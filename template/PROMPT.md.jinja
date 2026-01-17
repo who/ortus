@@ -1,0 +1,149 @@
+# Ralph Wiggum Loop Prompt
+
+Read @AGENTS.md for session rules and landing-the-plane protocol.
+Read @activity.md for what was completed in the last iteration.
+
+## Your Task
+
+1. **Check Status**: Run `bd ready` to see tasks with no blockers
+2. **Select One Task**: Pick the highest-priority task from ready work
+3. **Claim It**: Run `bd update <id> --status=in_progress`
+4. **Implement**: Make the code changes described in the task
+5. **Verify**: Run tests, linting, or other verification appropriate to your project
+6. **Complete**: Run `bd close <id> --reason="<brief summary>"`
+7. **Log Progress**: Update activity.md with dated entry
+8. **Commit**: Stage and commit your changes with descriptive message
+9. **Push**: Run `git pull --rebase && bd sync && git push` to preserve work
+
+## Verification Methods
+
+{%- if language == 'python' %}
+
+### For Tests
+```bash
+{%- if package_manager == 'uv' %}
+uv run pytest tests/ -v
+{%- else %}
+pytest tests/ -v
+{%- endif %}
+```
+
+### For Linting
+```bash
+{%- if package_manager == 'uv' %}
+uv run ruff check .
+uv run ruff format --check .
+{%- else %}
+ruff check .
+ruff format --check .
+{%- endif %}
+```
+
+### For Type Checking
+```bash
+{%- if package_manager == 'uv' %}
+uv run mypy src/
+{%- else %}
+mypy src/
+{%- endif %}
+```
+
+{%- elif language == 'typescript' %}
+
+### For Tests
+```bash
+{{ package_manager }} test
+```
+
+### For Linting
+```bash
+{{ package_manager }} run lint
+```
+
+### For Type Checking
+```bash
+npx tsc --noEmit
+```
+
+{%- elif language == 'go' %}
+
+### For Tests
+```bash
+go test ./...
+```
+
+### For Linting
+```bash
+golangci-lint run
+```
+
+### For Formatting
+```bash
+go fmt ./...
+```
+
+{%- elif language == 'rust' %}
+
+### For Tests
+```bash
+cargo test
+```
+
+### For Linting
+```bash
+cargo clippy
+```
+
+### For Formatting
+```bash
+cargo fmt --check
+```
+
+{%- else %}
+
+<!-- TODO: Add project-specific verification commands -->
+
+{%- endif %}
+
+## Important Rules
+
+- **One task per iteration** - Do not work on multiple tasks
+- **No partial work** - Either complete the task fully or don't start it
+- **Update activity.md** - Record what you did with timestamp
+- **Run quality checks** - Always run linting/tests before committing
+- **Descriptive commits** - Include task ID in commit message
+
+## Completion Signal
+
+When you have completed ONE task successfully, output:
+
+```
+<promise>COMPLETE</promise>
+```
+
+If you encounter a blocker that prevents completion, document it in activity.md and output:
+
+```
+<promise>BLOCKED</promise>
+```
+
+## Dependencies
+
+Tasks may have dependencies. Check with:
+```bash
+bd show <id>  # Shows dependencies in output
+bd dep tree <id>  # Visual dependency tree
+```
+
+Only work on tasks that have no unresolved blockers (i.e., tasks shown by `bd ready`).
+
+## Project-Specific Notes
+
+{%- if language == 'python' and package_manager == 'uv' %}
+- Use `uv run` for all Python commands
+{%- endif %}
+{%- if framework == 'fastapi' %}
+- API runs on port 8000 by default
+{%- endif %}
+
+<!-- TODO: Add any additional project-specific notes here -->
