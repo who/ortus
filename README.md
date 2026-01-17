@@ -52,7 +52,7 @@ This starts an interactive session where Claude will:
 3. Iterate up to 5 times to refine it
 4. Save the result to `prd/PRD-[project-name].md`
 
-See [prd/PRD-PROMPT.md](prd/PRD-PROMPT.md) for the full prompt template.
+See prd/PRD-PROMPT.md in the generated project for the full prompt template.
 
 ### Step 3: Import PRD into Beads
 
