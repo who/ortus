@@ -5,7 +5,7 @@ Read @activity.md for what was completed in the last iteration.
 
 ## Your Task
 
-1. **Check Status**: Run `bd ready` to see tasks with no blockers
+1. **Check Status**: Run `bd ready --assignee ralph` to see tasks assigned to you with no blockers
 2. **Select One Task**: Pick the highest-priority task from ready work
 3. **Claim It**: Run `bd update <id> --status=in_progress`
 4. **Implement**: Make the code changes described in the task
@@ -135,7 +135,7 @@ bd show <id>  # Shows dependencies in output
 bd dep tree <id>  # Visual dependency tree
 ```
 
-Only work on tasks that have no unresolved blockers (i.e., tasks shown by `bd ready`).
+Only work on tasks that have no unresolved blockers (i.e., tasks shown by `bd ready --assignee ralph`).
 
 ## Project-Specific Notes
 
