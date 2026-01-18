@@ -179,23 +179,23 @@ Format:
 # Generated from PRD
 
 # Phase 1: Foundation
-epic1=$(bd create "Epic: [Name]" -t epic -p 0 --label P0 -d "Description" --json | jq -r '.id')
-task1=$(bd create "Task: [Name]" -t task -p 1 --label P1 -d "Detailed description with acceptance criteria" --json | jq -r '.id')
+epic1=$(bd create "Epic: [Name]" -t epic -p 0 --label P0 -d "Description" --assignee ralph --json | jq -r '.id')
+task1=$(bd create "Task: [Name]" -t task -p 1 --label P1 -d "Detailed description with acceptance criteria" --assignee ralph --json | jq -r '.id')
 bd dep add $task1 $epic1
 
 # Tasks that can run in parallel
-task2=$(bd create "Task: [Name]" -t task -p 1 --label P1 -d "Description" --json | jq -r '.id')
-task3=$(bd create "Task: [Name]" -t task -p 1 --label P1 -d "Description" --json | jq -r '.id')
+task2=$(bd create "Task: [Name]" -t task -p 1 --label P1 -d "Description" --assignee ralph --json | jq -r '.id')
+task3=$(bd create "Task: [Name]" -t task -p 1 --label P1 -d "Description" --assignee ralph --json | jq -r '.id')
 bd dep add $task2 $epic1
 bd dep add $task3 $epic1
 
 # Sequential dependency
-task4=$(bd create "Task: [Name]" -t task -p 2 --label P2 -d "Description" --json | jq -r '.id')
+task4=$(bd create "Task: [Name]" -t task -p 2 --label P2 -d "Description" --assignee ralph --json | jq -r '.id')
 bd dep add $task4 $epic1
 bd dep add $task4 $task2  # Blocked by task2
 
 # Phase 2: Core Features (blocked by Phase 1 epic)
-epic2=$(bd create "Epic: [Name]" -t epic -p 0 --label P0 -d "Description" --json | jq -r '.id')
+epic2=$(bd create "Epic: [Name]" -t epic -p 0 --label P0 -d "Description" --assignee ralph --json | jq -r '.id')
 bd dep add $epic2 $epic1  # Phase 2 blocked by Phase 1
 # ... continue pattern
 ```
