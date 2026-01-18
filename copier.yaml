@@ -145,7 +145,7 @@ _skip_if_exists:
   - ".beads/*"
 
 _tasks:
-  - "chmod +x ralph.sh mega-ralph.sh generate-prd.sh generate-qa.sh"
+  - "chmod +x ralph.sh mega-ralph.sh generate-prd.sh generate-qa.sh collect-qa.sh"
   - "git init"
   - "bd init"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
