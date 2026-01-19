@@ -19,10 +19,10 @@ _message_after_copy: |
 
   Next steps:
     cd {{ _copier_conf.dst_path }}
-    bd create --title="Your idea here" --type=feature --assignee=lisa
-    ./interview.sh  # Interactive feature interview
-    ./lisa.sh       # Generates PRD from interview answers
-    ./ralph.sh      # Implements approved tasks
+    ./idea.sh "Your idea here"  # Create feature for lisa
+    ./interview.sh              # Interactive feature interview
+    ./lisa.sh                   # Generates PRD from interview answers
+    ./ralph.sh                  # Implements approved tasks
 
 # =============================================================================
 # Project Basics
@@ -152,7 +152,7 @@ _skip_if_exists:
   - ".beads/*"
 
 _tasks:
-  - "chmod +x ralph.sh lisa.sh interview.sh tail.sh"
+  - "chmod +x ralph.sh lisa.sh interview.sh idea.sh tail.sh"
   - "git init"
   - "bd init"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"

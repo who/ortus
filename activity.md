@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T22:00:00-08:00 - Add idea.sh wrapper script for creating features
+
+**Task**: ortus-55n - Add idea.sh wrapper script for creating features assigned to lisa
+**Status**: Completed
+**Changes**:
+- Created `template/idea.sh` - Simple wrapper script for creating features assigned to lisa
+- Updated `copier.yaml` _tasks to chmod +x idea.sh
+- Updated `copier.yaml` _message_after_copy to show `./idea.sh "Your idea here"` instead of full bd command
+
+**Usage**: `./idea.sh "My feature idea"` instead of `bd create --title="..." --type=feature --assignee=lisa`
+
+**Verification**: bash syntax check passes, template generation includes executable idea.sh, script shows usage when called without args, correctly creates features assigned to lisa.
+
+---
+
 ## 2026-01-19T15:00:00-08:00 - Fix interview.sh: Claude not receiving context
 
 **Task**: ortus-223 - Fix interview.sh: Claude not receiving context, doesn't start asking questions
