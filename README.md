@@ -44,7 +44,7 @@ Or use the lisa.sh automation:
 
 ```bash
 # Submit an idea for Lisa to process
-bd create --title="A CLI tool that converts markdown to PDF with custom themes" --type=idea --assignee=lisa
+bd create --title="A CLI tool that converts markdown to PDF with custom themes" --type=feature --assignee=lisa
 
 # Start the Lisa loop (runs in background, processes ideas)
 ./lisa.sh
