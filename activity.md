@@ -4,6 +4,20 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T16:00:00-08:00 - Add README generation instruction to PROMPT.md template
+
+**Task**: ortus-a5f - Add README generation instruction to PROMPT.md template
+**Status**: Completed
+**Changes**:
+- Added "README Maintenance" section to `template/PROMPT.md.jinja`
+- Section instructs Ralph to create/update README.md after implementing major features
+- Includes guidelines for initial README creation (project name, installation, usage, examples)
+- Includes guidelines for updating existing README (new feature docs, updated examples, preserving user sections)
+
+**Verification**: Template generation tested with `copier copy --defaults` - README Maintenance section present in generated PROMPT.md.
+
+---
+
 ## 2026-01-20T15:00:00-08:00 - Fix interview.sh: pipe prompt to claude stdin for AskUserQuestion
 
 **Task**: ortus-12l - Fix interview.sh: pipe prompt to claude stdin for AskUserQuestion
