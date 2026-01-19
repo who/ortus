@@ -4,6 +4,22 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T07:30:00-08:00 - Add tail.sh to template with terminal-agnostic colors
+
+**Task**: ortus-510 - Add tail.sh to template with terminal-agnostic colors
+**Status**: Completed
+**Changes**:
+- Created `template/tail.sh` with improved color handling using `tput` for terminal-aware colors
+- Added `NO_COLOR` environment variable support (https://no-color.org/)
+- Replaced hardcoded ANSI gray (90m) with `DIM` attribute that works across themes
+- Added fallback to basic ANSI codes when `tput` is unavailable
+- Added `tail.sh` to chmod task in `copier.yaml`
+- Removed old `tail.sh` from repository root
+
+**Verification**: Tested template generation - tail.sh is copied to generated projects, is executable, and supports NO_COLOR=1 for color-free output.
+
+---
+
 ## 2026-01-19T07:10:00-08:00 - Run prerequisite checks without adding shell script to generated project
 
 **Task**: ortus-v3j - Run prerequisite checks without adding shell script to generated project
