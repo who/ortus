@@ -4,6 +4,19 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T09:44:00-08:00 - Update copier.yaml for lisa.sh
+
+**Task**: ortus-q5p - Update copier.yaml for lisa.sh
+**Status**: Completed
+**Changes**:
+- copier.yaml _tasks and _message_after_copy were already updated by ortus-aqz
+- Fixed missing execute permissions on ralph.sh and tail.sh in template/
+- All three scripts (lisa.sh, ralph.sh, tail.sh) now properly executable
+
+**Verification**: Template generation produces all scripts with +x permissions, no old scripts present.
+
+---
+
 ## 2026-01-19T12:15:00-08:00 - Delete old PRD scripts from template/
 
 **Task**: ortus-aqz - Delete old PRD scripts from template/
