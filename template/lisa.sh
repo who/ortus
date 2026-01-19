@@ -67,13 +67,196 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
-# State handlers - to be implemented by subsequent tasks
+# Generate interview questions for an idea using Claude
+generate_interview_questions() {
+  local idea_id="$1"
+  local idea_title="$2"
+  local idea_description="$3"
+
+  # Build the prompt for Claude to generate questions
+  local prompt
+  prompt=$(cat <<'PROMPT_EOF'
+You are a senior product manager preparing to write a PRD. Analyze the idea below and generate discovery questions.
+
+## Idea Details
+**ID**: {{IDEA_ID}}
+**Title**: {{IDEA_TITLE}}
+**Description**:
+{{IDEA_DESCRIPTION}}
+
+## Your Task
+
+Generate 3-7 focused discovery questions that will help write a complete PRD. Questions should cover:
+- Problem Space - What problem are we solving? Who has this problem?
+- Users - Who are the target users? What are their goals?
+- Scope - What's in scope for v1? What's out of scope?
+- Success Criteria - How will we know this succeeded?
+- Constraints - Technical limitations, timeline?
+
+Not all categories need questions - focus on what's genuinely unclear from the description.
+
+## Output Format
+
+For EACH question, output exactly this format (I will parse this programmatically):
+
+<question>
+<short>Short version for title (max 60 chars)</short>
+<full>Full question text with context</full>
+</question>
+
+Output 3-7 question blocks, nothing else.
+PROMPT_EOF
+)
+
+  # Substitute variables
+  prompt="${prompt//\{\{IDEA_ID\}\}/$idea_id}"
+  prompt="${prompt//\{\{IDEA_TITLE\}\}/$idea_title}"
+  prompt="${prompt//\{\{IDEA_DESCRIPTION\}\}/$idea_description}"
+
+  # Call Claude and capture output
+  local claude_output
+  claude_output=$(echo "$prompt" | claude -p --output-format text 2>/dev/null) || {
+    log "  ERROR: Claude call failed"
+    return 1
+  }
+
+  # Parse questions from output and create beads
+  local question_count=0
+  local created_ids=()
+
+  # Extract all question blocks
+  while IFS= read -r -d '' question_block; do
+    # Extract short and full from the block
+    local short full
+    short=$(echo "$question_block" | grep -oP '(?<=<short>).*(?=</short>)' | head -1)
+    full=$(echo "$question_block" | grep -oP '(?<=<full>).*(?=</full>)' | head -1)
+
+    if [ -n "$short" ] && [ -n "$full" ]; then
+      # Create the question bead
+      local description
+      description="## Question
+
+$full
+
+## Context
+
+This question relates to the idea: $idea_title (ID: $idea_id)
+
+## How to Answer
+
+1. Add a comment with your answer
+2. Close this task when answered"
+
+      # Create the bead
+      local new_id
+      new_id=$(bd create --title="Q: $short" \
+        --type=task \
+        --priority=3 \
+        --assignee=human \
+        --body-file - <<< "$description" 2>/dev/null | grep -oP 'Created issue: \K\S+' || echo "")
+
+      if [ -n "$new_id" ]; then
+        log "    Created question: $new_id - Q: $short"
+        created_ids+=("$new_id")
+        question_count=$((question_count + 1))
+
+        # Add blocking dependency: idea depends on this question
+        bd dep add "$idea_id" "$new_id" >/dev/null 2>&1 || {
+          log "    Warning: Failed to add dependency $idea_id -> $new_id"
+        }
+      else
+        log "    Warning: Failed to create question bead"
+      fi
+    fi
+  done < <(echo "$claude_output" | grep -oP '<question>.*?</question>' | tr '\n' '\0' || true)
+
+  # Alternative parsing if grep -P doesn't work (more portable)
+  if [ "$question_count" -eq 0 ]; then
+    # Try simpler parsing
+    local in_question=false short="" full=""
+    while IFS= read -r line; do
+      case "$line" in
+        *"<question>"*) in_question=true; short=""; full="" ;;
+        *"<short>"*) short=$(echo "$line" | sed 's/.*<short>\(.*\)<\/short>.*/\1/') ;;
+        *"<full>"*) full=$(echo "$line" | sed 's/.*<full>\(.*\)<\/full>.*/\1/') ;;
+        *"</question>"*)
+          if [ -n "$short" ] && [ -n "$full" ]; then
+            local description
+            description="## Question
+
+$full
+
+## Context
+
+This question relates to the idea: $idea_title (ID: $idea_id)
+
+## How to Answer
+
+1. Add a comment with your answer
+2. Close this task when answered"
+
+            local new_id
+            new_id=$(bd create --title="Q: $short" \
+              --type=task \
+              --priority=3 \
+              --assignee=human \
+              --body-file - <<< "$description" 2>/dev/null | grep -oE '[a-z]+-[a-z0-9]+' | head -1 || echo "")
+
+            if [ -n "$new_id" ]; then
+              log "    Created question: $new_id - Q: $short"
+              created_ids+=("$new_id")
+              question_count=$((question_count + 1))
+              bd dep add "$idea_id" "$new_id" >/dev/null 2>&1 || true
+            fi
+          fi
+          in_question=false
+          ;;
+      esac
+    done <<< "$claude_output"
+  fi
+
+  if [ "$question_count" -eq 0 ]; then
+    log "  ERROR: No questions were created"
+    return 1
+  fi
+
+  log "  Created $question_count interview questions"
+  echo "${created_ids[*]}"
+  return 0
+}
+
+# State handlers
 handle_new_idea() {
   local idea_id="$1"
   local idea_title="$2"
-  log "  TODO: Generate interview questions for new idea"
-  # Will call generate_interview() and add prd:interviewing label
-  return 1  # Not implemented yet
+
+  log "  Generating interview questions..."
+
+  # Get full idea details
+  local idea_json
+  idea_json=$(bd show "$idea_id" --json 2>/dev/null) || {
+    log "  ERROR: Failed to get idea details"
+    return 1
+  }
+
+  local idea_description
+  idea_description=$(echo "$idea_json" | jq -r '.description // "No description provided"')
+
+  # Generate interview questions
+  local question_ids
+  question_ids=$(generate_interview_questions "$idea_id" "$idea_title" "$idea_description") || {
+    log "  ERROR: Failed to generate interview questions"
+    return 1
+  }
+
+  # Add the interviewing label
+  bd label add "$idea_id" "prd:interviewing" >/dev/null 2>&1 || {
+    log "  Warning: Failed to add prd:interviewing label"
+  }
+
+  log "  Interview started. Questions assigned to 'human'."
+  log "  View questions: bd list --assignee human"
+  return 0
 }
 
 handle_interviewing() {

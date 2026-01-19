@@ -4,6 +4,24 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T10:15:00-08:00 - Implement lisa.sh interview generation
+
+**Task**: ortus-n75 - Implement lisa.sh interview generation
+**Status**: Completed
+**Changes**:
+- Implemented `generate_interview_questions()` function that calls Claude to analyze ideas
+- Claude generates 3-7 discovery questions in XML format for reliable parsing
+- Questions cover: problem space, users, scope, success criteria, constraints
+- Each question created as a bead assigned to 'human' with instructions on how to answer
+- Blocking dependencies added: idea depends on all question beads
+- `prd:interviewing` label added to idea after questions created
+- Implemented `handle_new_idea()` state handler that orchestrates the flow
+- Dual parsing approach: tries grep -P first, falls back to line-by-line sed parsing
+
+**Verification**: Syntax check passes, help output correct. Full integration requires Claude API.
+
+---
+
 ## 2026-01-19T09:25:00-08:00 - Create lisa.sh core loop structure
 
 **Task**: ortus-oet - Create lisa.sh core loop structure
