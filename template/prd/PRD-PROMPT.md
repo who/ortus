@@ -240,7 +240,7 @@ Before finalizing:
 
 ```bash
 # Submit an idea for Lisa to process
-bd create --title="Your idea description" --type=idea --assignee=lisa
+bd create --title="Your idea description" --type=feature --assignee=lisa
 
 # Start Lisa (runs continuously)
 ./lisa.sh

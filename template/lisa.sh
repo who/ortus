@@ -14,7 +14,7 @@
 #   approved         - Human approved, tasks being created for ralph
 #
 # Workflow:
-#   1. User: bd create --title="My idea" --type=idea --assignee=lisa
+#   1. User: bd create --title="My idea" --type=feature --assignee=lisa
 #   2. Lisa: Generates interview questions as child beads (blocking)
 #   3. Human: Answers questions via comments, closes question beads
 #   4. Lisa: When all questions closed, generates PRD (prd/PRD-<name>.md)
