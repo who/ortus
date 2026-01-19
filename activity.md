@@ -4,17 +4,18 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
-## 2026-01-19T08:00:00-08:00 - Update ralph.sh log tailing instructions to mention tail.sh
+## 2026-01-19T08:10:00-08:00 - Fix ralph.sh tail.sh usage to show no arguments needed
 
 **Task**: ortus-owu - Update ralph.sh log tailing instructions to mention tail.sh
 **Status**: Completed
 **Changes**:
-- Updated header comment in `template/ralph.sh` to show both `./tail.sh` and `tail -f` options
-- Updated runtime log output to show both options when starting the loop
-- Human-readable option uses `./tail.sh` for formatted, colored output
-- Raw output option uses standard `tail -f` for unformatted logs
+- Fixed header comment in `template/ralph.sh` to show `./tail.sh` without arguments
+- Fixed runtime log output to show `./tail.sh` without arguments
+- Added "(auto-follows all logs)" clarification to explain tail.sh behavior
+- Human-readable option uses `./tail.sh` (no args needed, auto-watches logs/)
+- Raw output option uses standard `tail -f` for a specific log file
 
-**Verification**: Tested template generation - ralph.sh is copied to generated projects with updated instructions showing both tail options.
+**Verification**: Tested template generation - ralph.sh is copied to generated projects with correct instructions showing tail.sh requires no arguments.
 
 ---
 

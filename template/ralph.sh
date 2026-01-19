@@ -8,7 +8,7 @@
 #
 # Logs are written to logs/ralph-<timestamp>.log
 # Watch live with:
-#   Human-readable: ./tail.sh logs/ralph-<timestamp>.log
+#   Human-readable: ./tail.sh                         (auto-follows all logs)
 #   Raw output:     tail -f logs/ralph-<timestamp>.log
 #
 # Exit codes:
@@ -38,7 +38,7 @@ fi
 log "Found $ready_count ready task(s). Starting loop..."
 log "Log file: $LOG_FILE"
 log "Watch live:"
-log "  Human-readable: ./tail.sh $LOG_FILE"
+log "  Human-readable: ./tail.sh              (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
 for ((i=1; i<=$ITERATIONS; i++)); do
