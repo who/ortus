@@ -1,10 +1,14 @@
 # PRD Generation Prompt
 
-Use this prompt with Claude to generate a structured PRD document.
+> **Note:** For automated PRD generation, use `lisa.sh` instead of this manual process.
+> Lisa handles the full idea-to-implementation pipeline automatically.
+> See the README for lisa.sh usage.
+
+This document provides a manual prompt for interactive PRD generation with Claude.
 
 ---
 
-## Prompt
+## Manual PRD Prompt
 
 ```
 I want to create a Product Requirements Document (PRD) for the following topic:
@@ -121,9 +125,11 @@ Save the final PRD to: `prd/PRD-[project-name].md`
 
 ---
 
-## Phase 4: Beads Conversion Prompt
+## Manual Beads Conversion Prompt
 
-After the PRD is finalized, use this prompt to convert it into beads issues:
+After the PRD is finalized, use this prompt to convert it into beads issues.
+
+> **Note:** If you used `lisa.sh`, it handles this conversion automatically when you approve the PRD.
 
 ```
 Read the PRD at @prd/PRD-[project-name].md
@@ -230,16 +236,33 @@ Before finalizing:
 
 ## Usage
 
-### Creating the PRD
-1. Copy the Phase 1-3 prompt above
+### Recommended: Automated Approach (lisa.sh)
+
+```bash
+# Submit an idea for Lisa to process
+bd create --title="Your idea description" --type=idea --assignee=lisa
+
+# Start Lisa (runs continuously)
+./lisa.sh
+
+# Lisa will:
+# 1. Generate interview questions (answer with bd comments add <id> "answer")
+# 2. Generate PRD when all questions are answered
+# 3. Create implementation tasks when you approve the PRD
+```
+
+### Manual: Creating the PRD
+
+1. Copy the Manual PRD Prompt above
 2. Replace `[INSERT YOUR SEED PROMPT HERE]` with your idea
 3. Run with Claude (recommend using `claude` CLI or Claude.ai with extended thinking)
 4. Answer the interview questions
 5. Iterate up to 5 times to refine the PRD
 
-### Converting to Beads
+### Manual: Converting to Beads
+
 1. Save the finalized PRD to `prd/PRD-[project-name].md`
-2. Copy the Phase 4 prompt above
+2. Copy the Manual Beads Conversion Prompt above
 3. Run with Claude, referencing your PRD
 4. Iterate up to 5 times to refine the beads structure
 5. Review the generated shell script

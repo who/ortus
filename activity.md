@@ -4,6 +4,20 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T10:00:00-08:00 - Update PRD prompt templates for lisa.sh
+
+**Task**: ortus-mgs - Update PRD prompt templates for lisa.sh
+**Status**: Completed
+**Changes**:
+- Deleted `template/prd/PRD-INTERVIEW-PROMPT.md` (unused - logic inlined in lisa.sh)
+- Updated `template/prd/PRD-PROMPT.md` with notes pointing to lisa.sh as preferred approach
+- Clarified manual workflow sections in PRD-PROMPT.md
+- Updated `template/CLAUDE.md.jinja` to reference lisa.sh in Important Files and allowed activities
+
+**Verification**: Template generates correctly with updated PRD-PROMPT.md. PRD-INTERVIEW-PROMPT.md no longer present in generated projects.
+
+---
+
 ## 2026-01-19T09:44:00-08:00 - Update copier.yaml for lisa.sh
 
 **Task**: ortus-q5p - Update copier.yaml for lisa.sh
