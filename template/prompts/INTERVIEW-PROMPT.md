@@ -42,7 +42,43 @@ This creates an audit trail and helps with PRD generation later.
 
 When you have gathered sufficient information (typically after 5-8 questions):
 
-1. **Save a final summary** with key insights:
+### Step 1: Display Interview Summary
+
+Show the user a complete summary of all questions and answers:
+
+```
+Here is a summary of your interview responses:
+
+Q1: [Question text]
+A: [Answer summary]
+
+Q2: [Question text]
+A: [Answer summary]
+
+... (all questions and answers)
+```
+
+### Step 2: Ask for Interview Approval
+
+Use AskUserQuestion to confirm the interview is complete:
+
+```
+question: "Does this summary look correct? Should I generate a PRD based on these responses?"
+header: "Approve"
+options:
+  - label: "Yes, generate PRD"
+    description: "Interview looks good, proceed to PRD generation"
+  - label: "No, I want to revise"
+    description: "I need to change or clarify some answers"
+```
+
+If the user wants to revise, ask which answer they want to change and update accordingly.
+
+### Step 3: Generate and Display PRD
+
+If approved, do the following in sequence:
+
+1. **Save final summary as comment**:
    ```bash
    bd comments add {{FEATURE_ID}} "Interview Summary:
    - Key problem: <summary>
@@ -56,9 +92,119 @@ When you have gathered sufficient information (typically after 5-8 questions):
    bd label add {{FEATURE_ID}} interviewed
    ```
 
-3. **Thank the user**, explain that the PRD will now be generated, and **prompt them to exit**:
-   - Tell the user: "The interview is complete! The PRD will be generated when you run `./ralph.sh`. Please type `/exit` or press Ctrl+C to exit this Claude session."
-   - **IMPORTANT**: Always end with a clear prompt telling the user to exit the session
+3. **Generate PRD document** by calling Claude to create a comprehensive PRD. The PRD should follow this structure:
+
+   ```markdown
+   # PRD: [Feature Title]
+
+   ## Metadata
+   - **Feature ID**: {{FEATURE_ID}}
+   - **Created**: [Date]
+   - **Author**: Claude (from interview)
+
+   ## Overview
+   ### Problem Statement
+   [One paragraph describing the problem based on interview]
+
+   ### Proposed Solution
+   [One paragraph describing the solution]
+
+   ### Success Metrics
+   - [Metric 1]
+   - [Metric 2]
+
+   ## Background & Context
+   [Why this feature, prior art, motivation]
+
+   ## Users & Personas
+   [Primary users, their goals and workflows]
+
+   ## Requirements
+
+   ### Functional Requirements
+   [P0] FR-001: The system shall...
+   [P1] FR-002: The system shall...
+
+   ### Non-Functional Requirements
+   [P1] NFR-001: The system shall...
+
+   ## System Architecture
+   [High-level components, technical decisions, data flow]
+
+   ## Milestones & Phases
+   [Logical phases with goals and deliverables]
+
+   ## Epic Breakdown
+   [Epics with tasks for each milestone]
+
+   ## Open Questions
+   [Unresolved decisions]
+
+   ## Out of Scope
+   [What this PRD does NOT cover]
+   ```
+
+4. **Save the PRD** to `prd/PRD-<feature-slug>.md`
+
+5. **Display the PRD** to the user (output the full PRD content)
+
+### Step 4: Ask for PRD Approval
+
+Use AskUserQuestion to confirm the PRD is acceptable:
+
+```
+question: "I've generated the PRD above. Would you like to approve it and create implementation tasks?"
+header: "PRD"
+options:
+  - label: "Approve and create tasks"
+    description: "PRD looks good, create implementation tasks for ralph"
+  - label: "Request changes"
+    description: "I want to modify the PRD before approving"
+```
+
+If the user wants changes, ask what they want to modify and update the PRD accordingly.
+
+### Step 5: Create Implementation Tasks
+
+If PRD is approved:
+
+1. **Add the approved label**:
+   ```bash
+   bd label add {{FEATURE_ID}} approved
+   ```
+
+2. **Generate implementation tasks** by analyzing the PRD and creating 3-10 atomic tasks. Each task should:
+   - Be small enough to complete in one session
+   - Have clear acceptance criteria
+   - Include dependencies where needed
+
+3. **Create tasks with beads**:
+   ```bash
+   bd create --title="Task: [Name]" --type=task --priority=1 --assignee=ralph --body="[Description with acceptance criteria]"
+   ```
+
+4. **Set up dependencies** between tasks that need ordering:
+   ```bash
+   bd dep add <dependent-task-id> <blocking-task-id>
+   ```
+
+5. **Close the feature** with a summary:
+   ```bash
+   bd close {{FEATURE_ID}} --reason="PRD complete. Created N implementation tasks for ralph."
+   ```
+
+### Step 6: Complete the Session
+
+After tasks are created, tell the user:
+
+"The interview and PRD process is complete! I've created [N] implementation tasks for ralph. You can:
+- Run `./ralph.sh` to start implementing the tasks
+- Run `bd list --assignee ralph` to see all tasks
+- Run `bd show <task-id>` to view task details
+
+Please type `/exit` or press Ctrl+C to exit this Claude session."
+
+**IMPORTANT**: Always end with a clear prompt telling the user to exit the session
 
 ## Example Question Flow
 
