@@ -4,6 +4,19 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T19:00:00-08:00 - Add beads visualization link (bdui) to generated README
+
+**Task**: ortus-k71 - Add beads visualization link (bdui) to generated README
+**Status**: Completed
+**Changes**:
+- Added "Beads Visualization" subsection to `template/CLAUDE.md.jinja` under Issue Tracking
+- Includes link to bdui (https://github.com/assimelha/bdui) for web-based visualization
+- Added CLI alternatives for users who prefer command-line: `bd list`, `bd ready`, `bd stats`
+
+**Verification**: Template generation tested - CLAUDE.md contains bdui link and CLI commands in the Issue Tracking section.
+
+---
+
 ## 2026-01-19T17:45:00-08:00 - Streamline interview completion with inline PRD and task creation
 
 **Task**: ortus-1ig - Streamline interview completion: show summary, approve, and generate PRD inline
