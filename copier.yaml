@@ -1,5 +1,9 @@
 _min_copier_version: "9.0.0"
 
+_jinja_extensions:
+  - copier_templates_extensions.TemplateExtensionLoader
+  - extensions/context.py:GitConfigContext
+
 _message_before_copy: |
   Welcome to Ortus — the origin of your next project.
 
@@ -37,12 +41,12 @@ project_description:
 author_name:
   type: str
   help: Your name
-  default: "Developer"
+  default: "{{ git_user_name }}"
 
 author_email:
   type: str
   help: Your email
-  default: "dev@example.com"
+  default: "{{ git_user_email }}"
 
 # =============================================================================
 # Technology Stack
