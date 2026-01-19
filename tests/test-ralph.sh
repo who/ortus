@@ -221,7 +221,7 @@ log_info "Project generated at: $(pwd)"
 
 # Manually run the initialization tasks (except idea.sh)
 log_info "Running manual initialization..."
-chmod +x ralph.sh lisa.sh interview.sh idea.sh tail.sh 2>/dev/null || true
+chmod +x ralph.sh interview.sh idea.sh tail.sh 2>/dev/null || true
 git init >/dev/null 2>&1
 bd init >/dev/null 2>&1
 git add -A >/dev/null 2>&1
