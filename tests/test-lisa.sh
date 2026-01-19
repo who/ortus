@@ -133,8 +133,10 @@ mkdir -p "$TEST_DIR"
 log_info "Test directory: $TEST_DIR"
 
 # Generate project from template
-log_info "Generating project from template..."
-copier copy --defaults --trust \
+# Note: The template runs idea.sh at the end which calls Claude for up-sampling.
+# We use --skip-tasks to avoid this interactive step, then manually initialize.
+log_info "Generating project from template (skipping tasks)..."
+copier copy --defaults --trust --skip-tasks \
   --data project_name=testproj \
   --data project_description="Test project for lisa.sh" \
   --data author_name="Test User" \
@@ -149,6 +151,15 @@ copier copy --defaults --trust \
 
 cd "$TEST_DIR/testproj"
 log_info "Project generated at: $(pwd)"
+
+# Manually run the initialization tasks (except idea.sh)
+log_info "Running manual initialization..."
+chmod +x ralph.sh lisa.sh interview.sh idea.sh tail.sh 2>/dev/null || true
+git init >/dev/null 2>&1
+bd init >/dev/null 2>&1
+git add -A >/dev/null 2>&1
+git commit -m 'Initial commit from Ortus template' >/dev/null 2>&1
+log_info "Initialization complete"
 
 # Verify project structure
 if [ ! -f "lisa.sh" ]; then

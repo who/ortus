@@ -4,6 +4,25 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T14:30:00-08:00 - Add test for interview.sh AskUserQuestion flow
+
+**Task**: ortus-3wy - Add test for interview.sh AskUserQuestion flow
+**Status**: Completed
+**Changes**:
+- Created `tests/test-interview.sh` - Test script that verifies interview.sh triggers AskUserQuestion immediately
+- Test uses `claude --print --output-format json` to capture Claude's first action
+- AskUserQuestion tool is denied in --print mode, but we detect the attempt in `permission_denials` field
+- Displays the question Claude tried to ask for verification
+- Updated `tests/test-lisa.sh` and `tests/test-ralph.sh` to use `--skip-tasks` to avoid interactive idea.sh
+
+**Test approach**: The test runs Claude with --print mode and checks that:
+1. AskUserQuestion appears in the JSON output (typically in permission_denials since it's denied in non-interactive mode)
+2. This confirms Claude's FIRST action was to call AskUserQuestion, not output text
+
+**Verification**: `./tests/test-interview.sh` passes - correctly identifies AskUserQuestion tool call and shows the interview question Claude attempted to ask.
+
+---
+
 ## 2026-01-19T23:30:00-08:00 - Fix interview.sh: Claude not using AskUserQuestion immediately
 
 **Task**: ortus-4ms - Fix interview.sh: Claude not using AskUserQuestion for interview
