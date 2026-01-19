@@ -4,6 +4,30 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T08:30:00-08:00 - Merge ralph.sh and mega-ralph.sh with task limit option
+
+**Task**: ortus-2wr - Epic: Merge ralph.sh and mega-ralph.sh with task limit option
+**Status**: Completed
+**Changes**:
+- Merged `mega-ralph.sh` logic into `ralph.sh` - runs until queue empty by default (mega mode)
+- Added `--tasks N` option to limit number of tasks to complete
+- Added `--iterations N` option (replaces positional arg, with legacy support)
+- Added `--idle-sleep N` option for configuring wait time when no work available
+- Added `-h|--help` flag for showing usage information
+- Removed `mega-ralph.sh` from both template/ and repository root
+- Updated `copier.yaml` _tasks to remove mega-ralph.sh from chmod list
+- Updated `README.md` with new usage examples and file structure
+
+**Behavior**:
+- `./ralph.sh` - Run until all tasks complete (default mega mode)
+- `./ralph.sh --tasks 1` - Complete exactly 1 task then exit
+- `./ralph.sh --tasks 5` - Complete up to 5 tasks then exit
+- `./ralph.sh 20` - Legacy: 20 iterations per task (still works)
+
+**Verification**: Tested template generation - ralph.sh is present and functional, mega-ralph.sh is absent, --help flag works correctly.
+
+---
+
 ## 2026-01-19T08:10:00-08:00 - Fix ralph.sh tail.sh usage to show no arguments needed
 
 **Task**: ortus-owu - Update ralph.sh log tailing instructions to mention tail.sh

@@ -76,11 +76,14 @@ bd dep tree <epic-id>      # Visualize dependencies
 Execute work through the Ralph automation loop:
 
 ```bash
-# Single task execution
+# Run until all tasks complete (default)
 ./ralph.sh
 
-# Continuous execution until queue is empty
-./mega-ralph.sh
+# Complete exactly 1 task then exit
+./ralph.sh --tasks 1
+
+# Complete up to 5 tasks then exit
+./ralph.sh --tasks 5
 ```
 
 Ralph will:
@@ -104,8 +107,7 @@ my-project/
 ├── PROMPT.md               # Ralph loop instructions
 ├── activity.md             # Work log
 ├── generate-prd.sh         # PRD generation helper
-├── ralph.sh                # Single task runner
-└── mega-ralph.sh           # Continuous task runner
+└── ralph.sh                # Task automation runner
 ```
 
 ## Work Execution Policy
