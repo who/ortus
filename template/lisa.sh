@@ -547,12 +547,217 @@ handle_ready() {
   return 0  # Nothing to do, human action required
 }
 
+# Generate implementation tasks from PRD using Claude
+generate_tasks_from_prd() {
+  local idea_id="$1"
+  local idea_title="$2"
+  local prd_content="$3"
+
+  # Build the prompt for Claude
+  local prompt
+  prompt=$(cat <<'PROMPT_EOF'
+You are a senior software engineer. Analyze the PRD below and break it into implementation tasks.
+
+## PRD Content
+{{PRD_CONTENT}}
+
+## Your Task
+
+Generate 3-10 implementation tasks that will fully implement this PRD. Each task should be:
+- Atomic and completable in a single work session
+- Clearly defined with specific acceptance criteria
+- Ordered with dependencies where needed
+
+Consider logical groupings:
+- Setup/infrastructure tasks first
+- Core feature implementation
+- Tests and validation
+- Documentation (if needed)
+
+## Output Format
+
+For EACH task, output exactly this format (I will parse this programmatically):
+
+<task>
+<title>Short task title (max 80 chars)</title>
+<priority>1-4 (1=critical, 2=high, 3=medium, 4=low)</priority>
+<depends_on>comma-separated task numbers if this task depends on others, or "none"</depends_on>
+<description>
+Full task description with:
+- What needs to be implemented
+- Key requirements from PRD
+- Acceptance criteria
+</description>
+</task>
+
+Output 3-10 task blocks, numbered in order. Nothing else.
+PROMPT_EOF
+)
+
+  # Substitute variables
+  prompt="${prompt//\{\{PRD_CONTENT\}\}/$prd_content}"
+
+  # Call Claude and capture output
+  local claude_output
+  claude_output=$(echo "$prompt" | claude -p --output-format text 2>/dev/null) || {
+    log "    ERROR: Claude call failed"
+    return 1
+  }
+
+  # Parse tasks and create beads
+  local task_count=0
+  local -a created_ids=()
+  local -a task_numbers=()
+
+  # Parse task blocks line by line
+  local in_task=false in_description=false
+  local title="" priority="" depends_on="" description=""
+  local task_num=0
+
+  while IFS= read -r line; do
+    case "$line" in
+      *"<task>"*)
+        in_task=true
+        task_num=$((task_num + 1))
+        title=""
+        priority="2"
+        depends_on=""
+        description=""
+        in_description=false
+        ;;
+      *"<title>"*)
+        title=$(echo "$line" | sed 's/.*<title>\(.*\)<\/title>.*/\1/')
+        ;;
+      *"<priority>"*)
+        priority=$(echo "$line" | sed 's/.*<priority>\(.*\)<\/priority>.*/\1/')
+        # Validate priority is 1-4
+        if ! [[ "$priority" =~ ^[1-4]$ ]]; then
+          priority="2"
+        fi
+        ;;
+      *"<depends_on>"*)
+        depends_on=$(echo "$line" | sed 's/.*<depends_on>\(.*\)<\/depends_on>.*/\1/')
+        ;;
+      *"<description>"*)
+        in_description=true
+        description=""
+        ;;
+      *"</description>"*)
+        in_description=false
+        ;;
+      *"</task>"*)
+        if [ -n "$title" ]; then
+          # Add PRD reference to description
+          local full_description="${description}
+
+## Reference
+- Source PRD idea: ${idea_id}
+- Parent idea: ${idea_title}"
+
+          # Create the task bead
+          local new_id
+          new_id=$(bd create --title="$title" \
+            --type=task \
+            --priority="$priority" \
+            --assignee=ralph \
+            --body-file - <<< "$full_description" 2>/dev/null | grep -oE '[a-z]+-[a-z0-9]+' | head -1 || echo "")
+
+          if [ -n "$new_id" ]; then
+            log "    Created task $task_num: $new_id - $title"
+            created_ids+=("$new_id")
+            task_numbers+=("$task_num")
+            task_count=$((task_count + 1))
+
+            # Handle dependencies on previous tasks
+            if [ -n "$depends_on" ] && [ "$depends_on" != "none" ]; then
+              # Parse comma-separated dependency numbers
+              IFS=',' read -ra dep_nums <<< "$depends_on"
+              for dep_num in "${dep_nums[@]}"; do
+                dep_num=$(echo "$dep_num" | tr -d ' ')
+                # Find the task ID for this number
+                for idx in "${!task_numbers[@]}"; do
+                  if [ "${task_numbers[$idx]}" = "$dep_num" ]; then
+                    local dep_id="${created_ids[$idx]}"
+                    bd dep add "$new_id" "$dep_id" >/dev/null 2>&1 || {
+                      log "    Warning: Failed to add dependency $new_id -> $dep_id"
+                    }
+                    log "      Depends on task $dep_num ($dep_id)"
+                    break
+                  fi
+                done
+              done
+            fi
+          else
+            log "    Warning: Failed to create task: $title"
+          fi
+        fi
+        in_task=false
+        ;;
+      *)
+        if [ "$in_description" = true ]; then
+          description="${description}${line}
+"
+        fi
+        ;;
+    esac
+  done <<< "$claude_output"
+
+  if [ "$task_count" -eq 0 ]; then
+    log "    ERROR: No tasks were created"
+    return 1
+  fi
+
+  log "  Created $task_count implementation tasks for ralph"
+  echo "${created_ids[*]}"
+  return 0
+}
+
 handle_approved() {
   local idea_id="$1"
   local idea_title="$2"
-  log "  TODO: Create implementation tasks for ralph"
-  # Will create tasks from PRD and close the idea
-  return 1  # Not implemented yet
+
+  log "  PRD approved! Creating implementation tasks..."
+
+  # Find the PRD file
+  local slug
+  slug=$(slugify "$idea_title")
+  local prd_file="prd/PRD-${slug}.md"
+
+  if [ ! -f "$prd_file" ]; then
+    log "  ERROR: PRD file not found at $prd_file"
+    return 1
+  fi
+
+  # Read the PRD content
+  local prd_content
+  prd_content=$(cat "$prd_file")
+
+  log "    Reading PRD from $prd_file"
+
+  # Generate tasks from PRD
+  local task_ids
+  task_ids=$(generate_tasks_from_prd "$idea_id" "$idea_title" "$prd_content") || {
+    log "  ERROR: Failed to generate tasks from PRD"
+    return 1
+  }
+
+  # Count tasks created
+  local task_count
+  task_count=$(echo "$task_ids" | wc -w)
+
+  # Remove labels
+  bd label remove "$idea_id" "prd:ready" >/dev/null 2>&1 || true
+  bd label remove "$idea_id" "approved" >/dev/null 2>&1 || true
+
+  # Close the idea with summary
+  local close_reason="PRD complete. Created $task_count tasks for ralph. Tasks: $task_ids"
+  bd close "$idea_id" --reason="$close_reason" >/dev/null 2>&1 || {
+    log "  Warning: Failed to close idea $idea_id"
+  }
+
+  log "  Idea $idea_id closed. $task_count tasks created for ralph."
+  log "  View tasks: bd list --assignee ralph"
+  return 0
 }
 
 # Process a single idea based on its state (labels)

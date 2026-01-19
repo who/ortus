@@ -4,6 +4,26 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T11:45:00-08:00 - Implement lisa.sh approval and ralph handoff
+
+**Task**: ortus-nxe - Implement lisa.sh approval and ralph handoff
+**Status**: Completed
+**Changes**:
+- Added `generate_tasks_from_prd()` function that calls Claude to break PRD into implementation tasks
+- Claude prompt asks for 3-10 atomic tasks with priorities and dependencies
+- XML parsing extracts title, priority, depends_on, and description for each task
+- Tasks created with `--assignee=ralph` using `bd create`
+- Dependencies between tasks handled via task numbering system
+- Implemented `handle_approved()` function as main entry point
+- Detects 'approved' label and reads the PRD file (prd/PRD-<slug>.md)
+- After task creation, removes 'prd:ready' and 'approved' labels
+- Closes the idea with summary: "PRD complete. Created X tasks for ralph."
+- Log output shows task creation details and provides `bd list --assignee ralph` command
+
+**Verification**: Syntax check passes, help output correct. Full integration requires Claude API.
+
+---
+
 ## 2026-01-19T11:15:00-08:00 - Implement lisa.sh PRD document generation
 
 **Task**: ortus-9pm - Implement lisa.sh PRD document generation
