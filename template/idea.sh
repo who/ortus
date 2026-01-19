@@ -2,6 +2,7 @@
 # idea.sh - Quick feature creation for Lisa workflow
 #
 # Usage: ./idea.sh "Your idea description"
+#        ./idea.sh                           # Prompts for idea
 #
 # Creates a feature bead assigned to lisa. After creating the idea:
 #   ./interview.sh   # Interactive feature interview
@@ -9,11 +10,16 @@
 
 set -euo pipefail
 
-if [[ -z "${1:-}" ]]; then
-    echo "Usage: ./idea.sh \"Your idea description\""
-    echo ""
-    echo "Creates a feature assigned to lisa for the PRD workflow."
-    exit 1
+idea="${1:-}"
+
+if [[ -z "$idea" ]]; then
+    # Prompt mode - ask user for their idea
+    echo "What's your idea?"
+    read -r -p "> " idea
+    if [[ -z "$idea" ]]; then
+        echo "No idea provided. Exiting."
+        exit 1
+    fi
 fi
 
-bd create --title="$1" --type=feature --assignee=lisa
+bd create --title="$idea" --type=feature --assignee=lisa

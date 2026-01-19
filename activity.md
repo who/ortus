@@ -4,6 +4,25 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T23:00:00-08:00 - Auto-run idea.sh in prompt mode after copier completes
+
+**Task**: ortus-wu0 - Auto-run idea.sh in prompt mode after copier completes
+**Status**: Completed
+**Changes**:
+- Updated `template/idea.sh` to prompt for input when called with no arguments
+- Added `./idea.sh` to copier.yaml _tasks to run after project creation
+- Updated `copier.yaml` _message_after_copy to remove redundant idea.sh instruction (now auto-runs)
+
+**New Flow**:
+1. User runs `copier copy gh:who/ortus ./myproject`
+2. Copier finishes, automatically prompts: "What's your idea?"
+3. User types idea, it gets created via `bd create`
+4. Message shows user to `cd myproject` and continue with interview.sh
+
+**Verification**: bash syntax check passes, prompt mode tested successfully (created/closed test issues), direct argument mode still works.
+
+---
+
 ## 2026-01-19T22:00:00-08:00 - Add idea.sh wrapper script for creating features
 
 **Task**: ortus-55n - Add idea.sh wrapper script for creating features assigned to lisa

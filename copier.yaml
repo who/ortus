@@ -19,10 +19,9 @@ _message_after_copy: |
 
   Next steps:
     cd {{ _copier_conf.dst_path }}
-    ./idea.sh "Your idea here"  # Create feature for lisa
-    ./interview.sh              # Interactive feature interview
-    ./lisa.sh                   # Generates PRD from interview answers
-    ./ralph.sh                  # Implements approved tasks
+    ./interview.sh   # Interactive feature interview
+    ./lisa.sh        # Generates PRD from interview answers
+    ./ralph.sh       # Implements approved tasks
 
 # =============================================================================
 # Project Basics
@@ -156,3 +155,4 @@ _tasks:
   - "git init"
   - "bd init"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
+  - "./idea.sh"
