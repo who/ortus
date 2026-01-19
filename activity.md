@@ -4,6 +4,32 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T13:05:00-08:00 - Add interview.sh for interactive Claude-powered interviews
+
+**Task**: ortus-2jq - Add interview.sh for interactive Claude-powered interviews
+**Status**: Completed
+**Changes**:
+- Created `template/interview.sh` - Bash wrapper that invokes Claude CLI for interactive interviews
+- Created `template/prompts/INTERVIEW-PROMPT.md` - Claude's instructions for conducting interviews
+- Updated `template/lisa.sh` to use new 'interviewed' label workflow:
+  - New features without labels → Prompts user to run ./interview.sh
+  - Features with 'interviewed' label → Lisa generates PRD from comments
+  - Removed old question-bead generation logic (generate_interview_questions, handle_interviewing, collect_answers functions)
+  - Updated state routing to use handle_new_feature, handle_interviewed instead of handle_new_idea, handle_interviewing
+- Updated `copier.yaml` to chmod interview.sh and updated next steps message
+
+**New Workflow**:
+1. User creates feature: `bd create --title="My feature" --type=feature --assignee=lisa`
+2. User runs `./interview.sh` for interactive Claude interview with AskUserQuestion
+3. interview.sh saves answers as comments and adds 'interviewed' label
+4. Lisa generates PRD from feature description + comments
+5. User reviews PRD, adds 'approved' label
+6. Lisa creates implementation tasks for ralph
+
+**Verification**: All scripts pass bash syntax check, help output correct, template generation includes all files with correct permissions.
+
+---
+
 ## 2026-01-19T12:30:00-08:00 - Fix test-lisa.sh not working (complete)
 
 **Task**: ortus-157 - Fix test-lisa.sh not working
