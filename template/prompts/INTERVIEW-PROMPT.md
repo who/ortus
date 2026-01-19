@@ -56,8 +56,8 @@ When you have gathered sufficient information (typically after 5-8 questions):
    bd label add {{FEATURE_ID}} interviewed
    ```
 
-3. **Thank the user**, explain that Lisa will now generate the PRD, and **prompt them to exit**:
-   - Tell the user: "The interview is complete! Lisa will now generate the PRD when you run `./lisa.sh`. Please type `/exit` or press Ctrl+C to exit this Claude session."
+3. **Thank the user**, explain that the PRD will now be generated, and **prompt them to exit**:
+   - Tell the user: "The interview is complete! The PRD will be generated when you run `./ralph.sh`. Please type `/exit` or press Ctrl+C to exit this Claude session."
    - **IMPORTANT**: Always end with a clear prompt telling the user to exit the session
 
 ## Example Question Flow

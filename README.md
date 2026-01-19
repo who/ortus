@@ -28,70 +28,67 @@ The generator will:
 
 You now have a blank slate ready for development.
 
-### Step 2: Generate Your PRD
+### Step 2: Create and Refine Your Feature
 
-Define what you're building by creating a PRD (Product Requirements Document). Use the included prompt template with your seed idea:
-
-```bash
-# Open a Claude session and paste the PRD prompt with your idea
-claude
-
-# In Claude, use the PRD-PROMPT template:
-# "I want to build [YOUR IDEA HERE]..."
-```
-
-Or use the lisa.sh automation:
+Define what you're building by creating a feature and going through the interview process:
 
 ```bash
-# Submit an idea for Lisa to process
-bd create --title="A CLI tool that converts markdown to PDF with custom themes" --type=feature --assignee=lisa
+# Quick way: use idea.sh to create a feature
+./idea.sh "A CLI tool that converts markdown to PDF with custom themes"
 
-# Start the Lisa loop (runs in background, processes ideas)
-./lisa.sh
+# Or create manually:
+bd create --title="A CLI tool that converts markdown to PDF" --type=feature --assignee=ralph
 ```
 
-Lisa will:
-1. Generate interview questions as beads (answer them with `bd comments add <id> "your answer"`)
-2. Collect your answers when you close the question beads
-3. Generate a structured PRD document at `prd/PRD-[project-name].md`
-4. Wait for your approval (add 'approved' label to continue)
-5. Create implementation tasks assigned to Ralph
-
-See prd/PRD-PROMPT.md in the generated project for the full prompt template.
-
-### Step 3: Import PRD into Beads
-
-Convert your PRD into executable work items. Open a Claude session and use the Phase 4 prompt from `prd/PRD-PROMPT.md` to generate a beads setup script. Then run it:
+Run the interactive interview to refine requirements:
 
 ```bash
-chmod +x prd/beads-setup-*.sh
-./prd/beads-setup-*.sh
+# Claude asks you questions about the feature
+./interview.sh
 ```
 
-Verify your work queue:
+Then start the unified automation loop:
 
 ```bash
-bd list                    # See all issues
-bd ready                   # See what's ready to work on
-bd dep tree <epic-id>      # Visualize dependencies
+# Generates PRD from interview, then implements tasks
+./ralph.sh
 ```
 
-### Step 4: Run Ralph
+Ralph will:
+1. Detect interviewed features and generate a PRD document at `prd/PRD-[project-name].md`
+2. Wait for your approval (add 'approved' label: `bd label add <id> approved`)
+3. Create implementation tasks from the approved PRD
+4. Implement tasks one by one
+
+See prd/PRD-PROMPT.md in the generated project for manual PRD generation.
+
+### Step 3: Run Ralph
 
 Execute work through the Ralph automation loop:
 
 ```bash
-# Run until all tasks complete (default)
+# Run the full loop: refinement + implementation
 ./ralph.sh
 
-# Complete exactly 1 task then exit
+# Complete exactly 1 implementation task then exit
 ./ralph.sh --tasks 1
 
-# Complete up to 5 tasks then exit
-./ralph.sh --tasks 5
+# Only run refinement (PRD generation), skip implementation
+./ralph.sh --refinement-only
+
+# Only run implementation, skip refinement
+./ralph.sh --implementation-only
 ```
 
-Ralph will:
+Ralph handles both phases:
+
+**Refinement Phase:**
+1. Find features with 'interviewed' label
+2. Generate PRD from interview comments
+3. Wait for 'approved' label
+4. Create implementation tasks
+
+**Implementation Phase:**
 1. Find the next ready task (`bd ready`)
 2. Claim and implement it
 3. Run verification (tests, linting)
@@ -111,8 +108,8 @@ my-project/
 ├── CLAUDE.md               # AI guidance
 ├── PROMPT.md               # Ralph loop instructions
 ├── activity.md             # Work log
-├── lisa.sh                 # PRD interview and generation loop
-└── ralph.sh                # Task implementation loop
+├── interview.sh            # Interactive feature interview with Claude
+└── ralph.sh                # Unified automation loop (refinement + implementation)
 ```
 
 ## Work Execution Policy
