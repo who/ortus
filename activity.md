@@ -4,6 +4,22 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T14:30:00-08:00 - Fix interview.sh: no initial prompt and missing exit prompt
+
+**Task**: ortus-kfr - Fix interview.sh: no initial prompt and missing exit prompt
+**Status**: Completed
+**Changes**:
+- Updated `template/interview.sh` to pass an initial prompt to claude CLI so it starts asking questions immediately
+- Added `initial_prompt` variable that tells Claude to start the interview immediately
+- Updated `template/prompts/INTERVIEW-PROMPT.md` to instruct Claude to prompt user to exit when interview is complete
+- Updated fallback system_prompt in interview.sh with same exit instructions
+
+**Root cause**: The `claude` CLI was invoked with `--system-prompt` but no positional prompt argument, so Claude waited for user input instead of starting immediately. The prompt also lacked instructions to tell user to exit when done.
+
+**Verification**: bash syntax check passes, --help output correct.
+
+---
+
 ## 2026-01-19T13:05:00-08:00 - Add interview.sh for interactive Claude-powered interviews
 
 **Task**: ortus-2jq - Add interview.sh for interactive Claude-powered interviews
