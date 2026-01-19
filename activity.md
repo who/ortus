@@ -4,6 +4,22 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T12:15:00-08:00 - Delete old PRD scripts from template/
+
+**Task**: ortus-aqz - Delete old PRD scripts from template/
+**Status**: Completed
+**Changes**:
+- Deleted 5 old PRD scripts: generate-prd.sh, generate-interview.sh, collect-interview.sh, generate-prd-from-interview.sh, prd-pipeline.sh
+- Updated copier.yaml _tasks chmod list to only include ralph.sh, lisa.sh, tail.sh
+- Updated copier.yaml _message_after_copy to reference lisa.sh workflow
+- Updated README.md to document lisa.sh usage instead of generate-prd.sh
+- Updated README.md file structure to show lisa.sh instead of generate-prd.sh
+- Fixed reference in template/prd/PRD-INTERVIEW-PROMPT.md from prd-pipeline.sh to lisa.sh
+
+**Verification**: git status shows clean file removals, no broken references outside .beads/
+
+---
+
 ## 2026-01-19T11:45:00-08:00 - Implement lisa.sh approval and ralph handoff
 
 **Task**: ortus-nxe - Implement lisa.sh approval and ralph handoff

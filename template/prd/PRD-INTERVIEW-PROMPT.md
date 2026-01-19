@@ -103,7 +103,7 @@ Subtask IDs: [list of IDs]
 
 ## Usage
 
-This prompt is called by prd-pipeline.sh when processing an idea. The script:
+This prompt is called by lisa.sh when processing an idea. The script:
 1. Reads the idea details with `bd show <id> --json`
 2. Substitutes {{IDEA_ID}}, {{IDEA_TITLE}}, {{IDEA_DESCRIPTION}}
 3. Runs Claude with this prompt

@@ -19,8 +19,9 @@ _message_after_copy: |
 
   Next steps:
     cd {{ _copier_conf.dst_path }}
-    ./generate-prd.sh "Your project idea here"
-    # Then import the PRD into beads and run ./ralph.sh
+    bd create --title="Your idea here" --type=idea --assignee=lisa
+    ./lisa.sh   # Starts PRD interview process
+    ./ralph.sh  # Implements approved tasks
 
 # =============================================================================
 # Project Basics
@@ -151,7 +152,7 @@ _skip_if_exists:
   - ".beads/*"
 
 _tasks:
-  - "chmod +x ralph.sh generate-prd.sh generate-interview.sh collect-interview.sh generate-prd-from-interview.sh prd-pipeline.sh tail.sh"
+  - "chmod +x ralph.sh lisa.sh tail.sh"
   - "git init"
   - "bd init"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
