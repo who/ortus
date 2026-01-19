@@ -4,6 +4,29 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T08:40:00-08:00 - Refactor test-ralph.sh into tests/ folder with external task definitions
+
+**Task**: ortus-yfp - Refactor test-ralph.sh into tests/ folder with external task definitions
+**Status**: Completed
+**Changes**:
+- Created `tests/` folder structure with `fixtures/` subfolder
+- Created `tests/fixtures/calculator-tasks.md` with 3 greeting-based tasks (greet, greet_person, farewell)
+- Moved and refactored `test-ralph.sh` to `tests/test-ralph.sh`
+- Added `create_tasks_from_fixture()` function to parse markdown task definitions
+- Uses `--body-file -` to properly pass task descriptions from parsed markdown
+- Tasks are created with titles, descriptions, and acceptance criteria from the fixture file
+- Dependencies are set up automatically between sequential tasks
+- Removed old `test-ralph.sh` from repository root
+
+**Usage**:
+- `./tests/test-ralph.sh --dry-run` - Set up test project, show manual instructions
+- `./tests/test-ralph.sh` - Full test (requires Claude API)
+- `./tests/test-ralph.sh --keep` - Full test, preserve test project after completion
+
+**Verification**: Dry-run mode passes - creates 3 tasks with full descriptions and acceptance criteria from fixture file, sets up correct dependency chain, shows 1 ready task.
+
+---
+
 ## 2026-01-19T08:15:00-08:00 - Create test suite for ralph.sh with deterministic project
 
 **Task**: ortus-1im - Create test suite for ralph.sh with deterministic project

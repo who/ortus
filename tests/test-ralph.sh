@@ -1,7 +1,7 @@
 #!/bin/bash
 # test-ralph.sh - Test suite for ralph.sh with deterministic project
 #
-# Usage: ./test-ralph.sh [--dry-run] [--keep]
+# Usage: ./tests/test-ralph.sh [--dry-run] [--keep]
 #
 # Options:
 #   --dry-run   Set up test project but don't run ralph (for inspection)
@@ -20,6 +20,8 @@ DRY_RUN=false
 KEEP_PROJECT=false
 TEST_DIR="/tmp/ortus-test-$$"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORTUS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -90,6 +92,103 @@ count_ralph_tasks() {
   bd list --status="$status" --assignee ralph --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0"
 }
 
+# Parse task definition file and create tasks
+# Format: Sections separated by "---", each with "# Task N: Title" header
+create_tasks_from_fixture() {
+  local fixture_file=$1
+  local task_ids=()
+
+  if [ ! -f "$fixture_file" ]; then
+    log_error "Fixture file not found: $fixture_file"
+    exit 1
+  fi
+
+  log_info "Reading task definitions from: $fixture_file"
+
+  # Helper function to create a single task
+  create_single_task() {
+    local title=$1
+    local body=$2
+    local task_output
+    # Trim leading/trailing whitespace from body
+    body=$(echo "$body" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    task_output=$(bd create --title="$title" --type=task --assignee=ralph --priority=2 --body-file - <<< "$body")
+    echo "$task_output" | grep -oP 'Created issue: \K[^ ]+' || true
+  }
+
+  # Parse the fixture file into tasks
+  local current_title=""
+  local current_body=""
+  local in_task=false
+  local task_count=0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Check for task header
+    if [[ "$line" =~ ^#\ Task\ [0-9]+:\ (.+)$ ]]; then
+      # Save previous task if exists
+      if [ "$in_task" = true ] && [ -n "$current_title" ]; then
+        task_count=$((task_count + 1))
+        local task_id
+        task_id=$(create_single_task "$current_title" "$current_body")
+        if [ -n "$task_id" ]; then
+          task_ids+=("$task_id")
+          log_info "Created task $task_count: $task_id - $current_title"
+        else
+          log_error "Failed to create task: $current_title"
+          exit 1
+        fi
+      fi
+
+      # Start new task
+      current_title="${BASH_REMATCH[1]}"
+      current_body=""
+      in_task=true
+    elif [[ "$line" == "---" ]]; then
+      # Task separator - save current task
+      if [ "$in_task" = true ] && [ -n "$current_title" ]; then
+        task_count=$((task_count + 1))
+        local task_id
+        task_id=$(create_single_task "$current_title" "$current_body")
+        if [ -n "$task_id" ]; then
+          task_ids+=("$task_id")
+          log_info "Created task $task_count: $task_id - $current_title"
+        else
+          log_error "Failed to create task: $current_title"
+          exit 1
+        fi
+        current_title=""
+        current_body=""
+        in_task=false
+      fi
+    elif [ "$in_task" = true ]; then
+      # Add line to current task body
+      if [ -n "$current_body" ]; then
+        current_body="$current_body"$'\n'"$line"
+      else
+        current_body="$line"
+      fi
+    fi
+  done < "$fixture_file"
+
+  # Handle last task (no trailing ---)
+  if [ "$in_task" = true ] && [ -n "$current_title" ]; then
+    task_count=$((task_count + 1))
+    local task_id
+    task_id=$(create_single_task "$current_title" "$current_body")
+    if [ -n "$task_id" ]; then
+      task_ids+=("$task_id")
+      log_info "Created task $task_count: $task_id - $current_title"
+    else
+      log_error "Failed to create task: $current_title"
+      exit 1
+    fi
+  fi
+
+  # Export task IDs for dependency setup
+  TASK_IDS=("${task_ids[@]}")
+  log_info "Created $task_count tasks total"
+}
+
 # ============================================================================
 # Test Setup
 # ============================================================================
@@ -113,7 +212,7 @@ copier copy --defaults --trust \
   --data framework=none \
   --data linter=ruff \
   --data license=MIT \
-  "$SCRIPT_DIR" "$TEST_DIR/testproj"
+  "$ORTUS_DIR" "$TEST_DIR/testproj"
 
 cd "$TEST_DIR/testproj"
 log_info "Project generated at: $(pwd)"
@@ -132,80 +231,21 @@ fi
 log_info "Project structure verified"
 
 # ============================================================================
-# Create Deterministic Tasks
+# Create Tasks from Fixture File
 # ============================================================================
 
-log_step "Creating deterministic test tasks"
+log_step "Creating test tasks from fixture file"
 
-# Helper to extract task ID from bd create output
-extract_task_id() {
-  grep -oP 'Created issue: \K[^ ]+' || true
-}
+# Create tasks from the fixture file
+create_tasks_from_fixture "$FIXTURES_DIR/calculator-tasks.md"
 
-# Create simple, verifiable tasks
-# Task 1: Create a calculator module with add function
-TASK1_OUTPUT=$(bd create --title="Create src/calculator.py with add function" --type=task --assignee=ralph --priority=2 << 'EOF'
-Create a new file `src/calculator.py` with a simple add function:
-
-```python
-def add(a: int, b: int) -> int:
-    """Add two integers and return the result."""
-    return a + b
-```
-
-Also create the `src/` directory if it doesn't exist.
-
-Acceptance criteria:
-- File exists at src/calculator.py
-- Contains the add function with correct signature
-- Function returns correct result (add(2, 3) == 5)
-EOF
-)
-TASK1_ID=$(echo "$TASK1_OUTPUT" | extract_task_id)
-log_info "Created task 1: $TASK1_ID"
-
-# Task 2: Add subtract function
-TASK2_OUTPUT=$(bd create --title="Add subtract function to calculator.py" --type=task --assignee=ralph --priority=2 << 'EOF'
-Add a subtract function to `src/calculator.py`:
-
-```python
-def subtract(a: int, b: int) -> int:
-    """Subtract b from a and return the result."""
-    return a - b
-```
-
-Acceptance criteria:
-- subtract function added to src/calculator.py
-- Function returns correct result (subtract(5, 3) == 2)
-EOF
-)
-TASK2_ID=$(echo "$TASK2_OUTPUT" | extract_task_id)
-log_info "Created task 2: $TASK2_ID"
-
-# Task 3: Add multiply function
-TASK3_OUTPUT=$(bd create --title="Add multiply function to calculator.py" --type=task --assignee=ralph --priority=2 << 'EOF'
-Add a multiply function to `src/calculator.py`:
-
-```python
-def multiply(a: int, b: int) -> int:
-    """Multiply two integers and return the result."""
-    return a * b
-```
-
-Acceptance criteria:
-- multiply function added to src/calculator.py
-- Function returns correct result (multiply(4, 3) == 12)
-EOF
-)
-TASK3_ID=$(echo "$TASK3_OUTPUT" | extract_task_id)
-log_info "Created task 3: $TASK3_ID"
-
-# Set up dependencies: task2 depends on task1, task3 depends on task2
-bd dep add "$TASK2_ID" "$TASK1_ID"
-log_info "Added dependency: $TASK2_ID depends on $TASK1_ID"
-
-bd dep add "$TASK3_ID" "$TASK2_ID"
-log_info "Added dependency: $TASK3_ID depends on $TASK2_ID"
+# Set up dependencies: each task depends on the previous one
+if [ ${#TASK_IDS[@]} -ge 2 ]; then
+  for ((i=1; i<${#TASK_IDS[@]}; i++)); do
+    bd dep add "${TASK_IDS[$i]}" "${TASK_IDS[$((i-1))]}"
+    log_info "Added dependency: ${TASK_IDS[$i]} depends on ${TASK_IDS[$((i-1))]}"
+  done
+fi
 
 # Commit task setup (if there are changes)
 git add -A
@@ -240,7 +280,7 @@ if [ "$DRY_RUN" = true ]; then
   bd list --status=open
   echo ""
   log_info "Dependency tree:"
-  bd dep tree "$TASK3_ID" 2>/dev/null || log_warn "Could not show dependency tree"
+  bd dep tree "${TASK_IDS[-1]}" 2>/dev/null || log_warn "Could not show dependency tree"
   echo ""
   log_info "To run tests manually:"
   echo "  cd $TEST_DIR/testproj"
@@ -274,15 +314,15 @@ if [ "$OPEN_AFTER_T1" != "2" ]; then
   exit 2
 fi
 
-# Verify the file was created
-if [ ! -f "src/calculator.py" ]; then
-  log_error "Test 1 FAILED: src/calculator.py was not created"
+# Verify the src/ directory and greeting.py file was created
+if [ ! -f "src/greeting.py" ]; then
+  log_error "Test 1 FAILED: src/greeting.py was not created"
   exit 2
 fi
 
-# Verify add function exists
-if ! grep -q "def add" src/calculator.py; then
-  log_error "Test 1 FAILED: add function not found in calculator.py"
+# Verify greet function exists
+if ! grep -q "def greet" src/greeting.py; then
+  log_error "Test 1 FAILED: greet function not found in greeting.py"
   exit 2
 fi
 
@@ -313,13 +353,13 @@ if [ "$OPEN_AFTER_T2" != "0" ]; then
 fi
 
 # Verify all functions exist
-if ! grep -q "def subtract" src/calculator.py; then
-  log_error "Test 2 FAILED: subtract function not found in calculator.py"
+if ! grep -q "def greet_person" src/greeting.py; then
+  log_error "Test 2 FAILED: greet_person function not found in greeting.py"
   exit 3
 fi
 
-if ! grep -q "def multiply" src/calculator.py; then
-  log_error "Test 2 FAILED: multiply function not found in calculator.py"
+if ! grep -q "def farewell" src/greeting.py; then
+  log_error "Test 2 FAILED: farewell function not found in greeting.py"
   exit 3
 fi
 
