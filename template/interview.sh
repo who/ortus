@@ -11,13 +11,13 @@
 # to gather requirements for features before PRD generation.
 #
 # Workflow:
-#   1. Finds features assigned to lisa without 'interviewed' label
+#   1. Finds features assigned to ralph without 'interviewed' label
 #   2. Lets user select which feature to interview (if multiple)
 #   3. Claude conducts an interactive interview asking targeted questions
 #   4. Answers are saved as comments on the feature bead
-#   5. 'interviewed' label is added to trigger Lisa's PRD generation
+#   5. 'interviewed' label is added to trigger PRD generation
 #
-# After interview completion, run lisa.sh to generate the PRD.
+# After interview completion, run ralph.sh to generate the PRD.
 #
 # Exit codes:
 #   0 - Interview completed successfully
@@ -76,9 +76,9 @@ echo_error() {
 
 # Find features that need interviewing
 find_pending_features() {
-  # Get all features assigned to lisa
+  # Get all features assigned to ralph
   local features_json
-  features_json=$(bd list --assignee lisa --type feature --status open --json 2>/dev/null || echo "[]")
+  features_json=$(bd list --assignee ralph --type feature --status open --json 2>/dev/null || echo "[]")
 
   # Filter out features that already have 'interviewed' label
   echo "$features_json" | jq -c '[.[] | select(.labels | (. == null) or (index("interviewed") | not) and (index("prd:interviewing") | not) and (index("prd:ready") | not) and (index("approved") | not))]'
@@ -94,12 +94,12 @@ select_feature() {
     echo_info "No features need interviewing."
     echo ""
     echo "Features get interviewed when they:"
-    echo "  1. Are assigned to 'lisa'"
+    echo "  1. Are assigned to 'ralph'"
     echo "  2. Have type 'feature'"
     echo "  3. Don't have 'interviewed', 'prd:interviewing', 'prd:ready', or 'approved' labels"
     echo ""
     echo "Create a new feature with:"
-    echo "  bd create --title=\"My feature\" --type=feature --assignee=lisa"
+    echo "  bd create --title=\"My feature\" --type=feature --assignee=ralph"
     exit 2
   fi
 
@@ -210,7 +210,7 @@ Conduct a dynamic, conversational interview to gather the information needed to 
 When you have gathered sufficient information (usually 5-8 questions):
 1. Save a final summary comment with key insights
 2. Add the 'interviewed' label: bd label add ${feature_id} interviewed
-3. Thank the user, explain next steps (Lisa will generate the PRD), and prompt them to exit:
+3. Thank the user, explain next steps (Ralph will generate the PRD), and prompt them to exit:
    - Tell the user: "The interview is complete! Please type /exit or press Ctrl+C to exit this Claude session."
    - IMPORTANT: Always end with a clear prompt telling the user to exit the session
 
@@ -281,7 +281,7 @@ ${initial_prompt}"
   echo_success "Interview complete!"
   echo ""
   echo "Next steps:"
-  echo "  1. Run ./lisa.sh to generate the PRD"
+  echo "  1. Run ./ralph.sh to generate the PRD"
   echo "  2. Review the PRD in prd/PRD-<name>.md"
   echo "  3. Add 'approved' label when ready: bd label add $feature_id approved"
 }

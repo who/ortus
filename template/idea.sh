@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# idea.sh - Quick feature creation for Lisa workflow
+# idea.sh - Quick feature creation for Ralph workflow
 #
 # Usage: ./idea.sh "Your idea description"
 #        ./idea.sh                           # Prompts for idea
 #
-# Creates a feature bead assigned to lisa. After creating the idea:
+# Creates a feature bead assigned to ralph. After creating the idea:
 #   ./interview.sh   # Interactive feature interview
-#   ./lisa.sh        # Generates PRD from interview answers
+#   ./ralph.sh        # Generates PRD from interview answers
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ Idea: $idea")
 
 if [[ -z "$description" ]]; then
     # Fallback if Claude fails
-    bd create --title="$idea" --type=feature --assignee=lisa
+    bd create --title="$idea" --type=feature --assignee=ralph
 else
-    bd create --title="$idea" --type=feature --assignee=lisa --body="$description"
+    bd create --title="$idea" --type=feature --assignee=ralph --body="$description"
 fi

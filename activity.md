@@ -4,6 +4,43 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T15:15:00-08:00 - Unify loops and rename lisa functions to generic terms
+
+**Task**: ortus-5ds - Epic: Unify loops and rename lisa functions to generic terms
+**Status**: Completed
+**Changes**:
+- Merged `lisa.sh` functionality into `ralph.sh` to create a unified automation loop
+- Added `--refinement-only` and `--implementation-only` flags to ralph.sh for selective operation
+- Added `--poll-interval` option for configuring refinement check frequency
+- Renamed all lisa-specific references to generic terms:
+  - `assignee=lisa` → `assignee=ralph`
+  - Lisa prompts → generic "refinement" / "PRD generation" terminology
+- Updated `interview.sh` to use `--assignee ralph` instead of `--assignee lisa`
+- Updated `idea.sh` to use `--assignee ralph` instead of `--assignee lisa`
+- Updated `prompts/INTERVIEW-PROMPT.md` to reference ralph.sh instead of lisa.sh
+- Updated `prd/PRD-PROMPT.md` to document the new ralph.sh workflow
+- Updated `CLAUDE.md.jinja` with new Important Files section
+- Updated `copier.yaml` to remove lisa.sh from chmod list and update post-copy message
+- Updated `README.md` with new workflow documentation
+- Renamed `tests/test-lisa.sh` to `tests/test-refinement.sh` and updated to use ralph.sh
+- Deleted `template/lisa.sh`
+
+**Architecture**:
+```
+ralph.sh (unified loop)
+├── Refinement Phase (features)
+│   ├── handle_new_feature()      # Prompt user to run interview.sh
+│   ├── handle_interviewed()      # Generate PRD from comments
+│   ├── handle_prd_ready()        # Wait for human approval
+│   └── handle_approved()         # Create implementation tasks
+└── Implementation Phase (tasks)
+    └── run_single_task()         # Execute via PROMPT.md
+```
+
+**Verification**: Bash syntax checks pass for all modified scripts. Template generation produces no lisa references. test-refinement.sh --dry-run passes.
+
+---
+
 ## 2026-01-19T16:00:00-08:00 - Add README generation instruction to PROMPT.md template
 
 **Task**: ortus-a5f - Add README generation instruction to PROMPT.md template

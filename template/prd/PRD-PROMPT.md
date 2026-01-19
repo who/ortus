@@ -1,8 +1,8 @@
 # PRD Generation Prompt
 
-> **Note:** For automated PRD generation, use `lisa.sh` instead of this manual process.
-> Lisa handles the full idea-to-implementation pipeline automatically.
-> See the README for lisa.sh usage.
+> **Note:** For automated PRD generation, use `./interview.sh` and `./ralph.sh` instead of this manual process.
+> Ralph handles the full idea-to-implementation pipeline automatically.
+> See the README for ralph.sh usage.
 
 This document provides a manual prompt for interactive PRD generation with Claude.
 
@@ -129,7 +129,7 @@ Save the final PRD to: `prd/PRD-[project-name].md`
 
 After the PRD is finalized, use this prompt to convert it into beads issues.
 
-> **Note:** If you used `lisa.sh`, it handles this conversion automatically when you approve the PRD.
+> **Note:** If you used `./ralph.sh`, it handles this conversion automatically when you approve the PRD.
 
 ```
 Read the PRD at @prd/PRD-[project-name].md
@@ -236,19 +236,27 @@ Before finalizing:
 
 ## Usage
 
-### Recommended: Automated Approach (lisa.sh)
+### Recommended: Automated Approach (ralph.sh)
 
 ```bash
-# Submit an idea for Lisa to process
-bd create --title="Your idea description" --type=feature --assignee=lisa
+# Submit an idea using the quick helper
+./idea.sh "Your idea description"
 
-# Start Lisa (runs continuously)
-./lisa.sh
+# Or create manually
+bd create --title="Your idea description" --type=feature --assignee=ralph
 
-# Lisa will:
-# 1. Generate interview questions (answer with bd comments add <id> "answer")
-# 2. Generate PRD when all questions are answered
-# 3. Create implementation tasks when you approve the PRD
+# Run the interactive interview
+./interview.sh
+
+# Start Ralph (runs continuously)
+./ralph.sh
+
+# Ralph will:
+# 1. Detect interviewed features
+# 2. Generate PRD from interview comments
+# 3. Wait for your approval (bd label add <id> approved)
+# 4. Create implementation tasks when you approve
+# 5. Implement tasks automatically
 ```
 
 ### Manual: Creating the PRD
