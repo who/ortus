@@ -40,17 +40,22 @@ claude
 # "I want to build [YOUR IDEA HERE]..."
 ```
 
-Or use the helper script:
+Or use the lisa.sh automation:
 
 ```bash
-./generate-prd.sh "A CLI tool that converts markdown to PDF with custom themes"
+# Submit an idea for Lisa to process
+bd create --title="A CLI tool that converts markdown to PDF with custom themes" --type=idea --assignee=lisa
+
+# Start the Lisa loop (runs in background, processes ideas)
+./lisa.sh
 ```
 
-This starts an interactive session where Claude will:
-1. Interview you about your idea (3-5 questions at a time)
-2. Generate a structured PRD document
-3. Iterate up to 5 times to refine it
-4. Save the result to `prd/PRD-[project-name].md`
+Lisa will:
+1. Generate interview questions as beads (answer them with `bd comments add <id> "your answer"`)
+2. Collect your answers when you close the question beads
+3. Generate a structured PRD document at `prd/PRD-[project-name].md`
+4. Wait for your approval (add 'approved' label to continue)
+5. Create implementation tasks assigned to Ralph
 
 See prd/PRD-PROMPT.md in the generated project for the full prompt template.
 
@@ -106,8 +111,8 @@ my-project/
 ├── CLAUDE.md               # AI guidance
 ├── PROMPT.md               # Ralph loop instructions
 ├── activity.md             # Work log
-├── generate-prd.sh         # PRD generation helper
-└── ralph.sh                # Task automation runner
+├── lisa.sh                 # PRD interview and generation loop
+└── ralph.sh                # Task implementation loop
 ```
 
 ## Work Execution Policy
