@@ -4,22 +4,29 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
-## 2026-01-19T23:00:00-08:00 - Auto-run idea.sh in prompt mode after copier completes
+## 2026-01-20T14:15:00-08:00 - Complete Claude up-sampling for idea.sh
 
 **Task**: ortus-wu0 - Auto-run idea.sh in prompt mode after copier completes
 **Status**: Completed
 **Changes**:
-- Updated `template/idea.sh` to prompt for input when called with no arguments
-- Added `./idea.sh` to copier.yaml _tasks to run after project creation
-- Updated `copier.yaml` _message_after_copy to remove redundant idea.sh instruction (now auto-runs)
+- Added Claude up-sampling to `template/idea.sh` - brief ideas are expanded into 2-3 sentence descriptions
+- Claude prompt asks for concise, specific feature descriptions
+- Fallback to bare title if Claude call fails
+- Investigated auto-cd: copier _tasks run in dest dir (idea.sh works), but shell can't be changed from subprocess (POSIX limitation)
+
+**Up-sampling Example**:
+- Input: "calculator cli"
+- Output: "A command-line calculator application that accepts mathematical expressions as arguments and outputs the computed result. Should support basic arithmetic operations (addition, subtraction, multiplication, division) with proper operator precedence and parentheses handling. The CLI should provide clear error messages for invalid expressions or division by zero."
 
 **New Flow**:
 1. User runs `copier copy gh:who/ortus ./myproject`
 2. Copier finishes, automatically prompts: "What's your idea?"
-3. User types idea, it gets created via `bd create`
-4. Message shows user to `cd myproject` and continue with interview.sh
+3. User types brief idea (e.g., "calculator cli")
+4. Claude expands idea into full feature description
+5. Feature created via `bd create --body` with rich description
+6. Message shows user to `cd myproject` and continue with interview.sh
 
-**Verification**: bash syntax check passes, prompt mode tested successfully (created/closed test issues), direct argument mode still works.
+**Verification**: bash syntax check passes, template generation works, Claude up-sampling tested with "calculator cli" → full description generated correctly.
 
 ---
 

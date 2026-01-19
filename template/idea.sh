@@ -22,4 +22,15 @@ if [[ -z "$idea" ]]; then
     fi
 fi
 
-bd create --title="$idea" --type=feature --assignee=lisa
+# Use Claude to up-sample the idea into a full description
+echo "Expanding your idea..."
+description=$(claude --print "You are helping a developer capture a feature idea. Up-sample this brief idea into a 2-3 sentence feature description. Be concise and specific about what the feature should do. Output ONLY the description text, nothing else.
+
+Idea: $idea")
+
+if [[ -z "$description" ]]; then
+    # Fallback if Claude fails
+    bd create --title="$idea" --type=feature --assignee=lisa
+else
+    bd create --title="$idea" --type=feature --assignee=lisa --body="$description"
+fi
