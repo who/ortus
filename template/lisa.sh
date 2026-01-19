@@ -11,7 +11,7 @@
 #   (none)           - New idea, needs interview questions generated
 #   prd:interviewing - Interview questions created, waiting for human answers
 #   prd:ready        - Interview complete, PRD generated, awaiting approval
-#   prd:approved     - Human approved, tasks being created for ralph
+#   approved         - Human approved, tasks being created for ralph
 #
 # Workflow:
 #   1. User: bd create --title="My idea" --type=idea --assignee=lisa
@@ -770,7 +770,7 @@ process_idea() {
   log "  Labels: ${labels:-none}"
 
   # Route based on state labels
-  if [[ "$labels" == *"prd:approved"* ]]; then
+  if [[ "$labels" == *"approved"* ]]; then
     handle_approved "$idea_id" "$idea_title"
   elif [[ "$labels" == *"prd:ready"* ]]; then
     handle_ready "$idea_id" "$idea_title"
