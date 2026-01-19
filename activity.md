@@ -4,6 +4,22 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T12:30:00-08:00 - Fix PrerequisiteChecker extension timing
+
+**Task**: ortus-kdb - PrerequisiteChecker extension not loading during template generation
+**Status**: Completed
+**Changes**:
+- Extension WAS loading, but output appeared at the end due to stdout buffering
+- Moved check execution from `hook()` to `__init__()` to run when Jinja environment is created
+- Added `flush=True` to all print statements to prevent output buffering
+- Checks now appear before the "Welcome" message, not after "Project created"
+
+**Root cause**: The `ContextHook.hook()` method runs during Jinja template rendering which happens late in the Copier workflow. Python's stdout buffering delayed the output further. By running checks in `__init__` with explicit flushing, output appears immediately when the Jinja environment is created.
+
+**Verification**: Template generation shows prerequisite checks at the start with ✓/✗ markers for all 6 tools, appearing before the welcome message.
+
+---
+
 ## 2026-01-19T11:10:00-08:00 - Remove check-prerequisites.sh from template folder
 
 **Task**: ortus-ccg - Remove check-prerequisites.sh from template folder

@@ -3,9 +3,15 @@
 Runs prerequisite checks during template generation and reports results.
 """
 
+from __future__ import annotations
+
 import shutil
+from typing import TYPE_CHECKING
 
 from copier_templates_extensions import ContextHook
+
+if TYPE_CHECKING:
+    from jinja2 import Environment
 
 
 # Track if checks have already run to avoid duplicate output
@@ -13,7 +19,11 @@ _checks_run = False
 
 
 class PrerequisiteChecker(ContextHook):
-    """Checks for required tools during template generation."""
+    """Checks for required tools during template generation.
+
+    Runs checks when the Jinja environment is initialized (before template
+    rendering and prompts) so users see prerequisite status early.
+    """
 
     # ANSI colors
     GREEN = "\033[0;32m"
@@ -39,18 +49,22 @@ class PrerequisiteChecker(ContextHook):
         ("fd", "Fast file finder", "brew install fd / apt install fd-find"),
     ]
 
-    def hook(self, context: dict) -> dict:
-        """Run prerequisite checks and return empty context (no variables added)."""
+    def __init__(self, environment: Environment) -> None:
+        """Initialize and run prerequisite checks immediately."""
+        super().__init__(environment)
         global _checks_run
         if not _checks_run:
             self._run_checks()
             _checks_run = True
+
+    def hook(self, context: dict) -> dict:
+        """Return empty context (no variables added). Checks run in __init__."""
         return {}
 
     def _run_checks(self) -> None:
         """Run all prerequisite checks and print results."""
-        print("\nChecking prerequisites...")
-        print()
+        print("\nChecking prerequisites...", flush=True)
+        print(flush=True)
 
         missing_count = 0
 
@@ -61,16 +75,17 @@ class PrerequisiteChecker(ContextHook):
                 self._print_missing(tool, description, install_hint)
                 missing_count += 1
 
-        print()
+        print(flush=True)
 
         if missing_count == 0:
-            print(f"{self.GREEN}All prerequisites installed!{self.NC}")
+            print(f"{self.GREEN}All prerequisites installed!{self.NC}", flush=True)
         else:
-            print(f"{self.YELLOW}Missing {missing_count} tool(s).{self.NC}")
+            print(f"{self.YELLOW}Missing {missing_count} tool(s).{self.NC}", flush=True)
             print(
-                "The project will work, but some automation features may not function until these are installed."
+                "The project will work, but some automation features may not function until these are installed.",
+                flush=True
             )
-        print()
+        print(flush=True)
 
     def _check_tool(self, tool: str) -> bool:
         """Check if a tool is available in PATH."""
@@ -78,9 +93,9 @@ class PrerequisiteChecker(ContextHook):
 
     def _print_found(self, tool: str, description: str) -> None:
         """Print a found tool message."""
-        print(f"{self.GREEN}✓{self.NC} {tool:<10} {description}")
+        print(f"{self.GREEN}✓{self.NC} {tool:<10} {description}", flush=True)
 
     def _print_missing(self, tool: str, description: str, install_hint: str) -> None:
         """Print a missing tool message with install hint."""
-        print(f"{self.RED}✗{self.NC} {tool:<10} {description}")
-        print(f"  {self.YELLOW}Install:{self.NC} {install_hint}")
+        print(f"{self.RED}✗{self.NC} {tool:<10} {description}", flush=True)
+        print(f"  {self.YELLOW}Install:{self.NC} {install_hint}", flush=True)
