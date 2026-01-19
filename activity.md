@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T13:00:00-08:00 - Create and validate test-lisa.sh test script
+
+**Task**: ortus-a1r - Create and validate test-lisa.sh test script
+**Status**: Completed
+**Changes**:
+- Verified tests/test-lisa.sh already existed with complete implementation
+- Test generates project from ortus template in /tmp
+- Test creates an idea bead assigned to lisa
+- Test runs lisa.sh and validates full pipeline (interview questions, PRD generation, task creation)
+- Verified dry-run mode works correctly
+
+**Verification**: `./tests/test-lisa.sh --dry-run` passes - creates test project, creates idea bead, displays manual testing instructions.
+
+---
+
 ## 2026-01-19T12:30:00-08:00 - Fix PrerequisiteChecker extension timing
 
 **Task**: ortus-kdb - PrerequisiteChecker extension not loading during template generation
