@@ -4,6 +4,24 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T15:00:00-08:00 - Fix interview.sh: Claude not receiving context
+
+**Task**: ortus-223 - Fix interview.sh: Claude not receiving context, doesn't start asking questions
+**Status**: Completed
+**Changes**:
+- Modified `template/interview.sh` to pass system prompt via `--settings` JSON file instead of `--system-prompt` CLI argument
+- This avoids shell quoting issues with multiline strings containing special characters
+- Added temporary file handling with proper cleanup (trap for prompt file, explicit rm for settings file)
+- Used jq to properly JSON-escape the system prompt content
+- Updated `template/prompts/INTERVIEW-PROMPT.md` to add explicit "start immediately" instructions
+- Added "IMPORTANT: Start Immediately" section to fallback system prompt
+
+**Root cause**: The `--system-prompt` CLI argument was having issues with the long multiline system prompt containing special characters. Using a JSON settings file (`--settings`) provides a cleaner way to pass complex prompts.
+
+**Verification**: bash syntax check passes, template generation works, JSON escaping confirmed working with special characters.
+
+---
+
 ## 2026-01-19T14:30:00-08:00 - Fix interview.sh: no initial prompt and missing exit prompt
 
 **Task**: ortus-kfr - Fix interview.sh: no initial prompt and missing exit prompt
