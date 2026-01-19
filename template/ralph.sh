@@ -702,7 +702,7 @@ while true; do
     log "--- Checking for implementation work (tasks) ---"
 
     # Check for ready tasks
-    ready_count=$(bd ready --assignee ralph --json 2>/dev/null | jq -r '[.[] | select(.type == "task")] | length' 2>/dev/null || echo "0")
+    ready_count=$(bd ready --assignee ralph --json 2>/dev/null | jq -r '[.[] | select(.issue_type == "task")] | length' 2>/dev/null || echo "0")
 
     if [ "$ready_count" != "0" ]; then
       log "Found $ready_count ready task(s)"

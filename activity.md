@@ -4,6 +4,18 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T00:00:00-08:00 - Fix ralph.sh: wrong JSON field name (.type vs .issue_type)
+
+**Task**: ortus-nyw - Fix ralph.sh: wrong JSON field name (.type vs .issue_type)
+**Status**: Completed
+**Changes**:
+- Fixed jq filter on line 705 of `template/ralph.sh` from `.type` to `.issue_type`
+- The beads JSON output uses `issue_type` field, not `type`
+
+**Verification**: bash syntax check passes, jq filter correctly parses issue_type field from beads JSON output.
+
+---
+
 ## 2026-01-19T19:00:00-08:00 - Add beads visualization link (bdui) to generated README
 
 **Task**: ortus-k71 - Add beads visualization link (bdui) to generated README
