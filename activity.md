@@ -4,6 +4,24 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T09:25:00-08:00 - Create lisa.sh core loop structure
+
+**Task**: ortus-oet - Create lisa.sh core loop structure
+**Status**: Completed
+**Changes**:
+- Created `template/lisa.sh` with continuous polling loop (similar to ralph.sh)
+- Configurable `--poll-interval` and `--idle-sleep` options
+- Timestamped logging to `logs/lisa-<timestamp>.log`
+- State routing based on labels: prd:interviewing, prd:ready, prd:approved
+- Processes ideas assigned to 'lisa' via `bd ready --assignee lisa`
+- Graceful handling of empty queue (sleeps and retries)
+- Stubbed state handlers for: new ideas, interviewing, ready, approved
+- Fixed epic dependency structure: removed subtask→epic dependencies that were blocking work
+
+**Verification**: Syntax check passes, help output correct, brief loop test shows correct polling and logging behavior.
+
+---
+
 ## 2026-01-19T08:40:00-08:00 - Refactor test-ralph.sh into tests/ folder with external task definitions
 
 **Task**: ortus-yfp - Refactor test-ralph.sh into tests/ folder with external task definitions
