@@ -171,9 +171,13 @@ run_interview() {
   echo -e "${DIM}Feature ID: ${feature_id}${RESET}"
   echo ""
 
+  # Create a temporary file for the system prompt
+  local prompt_tmpfile
+  prompt_tmpfile=$(mktemp)
+  trap "rm -f '$prompt_tmpfile'" EXIT
+
   # Build the system prompt with feature context
-  local system_prompt
-  system_prompt=$(cat <<EOF
+  cat > "$prompt_tmpfile" <<EOF
 You are conducting a product requirements interview for the following feature:
 
 ## Feature Details
@@ -210,40 +214,61 @@ When you have gathered sufficient information (usually 5-8 questions):
    - Tell the user: "The interview is complete! Please type /exit or press Ctrl+C to exit this Claude session."
    - IMPORTANT: Always end with a clear prompt telling the user to exit the session
 
-Start the interview now. Begin with a brief greeting and your first question.
-EOF
-)
+## IMPORTANT: Start Immediately
 
-  # Check if prompts/INTERVIEW-PROMPT.md exists and use it
+You MUST start the interview RIGHT NOW. Do not wait for user input. Begin with a brief greeting and immediately ask your first question using the AskUserQuestion tool.
+EOF
+
+  # Check if prompts/INTERVIEW-PROMPT.md exists and use it instead
   local prompt_file="prompts/INTERVIEW-PROMPT.md"
   if [ -f "$prompt_file" ]; then
-    # Read the prompt file and substitute variables
-    local prompt_content
-    prompt_content=$(cat "$prompt_file")
-    prompt_content="${prompt_content//\{\{FEATURE_ID\}\}/$feature_id}"
-    prompt_content="${prompt_content//\{\{FEATURE_TITLE\}\}/$feature_title}"
-    prompt_content="${prompt_content//\{\{FEATURE_DESCRIPTION\}\}/$feature_description}"
-    system_prompt="$prompt_content"
+    # Read the prompt file and substitute variables using awk for safety
+    # (handles special characters in descriptions)
+    awk -v id="$feature_id" -v title="$feature_title" -v desc="$feature_description" '
+      {
+        gsub(/\{\{FEATURE_ID\}\}/, id)
+        gsub(/\{\{FEATURE_TITLE\}\}/, title)
+        gsub(/\{\{FEATURE_DESCRIPTION\}\}/, desc)
+        print
+      }
+    ' "$prompt_file" > "$prompt_tmpfile"
   fi
 
-  # Initial prompt to get Claude started immediately
-  local initial_prompt="Please start the interview for feature ${feature_id} now. Begin with a brief greeting and your first question using the AskUserQuestion tool."
+  # Initial prompt message to kick off the conversation
+  local initial_prompt="Start the interview for feature ${feature_id} now. Greet the user briefly and ask your first question using AskUserQuestion."
 
-  # Run Claude with the interview prompt
-  claude --system-prompt "$system_prompt" \
+  # Run Claude with the interview prompt using settings file for system prompt
+  # We use a settings JSON to pass the system prompt cleanly, avoiding shell quoting issues
+  local settings_tmpfile
+  settings_tmpfile=$(mktemp)
+
+  # Read the system prompt and create a settings JSON
+  local system_prompt_escaped
+  system_prompt_escaped=$(cat "$prompt_tmpfile" | jq -Rs '.')
+  cat > "$settings_tmpfile" <<SETTINGS_EOF
+{
+  "systemPrompt": ${system_prompt_escaped}
+}
+SETTINGS_EOF
+
+  claude --settings "$settings_tmpfile" \
     --allowedTools "AskUserQuestion,Bash(bd:*),Read" \
-    "$initial_prompt" \
-    || {
-      local exit_code=$?
-      if [ $exit_code -eq 130 ]; then
-        # User interrupted with Ctrl+C
-        echo ""
-        echo_warn "Interview interrupted. Progress may be partially saved."
-        exit 0
-      fi
-      echo_error "Interview session ended with error"
-      exit 1
-    }
+    "$initial_prompt"
+  local exit_code=$?
+
+  # Cleanup
+  rm -f "$settings_tmpfile"
+
+  if [ $exit_code -ne 0 ]; then
+    if [ $exit_code -eq 130 ]; then
+      # User interrupted with Ctrl+C
+      echo ""
+      echo_warn "Interview interrupted. Progress may be partially saved."
+      exit 0
+    fi
+    echo_error "Interview session ended with error"
+    exit 1
+  fi
 
   echo ""
   echo_success "Interview complete!"

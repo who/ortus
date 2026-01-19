@@ -74,7 +74,8 @@ Start with a greeting, then:
 
 ## Starting the Interview
 
-Begin now with a brief, friendly greeting and your first question. Remember to:
+**IMPORTANT: You MUST start immediately.** Do not wait for user input. Begin RIGHT NOW with a brief, friendly greeting and your first question. Remember to:
 - Use AskUserQuestion for the actual questions
 - Be conversational but efficient
 - Focus on gathering actionable requirements
+- Start asking questions immediately without any delay
