@@ -19,7 +19,7 @@ _message_after_copy: |
 
   Next steps:
     cd {{ _copier_conf.dst_path }}
-    bd create --title="Your idea here" --type=idea --assignee=lisa
+    bd create --title="Your idea here" --type=feature --assignee=lisa
     ./lisa.sh   # Starts PRD interview process
     ./ralph.sh  # Implements approved tasks
 
