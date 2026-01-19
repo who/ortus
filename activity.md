@@ -4,6 +4,22 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T23:30:00-08:00 - Fix interview.sh: Claude not using AskUserQuestion immediately
+
+**Task**: ortus-4ms - Fix interview.sh: Claude not using AskUserQuestion for interview
+**Status**: Completed
+**Changes**:
+- Updated `template/prompts/INTERVIEW-PROMPT.md` to explicitly instruct Claude that its FIRST action must be AskUserQuestion
+- Added concrete example of proper AskUserQuestion call format
+- Updated fallback system prompt in `template/interview.sh` with same explicit instruction
+- Changed initial prompt from "greet the user" to "your FIRST action must be AskUserQuestion"
+
+**Root cause**: The prompt said "start immediately" and "use AskUserQuestion" but Claude interpreted this as guidance rather than a mandatory first action. Claude would output text (greeting) before using the tool. The fix makes it explicit that no text output is allowed before the AskUserQuestion tool call.
+
+**Verification**: bash syntax check passes, template generation works, both INTERVIEW-PROMPT.md and interview.sh contain explicit instructions.
+
+---
+
 ## 2026-01-20T14:15:00-08:00 - Complete Claude up-sampling for idea.sh
 
 **Task**: ortus-wu0 - Auto-run idea.sh in prompt mode after copier completes

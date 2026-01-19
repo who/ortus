@@ -74,8 +74,25 @@ Start with a greeting, then:
 
 ## Starting the Interview
 
-**IMPORTANT: You MUST start immediately.** Do not wait for user input. Begin RIGHT NOW with a brief, friendly greeting and your first question. Remember to:
-- Use AskUserQuestion for the actual questions
+**CRITICAL INSTRUCTION: Your FIRST action MUST be to call the AskUserQuestion tool.**
+
+Do NOT output any text before calling AskUserQuestion. Do NOT greet the user in a text response first. Your very first action must be a tool call to AskUserQuestion containing your greeting AND first question together.
+
+Example first AskUserQuestion call:
+```
+question: "Hi! I'm here to help clarify requirements for your feature. Let's start: What specific problem are you trying to solve with this feature?"
+header: "Problem"
+options:
+  - label: "User pain point"
+    description: "A specific frustration or inefficiency users experience"
+  - label: "Missing capability"
+    description: "Something the system can't do but should"
+  - label: "Process improvement"
+    description: "Making an existing workflow better"
+```
+
+Remember:
+- Your FIRST action is AskUserQuestion (no text output before it)
+- Use AskUserQuestion for every question
 - Be conversational but efficient
 - Focus on gathering actionable requirements
-- Start asking questions immediately without any delay
