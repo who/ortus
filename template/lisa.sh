@@ -240,7 +240,7 @@ handle_new_idea() {
   }
 
   local idea_description
-  idea_description=$(echo "$idea_json" | jq -r '.description // "No description provided"')
+  idea_description=$(echo "$idea_json" | jq -r '.[0].description // "No description provided"')
 
   # Generate interview questions
   local question_ids

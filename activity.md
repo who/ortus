@@ -4,19 +4,18 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
-## 2026-01-19T11:55:00-08:00 - Fix test-lisa.sh not working
+## 2026-01-19T12:30:00-08:00 - Fix test-lisa.sh not working (complete)
 
 **Task**: ortus-157 - Fix test-lisa.sh not working
 **Status**: Completed
 **Changes**:
-- Fixed label mismatch in template/lisa.sh
-- lisa.sh was checking for "prd:approved" label but should check for "approved"
-- Updated comment on line 14 to document correct label ("approved" not "prd:approved")
-- Updated condition on line 773 to check for "*approved*" instead of "*prd:approved*"
+- Fixed jq parsing bug on line 243 of template/lisa.sh
+- Changed `.description` to `.[0].description` to match `bd show --json` output format (which returns an array)
+- Previous session fixed label check from "prd:approved" to "approved" on line 773
 
-**Root cause**: The process_idea() function checked for "prd:approved" label, but documentation and the test both use plain "approved" label. When the test added the "approved" label after PRD approval, lisa.sh didn't recognize it.
+**Root cause**: Two issues combined: 1) Label mismatch (fixed previously), 2) jq parsing assumed object but bd show --json returns array
 
-**Verification**: `./tests/test-lisa.sh --dry-run` passes, lisa.sh syntax check passes, generated project has correct label check.
+**Verification**: `./tests/test-lisa.sh --dry-run` passes, bash syntax check passes, both `.[0].description` usages now consistent.
 
 ---
 
