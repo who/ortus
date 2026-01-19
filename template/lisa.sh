@@ -259,13 +259,124 @@ handle_new_idea() {
   return 0
 }
 
+# Collect answers from closed question beads
+# Output format: question title + answer text, one per bead
+collect_answers() {
+  local idea_id="$1"
+  local answers=""
+
+  # Get dependencies (question beads) for this idea
+  local idea_json
+  idea_json=$(bd show "$idea_id" --json 2>/dev/null) || return 1
+
+  # Extract dependency IDs
+  local dep_ids
+  dep_ids=$(echo "$idea_json" | jq -r '.[0].dependencies[]?.id // empty' 2>/dev/null)
+
+  if [ -z "$dep_ids" ]; then
+    log "    No question beads found"
+    return 0
+  fi
+
+  # Collect answers from each question bead
+  while IFS= read -r dep_id; do
+    [ -z "$dep_id" ] && continue
+
+    local dep_json
+    dep_json=$(bd show "$dep_id" --json 2>/dev/null) || continue
+
+    local dep_title
+    dep_title=$(echo "$dep_json" | jq -r '.[0].title // "Unknown question"')
+
+    # Get comments on this question bead
+    local comments_json
+    comments_json=$(bd comments "$dep_id" --json 2>/dev/null || echo "[]")
+
+    local comment_texts
+    comment_texts=$(echo "$comments_json" | jq -r '.[].text // empty' 2>/dev/null | tr '\n' ' ')
+
+    if [ -n "$comment_texts" ]; then
+      answers="${answers}### ${dep_title}
+
+${comment_texts}
+
+"
+    else
+      answers="${answers}### ${dep_title}
+
+(No answer provided)
+
+"
+    fi
+  done <<< "$dep_ids"
+
+  echo "$answers"
+}
+
 handle_interviewing() {
   local idea_id="$1"
   local idea_title="$2"
-  log "  TODO: Check if interview is complete"
-  # Will check if all question beads are closed
-  # If complete: generate PRD and add prd:ready label
-  return 1  # Not implemented yet
+
+  log "  Checking if interview is complete..."
+
+  # Get idea details including dependencies (question beads)
+  local idea_json
+  idea_json=$(bd show "$idea_id" --json 2>/dev/null) || {
+    log "  ERROR: Failed to get idea details"
+    return 1
+  }
+
+  # Count total dependencies and open dependencies
+  local total_deps open_deps
+  total_deps=$(echo "$idea_json" | jq -r '.[0].dependencies | length' 2>/dev/null || echo "0")
+
+  if [ "$total_deps" = "0" ] || [ -z "$total_deps" ]; then
+    log "  No question beads found - skipping interview phase"
+    # Transition directly to ready (edge case: no questions were generated)
+    bd label remove "$idea_id" "prd:interviewing" >/dev/null 2>&1 || true
+    bd label add "$idea_id" "prd:ready" >/dev/null 2>&1 || {
+      log "  ERROR: Failed to add prd:ready label"
+      return 1
+    }
+    log "  Transitioned to prd:ready (no interview questions)"
+    return 0
+  fi
+
+  # Count how many dependencies are still open (not closed)
+  open_deps=$(echo "$idea_json" | jq -r '[.[0].dependencies[] | select(.status != "closed")] | length' 2>/dev/null || echo "0")
+
+  log "    Questions: $total_deps total, $open_deps still open"
+
+  if [ "$open_deps" != "0" ]; then
+    log "  Interview still in progress - waiting for human to close question beads"
+    return 0  # Not an error, just waiting
+  fi
+
+  # All questions are answered!
+  log "  All questions answered - collecting responses..."
+
+  # Collect answers from question bead comments
+  local answers
+  answers=$(collect_answers "$idea_id")
+
+  # Store answers in a temp file for the next phase (PRD generation)
+  local answers_file="logs/.lisa-answers-${idea_id}.tmp"
+  echo "$answers" > "$answers_file"
+  log "    Answers saved to $answers_file"
+
+  # Transition labels: remove prd:interviewing, add prd:ready
+  bd label remove "$idea_id" "prd:interviewing" >/dev/null 2>&1 || {
+    log "  Warning: Failed to remove prd:interviewing label"
+  }
+
+  bd label add "$idea_id" "prd:ready" >/dev/null 2>&1 || {
+    log "  ERROR: Failed to add prd:ready label"
+    return 1
+  }
+
+  log "  Interview complete! Transitioned to prd:ready"
+  log "  Human review required: add 'approved' label when PRD is approved"
+  return 0
 }
 
 handle_ready() {

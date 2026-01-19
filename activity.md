@@ -4,6 +4,25 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T10:45:00-08:00 - Implement lisa.sh interview completion detection
+
+**Task**: ortus-om6 - Implement lisa.sh interview completion detection
+**Status**: Completed
+**Changes**:
+- Implemented `handle_interviewing()` function to detect when all question beads are closed
+- Uses `bd show --json` to get dependencies and checks their status
+- Counts total dependencies vs open dependencies to determine completion
+- Implemented `collect_answers()` function to extract answers from question bead comments
+- Iterates through dependency IDs and collects comment text from each
+- Formats answers as markdown with question titles as headers
+- Answers stored in `logs/.lisa-answers-<idea-id>.tmp` for PRD generation phase
+- Label transitions: removes `prd:interviewing`, adds `prd:ready`
+- Handles edge cases: no questions (skips to ready), questions without answers (noted)
+
+**Verification**: Syntax check passes, help output correct. Full integration requires Claude API.
+
+---
+
 ## 2026-01-19T10:15:00-08:00 - Implement lisa.sh interview generation
 
 **Task**: ortus-n75 - Implement lisa.sh interview generation
