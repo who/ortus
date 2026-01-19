@@ -206,7 +206,9 @@ Conduct a dynamic, conversational interview to gather the information needed to 
 When you have gathered sufficient information (usually 5-8 questions):
 1. Save a final summary comment with key insights
 2. Add the 'interviewed' label: bd label add ${feature_id} interviewed
-3. Thank the user and explain next steps (Lisa will generate the PRD)
+3. Thank the user, explain next steps (Lisa will generate the PRD), and prompt them to exit:
+   - Tell the user: "The interview is complete! Please type /exit or press Ctrl+C to exit this Claude session."
+   - IMPORTANT: Always end with a clear prompt telling the user to exit the session
 
 Start the interview now. Begin with a brief greeting and your first question.
 EOF
@@ -224,9 +226,13 @@ EOF
     system_prompt="$prompt_content"
   fi
 
+  # Initial prompt to get Claude started immediately
+  local initial_prompt="Please start the interview for feature ${feature_id} now. Begin with a brief greeting and your first question using the AskUserQuestion tool."
+
   # Run Claude with the interview prompt
   claude --system-prompt "$system_prompt" \
     --allowedTools "AskUserQuestion,Bash(bd:*),Read" \
+    "$initial_prompt" \
     || {
       local exit_code=$?
       if [ $exit_code -eq 130 ]; then
