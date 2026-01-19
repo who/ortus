@@ -245,27 +245,26 @@ EOF
   # CRITICAL: This must instruct Claude to use AskUserQuestion as its FIRST action
   local initial_prompt="Your FIRST action must be to call AskUserQuestion. Do not output any text first. Immediately call AskUserQuestion with your greeting and first interview question for feature ${feature_id}."
 
-  # Run Claude with the interview prompt using settings file for system prompt
-  # We use a settings JSON to pass the system prompt cleanly, avoiding shell quoting issues
-  local settings_tmpfile
-  settings_tmpfile=$(mktemp)
+  # Run Claude by piping the full prompt to stdin
+  # This approach ensures Claude immediately processes the prompt and executes tool calls
+  #
+  # The prompt is structured as:
+  # 1. System instructions (from INTERVIEW-PROMPT.md or fallback)
+  # 2. Explicit instruction to start immediately with AskUserQuestion
+  #
+  # We pipe to stdin because this triggers immediate execution vs positional args
+  # which may not execute tool calls properly
 
-  # Read the system prompt and create a settings JSON
-  local system_prompt_escaped
-  system_prompt_escaped=$(cat "$prompt_tmpfile" | jq -Rs '.')
-  cat > "$settings_tmpfile" <<SETTINGS_EOF
-{
-  "systemPrompt": ${system_prompt_escaped}
-}
-SETTINGS_EOF
+  local full_prompt
+  full_prompt=$(cat "$prompt_tmpfile")
+  full_prompt="${full_prompt}
 
-  claude --settings "$settings_tmpfile" \
-    --allowedTools "AskUserQuestion,Bash(bd:*),Read" \
-    "$initial_prompt"
+---
+
+${initial_prompt}"
+
+  echo "$full_prompt" | claude --allowedTools "AskUserQuestion,Bash(bd:*),Read"
   local exit_code=$?
-
-  # Cleanup
-  rm -f "$settings_tmpfile"
 
   if [ $exit_code -ne 0 ]; then
     if [ $exit_code -eq 130 ]; then
