@@ -214,9 +214,16 @@ When you have gathered sufficient information (usually 5-8 questions):
    - Tell the user: "The interview is complete! Please type /exit or press Ctrl+C to exit this Claude session."
    - IMPORTANT: Always end with a clear prompt telling the user to exit the session
 
-## IMPORTANT: Start Immediately
+## CRITICAL: Start Immediately with AskUserQuestion
 
-You MUST start the interview RIGHT NOW. Do not wait for user input. Begin with a brief greeting and immediately ask your first question using the AskUserQuestion tool.
+**Your FIRST action MUST be to call the AskUserQuestion tool.** Do NOT output any text before calling AskUserQuestion. Your very first action must be a tool call containing your greeting AND first question together.
+
+Example first AskUserQuestion call:
+- question: "Hi! I'm here to help clarify requirements for your feature. What specific problem are you trying to solve?"
+- header: "Problem"
+- options: User pain point, Missing capability, Process improvement
+
+Do NOT greet the user in a text response first. Immediately call AskUserQuestion as your first action.
 EOF
 
   # Check if prompts/INTERVIEW-PROMPT.md exists and use it instead
@@ -235,7 +242,8 @@ EOF
   fi
 
   # Initial prompt message to kick off the conversation
-  local initial_prompt="Start the interview for feature ${feature_id} now. Greet the user briefly and ask your first question using AskUserQuestion."
+  # CRITICAL: This must instruct Claude to use AskUserQuestion as its FIRST action
+  local initial_prompt="Your FIRST action must be to call AskUserQuestion. Do not output any text first. Immediately call AskUserQuestion with your greeting and first interview question for feature ${feature_id}."
 
   # Run Claude with the interview prompt using settings file for system prompt
   # We use a settings JSON to pass the system prompt cleanly, avoiding shell quoting issues
