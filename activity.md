@@ -4,6 +4,20 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T11:10:00-08:00 - Remove check-prerequisites.sh from template folder
+
+**Task**: ortus-ccg - Remove check-prerequisites.sh from template folder
+**Status**: Completed
+**Changes**:
+- Deleted `template/check-prerequisites.sh` (vestigial - prereq checking now handled by Python extension)
+- Removed `check-prerequisites.sh` from `_exclude` list in copier.yaml (no longer needed)
+
+**Note**: During verification, discovered that the PrerequisiteChecker extension (extensions/prerequisites.py) is not being loaded during template generation. This is a pre-existing issue - filed as ortus-kdb.
+
+**Verification**: Template generates successfully without copying check-prerequisites.sh. The _exclude entry was also redundant since the file no longer exists.
+
+---
+
 ## 2026-01-19T10:30:00-08:00 - Close Epic: Unify PRD pipeline into lisa.sh
 
 **Task**: ortus-j1f - Epic: Unify PRD pipeline into lisa.sh

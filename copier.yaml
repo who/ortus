@@ -145,7 +145,6 @@ _exclude:
   - __pycache__
   - .git
   - .DS_Store
-  - check-prerequisites.sh
 
 _skip_if_exists:
   - activity.md
