@@ -4,6 +4,30 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T08:15:00-08:00 - Create test suite for ralph.sh with deterministic project
+
+**Task**: ortus-1im - Create test suite for ralph.sh with deterministic project
+**Status**: Completed
+**Changes**:
+- Created `test-ralph.sh` in repo root (not included in template)
+- Test generates fresh project from template with Python/uv defaults
+- Creates 3 deterministic calculator tasks (add, subtract, multiply functions)
+- Tasks have chained dependencies to ensure proper ordering
+- Test 1 verifies `--tasks 1` completes exactly 1 task
+- Test 2 verifies unlimited ralph completes all remaining tasks
+- Added `--dry-run` mode for setup inspection without running Claude
+- Added `--keep` flag to preserve test project for debugging
+- Added `--help` flag with usage information
+
+**Usage**:
+- `./test-ralph.sh --dry-run` - Set up test project, show manual instructions
+- `./test-ralph.sh` - Full test (requires Claude API, may have some flakiness)
+- `./test-ralph.sh --keep` - Full test, preserve test project after completion
+
+**Verification**: Dry-run mode tested successfully - generates project, creates 3 tasks with correct dependencies (1 ready due to blocking), shows correct task count.
+
+---
+
 ## 2026-01-19T08:30:00-08:00 - Merge ralph.sh and mega-ralph.sh with task limit option
 
 **Task**: ortus-2wr - Epic: Merge ralph.sh and mega-ralph.sh with task limit option
