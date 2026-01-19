@@ -4,6 +4,22 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T15:00:00-08:00 - Fix interview.sh: pipe prompt to claude stdin for AskUserQuestion
+
+**Task**: ortus-12l - Fix interview.sh: pipe prompt to claude stdin for AskUserQuestion
+**Status**: Completed
+**Changes**:
+- Updated `template/interview.sh` to pipe the full prompt to claude stdin instead of using `--settings` flag with positional argument
+- Removed settings JSON file creation (no longer needed)
+- Combined system prompt and initial instruction into a single piped input
+- This approach ensures Claude immediately processes the prompt and executes tool calls
+
+**Root cause**: The `--settings` flag with positional argument approach was not triggering Claude to immediately execute the AskUserQuestion tool call. Piping to stdin forces Claude to process the prompt and execute tools immediately.
+
+**Verification**: `./tests/test-interview.sh` passes - AskUserQuestion detected as Claude's first action.
+
+---
+
 ## 2026-01-20T14:30:00-08:00 - Add test for interview.sh AskUserQuestion flow
 
 **Task**: ortus-3wy - Add test for interview.sh AskUserQuestion flow
