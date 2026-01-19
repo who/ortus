@@ -4,6 +4,19 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T01:00:00-08:00 - Change copier.yaml defaults: npm, no framework, eslint
+
+**Task**: ortus-sqd - Change copier.yaml defaults: npm, no framework, eslint
+**Status**: Completed
+**Changes**:
+- Updated `copier.yaml` default for `package_manager` from `bun` to `npm`
+- Updated `copier.yaml` default for `framework` from `nextjs` to `none`
+- `linter` default was already `eslint` (no change needed)
+
+**Verification**: Template generation with `--defaults` uses new defaults. Generated project successfully.
+
+---
+
 ## 2026-01-20T00:00:00-08:00 - Fix ralph.sh: wrong JSON field name (.type vs .issue_type)
 
 **Task**: ortus-nyw - Fix ralph.sh: wrong JSON field name (.type vs .issue_type)
