@@ -4,6 +4,20 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T08:00:00-08:00 - Update ralph.sh log tailing instructions to mention tail.sh
+
+**Task**: ortus-owu - Update ralph.sh log tailing instructions to mention tail.sh
+**Status**: Completed
+**Changes**:
+- Updated header comment in `template/ralph.sh` to show both `./tail.sh` and `tail -f` options
+- Updated runtime log output to show both options when starting the loop
+- Human-readable option uses `./tail.sh` for formatted, colored output
+- Raw output option uses standard `tail -f` for unformatted logs
+
+**Verification**: Tested template generation - ralph.sh is copied to generated projects with updated instructions showing both tail options.
+
+---
+
 ## 2026-01-19T07:30:00-08:00 - Add tail.sh to template with terminal-agnostic colors
 
 **Task**: ortus-510 - Add tail.sh to template with terminal-agnostic colors
