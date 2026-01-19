@@ -4,6 +4,31 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T10:30:00-08:00 - Close Epic: Unify PRD pipeline into lisa.sh
+
+**Task**: ortus-j1f - Epic: Unify PRD pipeline into lisa.sh
+**Status**: Completed
+**Changes**:
+- Verified all 8 subtasks completed successfully
+- Confirmed lisa.sh implements full pipeline: continuous loop, interview generation, completion detection, PRD generation, approval handoff
+- Verified old scripts removed from template/ (generate-*.sh, collect-*.sh, prd-pipeline.sh)
+- Confirmed copier.yaml updated with correct chmod and messages
+- Documentation updated to reference lisa.sh
+
+**Subtasks completed**:
+- ortus-oet: Core loop structure
+- ortus-n75: Interview generation
+- ortus-om6: Interview completion detection
+- ortus-9pm: PRD document generation
+- ortus-nxe: Approval and ralph handoff
+- ortus-aqz: Delete old PRD scripts
+- ortus-q5p: Update copier.yaml
+- ortus-mgs: Update PRD prompt templates
+
+**Verification**: lisa.sh syntax valid, all acceptance criteria confirmed via code inspection.
+
+---
+
 ## 2026-01-19T10:00:00-08:00 - Update PRD prompt templates for lisa.sh
 
 **Task**: ortus-mgs - Update PRD prompt templates for lisa.sh
