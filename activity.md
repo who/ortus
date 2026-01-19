@@ -4,6 +4,47 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T17:45:00-08:00 - Streamline interview completion with inline PRD and task creation
+
+**Task**: ortus-1ig - Streamline interview completion: show summary, approve, and generate PRD inline
+**Status**: Completed
+**Changes**:
+- Updated `template/prompts/INTERVIEW-PROMPT.md` with new 6-step end-of-interview flow:
+  1. Display Q&A summary showing all questions and answers
+  2. Ask for interview approval via AskUserQuestion
+  3. Generate and display PRD inline (no waiting for ralph loop)
+  4. Ask for PRD approval via AskUserQuestion
+  5. Create implementation tasks assigned to ralph
+  6. Complete session with clear next-steps instructions
+
+**New Flow**:
+```
+Interview completes
+    ↓
+Display summary of all Q&A
+    ↓
+AskUserQuestion: "Approve interview and generate PRD?"
+    ↓ (Yes)
+Generate PRD → Display to user
+    ↓
+AskUserQuestion: "Approve PRD and create tasks?"
+    ↓ (Yes)
+Create implementation tasks → Close feature
+    ↓
+Prompt user to exit session
+```
+
+**Benefits**:
+- No more waiting for ralph.sh loop to detect interviewed features
+- No manual `bd label add` commands needed from user
+- User sees PRD immediately and can request changes inline
+- Tasks created in same session without extra steps
+- User exits with everything complete
+
+**Verification**: Template generation tested - INTERVIEW-PROMPT.md contains all 6 steps with AskUserQuestion examples, PRD structure, and bd commands.
+
+---
+
 ## 2026-01-19T15:15:00-08:00 - Unify loops and rename lisa functions to generic terms
 
 **Task**: ortus-5ds - Epic: Unify loops and rename lisa functions to generic terms
