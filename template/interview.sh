@@ -1,0 +1,277 @@
+#!/bin/bash
+# interview.sh - Interactive Claude-powered interviews for feature refinement
+#
+# Usage: ./interview.sh [feature-id]
+#
+# Options:
+#   <feature-id>    Optional: Interview a specific feature
+#   -h, --help      Show this help message
+#
+# This script conducts dynamic interviews using Claude's AskUserQuestion tool
+# to gather requirements for features before PRD generation.
+#
+# Workflow:
+#   1. Finds features assigned to lisa without 'interviewed' label
+#   2. Lets user select which feature to interview (if multiple)
+#   3. Claude conducts an interactive interview asking targeted questions
+#   4. Answers are saved as comments on the feature bead
+#   5. 'interviewed' label is added to trigger Lisa's PRD generation
+#
+# After interview completion, run lisa.sh to generate the PRD.
+#
+# Exit codes:
+#   0 - Interview completed successfully
+#   1 - Error occurred
+#   2 - No features need interviewing
+
+set -e
+
+# Parse arguments
+FEATURE_ID=""
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)
+      head -n 23 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+      exit 0
+      ;;
+    *)
+      FEATURE_ID="$1"
+      shift
+      ;;
+  esac
+done
+
+# Colors for output (respect NO_COLOR)
+if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
+  BOLD="\033[1m"
+  DIM="\033[2m"
+  RESET="\033[0m"
+  GREEN="\033[32m"
+  YELLOW="\033[33m"
+  CYAN="\033[36m"
+else
+  BOLD=""
+  DIM=""
+  RESET=""
+  GREEN=""
+  YELLOW=""
+  CYAN=""
+fi
+
+echo_info() {
+  echo -e "${CYAN}ℹ${RESET} $*"
+}
+
+echo_success() {
+  echo -e "${GREEN}✓${RESET} $*"
+}
+
+echo_warn() {
+  echo -e "${YELLOW}!${RESET} $*"
+}
+
+echo_error() {
+  echo -e "\033[31m✗${RESET} $*" >&2
+}
+
+# Find features that need interviewing
+find_pending_features() {
+  # Get all features assigned to lisa
+  local features_json
+  features_json=$(bd list --assignee lisa --type feature --status open --json 2>/dev/null || echo "[]")
+
+  # Filter out features that already have 'interviewed' label
+  echo "$features_json" | jq -c '[.[] | select(.labels | (. == null) or (index("interviewed") | not) and (index("prd:interviewing") | not) and (index("prd:ready") | not) and (index("approved") | not))]'
+}
+
+# Display feature selection menu
+select_feature() {
+  local features_json="$1"
+  local count
+  count=$(echo "$features_json" | jq 'length')
+
+  if [ "$count" = "0" ]; then
+    echo_info "No features need interviewing."
+    echo ""
+    echo "Features get interviewed when they:"
+    echo "  1. Are assigned to 'lisa'"
+    echo "  2. Have type 'feature'"
+    echo "  3. Don't have 'interviewed', 'prd:interviewing', 'prd:ready', or 'approved' labels"
+    echo ""
+    echo "Create a new feature with:"
+    echo "  bd create --title=\"My feature\" --type=feature --assignee=lisa"
+    exit 2
+  fi
+
+  if [ "$count" = "1" ]; then
+    # Only one feature, select it automatically
+    echo "$features_json" | jq -r '.[0].id'
+    return 0
+  fi
+
+  # Multiple features - show menu
+  echo ""
+  echo -e "${BOLD}Select a feature to interview:${RESET}"
+  echo ""
+
+  local i=1
+  while IFS= read -r feature; do
+    local id title
+    id=$(echo "$feature" | jq -r '.id')
+    title=$(echo "$feature" | jq -r '.title')
+    echo "  $i) $id - $title"
+    i=$((i + 1))
+  done < <(echo "$features_json" | jq -c '.[]')
+
+  echo ""
+  read -p "Enter number (1-$count): " selection
+
+  if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$count" ]; then
+    echo_error "Invalid selection"
+    exit 1
+  fi
+
+  echo "$features_json" | jq -r ".[$((selection - 1))].id"
+}
+
+# Validate that a feature exists and is appropriate for interviewing
+validate_feature() {
+  local feature_id="$1"
+
+  local feature_json
+  feature_json=$(bd show "$feature_id" --json 2>/dev/null) || {
+    echo_error "Feature '$feature_id' not found"
+    exit 1
+  }
+
+  # Check if already interviewed
+  local labels
+  labels=$(echo "$feature_json" | jq -r '.[0].labels // [] | join(",")')
+
+  if [[ "$labels" == *"interviewed"* ]]; then
+    echo_warn "Feature $feature_id has already been interviewed."
+    echo "Labels: $labels"
+    read -p "Re-interview anyway? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      exit 0
+    fi
+  fi
+
+  echo "$feature_json"
+}
+
+# Run the interview session with Claude
+run_interview() {
+  local feature_id="$1"
+  local feature_title="$2"
+  local feature_description="$3"
+
+  echo ""
+  echo -e "${BOLD}Starting interview for: ${feature_title}${RESET}"
+  echo -e "${DIM}Feature ID: ${feature_id}${RESET}"
+  echo ""
+
+  # Build the system prompt with feature context
+  local system_prompt
+  system_prompt=$(cat <<EOF
+You are conducting a product requirements interview for the following feature:
+
+## Feature Details
+**ID**: ${feature_id}
+**Title**: ${feature_title}
+**Description**:
+${feature_description}
+
+## Your Task
+
+Conduct a dynamic, conversational interview to gather the information needed to write a comprehensive PRD. Ask 5-8 targeted questions covering:
+
+1. **Problem Space** - What problem does this solve? Who experiences it? How painful is it?
+2. **Users & Personas** - Who are the primary users? What are their goals?
+3. **Scope** - What's in scope for v1? What should be explicitly out of scope?
+4. **Success Criteria** - How will we measure if this succeeded?
+5. **Technical Constraints** - Are there specific technologies, integrations, or limitations?
+6. **Timeline & Priority** - Any deadlines? How does this compare to other work?
+
+## Interview Guidelines
+
+- Use the AskUserQuestion tool to ask each question
+- Adapt follow-up questions based on previous answers
+- Don't ask about topics already clear from the description
+- Keep questions focused and specific
+- After each answer, save it as a comment on the feature bead using: bd comments add ${feature_id} "<answer summary>"
+
+## Completing the Interview
+
+When you have gathered sufficient information (usually 5-8 questions):
+1. Save a final summary comment with key insights
+2. Add the 'interviewed' label: bd label add ${feature_id} interviewed
+3. Thank the user and explain next steps (Lisa will generate the PRD)
+
+Start the interview now. Begin with a brief greeting and your first question.
+EOF
+)
+
+  # Check if prompts/INTERVIEW-PROMPT.md exists and use it
+  local prompt_file="prompts/INTERVIEW-PROMPT.md"
+  if [ -f "$prompt_file" ]; then
+    # Read the prompt file and substitute variables
+    local prompt_content
+    prompt_content=$(cat "$prompt_file")
+    prompt_content="${prompt_content//\{\{FEATURE_ID\}\}/$feature_id}"
+    prompt_content="${prompt_content//\{\{FEATURE_TITLE\}\}/$feature_title}"
+    prompt_content="${prompt_content//\{\{FEATURE_DESCRIPTION\}\}/$feature_description}"
+    system_prompt="$prompt_content"
+  fi
+
+  # Run Claude with the interview prompt
+  claude --system-prompt "$system_prompt" \
+    --allowedTools "AskUserQuestion,Bash(bd:*),Read" \
+    || {
+      local exit_code=$?
+      if [ $exit_code -eq 130 ]; then
+        # User interrupted with Ctrl+C
+        echo ""
+        echo_warn "Interview interrupted. Progress may be partially saved."
+        exit 0
+      fi
+      echo_error "Interview session ended with error"
+      exit 1
+    }
+
+  echo ""
+  echo_success "Interview complete!"
+  echo ""
+  echo "Next steps:"
+  echo "  1. Run ./lisa.sh to generate the PRD"
+  echo "  2. Review the PRD in prd/PRD-<name>.md"
+  echo "  3. Add 'approved' label when ready: bd label add $feature_id approved"
+}
+
+# Main execution
+echo ""
+echo -e "${BOLD}=== Feature Interview ===${RESET}"
+echo ""
+
+if [ -n "$FEATURE_ID" ]; then
+  # Specific feature provided
+  feature_json=$(validate_feature "$FEATURE_ID")
+  feature_title=$(echo "$feature_json" | jq -r '.[0].title')
+  feature_description=$(echo "$feature_json" | jq -r '.[0].description // "No description provided"')
+else
+  # Find features that need interviewing
+  echo_info "Searching for features that need interviewing..."
+
+  pending_json=$(find_pending_features)
+  pending_count=$(echo "$pending_json" | jq 'length')
+
+  echo_info "Found $pending_count feature(s) awaiting interview"
+
+  FEATURE_ID=$(select_feature "$pending_json")
+
+  feature_json=$(bd show "$FEATURE_ID" --json 2>/dev/null)
+  feature_title=$(echo "$feature_json" | jq -r '.[0].title')
+  feature_description=$(echo "$feature_json" | jq -r '.[0].description // "No description provided"')
+fi
+
+run_interview "$FEATURE_ID" "$feature_title" "$feature_description"
