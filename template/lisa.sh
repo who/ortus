@@ -259,6 +259,138 @@ handle_new_idea() {
   return 0
 }
 
+# Slugify a title for use in filenames
+slugify() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//'
+}
+
+# Generate PRD document from idea and interview answers using Claude
+generate_prd_document() {
+  local idea_id="$1"
+  local idea_title="$2"
+  local idea_description="$3"
+  local answers="$4"
+
+  # Create the PRD filename
+  local slug
+  slug=$(slugify "$idea_title")
+  local prd_file="prd/PRD-${slug}.md"
+
+  log "    Generating PRD: $prd_file"
+
+  # Build the prompt for Claude
+  local prompt
+  prompt=$(cat <<'PROMPT_EOF'
+You are a senior product manager. Generate a comprehensive PRD document based on the idea and interview answers below.
+
+## Idea Details
+**ID**: {{IDEA_ID}}
+**Title**: {{IDEA_TITLE}}
+**Description**:
+{{IDEA_DESCRIPTION}}
+
+## Interview Answers
+{{ANSWERS}}
+
+## Your Task
+
+Generate a well-structured PRD document in markdown format. The PRD should follow this structure:
+
+```markdown
+# PRD: [Title]
+
+## Metadata
+- Source Idea: <idea-id>
+- Generated: <date>
+- Status: Draft (awaiting approval)
+
+## Overview
+- **Problem Statement**: One paragraph describing the problem
+- **Proposed Solution**: One paragraph describing the solution
+- **Success Metrics**: Bulleted list of measurable outcomes
+
+## Background & Context
+- Why now? What's the motivation?
+- Prior art and alternatives considered
+
+## Users & Personas
+- Primary user persona(s)
+- User goals and jobs-to-be-done
+
+## Requirements
+
+### Functional Requirements
+Numbered list using format: `[P0] FR-001: The system shall...`
+- P0 = must have, P1 = should have, P2 = nice to have
+
+### Non-Functional Requirements
+Performance, security, scalability, etc.
+Format: `[P1] NFR-001: The system shall...`
+
+## System Architecture
+- High-level components and their responsibilities
+- Key technical decisions and rationale
+- Data flow overview
+
+## Milestones & Phases
+Break the work into logical phases, each with:
+- **Milestone Name**
+- **Goal**: What this milestone achieves
+- **Key Deliverables**: Concrete outputs
+- **Dependencies**: What must come before
+
+## Epic Breakdown
+For each milestone, list epics:
+
+### Epic: [Name]
+- **Description**: What this epic accomplishes
+- **Requirements Covered**: FR-001, FR-002, etc.
+- **Tasks** (high-level):
+  - [ ] Task 1
+  - [ ] Task 2
+
+## Open Questions
+Unresolved decisions that need stakeholder input.
+
+## Out of Scope
+Explicitly list what this PRD does NOT cover.
+```
+
+Output ONLY the markdown document, starting with the # PRD: line. Do not include any preamble or explanation.
+PROMPT_EOF
+)
+
+  # Substitute variables
+  prompt="${prompt//\{\{IDEA_ID\}\}/$idea_id}"
+  prompt="${prompt//\{\{IDEA_TITLE\}\}/$idea_title}"
+  prompt="${prompt//\{\{IDEA_DESCRIPTION\}\}/$idea_description}"
+  prompt="${prompt//\{\{ANSWERS\}\}/$answers}"
+
+  # Call Claude and capture output
+  local prd_content
+  prd_content=$(echo "$prompt" | claude -p --output-format text 2>/dev/null) || {
+    log "    ERROR: Claude call failed"
+    return 1
+  }
+
+  # Validate we got a PRD (should start with # PRD:)
+  if [[ ! "$prd_content" =~ ^#[[:space:]]*PRD: ]]; then
+    log "    ERROR: Generated content doesn't look like a PRD"
+    log "    First 100 chars: ${prd_content:0:100}"
+    return 1
+  fi
+
+  # Ensure prd directory exists
+  mkdir -p prd
+
+  # Write the PRD file
+  echo "$prd_content" > "$prd_file"
+
+  log "    PRD written to $prd_file"
+  echo "$prd_file"
+  return 0
+}
+
 # Collect answers from closed question beads
 # Output format: question title + answer text, one per bead
 collect_answers() {
@@ -359,10 +491,24 @@ handle_interviewing() {
   local answers
   answers=$(collect_answers "$idea_id")
 
-  # Store answers in a temp file for the next phase (PRD generation)
+  # Store answers in a temp file for reference
   local answers_file="logs/.lisa-answers-${idea_id}.tmp"
   echo "$answers" > "$answers_file"
   log "    Answers saved to $answers_file"
+
+  # Get idea description for PRD generation
+  local idea_description
+  idea_description=$(echo "$idea_json" | jq -r '.[0].description // "No description provided"')
+
+  # Generate the PRD document
+  log "  Generating PRD document..."
+  local prd_file
+  prd_file=$(generate_prd_document "$idea_id" "$idea_title" "$idea_description" "$answers") || {
+    log "  ERROR: Failed to generate PRD document"
+    return 1
+  }
+
+  log "  PRD generated: $prd_file"
 
   # Transition labels: remove prd:interviewing, add prd:ready
   bd label remove "$idea_id" "prd:interviewing" >/dev/null 2>&1 || {
@@ -374,15 +520,29 @@ handle_interviewing() {
     return 1
   }
 
-  log "  Interview complete! Transitioned to prd:ready"
-  log "  Human review required: add 'approved' label when PRD is approved"
+  log "  Interview complete! PRD ready for review."
+  log "  Review PRD at: $prd_file"
+  log "  Add 'approved' label when PRD is approved: bd label add $idea_id approved"
   return 0
 }
 
 handle_ready() {
   local idea_id="$1"
   local idea_title="$2"
-  log "  Waiting for human to add 'approved' label"
+
+  # Check if PRD file exists
+  local slug
+  slug=$(slugify "$idea_title")
+  local prd_file="prd/PRD-${slug}.md"
+
+  if [ -f "$prd_file" ]; then
+    log "  PRD available at: $prd_file"
+    log "  Waiting for human to approve. Run: bd label add $idea_id approved"
+  else
+    log "  WARNING: PRD file not found at $prd_file"
+    log "  This may indicate PRD generation failed. Check logs."
+  fi
+
   # PRD exists, waiting for human review
   return 0  # Nothing to do, human action required
 }
