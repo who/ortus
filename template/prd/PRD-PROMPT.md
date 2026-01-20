@@ -244,18 +244,20 @@ Before finalizing:
 # Or create manually
 bd create --title="Your idea description" --type=feature --assignee=ralph
 
-# Run the interactive interview
+# Run the interactive interview (generates PRD and creates tasks)
 ./interview.sh
 
-# Start Ralph (runs continuously)
+# Start Ralph to implement the tasks
 ./ralph.sh
 
-# Ralph will:
-# 1. Detect interviewed features
-# 2. Generate PRD from interview comments
-# 3. Wait for your approval (bd label add <id> approved)
-# 4. Create implementation tasks when you approve
-# 5. Implement tasks automatically
+# interview.sh will:
+# 1. Conduct an interactive interview
+# 2. Generate PRD from your answers
+# 3. Ask for your approval inline
+# 4. Create implementation tasks for ralph
+#
+# ralph.sh will:
+# 5. Implement the tasks automatically
 ```
 
 ### Manual: Creating the PRD

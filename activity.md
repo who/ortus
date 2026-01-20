@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T09:30:00-08:00 - Audit copier template prompts for outdated content
+
+**Task**: ortus-dav - Audit copier template prompts for outdated content
+**Status**: Completed
+**Changes**:
+- Audited all 6 files: INTERVIEW-PROMPT.md, PRD-PROMPT.md, PROMPT.md.jinja, CLAUDE.md.jinja, AGENTS.md, copier.yaml
+- Fixed `template/prd/PRD-PROMPT.md` lines 253-258: workflow description incorrectly said ralph.sh handles PRD generation and approval
+- Updated to correctly document that interview.sh handles interview→PRD→tasks, and ralph.sh only implements tasks
+- Verified no references to lisa.sh, --refinement-only, or --implementation-only flags
+- Confirmed `bd label add` commands in INTERVIEW-PROMPT.md are correct (used by Claude during automated flow, not manual user commands)
+
+**Verification**: Template generation succeeds, grep confirms no outdated references in generated project.
+
+---
+
 ## 2026-01-19T17:00:00-08:00 - Update interview.sh completion message - remove obsolete next steps
 
 **Task**: ortus-b9x - Update interview.sh completion message - remove obsolete next steps
