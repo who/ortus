@@ -4,6 +4,24 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T17:30:00-08:00 - Add README.md generation to template
+
+**Task**: ortus-6cf - Add README.md generation and maintenance to template
+**Status**: Completed
+**Changes**:
+- Created `template/README.md.jinja` with dynamic content based on copier answers
+- README includes project name, description, tech stack (language, package manager, framework, linter)
+- Quick start section with language-specific commands (Python/uv, TypeScript, Go, Rust)
+- Workflow section explaining idea.sh → interview.sh → ralph.sh flow
+- Issue tracking commands reference (bd list, ready, show, stats)
+- Project structure section with language-specific directory layout
+- Optional repository link and license sections
+- PROMPT.md.jinja already had README maintenance instructions (lines 116-129)
+
+**Verification**: Template generation tested for Python/uv, TypeScript/bun, Go/gomod, Rust/cargo, and 'other' language. All render correctly with proper conditionals for empty/none values.
+
+---
+
 ## 2026-01-20T16:42:00-08:00 - Add copier validation test
 
 **Task**: ortus-ib1 - Bug: copier --data flag requires = in test commands
