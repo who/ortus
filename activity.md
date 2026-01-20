@@ -4,6 +4,20 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T16:42:00-08:00 - Add copier validation test
+
+**Task**: ortus-ib1 - Bug: copier --data flag requires = in test commands
+**Status**: Completed
+**Changes**:
+- Created `tests/test-copier.sh` - validation test that verifies copier template generation
+- Test runs `copier copy --defaults` with all `--data key=value` flags
+- Verifies expected files are generated (ralph.sh, interview.sh, etc.)
+- Test catches malformed --data syntax errors that would cause `ValueError: not enough values to unpack`
+
+**Verification**: test-copier.sh passes, test-ralph.sh --dry-run passes, test-interview.sh --dry-run passes
+
+---
+
 ## 2026-01-20T15:30:00-08:00 - Create domain-specific PRD templates
 
 **Task**: ortus-jc0 - Create domain-specific PRD templates
