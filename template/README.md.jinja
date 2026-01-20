@@ -1,0 +1,199 @@
+# {{ project_name }}
+
+{{ project_description }}
+
+## Tech Stack
+
+- **Language**: {{ language | capitalize }}
+{%- if package_manager and package_manager != 'none' %}
+- **Package Manager**: {{ package_manager }}
+{%- endif %}
+{%- if framework and framework != 'none' %}
+- **Framework**: {{ framework }}
+{%- endif %}
+{%- if linter and linter != 'none' %}
+- **Linter**: {{ linter }}
+{%- endif %}
+
+## Quick Start
+
+{%- if language == 'python' and package_manager == 'uv' %}
+
+```bash
+# Install dependencies
+uv sync
+
+# Run the project
+{%- if framework == 'fastapi' %}
+uv run uvicorn app.main:app --reload
+{%- elif framework == 'flask' %}
+uv run flask --app app.main run
+{%- elif framework == 'django' %}
+uv run python manage.py runserver
+{%- else %}
+uv run python -m app.main
+{%- endif %}
+
+# Run tests
+uv run pytest
+
+# Lint code
+uv run ruff check .
+uv run ruff format --check .
+```
+
+{%- elif language == 'python' and package_manager == 'pip' %}
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the project
+{%- if framework == 'fastapi' %}
+uvicorn app.main:app --reload
+{%- elif framework == 'flask' %}
+flask --app app.main run
+{%- elif framework == 'django' %}
+python manage.py runserver
+{%- else %}
+python -m app.main
+{%- endif %}
+
+# Run tests
+pytest
+
+# Lint code
+ruff check .
+```
+
+{%- elif language == 'typescript' %}
+
+```bash
+# Install dependencies
+{{ package_manager }} install
+
+# Run development server
+{{ package_manager }} run dev
+
+# Run tests
+{{ package_manager }} test
+
+# Lint code
+{{ package_manager }} run lint
+```
+
+{%- elif language == 'go' %}
+
+```bash
+# Download dependencies
+go mod download
+
+# Run the project
+go run ./cmd/server
+
+# Run tests
+go test ./...
+
+# Lint code
+golangci-lint run
+```
+
+{%- elif language == 'rust' %}
+
+```bash
+# Build the project
+cargo build
+
+# Run the project
+cargo run
+
+# Run tests
+cargo test
+
+# Lint code
+cargo clippy
+```
+
+{%- else %}
+
+```bash
+# TODO: Add your setup and run commands
+```
+
+{%- endif %}
+
+## Workflow
+
+This project uses beads (`bd`) for issue tracking and Ralph automation loops for implementation.
+
+### Creating a Feature
+
+1. **Capture your idea**:
+   ```bash
+   ./idea.sh "Your feature idea"
+   ```
+
+2. **Run the interactive interview**:
+   ```bash
+   ./interview.sh
+   ```
+   Claude will ask clarifying questions, generate a PRD, and create implementation tasks.
+
+3. **Implement tasks with Ralph**:
+   ```bash
+   ./ralph.sh
+   ```
+   Ralph picks up tasks and implements them one by one.
+
+### Issue Tracking Commands
+
+```bash
+bd list              # List all issues
+bd ready             # Show issues ready to work
+bd show <id>         # View issue details
+bd stats             # Project statistics
+```
+
+## Project Structure
+
+```
+{{ project_name }}/
+{%- if language == 'python' %}
+├── src/                  # Source code
+│   └── app/              # Application package
+├── tests/                # Test suite
+{%- elif language == 'typescript' %}
+├── src/                  # Source code
+├── tests/                # Test suite
+{%- elif language == 'go' %}
+├── cmd/                  # Application entrypoints
+├── internal/             # Private packages
+├── pkg/                  # Public packages
+{%- elif language == 'rust' %}
+├── src/                  # Source code
+│   └── main.rs           # Entrypoint
+├── tests/                # Integration tests
+{%- endif %}
+├── prd/                  # Product requirements documents
+├── prompts/              # AI prompt templates
+├── .beads/               # Issue tracking data
+└── .claude/              # Claude Code settings
+```
+
+{%- if github_username %}
+
+## Repository
+
+[{{ github_username }}/{{ project_name }}](https://github.com/{{ github_username }}/{{ project_name }})
+{%- endif %}
+
+{%- if license != 'none' %}
+
+## License
+
+{{ license }}
+{%- endif %}
