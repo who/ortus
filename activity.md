@@ -4,6 +4,32 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T12:00:00-08:00 - Add PRD quality gate validation
+
+**Task**: ortus-cpx - Add PRD quality gate validation
+**Status**: Completed
+**Changes**:
+- Added Step 4.5 "Validate PRD Quality" to `template/prompts/INTERVIEW-PROMPT.md.jinja`
+- Blocking issues that must be fixed before approval:
+  - Problem Statement present and >50 words
+  - Success Metrics defined (at least 2)
+  - Functional Requirements listed (at least 3)
+  - Out of Scope section populated
+  - No TODO/TBD/FIXME placeholders
+- Quality warnings (non-blocking, flagged for review):
+  - Thin sections (<30 words)
+  - Unmeasurable metrics
+  - Requirements missing acceptance criteria
+  - Project-type-specific NFR warnings (API/fullstack: security/performance, library: compatibility/docs, CLI: usability/error handling)
+  - Large scope without milestone phasing
+- Validation output format with tables showing pass/fail status
+- User options for handling issues: fix automatically, override, or start over
+- User options for warnings: approve as-is or address first
+
+**Verification**: Template generation tested for api, cli, and default project types. All Jinja conditionals render correctly.
+
+---
+
 ## 2026-01-20T11:00:00-08:00 - Enhance INTERVIEW-PROMPT.md with adaptive questioning
 
 **Task**: ortus-9ij - Enhance INTERVIEW-PROMPT.md with adaptive questioning

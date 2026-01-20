@@ -317,6 +317,106 @@ If approved, do the following in sequence:
 
 5. **Display the PRD** to the user (output the full PRD content)
 
+### Step 4.5: Validate PRD Quality
+
+Before asking for approval, validate the PRD against quality standards. Present the results to the user.
+
+#### Validation Checks
+
+**Blocking Issues** (must be fixed before approval):
+1. **Problem Statement**: Must be present and contain at least 50 words
+2. **Success Metrics**: Must define at least 2 measurable metrics
+3. **Functional Requirements**: Must list at least 3 requirements
+4. **Out of Scope**: Section must be present and populated
+5. **No Placeholders**: Check for TODO, TBD, FIXME, or [placeholder] text
+
+**Quality Warnings** (non-blocking, but flagged for review):
+1. **Thin Sections**: Any section with fewer than 30 words
+2. **Unmeasurable Metrics**: Success metrics without numbers, percentages, or clear criteria
+3. **Requirements Missing Criteria**: Functional requirements without "shall" or acceptance criteria
+4. **Missing NFRs for Project Type**:
+{% if project_type == 'api' %}   - API projects should have security/auth and performance NFRs{% elif project_type == 'fullstack' %}   - Full-stack projects should have security/auth and performance NFRs{% elif project_type == 'library' %}   - Library projects should have compatibility and documentation NFRs{% elif project_type == 'cli' %}   - CLI projects should have usability and error handling NFRs{% endif %}
+
+5. **Large Scope Without Phasing**: More than 10 requirements without clear milestone breakdown
+
+#### Validation Output Format
+
+Display the validation results:
+
+```
+## PRD Validation Results
+
+### Section Completeness
+| Section | Status | Notes |
+|---------|--------|-------|
+| Problem Statement | ✅ Pass / ❌ Fail | X words (min 50) |
+| Success Metrics | ✅ Pass / ❌ Fail | X defined (min 2) |
+| Functional Requirements | ✅ Pass / ❌ Fail | X listed (min 3) |
+| Out of Scope | ✅ Pass / ❌ Fail | Present/Missing |
+| No Placeholders | ✅ Pass / ❌ Fail | Clean/Found: [list] |
+
+### Quality Indicators
+| Check | Status | Notes |
+|-------|--------|-------|
+| Measurable Metrics | ✅ / ⚠️ | All metrics have clear criteria |
+| Requirements Quality | ✅ / ⚠️ | All have acceptance criteria |
+| NFRs Coverage | ✅ / ⚠️ | Appropriate for project type |
+| Scope Phasing | ✅ / ⚠️ | Milestones are realistic |
+
+### Warnings
+- [List any warnings found, or "None"]
+
+**Overall Status**: ✅ Ready for Approval / ❌ Blocking Issues Found
+```
+
+#### Handling Validation Results
+
+**If blocking issues found**:
+
+```
+question: "The PRD has some blocking issues that should be addressed. How would you like to proceed?"
+header: "Issues"
+options:
+  - label: "Fix issues automatically"
+    description: "I'll revise the PRD to address the blocking issues"
+  - label: "Override and approve anyway"
+    description: "Proceed despite issues (not recommended)"
+  - label: "Start over"
+    description: "Discard this PRD and restart the interview"
+```
+
+If user selects "Fix issues automatically":
+- Revise the PRD to address blocking issues
+- Re-run validation
+- Display updated results
+
+If user selects "Override and approve anyway":
+- Add a note to the PRD metadata: `**Validation Override**: Approved despite blocking issues`
+- Proceed to Step 5
+
+**If only warnings (no blocking issues)**:
+
+```
+question: "The PRD passes all required checks with some warnings. How would you like to proceed?"
+header: "Review"
+options:
+  - label: "Approve as-is"
+    description: "Warnings are acceptable, proceed to task creation"
+  - label: "Address warnings first"
+    description: "I'll improve the PRD to address the warnings"
+```
+
+If user selects "Address warnings first":
+- Ask which warnings they want addressed
+- Revise the PRD
+- Re-run validation
+
+**If validation passes cleanly**:
+
+Output: "✅ PRD passes all quality checks! Ready for approval."
+
+Then proceed to Step 5.
+
 ### Step 5: Ask for PRD Approval
 
 Use AskUserQuestion to confirm the PRD is acceptable:
