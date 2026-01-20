@@ -1,8 +1,7 @@
 # PRD Generation Prompt
 
-> **Note:** For automated PRD generation, use `lisa.sh` instead of this manual process.
-> Lisa handles the full idea-to-implementation pipeline automatically.
-> See the README for lisa.sh usage.
+> **Note:** For automated PRD generation, use `./interview.sh` instead of this manual process.
+> interview.sh handles the full idea-to-PRD-to-tasks pipeline, then ralph.sh implements the tasks.
 
 This document provides a manual prompt for interactive PRD generation with Claude.
 
@@ -129,7 +128,7 @@ Save the final PRD to: `prd/PRD-[project-name].md`
 
 After the PRD is finalized, use this prompt to convert it into beads issues.
 
-> **Note:** If you used `lisa.sh`, it handles this conversion automatically when you approve the PRD.
+> **Note:** If you used `./interview.sh`, it handles this conversion automatically when you approve the PRD.
 
 ```
 Read the PRD at @prd/PRD-[project-name].md
@@ -236,19 +235,29 @@ Before finalizing:
 
 ## Usage
 
-### Recommended: Automated Approach (lisa.sh)
+### Recommended: Automated Approach (ralph.sh)
 
 ```bash
-# Submit an idea for Lisa to process
-bd create --title="Your idea description" --type=feature --assignee=lisa
+# Submit an idea using the quick helper
+./idea.sh "Your idea description"
 
-# Start Lisa (runs continuously)
-./lisa.sh
+# Or create manually
+bd create --title="Your idea description" --type=feature --assignee=ralph
 
-# Lisa will:
-# 1. Generate interview questions (answer with bd comments add <id> "answer")
-# 2. Generate PRD when all questions are answered
-# 3. Create implementation tasks when you approve the PRD
+# Run the interactive interview (generates PRD and creates tasks)
+./interview.sh
+
+# Start Ralph to implement the tasks
+./ralph.sh
+
+# interview.sh will:
+# 1. Conduct an interactive interview
+# 2. Generate PRD from your answers
+# 3. Ask for your approval inline
+# 4. Create implementation tasks for ralph
+#
+# ralph.sh will:
+# 5. Implement the tasks automatically
 ```
 
 ### Manual: Creating the PRD

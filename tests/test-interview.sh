@@ -115,7 +115,7 @@ log_info "Project generated at: $(pwd)"
 
 # Manually run the initialization tasks (except idea.sh)
 log_info "Running manual initialization..."
-chmod +x ralph.sh lisa.sh interview.sh idea.sh tail.sh 2>/dev/null || true
+chmod +x ralph.sh interview.sh idea.sh tail.sh 2>/dev/null || true
 git init >/dev/null 2>&1
 bd init >/dev/null 2>&1
 git add -A >/dev/null 2>&1
@@ -128,8 +128,8 @@ if [ ! -f "interview.sh" ]; then
   exit 1
 fi
 
-if [ ! -f "lisa.sh" ]; then
-  log_error "lisa.sh not found in generated project"
+if [ ! -f "ralph.sh" ]; then
+  log_error "ralph.sh not found in generated project"
   exit 1
 fi
 
@@ -144,7 +144,7 @@ log_step "Creating test feature"
 FEATURE_TITLE="Test Feature for Interview"
 FEATURE_DESC="A test feature to verify interview.sh correctly triggers AskUserQuestion."
 
-FEATURE_OUTPUT=$(bd create --title="$FEATURE_TITLE" --type=feature --assignee=lisa --description="$FEATURE_DESC" 2>&1)
+FEATURE_OUTPUT=$(bd create --title="$FEATURE_TITLE" --type=feature --assignee=ralph --description="$FEATURE_DESC" 2>&1)
 FEATURE_ID=$(echo "$FEATURE_OUTPUT" | grep -oE '[a-z]+-[a-z0-9]+' | head -1)
 
 if [ -z "$FEATURE_ID" ]; then

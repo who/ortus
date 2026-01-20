@@ -4,6 +4,188 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T09:30:00-08:00 - Audit copier template prompts for outdated content
+
+**Task**: ortus-dav - Audit copier template prompts for outdated content
+**Status**: Completed
+**Changes**:
+- Audited all 6 files: INTERVIEW-PROMPT.md, PRD-PROMPT.md, PROMPT.md.jinja, CLAUDE.md.jinja, AGENTS.md, copier.yaml
+- Fixed `template/prd/PRD-PROMPT.md` lines 253-258: workflow description incorrectly said ralph.sh handles PRD generation and approval
+- Updated to correctly document that interview.sh handles interview→PRD→tasks, and ralph.sh only implements tasks
+- Verified no references to lisa.sh, --refinement-only, or --implementation-only flags
+- Confirmed `bd label add` commands in INTERVIEW-PROMPT.md are correct (used by Claude during automated flow, not manual user commands)
+
+**Verification**: Template generation succeeds, grep confirms no outdated references in generated project.
+
+---
+
+## 2026-01-19T17:00:00-08:00 - Update interview.sh completion message - remove obsolete next steps
+
+**Task**: ortus-b9x - Update interview.sh completion message - remove obsolete next steps
+**Status**: Completed
+**Changes**:
+- Updated `template/interview.sh` header comment from "run ralph.sh to generate the PRD" to "run ralph.sh to implement the tasks"
+- Updated completion message to remove obsolete steps (PRD generation, reviewing PRD, adding approved label)
+- New completion message shows single next step: `./ralph.sh` to implement tasks
+
+**Verification**: Bash syntax check passes. INTERVIEW-PROMPT.md already had correct workflow instructions (no changes needed).
+
+---
+
+## 2026-01-20T09:00:00-08:00 - Add skip interview option for one-shot PRD generation
+
+**Task**: ortus-88n - Add 'skip interview' option for one-shot PRD generation
+**Status**: Completed
+**Changes**:
+- Updated `template/prompts/INTERVIEW-PROMPT.md` to add mode selection as first question
+- First AskUserQuestion now asks: "Full interview (Recommended)" vs "One-shot PRD"
+- Full interview option proceeds with normal 5-8 question flow
+- One-shot option displays warning and skips directly to PRD generation
+- One-shot PRDs marked in metadata with "Generation Mode: One-shot (no interview)"
+
+**Verification**: Template generates correctly with new INTERVIEW-PROMPT.md containing mode selection, full interview flow, and one-shot flow sections.
+
+---
+
+## 2026-01-19T16:15:00-08:00 - Simplify ralph.sh to task executor only
+
+**Task**: ortus-9q0 - Simplify ralph.sh to task executor only - remove all refinement logic
+**Status**: Completed
+**Changes**:
+- Removed all refinement/PRD functions (~570 lines):
+  - `handle_new_feature()`, `handle_interviewed()`, `handle_prd_ready()`, `handle_approved()`
+  - `collect_interview_answers()`, `generate_prd_document()`, `generate_tasks_from_prd()`
+  - `process_feature()`, `check_refinement_work()`, `slugify()`
+- Removed `--refinement-only`, `--implementation-only`, and `--poll-interval` flags
+- Simplified main loop to only check for tasks (`bd ready --assignee ralph`)
+- Updated header comments to reflect new simplified workflow
+- File reduced from 758 lines to 190 lines
+
+**New Workflow**:
+1. `./idea.sh "my idea"` → creates feature
+2. `./interview.sh` → conducts interview, generates PRD, creates tasks
+3. `./ralph.sh` → implements tasks only (can run in background)
+
+**Verification**: bash syntax OK, --help flag works, template generation successful, test-ralph.sh --dry-run passes.
+
+---
+
+## 2026-01-20T01:00:00-08:00 - Change copier.yaml defaults: npm, no framework, eslint
+
+**Task**: ortus-sqd - Change copier.yaml defaults: npm, no framework, eslint
+**Status**: Completed
+**Changes**:
+- Updated `copier.yaml` default for `package_manager` from `bun` to `npm`
+- Updated `copier.yaml` default for `framework` from `nextjs` to `none`
+- `linter` default was already `eslint` (no change needed)
+
+**Verification**: Template generation with `--defaults` uses new defaults. Generated project successfully.
+
+---
+
+## 2026-01-20T00:00:00-08:00 - Fix ralph.sh: wrong JSON field name (.type vs .issue_type)
+
+**Task**: ortus-nyw - Fix ralph.sh: wrong JSON field name (.type vs .issue_type)
+**Status**: Completed
+**Changes**:
+- Fixed jq filter on line 705 of `template/ralph.sh` from `.type` to `.issue_type`
+- The beads JSON output uses `issue_type` field, not `type`
+
+**Verification**: bash syntax check passes, jq filter correctly parses issue_type field from beads JSON output.
+
+---
+
+## 2026-01-19T19:00:00-08:00 - Add beads visualization link (bdui) to generated README
+
+**Task**: ortus-k71 - Add beads visualization link (bdui) to generated README
+**Status**: Completed
+**Changes**:
+- Added "Beads Visualization" subsection to `template/CLAUDE.md.jinja` under Issue Tracking
+- Includes link to bdui (https://github.com/assimelha/bdui) for web-based visualization
+- Added CLI alternatives for users who prefer command-line: `bd list`, `bd ready`, `bd stats`
+
+**Verification**: Template generation tested - CLAUDE.md contains bdui link and CLI commands in the Issue Tracking section.
+
+---
+
+## 2026-01-19T17:45:00-08:00 - Streamline interview completion with inline PRD and task creation
+
+**Task**: ortus-1ig - Streamline interview completion: show summary, approve, and generate PRD inline
+**Status**: Completed
+**Changes**:
+- Updated `template/prompts/INTERVIEW-PROMPT.md` with new 6-step end-of-interview flow:
+  1. Display Q&A summary showing all questions and answers
+  2. Ask for interview approval via AskUserQuestion
+  3. Generate and display PRD inline (no waiting for ralph loop)
+  4. Ask for PRD approval via AskUserQuestion
+  5. Create implementation tasks assigned to ralph
+  6. Complete session with clear next-steps instructions
+
+**New Flow**:
+```
+Interview completes
+    ↓
+Display summary of all Q&A
+    ↓
+AskUserQuestion: "Approve interview and generate PRD?"
+    ↓ (Yes)
+Generate PRD → Display to user
+    ↓
+AskUserQuestion: "Approve PRD and create tasks?"
+    ↓ (Yes)
+Create implementation tasks → Close feature
+    ↓
+Prompt user to exit session
+```
+
+**Benefits**:
+- No more waiting for ralph.sh loop to detect interviewed features
+- No manual `bd label add` commands needed from user
+- User sees PRD immediately and can request changes inline
+- Tasks created in same session without extra steps
+- User exits with everything complete
+
+**Verification**: Template generation tested - INTERVIEW-PROMPT.md contains all 6 steps with AskUserQuestion examples, PRD structure, and bd commands.
+
+---
+
+## 2026-01-19T15:15:00-08:00 - Unify loops and rename lisa functions to generic terms
+
+**Task**: ortus-5ds - Epic: Unify loops and rename lisa functions to generic terms
+**Status**: Completed
+**Changes**:
+- Merged `lisa.sh` functionality into `ralph.sh` to create a unified automation loop
+- Added `--refinement-only` and `--implementation-only` flags to ralph.sh for selective operation
+- Added `--poll-interval` option for configuring refinement check frequency
+- Renamed all lisa-specific references to generic terms:
+  - `assignee=lisa` → `assignee=ralph`
+  - Lisa prompts → generic "refinement" / "PRD generation" terminology
+- Updated `interview.sh` to use `--assignee ralph` instead of `--assignee lisa`
+- Updated `idea.sh` to use `--assignee ralph` instead of `--assignee lisa`
+- Updated `prompts/INTERVIEW-PROMPT.md` to reference ralph.sh instead of lisa.sh
+- Updated `prd/PRD-PROMPT.md` to document the new ralph.sh workflow
+- Updated `CLAUDE.md.jinja` with new Important Files section
+- Updated `copier.yaml` to remove lisa.sh from chmod list and update post-copy message
+- Updated `README.md` with new workflow documentation
+- Renamed `tests/test-lisa.sh` to `tests/test-refinement.sh` and updated to use ralph.sh
+- Deleted `template/lisa.sh`
+
+**Architecture**:
+```
+ralph.sh (unified loop)
+├── Refinement Phase (features)
+│   ├── handle_new_feature()      # Prompt user to run interview.sh
+│   ├── handle_interviewed()      # Generate PRD from comments
+│   ├── handle_prd_ready()        # Wait for human approval
+│   └── handle_approved()         # Create implementation tasks
+└── Implementation Phase (tasks)
+    └── run_single_task()         # Execute via PROMPT.md
+```
+
+**Verification**: Bash syntax checks pass for all modified scripts. Template generation produces no lisa references. test-refinement.sh --dry-run passes.
+
+---
+
 ## 2026-01-19T16:00:00-08:00 - Add README generation instruction to PROMPT.md template
 
 **Task**: ortus-a5f - Add README generation instruction to PROMPT.md template
