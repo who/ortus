@@ -1,18 +1,23 @@
 #!/bin/bash
-# ralph.sh - Run Claude agent loop for beads tasks
+# ralph.sh - Task implementation loop for executing assigned work
 #
 # Usage: ./ralph.sh [--tasks N] [--iterations N] [--idle-sleep N]
 #
 # Options:
-#   --tasks N       Max tasks to complete (default: unlimited, runs until queue empty)
-#   --iterations N  Max iterations per task (default: 10)
-#   --idle-sleep N  Seconds to sleep when no work available (default: 60)
+#   --tasks N            Max tasks to complete (default: unlimited, runs until queue empty)
+#   --iterations N       Max iterations per task (default: 10)
+#   --idle-sleep N       Seconds to sleep when no work available (default: 60)
 #
 # Examples:
 #   ./ralph.sh                    # Run until all tasks complete
 #   ./ralph.sh --tasks 1          # Complete exactly 1 task then exit
 #   ./ralph.sh --tasks 5          # Complete up to 5 tasks then exit
 #   ./ralph.sh --iterations 20    # Allow 20 iterations per task
+#
+# Workflow:
+#   1. ./idea.sh "my idea"   - Creates a feature
+#   2. ./interview.sh        - Conducts interview, generates PRD, creates tasks
+#   3. ./ralph.sh            - Implements tasks (can run in background)
 #
 # Logs are written to logs/ralph-<timestamp>.log
 # Watch live with:
@@ -48,7 +53,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      head -n 24 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+      head -n 29 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
       exit 0
       ;;
     *)
@@ -69,7 +74,7 @@ mkdir -p logs
 LOG_FILE="logs/ralph-$(date '+%Y%m%d-%H%M%S').log"
 
 log() {
-  echo "$@" | tee -a "$LOG_FILE"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
 # Run a single task to completion
@@ -105,12 +110,15 @@ run_single_task() {
   return 1
 }
 
-# Main execution
+# =============================================================================
+# Main Execution
+# =============================================================================
+
 log "=== Ralph Started ==="
 if [ -z "$MAX_TASKS" ]; then
-  log "Mode: Continuous (run until queue empty)"
+  log "Task limit: Unlimited (run until queue empty)"
 else
-  log "Mode: Limited to $MAX_TASKS task(s)"
+  log "Task limit: $MAX_TASKS task(s)"
 fi
 log "Iterations per task: $ITERATIONS_PER_TASK"
 log "Idle sleep: ${IDLE_SLEEP}s"
@@ -132,10 +140,36 @@ while true; do
     exit 0
   fi
 
-  # Check for ready work
-  ready_count=$(bd ready --assignee ralph --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0")
+  log ""
+  log "--- Checking for ready tasks ---"
 
-  if [ "$ready_count" = "0" ]; then
+  # Check for ready tasks (type=task only)
+  ready_count=$(bd ready --assignee ralph --json 2>/dev/null | jq -r '[.[] | select(.issue_type == "task")] | length' 2>/dev/null || echo "0")
+
+  if [ "$ready_count" != "0" ]; then
+    log "Found $ready_count ready task(s)"
+
+    log ""
+    log "========================================"
+    log "Starting task #$((tasks_completed + 1))..."
+    log "========================================"
+
+    if run_single_task $((tasks_completed + 1)); then
+      tasks_completed=$((tasks_completed + 1))
+      log ""
+      log "Pausing ${TASK_DELAY}s before checking for more work..."
+      sleep "$TASK_DELAY"
+    else
+      # Task failed or blocked
+      log ""
+      log "========================================"
+      log "Task failed. Tasks completed before failure: $tasks_completed"
+      log "========================================"
+      exit 1
+    fi
+  else
+    log "No ready tasks found"
+
     if [ "$tasks_completed" -gt 0 ]; then
       # We completed some work, queue is now empty
       log ""
@@ -144,33 +178,13 @@ while true; do
       log "========================================"
       exit 0
     elif [ -z "$MAX_TASKS" ]; then
-      # Mega mode with no work - sleep and retry
-      log "No ready work found. Sleeping ${IDLE_SLEEP}s before retry... (Ctrl+C to stop)"
+      # Continuous mode with no work - sleep and retry
+      log ""
+      log "No work found. Sleeping ${IDLE_SLEEP}s before retry... (Ctrl+C to stop)"
       sleep "$IDLE_SLEEP"
-      continue
     else
       # Limited mode with no work - exit
-      log "No ready work found (bd ready returned 0 items)"
       exit 2
     fi
-  fi
-
-  log ""
-  log "========================================"
-  log "Found $ready_count ready task(s). Starting task #$((tasks_completed + 1))..."
-  log "========================================"
-
-  if run_single_task $((tasks_completed + 1)); then
-    tasks_completed=$((tasks_completed + 1))
-    log ""
-    log "Pausing ${TASK_DELAY}s before checking for more work..."
-    sleep "$TASK_DELAY"
-  else
-    # Task failed or blocked
-    log ""
-    log "========================================"
-    log "Task failed. Tasks completed before failure: $tasks_completed"
-    log "========================================"
-    exit 1
   fi
 done
