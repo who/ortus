@@ -108,6 +108,21 @@ linter:
   when: "{{ language != 'other' }}"
 
 # =============================================================================
+# Project Type
+# =============================================================================
+
+project_type:
+  type: str
+  help: What type of project is this?
+  choices:
+    API service (endpoints, schemas, auth): api
+    CLI tool (commands, flags, I/O): cli
+    Library/package (public API, versioning): library
+    Full-stack app (frontend + backend): fullstack
+    Other/Generic: other
+  default: other
+
+# =============================================================================
 # Repository
 # =============================================================================
 

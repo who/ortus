@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T10:00:00-08:00 - Add project_type selection to copier.yaml
+
+**Task**: ortus-t97 - Add project_type selection to copier.yaml
+**Status**: Completed
+**Changes**:
+- Added `project_type` question to copier.yaml under new "Project Type" section
+- 5 options available: api, cli, library, fullstack, other (default)
+- Question appears after linter selection in the interview flow
+- Variable accessible in templates via `{{ project_type }}`
+- Blocks ortus-9ij (adaptive questioning) and ortus-jc0 (domain-specific templates)
+
+**Verification**: All 5 project_type values pass template generation tests. Variable accessible to Jinja templates.
+
+---
+
 ## 2026-01-20T09:30:00-08:00 - Audit copier template prompts for outdated content
 
 **Task**: ortus-dav - Audit copier template prompts for outdated content
