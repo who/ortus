@@ -17,7 +17,7 @@
 #   4. Answers are saved as comments on the feature bead
 #   5. 'interviewed' label is added to trigger PRD generation
 #
-# After interview completion, run ralph.sh to generate the PRD.
+# After interview completion, run ralph.sh to implement the tasks.
 #
 # Exit codes:
 #   0 - Interview completed successfully
@@ -280,10 +280,9 @@ ${initial_prompt}"
   echo ""
   echo_success "Interview complete!"
   echo ""
-  echo "Next steps:"
-  echo "  1. Run ./ralph.sh to generate the PRD"
-  echo "  2. Review the PRD in prd/PRD-<name>.md"
-  echo "  3. Add 'approved' label when ready: bd label add $feature_id approved"
+  echo "Next step:"
+  echo "  Run ./ralph.sh to implement the tasks"
+  echo "  (or ./ralph.sh & to run in background)"
 }
 
 # Main execution

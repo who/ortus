@@ -4,6 +4,19 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-19T17:00:00-08:00 - Update interview.sh completion message - remove obsolete next steps
+
+**Task**: ortus-b9x - Update interview.sh completion message - remove obsolete next steps
+**Status**: Completed
+**Changes**:
+- Updated `template/interview.sh` header comment from "run ralph.sh to generate the PRD" to "run ralph.sh to implement the tasks"
+- Updated completion message to remove obsolete steps (PRD generation, reviewing PRD, adding approved label)
+- New completion message shows single next step: `./ralph.sh` to implement tasks
+
+**Verification**: Bash syntax check passes. INTERVIEW-PROMPT.md already had correct workflow instructions (no changes needed).
+
+---
+
 ## 2026-01-20T09:00:00-08:00 - Add skip interview option for one-shot PRD generation
 
 **Task**: ortus-88n - Add 'skip interview' option for one-shot PRD generation
