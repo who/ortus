@@ -210,7 +210,7 @@ Conduct a dynamic, conversational interview to gather the information needed to 
 When you have gathered sufficient information (usually 5-8 questions):
 1. Save a final summary comment with key insights
 2. Add the 'interviewed' label: bd label add ${feature_id} interviewed
-3. Thank the user, explain next steps (Ralph will generate the PRD), and prompt them to exit:
+3. Thank the user, explain next steps (PRD and tasks will be generated), and prompt them to exit:
    - Tell the user: "The interview is complete! Please type /exit or press Ctrl+C to exit this Claude session."
    - IMPORTANT: Always end with a clear prompt telling the user to exit the session
 

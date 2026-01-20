@@ -19,8 +19,8 @@ _message_after_copy: |
 
   Next steps:
     cd {{ _copier_conf.dst_path }}
-    ./interview.sh   # Interactive feature interview
-    ./ralph.sh       # Unified loop: generates PRD from interview, then implements tasks
+    ./interview.sh   # Interactive interview → PRD → task creation
+    ./ralph.sh       # Implements the tasks
 
 # =============================================================================
 # Project Basics

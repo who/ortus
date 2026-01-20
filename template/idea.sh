@@ -5,8 +5,8 @@
 #        ./idea.sh                           # Prompts for idea
 #
 # Creates a feature bead assigned to ralph. After creating the idea:
-#   ./interview.sh   # Interactive feature interview
-#   ./ralph.sh        # Generates PRD from interview answers
+#   ./interview.sh   # Interactive interview → PRD → task creation
+#   ./ralph.sh       # Implements the tasks
 
 set -euo pipefail
 

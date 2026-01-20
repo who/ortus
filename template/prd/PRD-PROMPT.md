@@ -1,8 +1,7 @@
 # PRD Generation Prompt
 
-> **Note:** For automated PRD generation, use `./interview.sh` and `./ralph.sh` instead of this manual process.
-> Ralph handles the full idea-to-implementation pipeline automatically.
-> See the README for ralph.sh usage.
+> **Note:** For automated PRD generation, use `./interview.sh` instead of this manual process.
+> interview.sh handles the full idea-to-PRD-to-tasks pipeline, then ralph.sh implements the tasks.
 
 This document provides a manual prompt for interactive PRD generation with Claude.
 
@@ -129,7 +128,7 @@ Save the final PRD to: `prd/PRD-[project-name].md`
 
 After the PRD is finalized, use this prompt to convert it into beads issues.
 
-> **Note:** If you used `./ralph.sh`, it handles this conversion automatically when you approve the PRD.
+> **Note:** If you used `./interview.sh`, it handles this conversion automatically when you approve the PRD.
 
 ```
 Read the PRD at @prd/PRD-[project-name].md

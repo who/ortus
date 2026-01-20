@@ -47,48 +47,27 @@ Run the interactive interview to refine requirements:
 ./interview.sh
 ```
 
-Then start the unified automation loop:
-
-```bash
-# Generates PRD from interview, then implements tasks
-./ralph.sh
-```
-
-Ralph will:
-1. Detect interviewed features and generate a PRD document at `prd/PRD-[project-name].md`
-2. Wait for your approval (add 'approved' label: `bd label add <id> approved`)
+interview.sh will:
+1. Ask clarifying questions about your feature
+2. Generate a PRD document at `prd/PRD-[project-name].md`
 3. Create implementation tasks from the approved PRD
-4. Implement tasks one by one
-
-See prd/PRD-PROMPT.md in the generated project for manual PRD generation.
 
 ### Step 3: Run Ralph
 
-Execute work through the Ralph automation loop:
+Then start the task implementation loop:
 
 ```bash
-# Run the full loop: refinement + implementation
+# Run until all tasks complete
 ./ralph.sh
 
-# Complete exactly 1 implementation task then exit
+# Complete exactly 1 task then exit
 ./ralph.sh --tasks 1
 
-# Only run refinement (PRD generation), skip implementation
-./ralph.sh --refinement-only
-
-# Only run implementation, skip refinement
-./ralph.sh --implementation-only
+# Run in background
+./ralph.sh &
 ```
 
-Ralph handles both phases:
-
-**Refinement Phase:**
-1. Find features with 'interviewed' label
-2. Generate PRD from interview comments
-3. Wait for 'approved' label
-4. Create implementation tasks
-
-**Implementation Phase:**
+Ralph implements tasks:
 1. Find the next ready task (`bd ready`)
 2. Claim and implement it
 3. Run verification (tests, linting)
@@ -108,8 +87,8 @@ my-project/
 ├── CLAUDE.md               # AI guidance
 ├── PROMPT.md               # Ralph loop instructions
 ├── activity.md             # Work log
-├── interview.sh            # Interactive feature interview with Claude
-└── ralph.sh                # Unified automation loop (refinement + implementation)
+├── interview.sh            # Interactive interview → PRD → task creation
+└── ralph.sh                # Task implementation loop
 ```
 
 ## Work Execution Policy
