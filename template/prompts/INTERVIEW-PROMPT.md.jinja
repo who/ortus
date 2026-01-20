@@ -206,112 +206,40 @@ If approved, do the following in sequence:
    bd label add {% raw %}{{FEATURE_ID}}{% endraw %} interviewed
    ```
 
-3. **Generate PRD document** by calling Claude to create a comprehensive PRD. The PRD should follow this structure:
+3. **Generate PRD document** using the appropriate template based on project type.
 
-   ```markdown
-   # PRD: [Feature Title]
-
-   ## Metadata
-   - **Feature ID**: {% raw %}{{FEATURE_ID}}{% endraw %}
-   - **Project Type**: {{ project_type }}
-   - **Created**: [Date]
-   - **Author**: Claude (from interview)
-   - **Interview Confidence**: [High/Medium/Low]
-
-   ## Overview
-   ### Problem Statement
-   [One paragraph describing the problem based on interview]
-
-   ### Proposed Solution
-   [One paragraph describing the solution]
-
-   ### Success Metrics
-   - [Metric 1]
-   - [Metric 2]
-
-   ## Background & Context
-   [Why this feature, prior art, motivation]
-
-   ## Users & Personas
-   [Primary users, their goals and workflows]
-
-   ## Requirements
-
-   ### Functional Requirements
-   [P0] FR-001: The system shall...
-   [P1] FR-002: The system shall...
-
-   ### Non-Functional Requirements
-   [P1] NFR-001: The system shall...
+   **Template Selection**:
 {% if project_type == 'api' %}
-   ## API Design
-   ### Endpoints
-   | Method | Path | Description |
-   |--------|------|-------------|
-   | GET | /resource | List resources |
-
-   ### Authentication
-   [Authentication approach]
-
-   ### Rate Limiting
-   [Rate limiting strategy]
-
-   ### Error Responses
-   [Standard error format]
+   Use the template at `prd/templates/PRD-TEMPLATE-API.md` as your guide. This template includes:
+   - API Design section (endpoints, authentication, rate limiting, error handling)
+   - Request/Response schemas
+   - Versioning strategy
 {% elif project_type == 'cli' %}
-   ## CLI Design
-   ### Commands
-   | Command | Description | Example |
-   |---------|-------------|---------|
-   | cmd | Does something | `cli cmd --flag` |
-
-   ### Global Options
-   [Common flags across all commands]
-
-   ### Output Formats
-   [Supported output formats]
-
-   ### Exit Codes
-   [Exit code meanings]
+   Use the template at `prd/templates/PRD-TEMPLATE-CLI.md` as your guide. This template includes:
+   - CLI Design section (commands, flags, input/output)
+   - Exit codes and error messages
+   - Shell completion considerations
 {% elif project_type == 'library' %}
-   ## Library API
-   ### Public Interface
-   [Key functions/classes to export]
-
-   ### Versioning Strategy
-   [Semver approach]
-
-   ### Compatibility
-   [Supported environments and versions]
+   Use the template at `prd/templates/PRD-TEMPLATE-LIBRARY.md` as your guide. This template includes:
+   - Library API section (public interface, types)
+   - Versioning and compatibility policies
+   - Documentation requirements
 {% elif project_type == 'fullstack' %}
-   ## Architecture
-   ### Frontend
-   [Frontend technology and structure]
-
-   ### Backend
-   [Backend technology and structure]
-
-   ### Data Flow
-   [How data moves between components]
-
-   ### Authentication
-   [Auth flow between frontend and backend]
+   Use the template at `prd/templates/PRD-TEMPLATE-FULLSTACK.md` as your guide. This template includes:
+   - Frontend and Backend architecture sections
+   - API contract between layers
+   - State management and authentication flow
+   - Database design and data flow
+   - Deployment considerations
+{% else %}
+   Use the template at `prd/templates/PRD-TEMPLATE-GENERIC.md` as your guide. This template includes:
+   - Standard PRD sections (Overview, Background, Users, Requirements)
+   - System Architecture
+   - Milestones & Phases
+   - Epic Breakdown
 {% endif %}
-   ## System Architecture
-   [High-level components, technical decisions, data flow]
 
-   ## Milestones & Phases
-   [Logical phases with goals and deliverables]
-
-   ## Epic Breakdown
-   [Epics with tasks for each milestone]
-
-   ## Open Questions
-   [Unresolved decisions - especially from low-confidence areas]
-
-   ## Out of Scope
-   [What this PRD does NOT cover]
-   ```
+   **Important**: Read the template file to understand the full structure, then fill it in with the information gathered from the interview. Adapt sections as needed based on interview responses - not every section may be relevant.
 
 4. **Save the PRD** to `prd/PRD-<feature-slug>.md`
 

@@ -4,6 +4,26 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T15:30:00-08:00 - Create domain-specific PRD templates
+
+**Task**: ortus-jc0 - Create domain-specific PRD templates
+**Status**: Completed
+**Changes**:
+- Created `template/prd/templates/` directory with 5 PRD templates:
+  - `PRD-TEMPLATE-API.md` - API projects: endpoints, authentication, rate limiting, error handling, versioning
+  - `PRD-TEMPLATE-CLI.md` - CLI projects: commands, flags/options, input/output, exit codes, shell completion
+  - `PRD-TEMPLATE-LIBRARY.md` - Library projects: public API, versioning/semver, compatibility, documentation
+  - `PRD-TEMPLATE-FULLSTACK.md` - Full-stack projects: frontend/backend architecture, API contract, state management, auth flow, deployment
+  - `PRD-TEMPLATE-GENERIC.md` - Generic projects: standard PRD sections for 'other' type
+- Updated `template/prompts/INTERVIEW-PROMPT.md.jinja` to reference templates based on project_type:
+  - Jinja conditionals select appropriate template for api/cli/library/fullstack/other
+  - Each project type shows relevant template features
+  - Instructions to read template and adapt sections based on interview
+
+**Verification**: Template generation tested for all 5 project types. All templates copied correctly. INTERVIEW-PROMPT.md correctly references project-type-specific template in each case.
+
+---
+
 ## 2026-01-20T12:00:00-08:00 - Add PRD quality gate validation
 
 **Task**: ortus-cpx - Add PRD quality gate validation
