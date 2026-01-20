@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T09:00:00-08:00 - Add skip interview option for one-shot PRD generation
+
+**Task**: ortus-88n - Add 'skip interview' option for one-shot PRD generation
+**Status**: Completed
+**Changes**:
+- Updated `template/prompts/INTERVIEW-PROMPT.md` to add mode selection as first question
+- First AskUserQuestion now asks: "Full interview (Recommended)" vs "One-shot PRD"
+- Full interview option proceeds with normal 5-8 question flow
+- One-shot option displays warning and skips directly to PRD generation
+- One-shot PRDs marked in metadata with "Generation Mode: One-shot (no interview)"
+
+**Verification**: Template generates correctly with new INTERVIEW-PROMPT.md containing mode selection, full interview flow, and one-shot flow sections.
+
+---
+
 ## 2026-01-19T16:15:00-08:00 - Simplify ralph.sh to task executor only
 
 **Task**: ortus-9q0 - Simplify ralph.sh to task executor only - remove all refinement logic
