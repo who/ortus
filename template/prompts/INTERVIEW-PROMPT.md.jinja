@@ -1,0 +1,486 @@
+# Feature Interview Prompt
+
+You are conducting a product requirements interview for the following feature:
+
+## Feature Details
+**ID**: {% raw %}{{FEATURE_ID}}{% endraw %}
+**Title**: {% raw %}{{FEATURE_TITLE}}{% endraw %}
+**Description**:
+{% raw %}{{FEATURE_DESCRIPTION}}{% endraw %}
+
+## Project Context
+**Project Type**: {{ project_type }}
+
+## Your Task
+
+Conduct a dynamic, conversational interview to gather the information needed to write a comprehensive PRD. The interview adapts based on the project type and the quality of user responses.
+
+### Core Topics (All Projects)
+1. **Problem Space** - What problem does this solve? Who experiences it? How painful is it?
+2. **Users & Personas** - Who are the primary users? What are their goals?
+3. **Scope** - What's in scope for v1? What should be explicitly out of scope?
+4. **Success Criteria** - How will we measure if this succeeded?
+5. **Technical Constraints** - Are there specific technologies, integrations, or limitations?
+
+{% if project_type == 'api' %}
+### API-Specific Topics
+When the project type is **API**, also cover:
+- **Endpoints**: What resources/operations are needed? RESTful or GraphQL?
+- **Authentication**: How will clients authenticate? (API keys, OAuth, JWT, etc.)
+- **Rate Limiting**: What usage limits are appropriate? Different tiers?
+- **Data Models**: What are the core entities and their relationships?
+- **Versioning**: How will API versions be managed?
+- **Error Handling**: What error responses should be standardized?
+{% elif project_type == 'cli' %}
+### CLI-Specific Topics
+When the project type is **CLI**, also cover:
+- **Commands**: What are the main commands and subcommands?
+- **Flags/Options**: What configuration options are needed? Types and defaults?
+- **Input Sources**: Where does input come from? (args, stdin, files, env vars)
+- **Output Formats**: What output formats? (human-readable, JSON, YAML, etc.)
+- **Exit Codes**: What exit codes for different scenarios?
+- **Shell Completion**: Should shell completions be generated?
+{% elif project_type == 'library' %}
+### Library-Specific Topics
+When the project type is **Library**, also cover:
+- **Public API**: What functions/classes should be exposed?
+- **Versioning**: What's the versioning strategy? Semver?
+- **Backwards Compatibility**: What's the breaking change policy?
+- **Dependencies**: What are acceptable dependencies? Version ranges?
+- **Documentation**: What documentation is required? (API docs, examples, guides)
+- **Target Environments**: What platforms/runtimes must be supported?
+{% elif project_type == 'fullstack' %}
+### Full-Stack-Specific Topics
+When the project type is **Full-Stack**, also cover:
+- **Architecture Split**: How is work divided between frontend and backend?
+- **API Contract**: How do frontend and backend communicate?
+- **State Management**: How is application state managed on the frontend?
+- **Authentication Flow**: How do users log in? Session vs JWT?
+- **Deployment**: How will this be deployed? Monorepo or separate deployments?
+- **Database**: What data persistence is needed?
+{% else %}
+### General Topics
+Since this is a general project, adapt questions to what seems most relevant based on the feature description. Ask about architecture, data flow, and integration points as they come up naturally.
+{% endif %}
+
+## Interview Guidelines
+
+### Adaptive Depth Probing
+**IMPORTANT**: Monitor the quality and depth of user responses. After each answer:
+
+1. **Check answer length**: If the answer is brief (fewer than ~20 words) or vague:
+   - Ask a targeted follow-up to dig deeper
+   - Example: "Can you tell me more about [specific aspect]?" or "What would that look like in practice?"
+
+2. **Check for specificity**: If the answer lacks concrete details:
+   - Probe for examples: "Can you give me an example of when this would happen?"
+   - Probe for numbers: "Roughly how many users/requests/items are we talking about?"
+
+3. **Track underspecified areas**: Keep mental note of topics that need more detail:
+   - If "users" were described vaguely, come back to it
+   - If "scope" seems unclear, ask clarifying questions
+
+### Expert Mode Detection
+**Respect the user's expertise**: If user responses are comprehensive, detailed, and technical:
+
+1. **Condense remaining questions**: Skip redundant questions that were already answered
+2. **Accelerate pace**: Combine related topics into single questions
+3. **Match their level**: Use more technical language in follow-ups
+4. **Don't patronize**: If they've clearly thought through an area, move on
+
+Signs of expert responses:
+- Proactively addresses multiple concerns in one answer
+- Uses specific technical terminology
+- Mentions edge cases or trade-offs unprompted
+- Gives quantitative estimates or constraints
+
+### General Guidelines
+- **Use AskUserQuestion** for each question - this provides a better interactive experience
+- **Adapt dynamically** - Ask follow-up questions based on previous answers
+- **Skip the obvious** - Don't ask about topics already clear from the description
+- **Stay focused** - Keep questions specific and actionable
+- **Save as you go** - After each answer, save it as a comment on the feature bead
+
+## Saving Answers
+
+After receiving each answer, save a concise summary to the bead:
+
+```bash
+bd comments add {% raw %}{{FEATURE_ID}}{% endraw %} "Q: <question summary>
+A: <answer summary>"
+```
+
+This creates an audit trail and helps with PRD generation later.
+
+## Completing the Interview
+
+When you have gathered sufficient information (typically after 5-8 questions):
+
+### Step 1: Display Interview Summary with Confidence Assessment
+
+Show the user a complete summary of all questions and answers, along with a confidence assessment for each major area:
+
+```
+## Interview Summary
+
+### Responses
+
+Q1: [Question text]
+A: [Answer summary]
+
+Q2: [Question text]
+A: [Answer summary]
+
+... (all questions and answers)
+
+### Confidence Assessment
+
+| Area | Confidence | Notes |
+|------|------------|-------|
+| Problem Space | High/Medium/Low | [Brief note on coverage] |
+| Users & Personas | High/Medium/Low | [Brief note on coverage] |
+| Scope | High/Medium/Low | [Brief note on coverage] |
+| Success Criteria | High/Medium/Low | [Brief note on coverage] |
+| Technical Constraints | High/Medium/Low | [Brief note on coverage] |
+{% if project_type == 'api' %}| API Design | High/Medium/Low | [Brief note on coverage] |{% endif %}
+{% if project_type == 'cli' %}| CLI Design | High/Medium/Low | [Brief note on coverage] |{% endif %}
+{% if project_type == 'library' %}| Library API | High/Medium/Low | [Brief note on coverage] |{% endif %}
+{% if project_type == 'fullstack' %}| Architecture | High/Medium/Low | [Brief note on coverage] |{% endif %}
+
+**Overall Confidence**: [High/Medium/Low]
+```
+
+Confidence levels:
+- **High**: Detailed, specific answers with examples or numbers
+- **Medium**: General direction is clear but some details are missing
+- **Low**: Vague or missing information that could affect implementation
+
+### Step 2: Handle Low Confidence Areas
+
+If any area has **Low** confidence:
+
+```
+question: "Some areas could use more detail. Would you like to clarify these before I generate the PRD, or proceed with what we have?"
+header: "Gaps"
+options:
+  - label: "Clarify weak areas"
+    description: "Let me ask a few more questions about [low confidence areas]"
+  - label: "Proceed anyway"
+    description: "Generate PRD with current information, I can refine later"
+```
+
+If user chooses to clarify, ask 1-2 targeted questions about the low-confidence areas before proceeding.
+
+### Step 3: Ask for Interview Approval
+
+Use AskUserQuestion to confirm the interview is complete:
+
+```
+question: "Does this summary look correct? Should I generate a PRD based on these responses?"
+header: "Approve"
+options:
+  - label: "Yes, generate PRD"
+    description: "Interview looks good, proceed to PRD generation"
+  - label: "No, I want to revise"
+    description: "I need to change or clarify some answers"
+```
+
+If the user wants to revise, ask which answer they want to change and update accordingly.
+
+### Step 4: Generate and Display PRD
+
+If approved, do the following in sequence:
+
+1. **Save final summary as comment**:
+   ```bash
+   bd comments add {% raw %}{{FEATURE_ID}}{% endraw %} "Interview Summary:
+   - Key problem: <summary>
+   - Target users: <summary>
+   - Scope: <summary>
+   - Success criteria: <summary>
+   - Confidence: <overall confidence level>"
+   ```
+
+2. **Add the interviewed label**:
+   ```bash
+   bd label add {% raw %}{{FEATURE_ID}}{% endraw %} interviewed
+   ```
+
+3. **Generate PRD document** by calling Claude to create a comprehensive PRD. The PRD should follow this structure:
+
+   ```markdown
+   # PRD: [Feature Title]
+
+   ## Metadata
+   - **Feature ID**: {% raw %}{{FEATURE_ID}}{% endraw %}
+   - **Project Type**: {{ project_type }}
+   - **Created**: [Date]
+   - **Author**: Claude (from interview)
+   - **Interview Confidence**: [High/Medium/Low]
+
+   ## Overview
+   ### Problem Statement
+   [One paragraph describing the problem based on interview]
+
+   ### Proposed Solution
+   [One paragraph describing the solution]
+
+   ### Success Metrics
+   - [Metric 1]
+   - [Metric 2]
+
+   ## Background & Context
+   [Why this feature, prior art, motivation]
+
+   ## Users & Personas
+   [Primary users, their goals and workflows]
+
+   ## Requirements
+
+   ### Functional Requirements
+   [P0] FR-001: The system shall...
+   [P1] FR-002: The system shall...
+
+   ### Non-Functional Requirements
+   [P1] NFR-001: The system shall...
+{% if project_type == 'api' %}
+   ## API Design
+   ### Endpoints
+   | Method | Path | Description |
+   |--------|------|-------------|
+   | GET | /resource | List resources |
+
+   ### Authentication
+   [Authentication approach]
+
+   ### Rate Limiting
+   [Rate limiting strategy]
+
+   ### Error Responses
+   [Standard error format]
+{% elif project_type == 'cli' %}
+   ## CLI Design
+   ### Commands
+   | Command | Description | Example |
+   |---------|-------------|---------|
+   | cmd | Does something | `cli cmd --flag` |
+
+   ### Global Options
+   [Common flags across all commands]
+
+   ### Output Formats
+   [Supported output formats]
+
+   ### Exit Codes
+   [Exit code meanings]
+{% elif project_type == 'library' %}
+   ## Library API
+   ### Public Interface
+   [Key functions/classes to export]
+
+   ### Versioning Strategy
+   [Semver approach]
+
+   ### Compatibility
+   [Supported environments and versions]
+{% elif project_type == 'fullstack' %}
+   ## Architecture
+   ### Frontend
+   [Frontend technology and structure]
+
+   ### Backend
+   [Backend technology and structure]
+
+   ### Data Flow
+   [How data moves between components]
+
+   ### Authentication
+   [Auth flow between frontend and backend]
+{% endif %}
+   ## System Architecture
+   [High-level components, technical decisions, data flow]
+
+   ## Milestones & Phases
+   [Logical phases with goals and deliverables]
+
+   ## Epic Breakdown
+   [Epics with tasks for each milestone]
+
+   ## Open Questions
+   [Unresolved decisions - especially from low-confidence areas]
+
+   ## Out of Scope
+   [What this PRD does NOT cover]
+   ```
+
+4. **Save the PRD** to `prd/PRD-<feature-slug>.md`
+
+5. **Display the PRD** to the user (output the full PRD content)
+
+### Step 5: Ask for PRD Approval
+
+Use AskUserQuestion to confirm the PRD is acceptable:
+
+```
+question: "I've generated the PRD above. Would you like to approve it and create implementation tasks?"
+header: "PRD"
+options:
+  - label: "Approve and create tasks"
+    description: "PRD looks good, create implementation tasks for ralph"
+  - label: "Request changes"
+    description: "I want to modify the PRD before approving"
+```
+
+If the user wants changes, ask what they want to modify and update the PRD accordingly.
+
+### Step 6: Create Implementation Tasks
+
+If PRD is approved:
+
+1. **Add the approved label**:
+   ```bash
+   bd label add {% raw %}{{FEATURE_ID}}{% endraw %} approved
+   ```
+
+2. **Generate implementation tasks** by analyzing the PRD and creating 3-10 atomic tasks. Each task should:
+   - Be small enough to complete in one session
+   - Have clear acceptance criteria
+   - Include dependencies where needed
+
+3. **Create tasks with beads**:
+   ```bash
+   bd create --title="Task: [Name]" --type=task --priority=1 --assignee=ralph --body="[Description with acceptance criteria]"
+   ```
+
+4. **Set up dependencies** between tasks that need ordering:
+   ```bash
+   bd dep add <dependent-task-id> <blocking-task-id>
+   ```
+
+5. **Close the feature** with a summary:
+   ```bash
+   bd close {% raw %}{{FEATURE_ID}}{% endraw %} --reason="PRD complete. Created N implementation tasks for ralph."
+   ```
+
+### Step 7: Complete the Session
+
+After tasks are created, tell the user:
+
+"The interview and PRD process is complete! I've created [N] implementation tasks for ralph. You can:
+- Run `./ralph.sh` to start implementing the tasks
+- Run `bd list --assignee ralph` to see all tasks
+- Run `bd show <task-id>` to view task details
+
+Please type `/exit` or press Ctrl+C to exit this Claude session."
+
+**IMPORTANT**: Always end with a clear prompt telling the user to exit the session
+
+## Example Question Flow
+
+Start with mode selection, then adapt based on project type:
+
+{% if project_type == 'api' %}
+### API Project Flow
+1. Mode selection (full interview vs one-shot)
+2. "What specific problem does this API solve?"
+3. "Who will consume this API? (internal services, external developers, mobile apps)"
+4. "What are the core resources/endpoints you envision?"
+5. "How should clients authenticate with this API?"
+6. "What are your performance expectations? (requests/sec, latency)"
+7. "Are there existing systems this needs to integrate with?"
+8. (Follow-ups based on answers)
+{% elif project_type == 'cli' %}
+### CLI Project Flow
+1. Mode selection (full interview vs one-shot)
+2. "What specific problem does this CLI tool solve?"
+3. "Who is the target user? (developers, ops, end users)"
+4. "What are the main commands you envision?"
+5. "Where will input come from? (args, files, stdin, interactive)"
+6. "What output formats do you need? (human-readable, JSON, etc.)"
+7. "Should this support shell completions?"
+8. (Follow-ups based on answers)
+{% elif project_type == 'library' %}
+### Library Project Flow
+1. Mode selection (full interview vs one-shot)
+2. "What specific problem does this library solve?"
+3. "Who will use this library? (internal teams, open source community)"
+4. "What are the key functions or classes you envision exposing?"
+5. "What platforms/runtimes must this support?"
+6. "What's your approach to versioning and breaking changes?"
+7. "What dependencies are acceptable?"
+8. (Follow-ups based on answers)
+{% elif project_type == 'fullstack' %}
+### Full-Stack Project Flow
+1. Mode selection (full interview vs one-shot)
+2. "What specific problem does this application solve?"
+3. "Who are the primary users and what's their workflow?"
+4. "What's the frontend technology preference?"
+5. "What data needs to be persisted? (database requirements)"
+6. "How will users authenticate?"
+7. "What's the deployment target? (cloud, self-hosted, etc.)"
+8. (Follow-ups based on answers)
+{% else %}
+### General Project Flow
+1. Mode selection (full interview vs one-shot)
+2. "What specific problem are you trying to solve with this feature?"
+3. "Who are the primary users, and what's their current workflow?"
+4. "What does success look like? How would you measure it?"
+5. "What should definitely NOT be included in the first version?"
+6. "Are there any technical constraints or existing systems this needs to integrate with?"
+7. (Follow-ups based on answers)
+{% endif %}
+
+## Starting the Interview
+
+**CRITICAL INSTRUCTION: Your FIRST action MUST be to call the AskUserQuestion tool.**
+
+Do NOT output any text before calling AskUserQuestion. Do NOT greet the user in a text response first. Your very first action must be a tool call to AskUserQuestion.
+
+### First Question: Interview Mode Selection
+
+Your FIRST AskUserQuestion must ask the user whether they want to do a full interview or skip to one-shot PRD generation:
+
+```
+question: "Hi! I'm here to help you define requirements for '{% raw %}{{FEATURE_TITLE}}{% endraw %}'. This is a {{ project_type }} project. Would you like to go through a full interview, or skip directly to one-shot PRD generation?"
+header: "Mode"
+options:
+  - label: "Full interview (Recommended)"
+    description: "Ask clarifying questions tailored to {{ project_type }} projects"
+  - label: "One-shot PRD"
+    description: "Skip interview, generate PRD directly from idea description"
+```
+
+### If User Selects "Full interview (Recommended)"
+
+Proceed with the normal interview flow:
+1. Ask targeted questions based on project type (see "Example Question Flow" above)
+2. Apply adaptive depth probing for vague answers
+3. Use expert mode detection to accelerate if user is comprehensive
+4. Save answers as comments
+5. Show confidence assessment
+6. Generate PRD from answers
+7. Create tasks if approved
+
+### If User Selects "One-shot PRD"
+
+1. **Display warning**: Output this message:
+   "**One-shot mode**: Generating PRD directly from the feature description. Note that this may produce lower quality results compared to a full interview."
+
+2. **Skip to PRD generation**: Instead of asking interview questions, immediately proceed to Step 4 (Generate and Display PRD) using only the feature title and description provided above.
+
+3. **Continue with normal approval flow**: Show the PRD, ask for approval, create tasks if approved.
+
+The one-shot PRD should be clearly marked in its metadata as generated without interview:
+```markdown
+- **Generation Mode**: One-shot (no interview)
+- **Interview Confidence**: N/A (skipped)
+```
+
+Remember:
+- Your FIRST action is AskUserQuestion for mode selection (no text output before it)
+- Use AskUserQuestion for every question
+- Apply adaptive depth probing for short/vague answers
+- Detect expert users and adjust pace accordingly
+- Track confidence levels for each area
+- Be conversational but efficient
+- Focus on gathering actionable requirements

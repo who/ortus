@@ -4,6 +4,35 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T11:00:00-08:00 - Enhance INTERVIEW-PROMPT.md with adaptive questioning
+
+**Task**: ortus-9ij - Enhance INTERVIEW-PROMPT.md with adaptive questioning
+**Status**: Completed
+**Changes**:
+- Converted `template/prompts/INTERVIEW-PROMPT.md` to Jinja template (`.md.jinja`) for project_type access
+- Added project-type-aware questions for API, CLI, Library, Full-stack, and generic projects
+  - API: Endpoints, authentication, rate limiting, data models, versioning, error handling
+  - CLI: Commands, flags/options, input sources, output formats, exit codes, shell completion
+  - Library: Public API, versioning/semver, backwards compatibility, dependencies, documentation
+  - Full-stack: Architecture split, API contract, state management, authentication flow, deployment
+- Implemented adaptive depth probing for vague/short answers
+  - Guidelines to ask follow-ups for answers <20 words
+  - Probing for examples and numbers when specificity is lacking
+  - Tracking underspecified areas for later revisiting
+- Added confidence tracking before PRD generation
+  - Confidence Assessment table showing High/Medium/Low per area
+  - Project-type-specific areas included in the table
+  - Step to handle low-confidence areas before proceeding
+- Implemented expert mode detection
+  - Guidelines to detect comprehensive, detailed, technical responses
+  - Instructions to condense questions, accelerate pace, and match technical level
+- Added project-type-specific question flows and PRD sections
+- Mode selection question now mentions project type context
+
+**Verification**: Template generation tested for api, cli, and other project types. All conditionals render correctly. interview.sh still finds generated file at prompts/INTERVIEW-PROMPT.md.
+
+---
+
 ## 2026-01-20T10:00:00-08:00 - Add project_type selection to copier.yaml
 
 **Task**: ortus-t97 - Add project_type selection to copier.yaml
