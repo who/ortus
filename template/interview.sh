@@ -282,7 +282,6 @@ ${initial_prompt}"
   echo ""
   echo "Next step:"
   echo "  Run ./ralph.sh to implement the tasks"
-  echo "  (or ./ralph.sh & to run in background)"
 }
 
 # Main execution
