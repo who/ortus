@@ -222,11 +222,33 @@ Start with a greeting, then:
 
 **CRITICAL INSTRUCTION: Your FIRST action MUST be to call the AskUserQuestion tool.**
 
-Do NOT output any text before calling AskUserQuestion. Do NOT greet the user in a text response first. Your very first action must be a tool call to AskUserQuestion containing your greeting AND first question together.
+Do NOT output any text before calling AskUserQuestion. Do NOT greet the user in a text response first. Your very first action must be a tool call to AskUserQuestion.
 
-Example first AskUserQuestion call:
+### First Question: Interview Mode Selection
+
+Your FIRST AskUserQuestion must ask the user whether they want to do a full interview or skip to one-shot PRD generation:
+
 ```
-question: "Hi! I'm here to help clarify requirements for your feature. Let's start: What specific problem are you trying to solve with this feature?"
+question: "Hi! I'm here to help you define requirements for '{{FEATURE_TITLE}}'. Would you like to go through a full interview, or skip directly to one-shot PRD generation?"
+header: "Mode"
+options:
+  - label: "Full interview (Recommended)"
+    description: "Ask clarifying questions to build detailed requirements"
+  - label: "One-shot PRD"
+    description: "Skip interview, generate PRD directly from idea description"
+```
+
+### If User Selects "Full interview (Recommended)"
+
+Proceed with the normal interview flow:
+1. Ask 5-8 targeted questions (see "Example Question Flow" below)
+2. Save answers as comments
+3. Generate PRD from answers
+4. Create tasks if approved
+
+Example second question (after mode selection):
+```
+question: "What specific problem are you trying to solve with this feature?"
 header: "Problem"
 options:
   - label: "User pain point"
@@ -237,8 +259,22 @@ options:
     description: "Making an existing workflow better"
 ```
 
+### If User Selects "One-shot PRD"
+
+1. **Display warning**: Output this message:
+   "**One-shot mode**: Generating PRD directly from the feature description. Note that this may produce lower quality results compared to a full interview."
+
+2. **Skip to PRD generation**: Instead of asking interview questions, immediately proceed to Step 3 (Generate and Display PRD) using only the feature title and description provided above.
+
+3. **Continue with normal approval flow**: Show the PRD, ask for approval, create tasks if approved.
+
+The one-shot PRD should be clearly marked in its metadata as generated without interview:
+```markdown
+- **Generation Mode**: One-shot (no interview)
+```
+
 Remember:
-- Your FIRST action is AskUserQuestion (no text output before it)
+- Your FIRST action is AskUserQuestion for mode selection (no text output before it)
 - Use AskUserQuestion for every question
 - Be conversational but efficient
 - Focus on gathering actionable requirements
