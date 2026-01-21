@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T20:45:00-08:00 - Add quality gate verification to PROMPT.md
+
+**Task**: ortus-aoy - Add quality gate verification to PROMPT.md
+**Status**: Completed
+**Changes**:
+- Enhanced Quality Gate Audit (Step 3) in `template/PROMPT.md.jinja` with 4 detailed substeps
+- Step 3a: Extract Acceptance Criteria - how to identify criteria from epic description
+- Step 3b: Map Criteria to Completed Tasks - table format with instructions for building the mapping
+- Step 3c: Create Tasks for Uncovered Criteria - example bd create commands, explicit STOP instruction
+- Step 3d: Verify Test/Quality Evidence - confirm verification was done and documented
+
+**Verification**: Template generation tested with `copier copy --defaults` - PROMPT.md contains all 4 substeps with practical examples and clear instructions.
+
+---
+
 ## 2026-01-20T20:15:00-08:00 - Add parent epic detection logic to PROMPT.md
 
 **Task**: ortus-aty - Add parent epic detection logic to PROMPT.md
