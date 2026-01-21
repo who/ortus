@@ -5,15 +5,16 @@ Read @activity.md for what was completed in the last iteration.
 
 ## Your Task
 
-1. **Check Status**: Run `bd ready --assignee ralph` to see tasks assigned to you with no blockers
-2. **Select One Task**: Pick the highest-priority task from ready work
+1. **Check Status**: Run `bd ready --assignee ralph` to see issues assigned to you with no blockers
+2. **Select One Issue**: Pick the highest-priority issue from ready work
 3. **Claim It**: Run `bd update <id> --status=in_progress`
-4. **Implement**: Make the code changes described in the task
+4. **Implement**: Make the code changes described in the issue
 5. **Verify**: Run tests, linting, or other verification appropriate to your project
 6. **Complete**: Run `bd close <id> --reason="<brief summary>"`
-7. **Log Progress**: Update activity.md with dated entry
-8. **Commit**: Stage and commit your changes with descriptive message
-9. **Push**: Run `git pull --rebase && bd sync && git push` to preserve work
+7. **Epic Ceremony**: Check if this completes an epic (see Epic Closure Ceremony below)
+8. **Log Progress**: Update activity.md with dated entry
+9. **Commit**: Stage and commit your changes with descriptive message
+10. **Push**: Run `git pull --rebase && bd sync && git push` to preserve work
 
 ## Verification Methods
 
@@ -105,13 +106,63 @@ cargo fmt --check
 
 {%- endif %}
 
+## Epic Closure Ceremony
+
+After closing a task, check if it was part of an epic that is now complete:
+
+### 1. Detect Epic Completion
+
+```bash
+# Check if the closed task has a parent epic
+bd show <task-id>  # Look for "DEPENDS ON" section pointing to a feature/epic
+
+# If parent found, check its status
+bd show <epic-id>  # Check if all blocking issues are now closed
+```
+
+### 2. Quality Gate Audit
+
+Before closing the epic, verify all acceptance criteria are met:
+
+1. Read the epic's description and identify acceptance criteria
+2. For each criterion, verify there's a completed task that addresses it
+3. Check that verification was performed (tests, manual testing, etc.)
+
+If any criteria are NOT covered:
+```bash
+# Create missing tasks
+bd create --title="<missing work>" --type=task --assignee=ralph
+bd dep add <new-task-id> <epic-id>
+# Do NOT close the epic yet
+```
+
+### 3. Write Retrospective
+
+Add a retrospective entry to activity.md with:
+- **Key decisions**: Important architectural or design choices made
+- **Learnings**: What worked well, what was challenging
+- **Follow-up**: Any tech debt or improvements deferred for later
+
+### 4. Close Epic
+
+Only after all criteria are verified:
+```bash
+bd close <epic-id> --reason="All acceptance criteria met: <brief summary of what was delivered>"
+```
+
+### When to Skip
+
+Skip the ceremony if:
+- The task has no parent epic
+- The parent epic still has other open tasks
+
 ## Important Rules
 
-- **One task per iteration** - Do not work on multiple tasks
-- **No partial work** - Either complete the task fully or don't start it
+- **One issue per iteration** - Do not work on multiple issues
+- **No partial work** - Either complete the issue fully or don't start it
 - **Update activity.md** - Record what you did with timestamp
 - **Run quality checks** - Always run linting/tests before committing
-- **Descriptive commits** - Include task ID in commit message
+- **Descriptive commits** - Include issue ID in commit message
 
 ## README Maintenance
 
@@ -129,7 +180,7 @@ After implementing a major feature:
 
 ## Completion Signal
 
-When you have completed ONE task successfully, output:
+When you have completed ONE issue successfully, output:
 
 ```
 <promise>COMPLETE</promise>
@@ -143,13 +194,13 @@ If you encounter a blocker that prevents completion, document it in activity.md 
 
 ## Dependencies
 
-Tasks may have dependencies. Check with:
+Issues may have dependencies. Check with:
 ```bash
 bd show <id>  # Shows dependencies in output
 bd dep tree <id>  # Visual dependency tree
 ```
 
-Only work on tasks that have no unresolved blockers (i.e., tasks shown by `bd ready --assignee ralph`).
+Only work on issues that have no unresolved blockers (i.e., issues shown by `bd ready --assignee ralph`).
 
 ## Project-Specific Notes
 

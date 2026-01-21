@@ -4,6 +4,23 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T19:55:00-08:00 - Add epic closure ceremony to PROMPT.md
+
+**Task**: ortus-wpb - Add epic closure ceremony to PROMPT.md
+**Status**: Completed
+**Changes**:
+- Added "Epic Closure Ceremony" section to `template/PROMPT.md.jinja`
+- Four-step ceremony: detect completion, quality gate audit, retrospective, close epic
+- Quality gate audit verifies acceptance criteria have corresponding completed tasks
+- If criteria missing, creates new tasks and keeps epic open
+- Retrospective captures key decisions, learnings, and follow-up items
+- Updated main workflow to reference ceremony as step 7
+- Changed terminology from "task" to "issue" throughout for consistency
+
+**Verification**: Template generation tested with `copier copy --defaults` - PROMPT.md contains epic ceremony section and updated workflow steps.
+
+---
+
 ## 2026-01-20T17:30:00-08:00 - Add README.md generation to template
 
 **Task**: ortus-6cf - Add README.md generation and maintenance to template
