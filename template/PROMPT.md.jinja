@@ -8,13 +8,30 @@ Read @activity.md for what was completed in the last iteration.
 1. **Check Status**: Run `bd ready --assignee ralph` to see issues assigned to you with no blockers
 2. **Select One Issue**: Pick the highest-priority issue from ready work
 3. **Claim It**: Run `bd update <id> --status=in_progress`
-4. **Implement**: Make the code changes described in the issue
-5. **Verify**: Run tests, linting, or other verification appropriate to your project
-6. **Complete**: Run `bd close <id> --reason="<brief summary>"`
-7. **Epic Ceremony**: Check if this completes an epic (see Epic Closure Ceremony below)
-8. **Log Progress**: Update activity.md with dated entry
-9. **Commit**: Stage and commit your changes with descriptive message
-10. **Push**: Run `git pull --rebase && bd sync && git push` to preserve work
+4. **Identify Type**: Get the issue type from `bd show <id> --json` (look for `issue_type` field)
+5. **Follow Type Workflow**: Read the appropriate workflow file for your issue type:
+   - `task` → Read @prompts/task.md
+   - `bug` → Read @prompts/bug.md
+   - `feature` → Read @prompts/feature.md
+   - `epic` → Read @prompts/epic.md
+   - `chore` → Read @prompts/chore.md
+   - Unknown type → Log warning and skip (output `<promise>BLOCKED</promise>`)
+6. **Execute**: Follow the type-specific workflow to completion
+7. **Complete**: Run `bd close <id> --reason="<brief summary>"` (unless workflow says otherwise)
+8. **Epic Ceremony**: Check if this completes an epic (see Epic Closure Ceremony below)
+9. **Log Progress**: Update activity.md with dated entry
+10. **Commit**: Stage and commit your changes with descriptive message
+11. **Push**: Run `git pull --rebase && bd sync && git push` to preserve work
+
+## Type-Specific Behaviors
+
+| Type | Behavior |
+|------|----------|
+| task | Implement directly |
+| bug | Debug-first: reproduce, diagnose, fix, regression test (required) |
+| feature | Assess size. Small: implement. Large: decompose into tasks, then continue |
+| epic | Ceremony only (quality gate + retrospective) |
+| chore | Same as task, but lower priority than other types |
 
 ## Verification Methods
 
