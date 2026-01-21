@@ -193,10 +193,36 @@ Only proceed to Step 4 if ALL criteria have verified coverage.
 
 ### 4. Write Retrospective
 
-Add a retrospective entry to activity.md with:
-- **Key decisions**: Important architectural or design choices made
-- **Learnings**: What worked well, what was challenging
-- **Follow-up**: Any tech debt or improvements deferred for later
+Add an **epic closure** entry to activity.md. Use this format:
+
+```markdown
+## <ISO-8601 timestamp> - Epic Complete: <epic title>
+
+**Epic**: <epic-id> - <epic title>
+**Status**: Completed
+**Scope**: <number of child tasks completed>
+
+### Key Decisions
+- <Decision 1>: <why this approach was chosen>
+- <Decision 2>: <trade-offs considered>
+
+### Learnings
+- **What worked well**: <positive outcomes or patterns>
+- **Challenges**: <difficulties encountered and how resolved>
+
+### Follow-up
+- <Tech debt or improvements deferred for later, if any>
+- <Related work that could be done next, if any>
+
+---
+```
+
+**Guidelines**:
+- Use ISO-8601 timestamp format (e.g., `2026-01-20T15:30:00-08:00`)
+- Reference the epic ID (e.g., `ortus-abc`) so entries are traceable
+- Keep each bullet point concise (1-2 sentences)
+- If no follow-up items, write "None" or omit the section
+- Add the entry at the **top** of activity.md, below the header
 
 ### 5. Close Epic
 

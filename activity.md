@@ -4,6 +4,20 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T21:00:00-08:00 - Add retrospective writing to PROMPT.md
+
+**Task**: ortus-6rg - Add retrospective writing to PROMPT.md
+**Status**: Completed
+**Changes**:
+- Enhanced Step 4 (Write Retrospective) in `template/PROMPT.md.jinja` with detailed format template
+- Added markdown template for epic closure entries with: timestamp, epic ID, scope, key decisions, learnings, follow-up
+- Added guidelines for ISO-8601 timestamps, epic ID referencing, concise bullet points
+- Template distinguishes epic closure entries from regular task entries in activity.md
+
+**Verification**: Template generation tested with `copier copy --defaults` - PROMPT.md contains full retrospective format with all required sections.
+
+---
+
 ## 2026-01-20T20:45:00-08:00 - Add quality gate verification to PROMPT.md
 
 **Task**: ortus-aoy - Add quality gate verification to PROMPT.md
