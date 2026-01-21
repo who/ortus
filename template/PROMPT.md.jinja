@@ -140,19 +140,56 @@ Parse the JSON to check completion status:
 
 ### 3. Quality Gate Audit
 
-Before closing the epic, verify all acceptance criteria are met:
+Before closing the epic, verify all acceptance criteria are met.
 
-1. Read the epic's description and identify acceptance criteria
-2. For each criterion, verify there's a completed task that addresses it
-3. Check that verification was performed (tests, manual testing, etc.)
+#### 3a. Extract Acceptance Criteria
 
-If any criteria are NOT covered:
-```bash
-# Create missing tasks
-bd create --title="<missing work>" --type=task --assignee=ralph
-bd dep add <new-task-id> <epic-id>
-# Do NOT close the epic yet
+From the epic's `bd show <epic-id>` output, identify all acceptance criteria:
+- Look for "Acceptance criteria" section in the description
+- Also check for numbered requirements or bullet points describing expected behavior
+- Each criterion should be testable/verifiable
+
+#### 3b. Map Criteria to Completed Tasks
+
+For each acceptance criterion, find the task that fulfills it:
+
 ```
+| Criterion | Covered By | Status |
+|-----------|------------|--------|
+| "Users can log in" | task-abc (auth implementation) | ✓ Verified |
+| "Tests pass" | task-def (test suite) | ✓ Verified |
+| "Docs updated" | ??? | ✗ MISSING |
+```
+
+To build this mapping:
+1. Get the list of completed child tasks from `bd show <epic-id> --json` (check the `blocks` array)
+2. For each closed child task, run `bd show <task-id>` to see what it implemented
+3. Match task descriptions/titles to acceptance criteria
+
+#### 3c. Create Tasks for Uncovered Criteria
+
+If ANY acceptance criteria lack a completed task covering them:
+
+```bash
+# Example: Missing documentation for a feature
+bd create --title="Add user documentation for login feature" --type=task --assignee=ralph --priority=2
+bd dep add <new-task-id> <epic-id>
+
+# Example: Missing test coverage
+bd create --title="Add integration tests for auth flow" --type=task --assignee=ralph --priority=2
+bd dep add <new-task-id> <epic-id>
+```
+
+**IMPORTANT**: If you create any new tasks, **stop here**. Do NOT proceed to the retrospective or close the epic. The new tasks must be completed first, and the ceremony will resume when the last task is closed.
+
+#### 3d. Verify Test/Quality Evidence
+
+For each criterion marked as covered:
+1. Confirm the covering task included verification (tests ran, manual testing done)
+2. Check that verification is documented (in task comments, activity.md, or commit messages)
+3. If verification evidence is missing, add it now or create a task to add it
+
+Only proceed to Step 4 if ALL criteria have verified coverage.
 
 ### 4. Write Retrospective
 
