@@ -1,280 +1,114 @@
 # Ralph Wiggum Loop Prompt
 
 Read @AGENTS.md for session rules and landing-the-plane protocol.
-Read @activity.md for what was completed in the last iteration.
 
 ## Your Task
 
-1. **Check Status**: Run `bd ready --assignee ralph` to see issues assigned to you with no blockers
+1. **Check Status**: Run `bd ready` to see issues with no blockers
 2. **Select One Issue**: Pick the highest-priority issue from ready work
 3. **Claim It**: Run `bd update <id> --status=in_progress`
-4. **Identify Type**: Get the issue type from `bd show <id> --json` (look for `issue_type` field)
-5. **Follow Type Workflow**: Read the appropriate workflow file for your issue type:
-   - `task` → Read @prompts/task.md
-   - `bug` → Read @prompts/bug.md
-   - `feature` → Read @prompts/feature.md
-   - `epic` → Read @prompts/epic.md
-   - `chore` → Read @prompts/chore.md
-   - Unknown type → Log warning and skip (output `<promise>BLOCKED</promise>`)
-6. **Execute**: Follow the type-specific workflow to completion
-7. **Complete**: Run `bd close <id> --reason="<brief summary>"` (unless workflow says otherwise)
-8. **Epic Ceremony**: Check if this completes an epic (see Epic Closure Ceremony below)
-9. **Log Progress**: Update activity.md with dated entry
+4. **Log Start**: Add comment with your implementation plan: `bd comments add <id> "Starting work. Plan: <brief strategy>"`
+5. **Implement**: Make the code changes described in the issue
+6. **Log Progress**: After key milestones, update ticket: `bd comments add <id> "Progress: <what you completed>"`
+7. **Verify**: Run tests, linting, or other verification appropriate to your project
+8. **Log Verification**: Record verification results: `bd comments add <id> "Verification: <test results summary>"`
+9. **Complete**: Run `bd close <id> --reason="<brief summary>"`
 10. **Commit**: Stage and commit your changes with descriptive message
 11. **Push**: Run `git pull --rebase && bd sync && git push` to preserve work
 
-## Type-Specific Behaviors
+## Verification
 
-| Type | Behavior |
-|------|----------|
-| task | Implement directly |
-| bug | Debug-first: reproduce, diagnose, fix, regression test (required) |
-| feature | Assess size. Small: implement. Large: decompose into tasks, then continue |
-| epic | Ceremony only (quality gate + retrospective) |
-| chore | Same as task, but lower priority than other types |
+Run the project's standard verification commands before committing:
+{%- if language == 'python' and package_manager == 'uv' %}
 
-## Verification Methods
-
-{%- if language == 'python' %}
-
-### For Tests
 ```bash
-{%- if package_manager == 'uv' %}
-uv run pytest tests/ -v
-{%- else %}
-pytest tests/ -v
-{%- endif %}
+uv run pytest tests/ -v      # Tests
+uv run ruff check .          # Lint
+uv run ruff format --check . # Format
+uv run mypy src/             # Types
 ```
+{%- elif language == 'python' %}
 
-### For Linting
 ```bash
-{%- if package_manager == 'uv' %}
-uv run ruff check .
-uv run ruff format --check .
-{%- else %}
-ruff check .
-ruff format --check .
-{%- endif %}
+pytest tests/ -v      # Tests
+ruff check .          # Lint
+ruff format --check . # Format
+mypy src/             # Types
 ```
-
-### For Type Checking
-```bash
-{%- if package_manager == 'uv' %}
-uv run mypy src/
-{%- else %}
-mypy src/
-{%- endif %}
-```
-
 {%- elif language == 'typescript' %}
 
-### For Tests
 ```bash
-{{ package_manager }} test
+{{ package_manager }} test      # Tests
+{{ package_manager }} run lint  # Lint
+npx tsc --noEmit                # Types
 ```
-
-### For Linting
-```bash
-{{ package_manager }} run lint
-```
-
-### For Type Checking
-```bash
-npx tsc --noEmit
-```
-
 {%- elif language == 'go' %}
 
-### For Tests
 ```bash
-go test ./...
+go test ./...      # Tests
+golangci-lint run  # Lint
+go fmt ./...       # Format
 ```
-
-### For Linting
-```bash
-golangci-lint run
-```
-
-### For Formatting
-```bash
-go fmt ./...
-```
-
 {%- elif language == 'rust' %}
 
-### For Tests
 ```bash
-cargo test
+cargo test       # Tests
+cargo clippy     # Lint
+cargo fmt --check # Format
 ```
-
-### For Linting
-```bash
-cargo clippy
-```
-
-### For Formatting
-```bash
-cargo fmt --check
-```
-
 {%- else %}
 
-<!-- TODO: Add project-specific verification commands -->
+| Check | Examples |
+|-------|----------|
+| Tests | `npm test`, `pytest`, `go test ./...`, `cargo test` |
+| Lint | `npm run lint`, `ruff check .`, `golangci-lint run` |
+| Types | `tsc --noEmit`, `mypy .`, `pyright` |
+| Build | `npm run build`, `go build ./...`, `cargo build` |
 
+Check `package.json`, `Makefile`, or project docs for exact commands.
 {%- endif %}
 
-## Epic Closure Ceremony
+## Issue Type Rules
 
-After closing a task, **automatically** check if it was part of an epic that is now complete.
+**task** — Implement exactly what's specified:
+- NO scope expansion
+- All acceptance criteria must pass before closing
+- Search the codebase first — don't assume something isn't already built
+- If you discover additional work, create a new issue with `bd create`
 
-### 1. Detect Parent Epic
+**bug** — Reproduce, diagnose, fix:
+- NO unrelated changes — fix only the bug
+- Minimal, focused fix — don't refactor surrounding code
+- Regression test is required
+- If you discover related bugs, create new issues with `bd create --type=bug`
 
-Immediately after running `bd close <task-id>`, run:
-
-```bash
-bd show <task-id> --json
-```
-
-Parse the JSON output to find the parent:
-- Look for the `"depends_on"` array - these are issues this task depends on
-- A parent epic/feature is an issue in `depends_on` with `issue_type` of "epic" or "feature"
-
-If no parent epic/feature found, **skip the ceremony** and continue to activity.md logging.
-
-### 2. Check Epic Completion Status
-
-If a parent epic/feature was found:
-
-```bash
-bd show <parent-id> --json
-```
-
-Parse the JSON to check completion status:
-- Look at the `"blocks"` array - these are child tasks that depend on the parent
-- For each child issue ID, check if its status is "closed"
-- If **ALL** children are closed, the epic is ready for ceremony
-- If any children are still open, **skip the ceremony** - more work remains
-
-### 3. Quality Gate Audit
-
-Before closing the epic, verify all acceptance criteria are met.
-
-#### 3a. Extract Acceptance Criteria
-
-From the epic's `bd show <epic-id>` output, identify all acceptance criteria:
-- Look for "Acceptance criteria" section in the description
-- Also check for numbered requirements or bullet points describing expected behavior
-- Each criterion should be testable/verifiable
-
-#### 3b. Map Criteria to Completed Tasks
-
-For each acceptance criterion, find the task that fulfills it:
-
-```
-| Criterion | Covered By | Status |
-|-----------|------------|--------|
-| "Users can log in" | task-abc (auth implementation) | ✓ Verified |
-| "Tests pass" | task-def (test suite) | ✓ Verified |
-| "Docs updated" | ??? | ✗ MISSING |
-```
-
-To build this mapping:
-1. Get the list of completed child tasks from `bd show <epic-id> --json` (check the `blocks` array)
-2. For each closed child task, run `bd show <task-id>` to see what it implemented
-3. Match task descriptions/titles to acceptance criteria
-
-#### 3c. Create Tasks for Uncovered Criteria
-
-If ANY acceptance criteria lack a completed task covering them:
-
-```bash
-# Example: Missing documentation for a feature
-bd create --title="Add user documentation for login feature" --type=task --assignee=ralph --priority=2
-bd dep add <new-task-id> <epic-id>
-
-# Example: Missing test coverage
-bd create --title="Add integration tests for auth flow" --type=task --assignee=ralph --priority=2
-bd dep add <new-task-id> <epic-id>
-```
-
-**IMPORTANT**: If you create any new tasks, **stop here**. Do NOT proceed to the retrospective or close the epic. The new tasks must be completed first, and the ceremony will resume when the last task is closed.
-
-#### 3d. Verify Test/Quality Evidence
-
-For each criterion marked as covered:
-1. Confirm the covering task included verification (tests ran, manual testing done)
-2. Check that verification is documented (in task comments, activity.md, or commit messages)
-3. If verification evidence is missing, add it now or create a task to add it
-
-Only proceed to Step 4 if ALL criteria have verified coverage.
-
-### 4. Write Retrospective
-
-Add an **epic closure** entry to activity.md. Use this format:
-
-```markdown
-## <ISO-8601 timestamp> - Epic Complete: <epic title>
-
-**Epic**: <epic-id> - <epic title>
-**Status**: Completed
-**Scope**: <number of child tasks completed>
-
-### Key Decisions
-- <Decision 1>: <why this approach was chosen>
-- <Decision 2>: <trade-offs considered>
-
-### Learnings
-- **What worked well**: <positive outcomes or patterns>
-- **Challenges**: <difficulties encountered and how resolved>
-
-### Follow-up
-- <Tech debt or improvements deferred for later, if any>
-- <Related work that could be done next, if any>
-
----
-```
-
-**Guidelines**:
-- Use ISO-8601 timestamp format (e.g., `2026-01-20T15:30:00-08:00`)
-- Reference the epic ID (e.g., `ortus-abc`) so entries are traceable
-- Keep each bullet point concise (1-2 sentences)
-- If no follow-up items, write "None" or omit the section
-- Add the entry at the **top** of activity.md, below the header
-
-### 5. Close Epic
-
-Only after all criteria are verified:
-```bash
-bd close <epic-id> --reason="All acceptance criteria met: <brief summary of what was delivered>"
-```
-
-### When to Skip
-
-Skip the ceremony if:
-- The task has no parent epic
-- The parent epic still has other open tasks
+**epic/feature** — Milestone check:
+- These are containers for related work
+- Run `bd show <id>` to see child issues
+- If all children are closed, close with `bd close <id> --reason="All child issues complete"`
+- If children remain open, output `<promise>BLOCKED</promise>` — the loop will retry later
 
 ## Important Rules
 
 - **One issue per iteration** - Do not work on multiple issues
 - **No partial work** - Either complete the issue fully or don't start it
-- **Update activity.md** - Record what you did with timestamp
-- **Run quality checks** - Always run linting/tests before committing
+- **Update tickets** - Use `bd comments add` to log progress
+- **Run quality checks** - Always run verification before committing
 - **Descriptive commits** - Include issue ID in commit message
 
-## README Maintenance
+## Ticket Update Guidelines
 
-After implementing a major feature:
-1. Check if README.md exists
-2. If not, create initial README with:
-   - Project name and description
-   - Installation/setup instructions
-   - Usage documentation for implemented features
-   - Basic examples
-3. If README exists, update it with:
-   - New feature documentation
-   - Updated usage examples
-   - Keep existing user-edited sections intact
+Keep ticket updates **succinct but informative**. Each comment should be 1-2 sentences max.
+
+**Good examples:**
+- `bd comments add <id> "Starting work. Plan: implement auth middleware, add tests, update docs"`
+- `bd comments add <id> "Progress: auth middleware complete, 5/8 tests passing"`
+- `bd comments add <id> "Verification: all tests pass, lint clean, types check"`
+
+**Bad examples:**
+- ❌ "Working on it" (not informative)
+- ❌ "Starting work. I'm going to first read through the codebase to understand..." (too verbose)
+- ❌ Long multi-paragraph explanations
 
 ## Completion Signal
 
@@ -284,7 +118,7 @@ When you have completed ONE issue successfully, output:
 <promise>COMPLETE</promise>
 ```
 
-If you encounter a blocker that prevents completion, document it in activity.md and output:
+If you encounter a blocker that prevents completion, add a comment explaining the blocker and output:
 
 ```
 <promise>BLOCKED</promise>
@@ -298,15 +132,16 @@ bd show <id>  # Shows dependencies in output
 bd dep tree <id>  # Visual dependency tree
 ```
 
-Only work on issues that have no unresolved blockers (i.e., issues shown by `bd ready --assignee ralph`).
+Only work on issues that have no unresolved blockers (i.e., issues shown by `bd ready`).
+{%- if language == 'python' and package_manager == 'uv' %}
 
 ## Project-Specific Notes
 
-{%- if language == 'python' and package_manager == 'uv' %}
 - Use `uv run` for all Python commands
 {%- endif %}
 {%- if framework == 'fastapi' %}
+
+## Project-Specific Notes
+
 - API runs on port 8000 by default
 {%- endif %}
-
-<!-- TODO: Add any additional project-specific notes here -->
