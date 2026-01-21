@@ -4,6 +4,23 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T21:15:00-08:00 - Add type-specific workflow system to Ralph
+
+**Task**: ortus-9jt - Add type-specific workflow system to Ralph
+**Status**: Completed
+**Changes**:
+- Created `template/prompts/task.md` - workflow for straightforward implementation tasks
+- Created `template/prompts/bug.md` - debug-first workflow with mandatory regression test
+- Created `template/prompts/feature.md` - size assessment with decomposition for large features
+- Created `template/prompts/epic.md` - ceremony-only workflow (quality gate + retrospective)
+- Created `template/prompts/chore.md` - low-priority maintenance task workflow
+- Updated `template/PROMPT.md.jinja` with type dispatch instructions (step 4-5)
+- Updated `template/ralph.sh` to remove task-only filter, now accepts all issue types
+
+**Verification**: Template generation tested with `copier copy --defaults` - all 5 workflow prompts generated in prompts/, PROMPT.md contains type dispatch table, ralph.sh syntax valid.
+
+---
+
 ## 2026-01-20T21:00:00-08:00 - Add retrospective writing to PROMPT.md
 
 **Task**: ortus-6rg - Add retrospective writing to PROMPT.md

@@ -141,13 +141,13 @@ while true; do
   fi
 
   log ""
-  log "--- Checking for ready tasks ---"
+  log "--- Checking for ready issues ---"
 
-  # Check for ready tasks (type=task only)
-  ready_count=$(bd ready --assignee ralph --json 2>/dev/null | jq -r '[.[] | select(.issue_type == "task")] | length' 2>/dev/null || echo "0")
+  # Check for ready issues (all types - PROMPT.md handles type dispatch)
+  ready_count=$(bd ready --assignee ralph --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0")
 
   if [ "$ready_count" != "0" ]; then
-    log "Found $ready_count ready task(s)"
+    log "Found $ready_count ready issue(s)"
 
     log ""
     log "========================================"
@@ -168,7 +168,7 @@ while true; do
       exit 1
     fi
   else
-    log "No ready tasks found"
+    log "No ready issues found"
 
     if [ "$tasks_completed" -gt 0 ]; then
       # We completed some work, queue is now empty
