@@ -4,6 +4,21 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-20T20:15:00-08:00 - Add parent epic detection logic to PROMPT.md
+
+**Task**: ortus-aty - Add parent epic detection logic to PROMPT.md
+**Status**: Completed
+**Changes**:
+- Rewrote Epic Closure Ceremony section in `template/PROMPT.md.jinja` with automatic detection
+- Step 1: Detect Parent Epic - run `bd show <task-id> --json` and parse `depends_on` for epic/feature
+- Step 2: Check Epic Completion Status - run `bd show <parent-id> --json` and verify all `blocks` are closed
+- Renumbered ceremony steps from 4 to 5 (detect, check, quality gate, retrospective, close)
+- Added explicit skip conditions: no parent found, or parent has open children
+
+**Verification**: Template generation tested with `copier copy --defaults` - PROMPT.md contains all 5 ceremony steps with JSON parsing instructions.
+
+---
+
 ## 2026-01-20T19:55:00-08:00 - Add epic closure ceremony to PROMPT.md
 
 **Task**: ortus-wpb - Add epic closure ceremony to PROMPT.md
