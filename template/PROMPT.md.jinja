@@ -108,19 +108,37 @@ cargo fmt --check
 
 ## Epic Closure Ceremony
 
-After closing a task, check if it was part of an epic that is now complete:
+After closing a task, **automatically** check if it was part of an epic that is now complete.
 
-### 1. Detect Epic Completion
+### 1. Detect Parent Epic
+
+Immediately after running `bd close <task-id>`, run:
 
 ```bash
-# Check if the closed task has a parent epic
-bd show <task-id>  # Look for "DEPENDS ON" section pointing to a feature/epic
-
-# If parent found, check its status
-bd show <epic-id>  # Check if all blocking issues are now closed
+bd show <task-id> --json
 ```
 
-### 2. Quality Gate Audit
+Parse the JSON output to find the parent:
+- Look for the `"depends_on"` array - these are issues this task depends on
+- A parent epic/feature is an issue in `depends_on` with `issue_type` of "epic" or "feature"
+
+If no parent epic/feature found, **skip the ceremony** and continue to activity.md logging.
+
+### 2. Check Epic Completion Status
+
+If a parent epic/feature was found:
+
+```bash
+bd show <parent-id> --json
+```
+
+Parse the JSON to check completion status:
+- Look at the `"blocks"` array - these are child tasks that depend on the parent
+- For each child issue ID, check if its status is "closed"
+- If **ALL** children are closed, the epic is ready for ceremony
+- If any children are still open, **skip the ceremony** - more work remains
+
+### 3. Quality Gate Audit
 
 Before closing the epic, verify all acceptance criteria are met:
 
@@ -136,14 +154,14 @@ bd dep add <new-task-id> <epic-id>
 # Do NOT close the epic yet
 ```
 
-### 3. Write Retrospective
+### 4. Write Retrospective
 
 Add a retrospective entry to activity.md with:
 - **Key decisions**: Important architectural or design choices made
 - **Learnings**: What worked well, what was challenging
 - **Follow-up**: Any tech debt or improvements deferred for later
 
-### 4. Close Epic
+### 5. Close Epic
 
 Only after all criteria are verified:
 ```bash
