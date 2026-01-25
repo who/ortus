@@ -3,24 +3,8 @@
 #
 # Usage: ./ralph.sh [--idle-sleep N]
 #
-# Options:
-#   --idle-sleep N   Seconds to sleep when no work available (default: 60)
-#
-# Runs until all ready work is complete. Each Claude invocation handles one task.
-#
-# Workflow:
-#   1. ./idea.sh "my idea"   - Creates a feature
-#   2. ./interview.sh        - Conducts interview, generates PRD, creates tasks
-#   3. ./ralph.sh            - Implements tasks (can run in background)
-#
-# Logs are written to logs/ralph-<timestamp>.log
-# Watch live with:
-#   Human-readable: ./tail.sh                         (auto-follows all logs)
-#   Raw output:     tail -f logs/ralph-<timestamp>.log
-#
-# Exit codes:
-#   0 - All ready work completed successfully
-#   1 - Error occurred
+# Runs until all ready work is complete. Logs to logs/ralph-<timestamp>.log
+# Watch live: ./tail.sh or tail -f logs/ralph-*.log
 
 set -e
 
