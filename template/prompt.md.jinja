@@ -17,42 +17,66 @@ Read @AGENTS.md for session rules and landing-the-plane protocol.
 ## Verification
 
 Run the project's standard verification commands before committing:
-{%- if language == 'python' and package_manager == 'uv' %}
+{%- if language == 'python' %}
+{%- set run_prefix = 'uv run ' if package_manager == 'uv' else '' %}
+{%- if framework == 'django' %}
 
 ```bash
-uv run pytest tests/ -v      # Tests
-uv run ruff check .          # Lint
-uv run ruff format --check . # Format
-uv run mypy src/             # Types
+{{ run_prefix }}python manage.py test  # Tests
+{%- if linter == 'ruff' %}
+{{ run_prefix }}ruff check .           # Lint
+{{ run_prefix }}ruff format --check .  # Format
+{%- endif %}
+{{ run_prefix }}mypy .                 # Types (optional)
 ```
-{%- elif language == 'python' %}
+{%- else %}
 
 ```bash
-pytest tests/ -v      # Tests
-ruff check .          # Lint
-ruff format --check . # Format
-mypy src/             # Types
+{{ run_prefix }}pytest tests/ -v       # Tests
+{%- if linter == 'ruff' %}
+{{ run_prefix }}ruff check .           # Lint
+{{ run_prefix }}ruff format --check .  # Format
+{%- endif %}
+{{ run_prefix }}mypy src/              # Types (optional)
 ```
+{%- endif %}
 {%- elif language == 'typescript' %}
+{%- if framework == 'nextjs' %}
+
+```bash
+{{ package_manager }} test       # Tests
+{{ package_manager }} run build  # Build (includes type check)
+{%- if linter == 'eslint' %}
+npx next lint                    # Lint (Next.js)
+{%- endif %}
+```
+{%- else %}
 
 ```bash
 {{ package_manager }} test      # Tests
+{%- if linter == 'eslint' %}
 {{ package_manager }} run lint  # Lint
+{%- endif %}
 npx tsc --noEmit                # Types
 ```
+{%- endif %}
 {%- elif language == 'go' %}
 
 ```bash
-go test ./...      # Tests
-golangci-lint run  # Lint
-go fmt ./...       # Format
+go test ./...       # Tests
+{%- if linter == 'golangci' %}
+golangci-lint run   # Lint
+{%- endif %}
+go fmt ./...        # Format
 ```
 {%- elif language == 'rust' %}
 
 ```bash
-cargo test       # Tests
-cargo clippy     # Lint
-cargo fmt --check # Format
+cargo test          # Tests
+{%- if linter == 'clippy' %}
+cargo clippy        # Lint
+{%- endif %}
+cargo fmt --check   # Format
 ```
 {%- else %}
 
