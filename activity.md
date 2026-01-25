@@ -4,6 +4,25 @@ This file tracks work completed by agents and humans. Add new entries at the top
 
 ---
 
+## 2026-01-24T21:40:00-08:00 - Simplify ralph.sh to match ralph-beads pattern
+
+**Task**: ortus-1u7 - Simplify ralph.sh to match ralph-beads pattern
+**Status**: Completed
+**Changes**:
+- Replaced complex ralph.sh (190 lines) with simplified version (68 lines)
+- Removed `--tasks N` option (task limit no longer supported)
+- Removed `--iterations N` option (iterations per task no longer supported)
+- Removed `run_single_task()` function with iteration loops
+- Kept `--idle-sleep N` option for continuous mode
+- Kept timestamped logging to `logs/ralph-<timestamp>.log`
+- Kept tail.sh references in help and startup output
+- Each Claude invocation now handles one task (no iteration limit)
+- Exits cleanly when no more ready work available
+
+**Verification**: bash syntax OK, --help works correctly, template generation produces executable ralph.sh, test-ralph.sh --dry-run passes.
+
+---
+
 ## 2026-01-20T21:15:00-08:00 - Add type-specific workflow system to Ralph
 
 **Task**: ortus-9jt - Add type-specific workflow system to Ralph
