@@ -87,7 +87,7 @@ run_single_task() {
     log "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     log "--------------------------------"
 
-    result=$(claude -p "$(cat PROMPT.md)" --output-format stream-json --verbose --dangerously-skip-permissions 2>&1 | tee -a "$LOG_FILE") || true
+    result=$(claude -p "$(cat prompt.md)" --output-format stream-json --verbose --dangerously-skip-permissions 2>&1 | tee -a "$LOG_FILE") || true
 
     if [[ "$result" == *"<promise>COMPLETE</promise>"* ]] || [[ "$result" == *"COMPLETE"* ]]; then
       log ""
