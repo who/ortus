@@ -161,7 +161,6 @@ _exclude:
   - .DS_Store
 
 _skip_if_exists:
-  - activity.md
   - ".beads/*"
 
 _tasks:

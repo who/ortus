@@ -85,8 +85,7 @@ my-project/
 │   └── PRD-PROMPT.md       # PRD generation template
 ├── src/                    # Your code goes here
 ├── CLAUDE.md               # AI guidance
-├── PROMPT.md               # Ralph loop instructions
-├── activity.md             # Work log
+├── prompt.md               # Ralph loop instructions
 ├── interview.sh            # Interactive interview → PRD → task creation
 └── ralph.sh                # Task implementation loop
 ```
