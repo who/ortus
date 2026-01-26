@@ -34,18 +34,18 @@ while true; do
 
   result=$(claude -p "$(cat prompt.md)" --output-format stream-json --verbose --dangerously-skip-permissions 2>&1 | tee -a "$LOG_FILE") || true
 
-  if [[ "$result" == *"<promise>COMPLETE</promise>"* ]] || [[ "$result" == *"COMPLETE"* ]]; then
+  if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
     tasks_completed=$((tasks_completed + 1))
     log "Task completed. Total: $tasks_completed"
-  elif [[ "$result" == *"<promise>BLOCKED</promise>"* ]] || [[ "$result" == *"BLOCKED"* ]]; then
-    log "Task blocked. Check beads comments for details."
-  elif [[ "$result" == *"<promise>EMPTY</promise>"* ]] || [[ "$result" == *"EMPTY"* ]]; then
+  elif [[ "$result" == *"<promise>EMPTY</promise>"* ]]; then
     # Explicit empty queue signal - stop gracefully
     log ""
     log "========================================"
     log "Queue empty. Tasks completed: $tasks_completed"
     log "========================================"
     exit 0
+  elif [[ "$result" == *"<promise>BLOCKED</promise>"* ]]; then
+    log "Task blocked. Check beads comments for details."
   else
     # No signal = no work available or error
     if [ "$tasks_completed" -gt 0 ]; then
