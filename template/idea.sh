@@ -12,25 +12,27 @@ set -euo pipefail
 
 # Handle PRD intake flow
 handle_prd() {
-    echo "Paste your PRD (press Ctrl+D when done):"
-    prd_content=$(cat)
-    if [[ -z "$prd_content" ]]; then
-        echo "No PRD provided. Exiting."
+    echo "Sweet! What's the path to your PRD?"
+    read -r -p "> " prd_path
+
+    if [[ -z "$prd_path" ]]; then
+        echo "No path provided. Exiting."
+        exit 1
+    fi
+
+    if [[ ! -f "$prd_path" ]]; then
+        echo "Hmm, I can't find a file at '$prd_path'. Double-check the path?"
         exit 1
     fi
 
     echo "Processing your PRD..."
-    # Extract title from PRD
-    title=$(claude --print "Extract a concise feature title (5-8 words max) from this PRD. Output ONLY the title, nothing else.
+    echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Bash(bd:*)"
 
-PRD:
-$prd_content")
-
-    if [[ -z "$title" ]]; then
-        title="Feature from PRD"
-    fi
-
-    bd create --title="$title" --type=feature --body="$prd_content"
+    echo ""
+    echo "Done! Your PRD has been decomposed into an epic with tasks."
+    echo "Next steps:"
+    echo "  bd ready       # See what's ready to work on"
+    echo "  ./ralph.sh     # Start implementing tasks"
 }
 
 # Handle idea intake flow
