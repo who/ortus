@@ -38,7 +38,7 @@ handle_prd() {
     original_dir=$(pwd)
     cd "$project_dir"
 
-    echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Bash(bd *)"
+    echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Read($prd_path),Bash(bd *)"
 
     # Return to original directory
     cd "$original_dir"
