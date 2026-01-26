@@ -280,7 +280,9 @@ ${initial_prompt}"
   echo ""
   echo_success "Interview complete!"
   echo ""
-  echo "Next steps:"
+  local project_dir
+  project_dir=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  echo "Next steps (from $project_dir):"
   echo "  bd ready           # See what's ready to work on"
   echo "  ./ortus/ralph.sh   # Start implementing tasks"
 }
