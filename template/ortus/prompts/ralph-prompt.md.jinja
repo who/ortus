@@ -5,7 +5,7 @@ Read @AGENTS.md for session rules and landing-the-plane protocol.
 ## Your Task
 
 1. **Check Recent Activity**: Run `bd activity --limit 10 --json | jq -r '.[].issue_id' | sort -u | xargs -I{} sh -c 'echo "=== {} ===" && bd comments {} 2>/dev/null'` to see what happened in previous loops
-2. **Get Ready Work**: Run `bd ready --json` to get issues with no blockers. If empty, stop.
+2. **Get Ready Work**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim Immediately**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
 4. **Implement**: Make the code changes described in the issue
 5. **Verify**: Run tests, linting, or other verification appropriate to your project
@@ -140,19 +140,24 @@ bd comments add bd-a1b2c3 "**Changes**:
 
 **Keep it concise** — bullet points for changes, one line for verification.
 
-## Completion Signal
+## Completion Signals
 
-When you have completed ONE issue successfully, output:
-
+**COMPLETE** — When you have successfully completed ONE issue:
 ```
 <promise>COMPLETE</promise>
 ```
 
-If you encounter a blocker that prevents completion, add a comment explaining the blocker and output:
-
+**BLOCKED** — When a specific issue cannot be completed due to dependencies or technical blockers. Add a comment explaining the blocker first:
 ```
 <promise>BLOCKED</promise>
 ```
+**Important**: Only use BLOCKED when there's an actual issue you claimed but cannot complete. Do NOT use BLOCKED when the queue is empty.
+
+**EMPTY** — When `bd ready` returns no issues (empty queue):
+```
+<promise>EMPTY</promise>
+```
+This signals the loop to stop gracefully. Do not output BLOCKED when queue is empty.
 
 ## Dependencies
 

@@ -42,6 +42,13 @@ while true; do
     log "Task completed. Total: $tasks_completed"
   elif [[ "$result" == *"<promise>BLOCKED</promise>"* ]] || [[ "$result" == *"BLOCKED"* ]]; then
     log "Task blocked. Check beads comments for details."
+  elif [[ "$result" == *"<promise>EMPTY</promise>"* ]] || [[ "$result" == *"EMPTY"* ]]; then
+    # Explicit empty queue signal - stop gracefully
+    log ""
+    log "========================================"
+    log "Queue empty. Tasks completed: $tasks_completed"
+    log "========================================"
+    exit 0
   else
     # No signal = no work available or error
     if [ "$tasks_completed" -gt 0 ]; then
