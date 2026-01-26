@@ -394,12 +394,14 @@ If PRD is approved:
 
 After tasks are created, tell the user:
 
-"The interview and PRD process is complete! I've created [N] implementation tasks for ralph. You can:
-- Run `./ortus/ralph.sh` to start implementing the tasks
-- Run `bd ready` to see available tasks
-- Run `bd show <task-id>` to view task details
+"All set! I've created [N] tasks ready for implementation.
 
-Please type `/exit` or press Ctrl+C to exit this Claude session."
+**Next step**: Exit this session and run:
+```
+./ortus/ralph.sh
+```
+
+(Type /exit or Ctrl+C to leave)"
 
 **IMPORTANT**: Always end with a clear prompt telling the user to exit the session
 
