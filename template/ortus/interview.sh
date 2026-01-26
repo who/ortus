@@ -225,9 +225,9 @@ Example first AskUserQuestion call:
 Do NOT greet the user in a text response first. Immediately call AskUserQuestion as your first action.
 EOF
 
-  # Check if ortus/prompts/interview-prompt.md exists and use it instead
-  # (Script runs from project root, so path is relative to there)
-  local prompt_file="ortus/prompts/interview-prompt.md"
+  # Check if interview-prompt.md exists and use it instead
+  # (Use script-relative path so script works from any directory)
+  local prompt_file="$(dirname "$0")/prompts/interview-prompt.md"
   if [ -f "$prompt_file" ]; then
     # Read the prompt file and substitute variables using awk for safety
     # (handles special characters in descriptions)

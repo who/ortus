@@ -35,7 +35,7 @@ while true; do
   log ""
   log "--- Starting iteration ---"
 
-  result=$(claude -p "$(cat ortus/prompts/ralph-prompt.md)" --output-format stream-json --verbose --dangerously-skip-permissions 2>&1 | tee -a "$LOG_FILE") || true
+  result=$(claude -p "$(cat "$(dirname "$0")/prompts/ralph-prompt.md")" --output-format stream-json --verbose --dangerously-skip-permissions 2>&1 | tee -a "$LOG_FILE") || true
 
   if [[ "$result" == *"<promise>COMPLETE</promise>"* ]] || [[ "$result" == *"COMPLETE"* ]]; then
     tasks_completed=$((tasks_completed + 1))
