@@ -167,5 +167,6 @@ _tasks:
   - "chmod +x ralph.sh interview.sh idea.sh tail.sh"
   - "git init"
   - "bd init"
+  - "bd setup claude"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
   - "./idea.sh"
