@@ -234,8 +234,8 @@ if [ ! -f "ortus/ralph.sh" ]; then
   exit 1
 fi
 
-if [ ! -f "PROMPT.md" ]; then
-  log_error "PROMPT.md not found in generated project"
+if [ ! -f "ortus/prompts/ralph-prompt.md" ]; then
+  log_error "ortus/prompts/ralph-prompt.md not found in generated project"
   exit 1
 fi
 

@@ -21,7 +21,7 @@ When asked to implement features, fix bugs, or make code changes:
 1. **Do NOT implement directly** - Instead, create beads issues with detailed descriptions
 2. **Create well-structured issues** - Use `bd create` with clear titles, descriptions, and acceptance criteria
 3. **Set up dependencies** - Use `bd dep add` to establish proper ordering
-4. **Defer to Ralph** - The `ralph.sh` loop will execute the actual work via prompt.md
+4. **Defer to Ralph** - The `ralph.sh` loop will execute the actual work via ortus/prompts/ralph-prompt.md
 
 **Allowed without Ralph loop:**
 - Answering questions about the codebase
@@ -267,10 +267,9 @@ bd stats             # Project statistics
 
 * **CLAUDE.md** - AI agent instructions (this file)
 * **AGENTS.md** - Session rules and landing-the-plane protocol
-* **prompt.md** - Ralph loop task instructions
+* **ortus/prompts/** - All prompt files (ralph-prompt.md, interview-prompt.md, prd-prompt.md)
 * **ortus/ralph.sh** - Task implementation loop
 * **ortus/interview.sh** - Interactive feature interview with Claude
-* **prd/PRD-PROMPT.md** - Manual PRD generation template
 
 ## Pro Tips for AI Agents
 

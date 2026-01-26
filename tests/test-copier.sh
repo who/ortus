@@ -81,12 +81,12 @@ EXPECTED_FILES=(
   "ortus/interview.sh"
   "ortus/idea.sh"
   "ortus/tail.sh"
-  "prompt.md"
+  "ortus/prompts/ralph-prompt.md"
+  "ortus/prompts/interview-prompt.md"
+  "ortus/prompts/prd-prompt.md"
   "CLAUDE.md"
   "AGENTS.md"
   ".beads/config.yaml"
-  "prompts/INTERVIEW-PROMPT.md"
-  "prd/PRD-PROMPT.md"
 )
 
 MISSING=0
