@@ -28,29 +28,29 @@ The generator will:
 
 You now have a blank slate ready for development.
 
-### Step 2: Create and Refine Your Feature
+### Step 2: Kickstart Your Feature
 
-Define what you're building by creating a feature and going through the interview process:
+Run `./idea.sh` to start. You'll choose between two paths:
 
+**Path A: You have a PRD**
 ```bash
-# Quick way: use idea.sh to create a feature
+./idea.sh
+# Choose [1] "Yes, I have a PRD"
+# Provide the path to your PRD file
+```
+Your PRD gets decomposed into an epic with implementation tasks, ready for Ralph.
+
+**Path B: You have an idea**
+```bash
 ./idea.sh "A CLI tool that converts markdown to PDF with custom themes"
-
-# Or create manually:
-bd create --title="A CLI tool that converts markdown to PDF" --type=feature
+# Or run ./idea.sh and choose [2] "Nope, just an idea"
 ```
 
-Run the interactive interview to refine requirements:
-
-```bash
-# Claude asks you questions about the feature
-./interview.sh
-```
-
-interview.sh will:
-1. Ask clarifying questions about your feature
-2. Generate a PRD document at `prd/PRD-[project-name].md`
-3. Create implementation tasks from the approved PRD
+Claude will:
+1. Expand your idea into a feature description
+2. Run an interactive interview to clarify requirements
+3. Generate a PRD document at `prd/PRD-[project-name].md`
+4. Create implementation tasks from the approved PRD
 
 ### Step 3: Run Ralph
 
@@ -86,6 +86,7 @@ my-project/
 ├── src/                    # Your code goes here
 ├── CLAUDE.md               # AI guidance
 ├── prompt.md               # Ralph loop instructions
+├── idea.sh                 # PRD intake or idea → interview → tasks
 ├── interview.sh            # Interactive interview → PRD → task creation
 └── ralph.sh                # Task implementation loop
 ```

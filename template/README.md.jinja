@@ -130,24 +130,38 @@ cargo clippy
 
 This project uses beads (`bd`) for issue tracking and Ralph automation loops for implementation.
 
-### Creating a Feature
+### Kickstart Your Feature
 
-1. **Capture your idea**:
-   ```bash
-   ./idea.sh "Your feature idea"
-   ```
+Run `./idea.sh` to start. You'll be asked whether you have a PRD or just an idea:
 
-2. **Run the interactive interview**:
-   ```bash
-   ./interview.sh
-   ```
-   Claude will ask clarifying questions, generate a PRD, and create implementation tasks.
+**Option 1: You have a PRD**
+```bash
+./idea.sh
+# Choose [1] "Yes, I have a PRD"
+# Provide the path to your PRD file
+```
+Your PRD will be decomposed into an epic with implementation tasks.
 
-3. **Implement tasks with Ralph**:
-   ```bash
-   ./ralph.sh
-   ```
-   Ralph picks up tasks and implements them one by one.
+**Option 2: You have an idea**
+```bash
+./idea.sh "Your feature idea"
+# Or run ./idea.sh and choose [2] "Nope, just an idea"
+```
+Claude will:
+1. Expand your idea into a feature description
+2. Run an interactive interview to clarify requirements
+3. Generate a PRD document
+4. Create implementation tasks from the PRD
+
+### Implement with Ralph
+
+Once tasks exist, run the implementation loop:
+
+```bash
+./ralph.sh
+```
+
+Ralph picks up tasks and implements them one by one, running tests and committing changes.
 
 ### Issue Tracking Commands
 
