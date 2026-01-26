@@ -115,7 +115,7 @@ log_info "Project generated at: $(pwd)"
 
 # Manually run the initialization tasks (except idea.sh)
 log_info "Running manual initialization..."
-chmod +x ralph.sh interview.sh idea.sh tail.sh 2>/dev/null || true
+chmod +x ortus/ralph.sh ortus/interview.sh ortus/idea.sh ortus/tail.sh 2>/dev/null || true
 git init >/dev/null 2>&1
 bd init >/dev/null 2>&1
 git add -A >/dev/null 2>&1
@@ -123,13 +123,13 @@ git commit -m 'Initial commit from Ortus template' >/dev/null 2>&1
 log_info "Initialization complete"
 
 # Verify project structure
-if [ ! -f "interview.sh" ]; then
-  log_error "interview.sh not found in generated project"
+if [ ! -f "ortus/interview.sh" ]; then
+  log_error "ortus/interview.sh not found in generated project"
   exit 1
 fi
 
-if [ ! -f "ralph.sh" ]; then
-  log_error "ralph.sh not found in generated project"
+if [ ! -f "ortus/ralph.sh" ]; then
+  log_error "ortus/ralph.sh not found in generated project"
   exit 1
 fi
 
@@ -172,11 +172,11 @@ if [ "$DRY_RUN" = true ]; then
   echo ""
   log_info "To run interview.sh manually:"
   echo "  cd $TEST_DIR/testproj"
-  echo "  ./interview.sh $FEATURE_ID"
+  echo "  ./ortus/interview.sh $FEATURE_ID"
   echo ""
   log_info "To test AskUserQuestion flow with --print mode:"
   echo "  cd $TEST_DIR/testproj"
-  echo "  timeout 30 ./interview.sh $FEATURE_ID 2>&1 | head -50"
+  echo "  timeout 30 ./ortus/interview.sh $FEATURE_ID 2>&1 | head -50"
   echo ""
   log_info "Expected behavior:"
   echo "  - Claude should immediately call AskUserQuestion"
@@ -188,7 +188,7 @@ fi
 # Test: Interview triggers AskUserQuestion immediately
 # ============================================================================
 
-log_step "Test: interview.sh triggers AskUserQuestion immediately"
+log_step "Test: ortus/interview.sh triggers AskUserQuestion immediately"
 
 # We need to test that Claude's FIRST action is AskUserQuestion.
 # We can't fully automate this since it requires Claude API, but we can:
@@ -198,7 +198,7 @@ log_step "Test: interview.sh triggers AskUserQuestion immediately"
 
 # Create a modified interview script that uses --print --output-format stream-json
 # to capture tool calls, and auto-responds to questions
-log_info "Creating test harness for interview.sh..."
+log_info "Creating test harness for ortus/interview.sh..."
 
 # Create test harness that captures Claude's first response
 # Note: Using heredoc WITHOUT quotes (<<HARNESS_EOF) so inner shell variables expand at creation time
@@ -283,7 +283,7 @@ if grep -q '"AskUserQuestion"' "$OUTPUT_FILE"; then
   fi
 
   log_info ""
-  log_info "Test PASSED: interview.sh triggers AskUserQuestion correctly"
+  log_info "Test PASSED: ortus/interview.sh triggers AskUserQuestion correctly"
 else
   log_error "Test FAILED: AskUserQuestion tool call NOT found in output"
   log_error ""
@@ -301,7 +301,7 @@ fi
 
 log_step "All Tests Passed!"
 echo ""
-log_info "Test: interview.sh triggers AskUserQuestion immediately ✓"
+log_info "Test: ortus/interview.sh triggers AskUserQuestion immediately ✓"
 echo ""
 log_info "This test validates that ortus-4ms fix is working correctly."
 echo ""

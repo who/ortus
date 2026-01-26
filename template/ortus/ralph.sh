@@ -1,10 +1,10 @@
 #!/bin/bash
 # ralph.sh - Autonomous task execution loop
 #
-# Usage: ./ralph.sh [--idle-sleep N]
+# Usage: ./ortus/ralph.sh [--idle-sleep N]
 #
 # Runs until all ready work is complete. Logs to logs/ralph-<timestamp>.log
-# Watch live: ./tail.sh or tail -f logs/ralph-*.log
+# Watch live: ./ortus/tail.sh or tail -f logs/ralph-*.log
 
 set -e
 
@@ -26,7 +26,7 @@ log "=== Ralph Started ==="
 log "Idle sleep: ${IDLE_SLEEP}s"
 log "Log file: $LOG_FILE"
 log "Watch live:"
-log "  Human-readable: ./tail.sh              (auto-follows all logs)"
+log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
 tasks_completed=0

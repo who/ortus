@@ -1,7 +1,7 @@
 #!/bin/bash
 # interview.sh - Interactive Claude-powered interviews for feature refinement
 #
-# Usage: ./interview.sh [feature-id]
+# Usage: ./ortus/interview.sh [feature-id]
 #
 # Options:
 #   <feature-id>    Optional: Interview a specific feature
@@ -17,7 +17,7 @@
 #   4. Answers are saved as comments on the feature bead
 #   5. 'interviewed' label is added to trigger PRD generation
 #
-# After interview completion, run ralph.sh to implement the tasks.
+# After interview completion, run ortus/ralph.sh to implement the tasks.
 #
 # Exit codes:
 #   0 - Interview completed successfully
@@ -226,6 +226,7 @@ Do NOT greet the user in a text response first. Immediately call AskUserQuestion
 EOF
 
   # Check if prompts/INTERVIEW-PROMPT.md exists and use it instead
+  # (Script runs from project root, so path is relative to there)
   local prompt_file="prompts/INTERVIEW-PROMPT.md"
   if [ -f "$prompt_file" ]; then
     # Read the prompt file and substitute variables using awk for safety
@@ -280,7 +281,7 @@ ${initial_prompt}"
   echo_success "Interview complete!"
   echo ""
   echo "Next step:"
-  echo "  Run ./ralph.sh to implement the tasks"
+  echo "  Run ./ortus/ralph.sh to implement the tasks"
 }
 
 # Main execution

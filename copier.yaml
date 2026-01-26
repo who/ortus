@@ -19,8 +19,8 @@ _message_after_copy: |
 
   Next steps:
     cd {{ _copier_conf.dst_path }}
-    ./interview.sh   # Interactive interview → PRD → task creation
-    ./ralph.sh       # Implements the tasks
+    ./ortus/interview.sh   # Interactive interview → PRD → task creation
+    ./ortus/ralph.sh       # Implements the tasks
 
 # =============================================================================
 # Project Basics
@@ -164,9 +164,9 @@ _skip_if_exists:
   - ".beads/*"
 
 _tasks:
-  - "chmod +x ralph.sh interview.sh idea.sh tail.sh"
+  - "chmod +x ortus/ralph.sh ortus/interview.sh ortus/idea.sh ortus/tail.sh"
   - "git init"
   - "bd init"
   - "bd setup claude"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
-  - "./idea.sh"
+  - "./ortus/idea.sh"

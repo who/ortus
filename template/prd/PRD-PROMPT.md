@@ -1,6 +1,6 @@
 # PRD Generation Prompt
 
-> **Note:** For automated PRD generation, use `./interview.sh` instead of this manual process.
+> **Note:** For automated PRD generation, use `./ortus/interview.sh` instead of this manual process.
 > interview.sh handles the full idea-to-PRD-to-tasks pipeline, then ralph.sh implements the tasks.
 
 This document provides a manual prompt for interactive PRD generation with Claude.
@@ -128,7 +128,7 @@ Save the final PRD to: `prd/PRD-[project-name].md`
 
 After the PRD is finalized, use this prompt to convert it into beads issues.
 
-> **Note:** If you used `./interview.sh`, it handles this conversion automatically when you approve the PRD.
+> **Note:** If you used `./ortus/interview.sh`, it handles this conversion automatically when you approve the PRD.
 
 ```
 Read the PRD at @prd/PRD-[project-name].md
@@ -239,16 +239,16 @@ Before finalizing:
 
 ```bash
 # Submit an idea using the quick helper
-./idea.sh "Your idea description"
+./ortus/idea.sh "Your idea description"
 
 # Or create manually
 bd create --title="Your idea description" --type=feature
 
 # Run the interactive interview (generates PRD and creates tasks)
-./interview.sh
+./ortus/interview.sh
 
 # Start Ralph to implement the tasks
-./ralph.sh
+./ortus/ralph.sh
 
 # interview.sh will:
 # 1. Conduct an interactive interview
