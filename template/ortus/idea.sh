@@ -20,17 +20,32 @@ handle_prd() {
         exit 1
     fi
 
+    # Convert to absolute path for reliable access after cd
+    prd_path=$(realpath "$prd_path" 2>/dev/null || echo "$prd_path")
+
     if [[ ! -f "$prd_path" ]]; then
         echo "Hmm, I can't find a file at '$prd_path'. Double-check the path?"
         exit 1
     fi
 
-    echo "Processing your PRD..."
+    # Find the project directory containing the PRD
+    prd_dir=$(dirname "$prd_path")
+    project_dir=$(cd "$prd_dir" && git rev-parse --show-toplevel 2>/dev/null || echo "$prd_dir")
+
+    echo "Processing your PRD in $project_dir..."
+
+    # Save current directory and switch to project
+    original_dir=$(pwd)
+    cd "$project_dir"
+
     echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Bash(bd *)"
+
+    # Return to original directory
+    cd "$original_dir"
 
     echo ""
     echo "Done! Your PRD has been decomposed into an epic with tasks."
-    echo "Next steps:"
+    echo "Next steps (run from $project_dir):"
     echo "  bd ready       # See what's ready to work on"
     echo "  ./ortus/ralph.sh     # Start implementing tasks"
 }
