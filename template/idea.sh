@@ -4,7 +4,7 @@
 # Usage: ./idea.sh "Your idea description"
 #        ./idea.sh                           # Prompts for idea
 #
-# Creates a feature bead assigned to ralph. After creating the idea:
+# Creates a feature bead. After creating the idea:
 #   ./interview.sh   # Interactive interview → PRD → task creation
 #   ./ralph.sh       # Implements the tasks
 
@@ -30,7 +30,7 @@ Idea: $idea")
 
 if [[ -z "$description" ]]; then
     # Fallback if Claude fails
-    bd create --title="$idea" --type=feature --assignee=ralph
+    bd create --title="$idea" --type=feature
 else
-    bd create --title="$idea" --type=feature --assignee=ralph --body="$description"
+    bd create --title="$idea" --type=feature --body="$description"
 fi

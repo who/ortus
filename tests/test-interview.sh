@@ -144,7 +144,7 @@ log_step "Creating test feature"
 FEATURE_TITLE="Test Feature for Interview"
 FEATURE_DESC="A test feature to verify interview.sh correctly triggers AskUserQuestion."
 
-FEATURE_OUTPUT=$(bd create --title="$FEATURE_TITLE" --type=feature --assignee=ralph --description="$FEATURE_DESC" 2>&1)
+FEATURE_OUTPUT=$(bd create --title="$FEATURE_TITLE" --type=feature --description="$FEATURE_DESC" 2>&1)
 FEATURE_ID=$(echo "$FEATURE_OUTPUT" | grep -oE '[a-z]+-[a-z0-9]+' | head -1)
 
 if [ -z "$FEATURE_ID" ]; then

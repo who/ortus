@@ -37,7 +37,7 @@ Define what you're building by creating a feature and going through the intervie
 ./idea.sh "A CLI tool that converts markdown to PDF with custom themes"
 
 # Or create manually:
-bd create --title="A CLI tool that converts markdown to PDF" --type=feature --assignee=ralph
+bd create --title="A CLI tool that converts markdown to PDF" --type=feature
 ```
 
 Run the interactive interview to refine requirements:

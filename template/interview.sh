@@ -78,7 +78,7 @@ echo_error() {
 find_pending_features() {
   # Get all features assigned to ralph
   local features_json
-  features_json=$(bd list --assignee ralph --type feature --status open --json 2>/dev/null || echo "[]")
+  features_json=$(bd list --type feature --status open --json 2>/dev/null || echo "[]")
 
   # Filter out features that already have 'interviewed' label
   echo "$features_json" | jq -c '[.[] | select(.labels | (. == null) or (index("interviewed") | not) and (index("prd:interviewing") | not) and (index("prd:ready") | not) and (index("approved") | not))]'
@@ -94,12 +94,11 @@ select_feature() {
     echo_info "No features need interviewing."
     echo ""
     echo "Features get interviewed when they:"
-    echo "  1. Are assigned to 'ralph'"
-    echo "  2. Have type 'feature'"
-    echo "  3. Don't have 'interviewed', 'prd:interviewing', 'prd:ready', or 'approved' labels"
+    echo "  1. Have type 'feature'"
+    echo "  2. Don't have 'interviewed', 'prd:interviewing', 'prd:ready', or 'approved' labels"
     echo ""
     echo "Create a new feature with:"
-    echo "  bd create --title=\"My feature\" --type=feature --assignee=ralph"
+    echo "  bd create --title=\"My feature\" --type=feature"
     exit 2
   fi
 

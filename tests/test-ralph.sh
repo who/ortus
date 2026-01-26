@@ -86,10 +86,10 @@ count_tasks() {
   bd list --status="$status" --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0"
 }
 
-# Count tasks assigned to ralph by status
-count_ralph_tasks() {
+# Count tasks by status (deprecated: used to filter by assignee)
+count_tasks_by_status() {
   local status=$1
-  bd list --status="$status" --assignee ralph --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0"
+  bd list --status="$status" --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0"
 }
 
 # Parse task definition file and create tasks
@@ -112,7 +112,7 @@ create_tasks_from_fixture() {
     local task_output
     # Trim leading/trailing whitespace from body
     body=$(echo "$body" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    task_output=$(bd create --title="$title" --type=task --assignee=ralph --priority=2 --body-file - <<< "$body")
+    task_output=$(bd create --title="$title" --type=task --priority=2 --body-file - <<< "$body")
     echo "$task_output" | grep -oP 'Created issue: \K[^ ]+' || true
   }
 
@@ -273,7 +273,7 @@ if [ "$INITIAL_OPEN" != "3" ]; then
 fi
 
 # Check what's ready (should be 1 due to dependencies)
-READY_COUNT=$(bd ready --assignee ralph --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0")
+READY_COUNT=$(bd ready --json 2>/dev/null | jq -r 'length' 2>/dev/null || echo "0")
 log_info "Ready tasks (no blockers): $READY_COUNT"
 
 if [ "$READY_COUNT" != "1" ]; then
