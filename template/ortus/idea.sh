@@ -26,7 +26,7 @@ handle_prd() {
     fi
 
     echo "Processing your PRD..."
-    echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Bash(bd:*)"
+    echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Bash(bd *)"
 
     echo ""
     echo "Done! Your PRD has been decomposed into an epic with tasks."

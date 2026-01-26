@@ -263,7 +263,7 @@ EOF
 
 ${initial_prompt}"
 
-  echo "$full_prompt" | claude --allowedTools "AskUserQuestion,Bash(bd:*),Read"
+  echo "$full_prompt" | claude --allowedTools "AskUserQuestion,Bash(bd *),Read"
   local exit_code=$?
 
   if [ $exit_code -ne 0 ]; then
