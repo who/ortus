@@ -30,11 +30,11 @@ You now have a blank slate ready for development.
 
 ### Step 2: Kickstart Your Feature
 
-Run `./idea.sh` to start. You'll choose between two paths:
+Run `./ortus/idea.sh` to start. You'll choose between two paths:
 
 **Path A: You have a PRD**
 ```bash
-./idea.sh
+./ortus/idea.sh
 # Choose [1] "Yes, I have a PRD"
 # Provide the path to your PRD file
 ```
@@ -42,8 +42,8 @@ Your PRD gets decomposed into an epic with implementation tasks, ready for Ralph
 
 **Path B: You have an idea**
 ```bash
-./idea.sh "A CLI tool that converts markdown to PDF with custom themes"
-# Or run ./idea.sh and choose [2] "Nope, just an idea"
+./ortus/idea.sh "A CLI tool that converts markdown to PDF with custom themes"
+# Or run ./ortus/idea.sh and choose [2] "Nope, just an idea"
 ```
 
 Claude will:
@@ -58,13 +58,13 @@ Then start the task implementation loop:
 
 ```bash
 # Run until all tasks complete
-./ralph.sh
+./ortus/ralph.sh
 
 # Complete exactly 1 task then exit
-./ralph.sh --tasks 1
+./ortus/ralph.sh --tasks 1
 
 # Run in background
-./ralph.sh &
+./ortus/ralph.sh &
 ```
 
 Ralph implements tasks:
@@ -83,12 +83,14 @@ my-project/
 ├── .github/workflows/      # CI pipeline
 ├── prd/
 │   └── PRD-PROMPT.md       # PRD generation template
+├── ortus/                  # Ortus automation scripts
+│   ├── idea.sh             # PRD intake or idea → interview → tasks
+│   ├── interview.sh        # Interactive interview → PRD → task creation
+│   ├── ralph.sh            # Task implementation loop
+│   └── tail.sh             # Log file watcher
 ├── src/                    # Your code goes here
 ├── CLAUDE.md               # AI guidance
-├── prompt.md               # Ralph loop instructions
-├── idea.sh                 # PRD intake or idea → interview → tasks
-├── interview.sh            # Interactive interview → PRD → task creation
-└── ralph.sh                # Task implementation loop
+└── prompt.md               # Ralph loop instructions
 ```
 
 ## Work Execution Policy

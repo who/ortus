@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # idea.sh - Quick feature creation for Ralph workflow
 #
-# Usage: ./idea.sh "Your idea description"
-#        ./idea.sh                           # Prompts for idea
+# Usage: ./ortus/idea.sh "Your idea description"
+#        ./ortus/idea.sh                           # Prompts for idea
 #
 # Creates a feature bead. After creating the idea:
-#   ./interview.sh   # Interactive interview → PRD → task creation
-#   ./ralph.sh       # Implements the tasks
+#   ./ortus/interview.sh   # Interactive interview → PRD → task creation
+#   ./ortus/ralph.sh       # Implements the tasks
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ handle_prd() {
     echo "Done! Your PRD has been decomposed into an epic with tasks."
     echo "Next steps:"
     echo "  bd ready       # See what's ready to work on"
-    echo "  ./ralph.sh     # Start implementing tasks"
+    echo "  ./ortus/ralph.sh     # Start implementing tasks"
 }
 
 # Handle idea intake flow
@@ -66,7 +66,7 @@ Idea: $idea")
     echo ""
 
     # Kick off interview flow
-    ./interview.sh "$feature_id"
+    ./ortus/interview.sh "$feature_id"
 }
 
 # Main flow

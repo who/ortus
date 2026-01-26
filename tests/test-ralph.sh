@@ -221,7 +221,7 @@ log_info "Project generated at: $(pwd)"
 
 # Manually run the initialization tasks (except idea.sh)
 log_info "Running manual initialization..."
-chmod +x ralph.sh interview.sh idea.sh tail.sh 2>/dev/null || true
+chmod +x ortus/ralph.sh ortus/interview.sh ortus/idea.sh ortus/tail.sh 2>/dev/null || true
 git init >/dev/null 2>&1
 bd init >/dev/null 2>&1
 git add -A >/dev/null 2>&1
@@ -229,8 +229,8 @@ git commit -m 'Initial commit from Ortus template' >/dev/null 2>&1
 log_info "Initialization complete"
 
 # Verify project structure
-if [ ! -f "ralph.sh" ]; then
-  log_error "ralph.sh not found in generated project"
+if [ ! -f "ortus/ralph.sh" ]; then
+  log_error "ortus/ralph.sh not found in generated project"
   exit 1
 fi
 
@@ -295,9 +295,9 @@ if [ "$DRY_RUN" = true ]; then
   echo ""
   log_info "To run tests manually:"
   echo "  cd $TEST_DIR/testproj"
-  echo "  ./ralph.sh --tasks 1  # Should complete 1 task"
-  echo "  bd list               # Check status"
-  echo "  ./ralph.sh            # Complete remaining tasks"
+  echo "  ./ortus/ralph.sh --tasks 1  # Should complete 1 task"
+  echo "  bd list                     # Check status"
+  echo "  ./ortus/ralph.sh            # Complete remaining tasks"
   exit 0
 fi
 
@@ -307,7 +307,7 @@ fi
 
 log_step "Test 1: ralph --tasks 1 (should complete exactly 1 task)"
 
-./ralph.sh --tasks 1 --iterations 15
+./ortus/ralph.sh --tasks 1 --iterations 15
 
 # Verify exactly 1 task completed
 CLOSED_AFTER_T1=$(count_ralph_tasks "closed")
@@ -345,7 +345,7 @@ log_info "Test 1 PASSED: Exactly 1 task completed, file created correctly"
 
 log_step "Test 2: ralph unlimited (should complete all remaining tasks)"
 
-./ralph.sh --iterations 15
+./ortus/ralph.sh --iterations 15
 
 # Verify all tasks completed
 CLOSED_AFTER_T2=$(count_ralph_tasks "closed")

@@ -132,11 +132,11 @@ This project uses beads (`bd`) for issue tracking and Ralph automation loops for
 
 ### Kickstart Your Feature
 
-Run `./idea.sh` to start. You'll be asked whether you have a PRD or just an idea:
+Run `./ortus/idea.sh` to start. You'll be asked whether you have a PRD or just an idea:
 
 **Option 1: You have a PRD**
 ```bash
-./idea.sh
+./ortus/idea.sh
 # Choose [1] "Yes, I have a PRD"
 # Provide the path to your PRD file
 ```
@@ -144,8 +144,8 @@ Your PRD will be decomposed into an epic with implementation tasks.
 
 **Option 2: You have an idea**
 ```bash
-./idea.sh "Your feature idea"
-# Or run ./idea.sh and choose [2] "Nope, just an idea"
+./ortus/idea.sh "Your feature idea"
+# Or run ./ortus/idea.sh and choose [2] "Nope, just an idea"
 ```
 Claude will:
 1. Expand your idea into a feature description
@@ -158,7 +158,7 @@ Claude will:
 Once tasks exist, run the implementation loop:
 
 ```bash
-./ralph.sh
+./ortus/ralph.sh
 ```
 
 Ralph picks up tasks and implements them one by one, running tests and committing changes.
@@ -192,6 +192,7 @@ bd stats             # Project statistics
 │   └── main.rs           # Entrypoint
 ├── tests/                # Integration tests
 {%- endif %}
+├── ortus/                # Ortus automation scripts
 ├── prd/                  # Product requirements documents
 ├── prompts/              # AI prompt templates
 ├── .beads/               # Issue tracking data
