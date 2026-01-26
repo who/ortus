@@ -17,10 +17,7 @@ _message_before_copy: |
 _message_after_copy: |
   Project created successfully!
 
-  Next steps:
-    cd {{ _copier_conf.dst_path }}
-    ./ortus/interview.sh   # Interactive interview → PRD → task creation
-    ./ortus/ralph.sh       # Implements the tasks
+  Starting project setup...
 
 # =============================================================================
 # Project Basics

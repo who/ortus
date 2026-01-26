@@ -280,8 +280,9 @@ ${initial_prompt}"
   echo ""
   echo_success "Interview complete!"
   echo ""
-  echo "Next step:"
-  echo "  Run ./ortus/ralph.sh to implement the tasks"
+  echo "Next steps:"
+  echo "  bd ready           # See what's ready to work on"
+  echo "  ./ortus/ralph.sh   # Start implementing tasks"
 }
 
 # Main execution
