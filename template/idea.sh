@@ -53,11 +53,20 @@ handle_idea() {
 
 Idea: $idea")
 
+    local feature_id
     if [[ -z "$description" ]]; then
-        bd create --title="$idea" --type=feature
+        feature_id=$(bd create --title="$idea" --type=feature --json | jq -r '.id')
     else
-        bd create --title="$idea" --type=feature --body="$description"
+        feature_id=$(bd create --title="$idea" --type=feature --body="$description" --json | jq -r '.id')
     fi
+
+    echo ""
+    echo "Feature created: $feature_id"
+    echo "Starting interview to build your PRD..."
+    echo ""
+
+    # Kick off interview flow
+    ./interview.sh "$feature_id"
 }
 
 # Main flow
