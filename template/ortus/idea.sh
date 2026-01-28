@@ -44,7 +44,7 @@ handle_prd() {
     original_dir=$(pwd)
     cd "$project_dir"
 
-    echo "Read $prd_path . Decompose the provided PRD Markdown into a Beads issue graph using bd. For each work item, create an issue with: title, description (scope/context), acceptance_criteria (testable \"done\" checklist), design notes (technical approach), priority (0-4, 0=critical), type (epic/feature/task/bug/chore), labels, and estimated_minutes. Structure hierarchically: epics for major features, decomposed into tasks via parent-child dependencies; use blocks for execution order constraints and related for shared context. Output all bd create and bd dep add commands to construct the complete graph with proper dependencies reflecting the PRD's requirements and sequence. When done, tell the user to type /exit to continue." | claude --allowedTools "Read($prd_path),Bash(bd:*)" 
+    echo "Read $prd_path . Decompose the provided PRD Markdown into a Beads issue graph using bd. For each work item, create an issue with: title, description (scope/context), acceptance_criteria (testable \"done\" checklist), design notes (technical approach), priority (0-4, 0=critical), type (epic/feature/task/bug/chore), labels, and estimated_minutes. Structure hierarchically: epics for major features, decomposed into tasks via parent-child dependencies; use blocks for execution order constraints and related for shared context. Output all bd create and bd dep add commands to construct the complete graph with proper dependencies reflecting the PRD's requirements and sequence. When done, tell the user to type /exit to continue." | claude --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions 
 
     # Return to original directory
     cd "$original_dir"
