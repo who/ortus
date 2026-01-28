@@ -66,44 +66,57 @@ language:
 package_manager:
   type: str
   help: Package manager to use
-  choices:
-    bun (Node.js): bun
-    npm (Node.js): npm
-    pnpm (Node.js): pnpm
-    yarn (Node.js): yarn
-    uv (Python): uv
-    pip (Python): pip
-    go mod (Go): gomod
-    cargo (Rust): cargo
-    None: none
-  default: npm
+  choices: >-
+    {% if language == 'typescript' %}
+    {"bun": "bun", "npm": "npm", "pnpm": "pnpm", "yarn": "yarn", "None": "none"}
+    {% elif language == 'python' %}
+    {"uv": "uv", "pip": "pip", "None": "none"}
+    {% elif language == 'go' %}
+    {"go mod": "gomod", "None": "none"}
+    {% elif language == 'rust' %}
+    {"cargo": "cargo", "None": "none"}
+    {% else %}
+    {"None": "none"}
+    {% endif %}
+  default: >-
+    {% if language == 'typescript' %}npm{% elif language == 'python' %}uv{% elif language == 'go' %}gomod{% elif language == 'rust' %}cargo{% else %}none{% endif %}
   when: "{{ language != 'other' }}"
 
 framework:
   type: str
   help: Web framework (optional)
-  choices:
-    Next.js (Node.js): nextjs
-    FastAPI (Python): fastapi
-    Flask (Python): flask
-    Django (Python): django
-    Express (Node.js): express
-    Gin (Go): gin
-    Actix (Rust): actix
-    Axum (Rust): axum
-    None: none
+  choices: >-
+    {% if language == 'typescript' %}
+    {"Next.js": "nextjs", "Express": "express", "None": "none"}
+    {% elif language == 'python' %}
+    {"FastAPI": "fastapi", "Flask": "flask", "Django": "django", "None": "none"}
+    {% elif language == 'go' %}
+    {"Gin": "gin", "None": "none"}
+    {% elif language == 'rust' %}
+    {"Actix": "actix", "Axum": "axum", "None": "none"}
+    {% else %}
+    {"None": "none"}
+    {% endif %}
   default: none
+  when: "{{ language != 'other' }}"
 
 linter:
   type: str
   help: Linter to use
-  choices:
-    ESLint (JavaScript/TypeScript): eslint
-    ruff (Python): ruff
-    golangci-lint (Go): golangci
-    clippy (Rust): clippy
-    None: none
-  default: eslint
+  choices: >-
+    {% if language == 'typescript' %}
+    {"ESLint": "eslint", "None": "none"}
+    {% elif language == 'python' %}
+    {"ruff": "ruff", "None": "none"}
+    {% elif language == 'go' %}
+    {"golangci-lint": "golangci", "None": "none"}
+    {% elif language == 'rust' %}
+    {"clippy": "clippy", "None": "none"}
+    {% else %}
+    {"None": "none"}
+    {% endif %}
+  default: >-
+    {% if language == 'typescript' %}eslint{% elif language == 'python' %}ruff{% elif language == 'go' %}golangci{% elif language == 'rust' %}clippy{% else %}none{% endif %}
   when: "{{ language != 'other' }}"
 
 # =============================================================================
