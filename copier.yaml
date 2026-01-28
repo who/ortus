@@ -196,4 +196,4 @@ _tasks:
   - "bd setup claude"
   - "{{ 'cp \"' + prd_path + '\" prd/intake.md' if has_prd else 'true' }}"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
-  - "./ortus/idea.sh"
+  - "./ortus/idea.sh{{ ' --prd prd/intake.md' if has_prd else '' }}"

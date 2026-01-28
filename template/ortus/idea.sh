@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # idea.sh - Quick feature creation for Ralph workflow
 #
-# Usage: ./ortus/idea.sh "Your idea description"
-#        ./ortus/idea.sh                           # Prompts for idea
+# Usage: ./ortus/idea.sh                           # Interactive menu
+#        ./ortus/idea.sh "Your idea description"   # Create from idea
+#        ./ortus/idea.sh --prd <path>              # Process existing PRD
 #
 # Creates a feature bead. After creating the idea:
 #   ./ortus/interview.sh   # Interactive interview → PRD → task creation
@@ -12,12 +13,17 @@ set -euo pipefail
 
 # Handle PRD intake flow
 handle_prd() {
-    echo "Sweet! What's the path to your PRD?"
-    read -r -p "> " prd_path
+    local prd_path="${1:-}"
 
+    # If no path provided as argument, prompt for it
     if [[ -z "$prd_path" ]]; then
-        echo "No path provided. Exiting."
-        exit 1
+        echo "Sweet! What's the path to your PRD?"
+        read -r -p "> " prd_path
+
+        if [[ -z "$prd_path" ]]; then
+            echo "No path provided. Exiting."
+            exit 1
+        fi
     fi
 
     # Convert to absolute path for reliable access after cd
@@ -85,6 +91,18 @@ Idea: $idea")
 }
 
 # Main flow
+
+# Check for --prd flag
+if [[ "${1:-}" == "--prd" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "Error: --prd requires a path argument"
+        echo "Usage: ./ortus/idea.sh --prd <path>"
+        exit 1
+    fi
+    handle_prd "$2"
+    exit 0
+fi
+
 idea="${1:-}"
 
 # If idea provided as argument, skip menu and go straight to idea flow
