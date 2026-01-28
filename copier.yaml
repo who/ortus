@@ -131,6 +131,20 @@ github_username:
   default: ""
 
 # =============================================================================
+# PRD Intake
+# =============================================================================
+
+has_prd:
+  type: bool
+  help: Do you have a PRD (Product Requirements Document)?
+  default: false
+
+prd_path:
+  type: str
+  help: Path to your PRD file (will be copied into project)
+  when: "{{ has_prd }}"
+
+# =============================================================================
 # Optional Features
 # =============================================================================
 
@@ -167,5 +181,6 @@ _tasks:
   - "git init"
   - "bd init"
   - "bd setup claude"
+  - "{{ 'cp \"' + prd_path + '\" prd/intake.md' if has_prd else 'true' }}"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
   - "./ortus/idea.sh"
