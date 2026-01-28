@@ -50,9 +50,8 @@ handle_prd() {
     cd "$original_dir"
 
     echo ""
-    echo "## Next Steps"
-    echo "1. cd $project_dir"
-    echo "2. ./ortus/ralph.sh"
+    echo "Next steps:"
+    echo "cd $(basename "$project_dir") && ./ortus/ralph.sh"
 }
 
 # Handle idea intake flow
