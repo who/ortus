@@ -17,10 +17,6 @@ _message_before_copy: |
 _message_after_copy: |
   Project created successfully!
 
-  Starting project setup...
-
-  (When complete, you'll need to `cd {{ _copier_conf.dst_path }}` to enter your project)
-
 # =============================================================================
 # Project Basics
 # =============================================================================
