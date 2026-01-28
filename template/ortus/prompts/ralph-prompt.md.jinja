@@ -112,6 +112,9 @@ cargo fmt --check   # Format
 
 - **One issue per iteration** - Do not work on multiple issues
 - **No partial work** - Either complete the issue fully or don't start it
+- **No placeholders** - Implement completely. No stubs, TODOs, or "implement later" comments
+- **Found bugs** - Never fix bugs inline. Always `bd create --type=bug` to track separately
+- **Verify acceptance criteria** - Tasks MUST NOT be closed unless ALL acceptance criteria pass. Before running `bd close`, verify each criterion is satisfied and document results in the completion comment
 - **Log completion** - Use structured comment format before closing
 - **Run quality checks** - Always run verification before committing
 - **Descriptive commits** - Include issue ID in commit message
