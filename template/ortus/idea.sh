@@ -44,16 +44,21 @@ handle_prd() {
     original_dir=$(pwd)
     cd "$project_dir"
 
-    echo "Read $prd_path. Use bd to create an epic and decompose into tasks with dependencies. Each task must have acceptance criteria." | claude --allowedTools "Read($prd_path),Bash(bd *)"
+    claude --allowedTools "Read($prd_path),Bash(bd:*)" --print <<EOF
+Read $prd_path
+
+Decompose the provided PRD Markdown into a Beads issue graph using bd. For each work item, create an issue with: title, description (scope/context), acceptance_criteria (testable "done" checklist), design notes (technical approach), priority (0-4, 0=critical), type (epic/feature/task/bug/chore), labels, and estimated_minutes. Structure hierarchically: epics for major features, decomposed into tasks via parent-child dependencies; use blocks for execution order constraints and related for shared context. Output all bd create and bd dep add commands to construct the complete graph with proper dependencies reflecting the PRD's requirements and sequence.
+
+When done, tell the user to type /exit to continue.
+EOF
 
     # Return to original directory
     cd "$original_dir"
 
     echo ""
-    echo "Done! Your PRD has been decomposed into an epic with tasks."
-    echo "Next steps (run from $project_dir):"
-    echo "  bd ready       # See what's ready to work on"
-    echo "  ./ortus/ralph.sh     # Start implementing tasks"
+    echo "## Next Steps"
+    echo "1. cd $project_dir"
+    echo "2. ./ortus/ralph.sh"
 }
 
 # Handle idea intake flow
