@@ -134,13 +134,22 @@ This project uses beads (`bd`) for issue tracking and Ralph automation loops for
 
 Run `./ortus/idea.sh` to start. You'll be asked whether you have a PRD or just an idea:
 
-**Option 1: You have a PRD**
+**Option 1: You have a PRD (non-interactive)**
+```bash
+./ortus/idea.sh --prd path/to/your-prd.md
+```
+Your PRD will be automatically decomposed into a beads issue graph:
+- Creates an epic with hierarchical implementation tasks
+- Sets up proper dependencies between issues
+- Uses parallel sub-agents for efficient issue creation
+- Runs in automated mode (no permission prompts)
+
+**Option 1b: You have a PRD (interactive)**
 ```bash
 ./ortus/idea.sh
 # Choose [1] "Yes, I have a PRD"
 # Provide the path to your PRD file
 ```
-Your PRD will be decomposed into an epic with implementation tasks.
 
 **Option 2: You have an idea**
 ```bash
