@@ -37,10 +37,29 @@ Run all relevant testing for the task that you have completed.
 - If all children are closed, close with `bd close <id> --reason="All child issues complete"`
 - If children remain open, output `<promise>BLOCKED</promise>` — the loop will retry later
 
+## Subagent Strategy
+
+Use the Task tool to delegate work efficiently:
+- **Search/Read tasks** (exploring codebase, finding files, reading context): Launch up to 500 Sonnet subagents in parallel
+- **Build/Test tasks** (running builds, tests, linting): 1 subagent at a time
+- **Complex reasoning** (architecture decisions, tricky bugs): Use Opus
+
+## Ultrathink Directive
+
+For complex problems requiring deep reasoning:
+- Architecture decisions spanning multiple files
+- Debugging subtle or intermittent issues
+- Performance optimization trade-offs
+- Security-sensitive code paths
+
+Use extended thinking to reason through the problem before implementing.
+
 ## Important Rules
 
 - **One issue per iteration** - Do not work on multiple issues
 - **No partial work** - Either complete the issue fully or don't start it
+- **No placeholders** - Implement completely. No stubs, TODOs, or "implement later" comments
+- **Found bugs** - Never fix bugs inline. Always `bd create --type=bug` to track separately
 - **Log completion** - Use structured comment format before closing
 - **Run quality checks** - Always run verification before committing
 - **Descriptive commits** - Include issue ID in commit message
