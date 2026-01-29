@@ -1,0 +1,9 @@
+-- {{ project_name }} - Server Entry Point
+-- This script runs on the Roblox server
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Load shared modules
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+
+print("[Server] {{ project_name }} server initialized")

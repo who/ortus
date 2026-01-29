@@ -90,3 +90,28 @@ target/
 *.rmeta
 *.d
 {%- endif %}
+
+{%- if language == 'luau' %}
+
+# Roblox / Luau
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# Rojo build output
+build/
+
+# Wally packages
+Packages/
+wally.lock
+
+# Rotriever packages
+rotriever_packages/
+
+# Selene cache
+.selene/
+
+# Roblox Studio autosaves
+autosaves/
+{%- endif %}

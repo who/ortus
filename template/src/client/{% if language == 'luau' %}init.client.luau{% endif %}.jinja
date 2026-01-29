@@ -1,0 +1,12 @@
+-- {{ project_name }} - Client Entry Point
+-- This script runs on the Roblox client (player's device)
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+-- Load shared modules
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+
+local player = Players.LocalPlayer
+
+print("[Client] {{ project_name }} client initialized for", player.Name)
