@@ -99,6 +99,36 @@ jobs:
 
       - name: Test
         run: cargo test
+{%- elif language == 'luau' %}
+
+      - name: Setup Rokit
+        uses: CompeyDev/setup-rokit@v0.1.2
+        with:
+          cache: true
+{%- if package_manager == 'wally' %}
+
+      - name: Install Dependencies
+        run: wally install
+{%- elif package_manager == 'rotriever' %}
+
+      - name: Install Dependencies
+        run: rotrieve install
+{%- endif %}
+
+      - name: Format Check
+        run: stylua --check .
+{%- if linter == 'selene' %}
+
+      - name: Lint
+        run: selene src/
+{%- elif linter == 'luau-lsp' %}
+
+      - name: Lint
+        run: luau-lsp analyze src/
+{%- endif %}
+
+      - name: Build
+        run: rojo build default.project.json -o build.rbxl
 {%- else %}
 
       # TODO: Add CI steps for your language
