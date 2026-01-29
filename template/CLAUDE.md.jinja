@@ -87,6 +87,23 @@ This ensures all work is tracked, atomic, and follows the defined workflow.
 {%- if linter == 'clippy' %}
 * Use `clippy` for linting
 {%- endif %}
+{%- elif language == 'luau' %}
+* Use strict type annotations (`--!strict` mode)
+* Follow Roblox Lua Style Guide (PascalCase for classes, camelCase for functions/variables)
+* Use `stylua` for formatting
+{%- if linter == 'selene' %}
+* Use `selene` for linting
+{%- elif linter == 'luau-lsp' %}
+* Use `luau-lsp` for type checking and analysis
+{%- endif %}
+
+### Roblox Security Patterns
+
+* **Never trust the client** - All game logic affecting state must run server-side
+* **Validate RemoteEvent/RemoteFunction calls** - Check sender, rate limit, and validate all arguments
+* **Avoid RemoteFunctions for client-to-server** - Prefer RemoteEvents to prevent client yielding exploits
+* **Sanitize all player input** - Check types, ranges, and ownership before processing
+* **Use module-based architecture** - Keep server/client code strictly separated
 {%- else %}
 <!-- TODO: Define your code standards -->
 {%- endif %}
@@ -110,6 +127,15 @@ This ensures all work is tracked, atomic, and follows the defined workflow.
 1. Run `cargo fmt`
 2. Run `cargo clippy`
 3. Run `cargo test`
+4. Stage changes appropriately
+{%- elif language == 'luau' %}
+1. Run `stylua src/`
+{%- if linter == 'selene' %}
+2. Run `selene src/`
+{%- elif linter == 'luau-lsp' %}
+2. Run `luau-lsp analyze src/`
+{%- endif %}
+3. Run `rojo build -o build.rbxl` to verify build
 4. Stage changes appropriately
 {%- else %}
 <!-- TODO: Define your pre-commit checklist -->
@@ -192,6 +218,33 @@ cargo test
 cargo clippy
 cargo fmt
 ```
+{%- elif language == 'luau' %}
+```bash
+# Install dependencies
+{%- if package_manager == 'wally' %}
+wally install
+{%- elif package_manager == 'rotriever' %}
+rotrieve install
+{%- endif %}
+
+# Build Roblox place file
+rojo build -o build.rbxl                    # Build place file
+rojo build -o build.rbxm                    # Build model file
+
+# Development (live sync to Roblox Studio)
+rojo serve                                  # Start sync server (requires Rojo plugin)
+
+# Linting
+{%- if linter == 'selene' %}
+selene src/                                 # Lint all source files
+{%- elif linter == 'luau-lsp' %}
+luau-lsp analyze src/                       # Type check and analyze
+{%- endif %}
+
+# Formatting
+stylua src/                                 # Format all source files
+stylua --check src/                         # Check formatting without changes
+```
 {%- else %}
 <!-- TODO: Add your development commands -->
 {%- endif %}
@@ -237,6 +290,27 @@ fd -e ext                       # All files with extension
 
 ### File Structure
 
+{%- if language == 'luau' %}
+```
+{{ project_name }}/
+├── src/
+│   ├── server/               # ServerScriptService code
+│   ├── client/               # StarterPlayerScripts code
+│   └── shared/               # ReplicatedStorage (shared modules)
+├── default.project.json      # Rojo project configuration
+{%- if package_manager == 'wally' %}
+├── wally.toml                # Wally package manifest
+├── Packages/                 # Wally dependencies (gitignored)
+{%- endif %}
+{%- if linter == 'selene' %}
+├── selene.toml               # Selene linter config
+{%- endif %}
+├── prd/                      # Product requirements documents
+├── .beads/                   # Issue tracking
+├── .claude/                  # Claude Code settings
+└── CLAUDE.md                 # This file
+```
+{%- else %}
 ```
 {{ project_name }}/
 ├── src/                      # Source code
@@ -246,6 +320,7 @@ fd -e ext                       # All files with extension
 ├── .claude/                  # Claude Code settings
 └── CLAUDE.md                 # This file
 ```
+{%- endif %}
 
 ## Issue Tracking
 
