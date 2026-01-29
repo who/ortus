@@ -56,6 +56,7 @@ language:
     Python: python
     Go: go
     Rust: rust
+    Luau (Roblox): luau
     Other: other
   default: typescript
 
@@ -71,11 +72,13 @@ package_manager:
     {"go mod": "gomod", "None": "none"}
     {% elif language == 'rust' %}
     {"cargo": "cargo", "None": "none"}
+    {% elif language == 'luau' %}
+    {"Wally": "wally", "Rotriever": "rotriever", "None": "none"}
     {% else %}
     {"None": "none"}
     {% endif %}
   default: >-
-    {% if language == 'typescript' %}npm{% elif language == 'python' %}uv{% elif language == 'go' %}gomod{% elif language == 'rust' %}cargo{% else %}none{% endif %}
+    {% if language == 'typescript' %}npm{% elif language == 'python' %}uv{% elif language == 'go' %}gomod{% elif language == 'rust' %}cargo{% elif language == 'luau' %}wally{% else %}none{% endif %}
   when: "{{ language != 'other' }}"
 
 framework:
@@ -90,6 +93,8 @@ framework:
     {"Gin": "gin", "None": "none"}
     {% elif language == 'rust' %}
     {"Actix": "actix", "Axum": "axum", "None": "none"}
+    {% elif language == 'luau' %}
+    {"Knit": "knit", "Roact": "roact", "None": "none"}
     {% else %}
     {"None": "none"}
     {% endif %}
@@ -108,11 +113,13 @@ linter:
     {"golangci-lint": "golangci", "None": "none"}
     {% elif language == 'rust' %}
     {"clippy": "clippy", "None": "none"}
+    {% elif language == 'luau' %}
+    {"selene": "selene", "luau-lsp": "luau-lsp", "None": "none"}
     {% else %}
     {"None": "none"}
     {% endif %}
   default: >-
-    {% if language == 'typescript' %}eslint{% elif language == 'python' %}ruff{% elif language == 'go' %}golangci{% elif language == 'rust' %}clippy{% else %}none{% endif %}
+    {% if language == 'typescript' %}eslint{% elif language == 'python' %}ruff{% elif language == 'go' %}golangci{% elif language == 'rust' %}clippy{% elif language == 'luau' %}selene{% else %}none{% endif %}
   when: "{{ language != 'other' }}"
 
 # =============================================================================
@@ -127,6 +134,7 @@ project_type:
     CLI tool (commands, flags, I/O): cli
     Library/package (public API, versioning): library
     Full-stack app (frontend + backend): fullstack
+    Roblox game (experiences, places, packages): roblox
     Other/Generic: other
   default: other
 
