@@ -58,6 +58,19 @@ When the project type is **Full-Stack**, also cover:
 - **Authentication Flow**: How do users log in? Session vs JWT?
 - **Deployment**: How will this be deployed? Monorepo or separate deployments?
 - **Database**: What data persistence is needed?
+{% elif project_type == 'roblox' %}
+### Roblox-Specific Topics
+When the project type is **Roblox**, also cover:
+- **Core Loop**: What is the core gameplay loop? (Action → Reward → Progression)
+- **Game Mechanics**: What are the primary and secondary mechanics?
+- **Progression System**: How do players advance? (levels, unlocks, achievements)
+- **Economy Design**: What currencies exist? How are they earned and spent?
+- **Multiplayer Design**: How many players per server? What needs to sync?
+- **Data Persistence**: What player data needs to be saved? (DataStore strategy)
+- **Monetization**: What game passes and developer products are planned?
+- **Platform Support**: Which platforms? (PC, mobile, console, VR)
+- **Player Personas**: Who is the target audience? (age range, play style)
+- **FTUE**: What is the first-time user experience? How are players onboarded?
 {% else %}
 ### General Topics
 Since this is a general project, adapt questions to what seems most relevant based on the feature description. Ask about architecture, data flow, and integration points as they come up naturally.
@@ -146,6 +159,9 @@ A: [Answer summary]
 {% if project_type == 'cli' %}| CLI Design | High/Medium/Low | [Brief note on coverage] |{% endif %}
 {% if project_type == 'library' %}| Library API | High/Medium/Low | [Brief note on coverage] |{% endif %}
 {% if project_type == 'fullstack' %}| Architecture | High/Medium/Low | [Brief note on coverage] |{% endif %}
+{% if project_type == 'roblox' %}| Game Design | High/Medium/Low | [Brief note on coverage] |
+| Multiplayer | High/Medium/Low | [Brief note on coverage] |
+| Monetization | High/Medium/Low | [Brief note on coverage] |{% endif %}
 
 **Overall Confidence**: [High/Medium/Low]
 ```
@@ -231,6 +247,17 @@ If approved, do the following in sequence:
    - State management and authentication flow
    - Database design and data flow
    - Deployment considerations
+{% elif project_type == 'roblox' %}
+   Use the template at `prd/templates/PRD-TEMPLATE-ROBLOX.md` as your guide. This template includes:
+   - Game Design section (core loop, mechanics, progression, economy)
+   - Multiplayer Design (server architecture, sync requirements)
+   - Player Personas and FTUE (first-time user experience)
+   - Roblox Architecture (client/server structure, Rojo project layout)
+   - Data Model (PlayerData schema, DataStore strategy)
+   - Client-Server Communication (RemoteEvents/RemoteFunctions)
+   - Security Model (server authority, anti-cheat)
+   - Monetization (GamePasses, DevProducts)
+   - Moderation & Safety
 {% else %}
    Use the template at `prd/templates/PRD-TEMPLATE-GENERIC.md` as your guide. This template includes:
    - Standard PRD sections (Overview, Background, Users, Requirements)
@@ -263,7 +290,7 @@ Before asking for approval, validate the PRD against quality standards. Present 
 2. **Unmeasurable Metrics**: Success metrics without numbers, percentages, or clear criteria
 3. **Requirements Missing Criteria**: Functional requirements without "shall" or acceptance criteria
 4. **Missing NFRs for Project Type**:
-{% if project_type == 'api' %}   - API projects should have security/auth and performance NFRs{% elif project_type == 'fullstack' %}   - Full-stack projects should have security/auth and performance NFRs{% elif project_type == 'library' %}   - Library projects should have compatibility and documentation NFRs{% elif project_type == 'cli' %}   - CLI projects should have usability and error handling NFRs{% endif %}
+{% if project_type == 'api' %}   - API projects should have security/auth and performance NFRs{% elif project_type == 'fullstack' %}   - Full-stack projects should have security/auth and performance NFRs{% elif project_type == 'library' %}   - Library projects should have compatibility and documentation NFRs{% elif project_type == 'cli' %}   - CLI projects should have usability and error handling NFRs{% elif project_type == 'roblox' %}   - Roblox projects should have performance (FPS, loading), data persistence, and multiplayer sync NFRs{% endif %}
 
 5. **Large Scope Without Phasing**: More than 10 requirements without clear milestone breakdown
 
@@ -449,6 +476,17 @@ Start with mode selection, then adapt based on project type:
 6. "How will users authenticate?"
 7. "What's the deployment target? (cloud, self-hosted, etc.)"
 8. (Follow-ups based on answers)
+{% elif project_type == 'roblox' %}
+### Roblox Project Flow
+1. Mode selection (full interview vs one-shot)
+2. "What kind of game is this? (genre, inspiration, reference games)"
+3. "Who is the target audience? (age range, play style)"
+4. "What is the core gameplay loop? (action → reward → progression)"
+5. "Is this multiplayer? How many players per server? What needs to sync?"
+6. "What player data needs to persist? (progression, inventory, currency)"
+7. "How will the game be monetized? (game passes, developer products)"
+8. "What platforms do you want to support? (PC, mobile, console, VR)"
+9. (Follow-ups based on answers)
 {% else %}
 ### General Project Flow
 1. Mode selection (full interview vs one-shot)
