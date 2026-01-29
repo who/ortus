@@ -118,6 +118,56 @@ cargo test
 cargo clippy
 ```
 
+{%- elif language == 'luau' %}
+
+```bash
+{%- if package_manager == 'wally' %}
+# Install packages with Wally
+wally install
+{%- elif package_manager == 'rotriever' %}
+# Install packages with Rotriever
+rotrieve install
+{%- endif %}
+
+# Build Roblox place file
+rojo build -o {{ project_name }}.rbxlx
+
+# Serve with live-sync (open Roblox Studio and connect via Rojo plugin)
+rojo serve
+
+# Lint code
+{%- if linter == 'selene' %}
+selene src/
+{%- elif linter == 'luau-lsp' %}
+luau-lsp analyze src/
+{%- endif %}
+
+# Format code
+stylua src/
+```
+
+### Rojo Workflow
+
+1. **Install the Rojo plugin** in Roblox Studio ([Rojo plugin](https://www.roblox.com/library/13916111412/Rojo))
+2. **Run `rojo serve`** in your terminal
+3. **Connect from Studio** using the Rojo plugin
+4. **Edit code externally** — changes sync automatically to Studio
+
+### Project Structure
+
+```
+{{ project_name }}/
+├── default.project.json    # Rojo project config
+{%- if package_manager == 'wally' %}
+├── wally.toml              # Wally package manifest
+├── Packages/               # Installed packages (gitignored)
+{%- endif %}
+└── src/
+    ├── server/             # ServerScriptService scripts
+    ├── client/             # StarterPlayerScripts scripts
+    └── shared/             # ReplicatedStorage modules
+```
+
 {%- else %}
 
 ```bash
@@ -200,6 +250,15 @@ bd stats             # Project statistics
 ├── src/                  # Source code
 │   └── main.rs           # Entrypoint
 ├── tests/                # Integration tests
+{%- elif language == 'luau' %}
+├── default.project.json  # Rojo project configuration
+{%- if package_manager == 'wally' %}
+├── wally.toml            # Wally package manifest
+{%- endif %}
+├── src/                  # Game source code
+│   ├── server/           # Server-side scripts
+│   ├── client/           # Client-side scripts
+│   └── shared/           # Shared modules
 {%- endif %}
 ├── ortus/                # Ortus automation scripts and prompts
 │   └── prompts/          # AI prompt templates
