@@ -78,6 +78,17 @@ cargo clippy        # Lint
 {%- endif %}
 cargo fmt --check   # Format
 ```
+{%- elif language == 'luau' %}
+
+```bash
+rojo build -o build.rbxl                    # Build Roblox place
+{%- if linter == 'selene' %}
+selene src/                                 # Lint (selene)
+{%- elif linter == 'luau-lsp' %}
+luau-lsp analyze src/                       # Lint (luau-lsp)
+{%- endif %}
+stylua --check src/                         # Format check
+```
 {%- else %}
 
 <!-- TODO: Add your project verification commands here -->
@@ -182,4 +193,18 @@ Only work on issues that have no unresolved blockers (i.e., issues shown by `bd 
 ## Project-Specific Notes
 
 - API runs on port 8000 by default
+{%- endif %}
+{%- if language == 'luau' %}
+
+## Project-Specific Notes
+
+- Use `rojo serve` for live sync to Roblox Studio
+- Run `rojo build -o build.rbxl` to generate place file
+{%- if package_manager == 'wally' %}
+- Install packages with `wally install`
+{%- elif package_manager == 'rotriever' %}
+- Install packages with `rotrieve install`
+{%- endif %}
+- Client code goes in `src/client/`, server code in `src/server/`, shared in `src/shared/`
+- All server-side code runs with elevated privileges — validate all client inputs
 {%- endif %}
