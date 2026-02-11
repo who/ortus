@@ -89,7 +89,7 @@ Reasoning and action are interleaved automatically. You do not need to plan ever
 
 ## Context Management
 
-- Fresh ~200K token window per invocation — this is your budget, spend it wisely
+- Fresh ~200K token window per invocation (1M available in beta for tier 4+ orgs) — 200K is the recommended default for Ralph loops; larger windows cost more and rarely improve single-task execution
 - 40-60% utilization is the "smart zone" — past 60% model quality degrades, past 80% you are in trouble
 - Never load large files into the main context — use subagents to read and summarize
 - Keep AGENTS.md operational and brief (~60 lines) — it is loaded every invocation
