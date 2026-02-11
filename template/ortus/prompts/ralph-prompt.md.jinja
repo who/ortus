@@ -161,6 +161,7 @@ Reasoning and action are interleaved automatically. You do not need to plan ever
 - Keep AGENTS.md operational and brief (~60 lines) — it is loaded every invocation
 - Prefer markdown over JSON for LLM communication — fewer tokens, same information
 - One tight, well-scoped task = 100% smart zone utilization
+- If a single task generates massive tool output approaching the context limit, the Compaction API can summarize earlier turns automatically — but this is rare with well-scoped tasks
 
 ## Important Rules
 
