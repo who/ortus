@@ -2,9 +2,58 @@
 # Watch log files in logs/ and format JSON output nicely
 # Tails files that are being actively updated
 
-LOGS_DIR="${1:-./logs}"
+# Resolve logs dir relative to script location (works from any directory)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Defaults
+LOGS_DIR="$PROJECT_ROOT/logs"
 SHOW_TOOLS="${SHOW_TOOLS:-false}"
 SHOW_SYSTEM="${SHOW_SYSTEM:-false}"
+ASSISTANT_ONLY="${ASSISTANT_ONLY:-false}"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -a|--assistant)
+            # Show only assistant messages
+            ASSISTANT_ONLY=true
+            shift
+            ;;
+        -v|--verbose)
+            SHOW_TOOLS=true
+            SHOW_SYSTEM=true
+            shift
+            ;;
+        -t|--tools)
+            SHOW_TOOLS=true
+            shift
+            ;;
+        -s|--system)
+            SHOW_SYSTEM=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: tail.sh [OPTIONS] [LOGS_DIR]"
+            echo ""
+            echo "Options:"
+            echo "  -a, --assistant  Show assistant messages only"
+            echo "  -v, --verbose    Show all output (tools + system)"
+            echo "  -t, --tools      Show tool calls"
+            echo "  -s, --system     Show system messages"
+            echo "  -h, --help       Show this help"
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            LOGS_DIR="$1"
+            shift
+            ;;
+    esac
+done
 
 # Color support detection
 # Respects NO_COLOR (https://no-color.org/) and checks terminal capabilities
@@ -97,8 +146,10 @@ format_line() {
 
         case "$type" in
             USER)
-                echo -e "\n${BOLD}${BLUE}>>> USER${RESET}"
-                echo -e "${BLUE}$content${RESET}"
+                if [ "$ASSISTANT_ONLY" != "true" ]; then
+                    echo -e "\n${BOLD}${BLUE}>>> USER${RESET}"
+                    echo -e "${BLUE}$content${RESET}"
+                fi
                 ;;
             ASSISTANT)
                 echo -e "\n${BOLD}${GREEN}<<< ASSISTANT${RESET}"
