@@ -46,10 +46,21 @@ If verification fails, fix the issue and re-verify. This is backpressure — kee
 
 ## Subagent Strategy
 
-Use the Task tool to delegate work efficiently:
-- **Search/Read tasks** (exploring codebase, finding files, reading context): Launch up to 500 Sonnet subagents in parallel
-- **Build/Test tasks** (running builds, tests, linting): 1 subagent at a time
-- **Complex reasoning** (architecture decisions, tricky bugs): Use Opus
+**Three principles:**
+1. **Main context = scheduler only** — never do leaf work in the main context
+2. **Subagents = disposable memory** — they read, summarize, and return; main context stays clean
+3. **Simplicity wins** — prefer many simple subagents over few complex ones
+
+**Allocation table:**
+
+| Category | Model | Parallelism | Examples |
+|----------|-------|-------------|----------|
+| Reads | Sonnet | up to 500 parallel | explore codebase, find files, read context, summarize |
+| Writes | Sonnet | N parallel | implement changes, create files, edit code |
+| Validation | Sonnet | exactly 1 serial | run tests, linting, builds |
+| Reasoning | Opus | 1 | architecture decisions, tricky bugs, security review |
+
+**Why exactly 1 for validation:** All write subagents funnel through a single validation gate. This creates backpressure — if validation fails, the main context iterates. Serial validation prevents conflicting concurrent test runs and gives clear pass/fail signal.
 
 ## Ultrathink Directive
 
