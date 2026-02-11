@@ -108,6 +108,34 @@ cargo fmt --check   # Format
 - If all children are closed, close with `bd close <id> --reason="All child issues complete"`
 - If children remain open, output `<promise>BLOCKED</promise>` — the loop will retry later
 
+## Subagent Strategy
+
+**Three principles:**
+1. **Main context = scheduler only** — never do leaf work in the main context
+2. **Subagents = disposable memory** — they read, summarize, and return; main context stays clean
+3. **Simplicity wins** — prefer many simple subagents over few complex ones
+
+**Allocation table:**
+
+| Category | Model | Parallelism | Examples |
+|----------|-------|-------------|----------|
+| Reads | Sonnet | up to 500 parallel | explore codebase, find files, read context, summarize |
+| Writes | Sonnet | N parallel | implement changes, create files, edit code |
+| Validation | Sonnet | exactly 1 serial | run tests, linting, builds |
+| Reasoning | Opus | 1 | architecture decisions, tricky bugs, security review |
+
+**Why exactly 1 for validation:** All write subagents funnel through a single validation gate. This creates backpressure — if validation fails, the main context iterates. Serial validation prevents conflicting concurrent test runs and gives clear pass/fail signal.
+
+## Ultrathink Directive
+
+For complex problems requiring deep reasoning:
+- Architecture decisions spanning multiple files
+- Debugging subtle or intermittent issues
+- Performance optimization trade-offs
+- Security-sensitive code paths
+
+Use extended thinking to reason through the problem before implementing.
+
 ## Important Rules
 
 - **One issue per iteration** - Do not work on multiple issues
