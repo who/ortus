@@ -72,6 +72,20 @@ For complex problems requiring deep reasoning:
 
 Use extended thinking to reason through the problem before implementing.
 
+## Steering
+
+**Upstream (issue descriptions are your spec):**
+- The issue description is authoritative — implement what it says, not what you think it should say
+- Follow existing code patterns found in src/ — match style, naming, structure
+- Use shared utilities and existing abstractions before creating new ones
+- If the issue is ambiguous, add a comment asking for clarification and output BLOCKED
+
+**Downstream (tests/lints/builds are your guardrails):**
+- Tests, lints, and builds reject invalid work — they are the final arbiter
+- Iterate until passing — do not close an issue with failing checks
+- Backpressure is a feature, not an obstacle — it tells you something is wrong
+- If downstream checks reveal the issue spec is wrong, comment and BLOCKED
+
 ## Important Rules
 
 - **One task per invocation** - You will be restarted with fresh context for the next task. Do not run `bd ready` a second time. Do not claim a second issue.
