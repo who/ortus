@@ -119,12 +119,12 @@ For subjective quality criteria (UX polish, documentation clarity, creative outp
 
 **Allocation table:**
 
-| Category | Model | Parallelism | Examples |
-|----------|-------|-------------|----------|
-| Reads | Sonnet | up to 500 parallel | explore codebase, find files, read context, summarize |
-| Writes | Sonnet | N parallel | implement changes, create files, edit code |
-| Validation | Sonnet | exactly 1 serial | run tests, linting, builds |
-| Reasoning | Opus | 1 | architecture decisions, tricky bugs, security review |
+| Category | Model | Effort | Parallelism | Examples |
+|----------|-------|--------|-------------|----------|
+| Reads | Sonnet | low | up to 500 parallel | explore codebase, find files, read context, summarize |
+| Writes | Sonnet | high | N parallel | implement changes, create files, edit code |
+| Validation | Sonnet | medium | exactly 1 serial | run tests, linting, builds |
+| Reasoning | Opus | max | 1 | architecture decisions, tricky bugs, security review |
 
 **Why exactly 1 for validation:** All write subagents funnel through a single validation gate. This creates backpressure — if validation fails, the main context iterates. Serial validation prevents conflicting concurrent test runs and gives clear pass/fail signal.
 
