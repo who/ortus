@@ -88,6 +88,8 @@ cargo fmt --check   # Format
 ```
 {%- endif %}
 
+For subjective quality criteria (UX polish, documentation clarity, creative output) where automated tests cannot provide a pass/fail signal, use LLM-as-Judge: spawn a subagent to evaluate the output against the acceptance criteria with a binary pass/fail verdict. Treat a "fail" verdict the same as a failing test — iterate until it passes.
+
 ## Issue Type Rules
 
 **task** — Implement exactly what's specified:
