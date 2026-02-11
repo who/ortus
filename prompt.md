@@ -86,6 +86,15 @@ Use extended thinking to reason through the problem before implementing.
 - Backpressure is a feature, not an obstacle — it tells you something is wrong
 - If downstream checks reveal the issue spec is wrong, comment and BLOCKED
 
+## Context Management
+
+- Fresh ~200K token window per invocation — this is your budget, spend it wisely
+- 40-60% utilization is the "smart zone" — past 60% model quality degrades, past 80% you are in trouble
+- Never load large files into the main context — use subagents to read and summarize
+- Keep AGENTS.md operational and brief (~60 lines) — it is loaded every invocation
+- Prefer markdown over JSON for LLM communication — fewer tokens, same information
+- One tight, well-scoped task = 100% smart zone utilization
+
 ## Important Rules
 
 - **One task per invocation** - You will be restarted with fresh context for the next task. Do not run `bd ready` a second time. Do not claim a second issue.
