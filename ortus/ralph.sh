@@ -1,10 +1,10 @@
 #!/bin/bash
 # ralph.sh - Autonomous task execution loop
 #
-# Usage: ./ralph.sh [--fast] [--idle-sleep N]
+# Usage: ./ortus/ralph.sh [--fast] [--idle-sleep N]
 #
 # Runs until all ready work is complete. Logs to logs/ralph-<timestamp>.log
-# Watch live: tail -f logs/ralph-*.log
+# Watch live: ./ortus/tail.sh or tail -f logs/ralph-*.log
 
 set -e
 
@@ -15,7 +15,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --fast) FAST_MODE="--fast"; shift ;;
     --idle-sleep) IDLE_SLEEP="$2"; shift 2 ;;
-    -h|--help) head -n 8 "$0" | tail -n +2 | sed 's/^# //'; exit 0 ;;
+    -h|--help) head -n 20 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -28,8 +28,11 @@ log "=== Ralph Started ==="
 if [ -n "$FAST_MODE" ]; then
   log "Fast mode: enabled (2.5x faster output, premium pricing)"
 fi
+log "Idle sleep: ${IDLE_SLEEP}s"
 log "Log file: $LOG_FILE"
-log "Watch live: tail -f $LOG_FILE"
+log "Watch live:"
+log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
+log "  Raw output:     tail -f $LOG_FILE"
 
 tasks_completed=0
 
@@ -37,7 +40,7 @@ while true; do
   log ""
   log "--- Starting iteration ---"
 
-  result=$(claude -p "$(cat prompt.md)" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE") || true
+  result=$(claude -p "$(cat "$(dirname "$0")/prompts/ralph-prompt.md")" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE") || true
 
   if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
     tasks_completed=$((tasks_completed + 1))

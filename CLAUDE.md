@@ -21,7 +21,7 @@ When asked to implement features, fix bugs, or make code changes:
 1. **Do NOT implement directly** - Instead, create beads issues with detailed descriptions
 2. **Create well-structured issues** - Use `bd create` with clear titles, descriptions, and acceptance criteria
 3. **Set up dependencies** - Use `bd dep add` to establish proper ordering
-4. **Defer to Ralph** - The `ralph.sh` loop will execute the actual work via PROMPT.md
+4. **Defer to Ralph** - The `ortus/ralph.sh` loop will execute the actual work via `ortus/prompts/ralph-prompt.md`
 
 **Allowed without Ralph loop:**
 - Answering questions about the codebase
@@ -108,16 +108,23 @@ fd -e ext                       # All files with extension
 ### File Structure
 
 ```
-ortus/
-├── template/                 # Copier template files
-│   ├── prompts/              # Prompt templates
-│   ├── prd/                  # PRD generation templates
+ortus/                        # Project root
+├── ortus/                    # Ortus tooling (matches generated project layout)
 │   ├── ralph.sh              # Ralph automation loop
+│   ├── tail.sh               # Log viewer
+│   ├── idea.sh               # Quick feature creation
+│   ├── interview.sh          # Interactive interview → PRD → tasks
+│   └── prompts/
+│       ├── ralph-prompt.md   # Ralph loop prompt
+│       └── prd-prompt.md     # PRD generation prompt
+├── template/                 # Copier template files
+│   ├── ortus/                # Template version of ortus/ tooling
 │   └── *.jinja               # Jinja-templated files
 ├── copier.yaml               # Template configuration
 ├── .beads/                   # Issue tracking
-├── .claude/                  # Claude Code settings
-└── CLAUDE.md                 # This file
+├── AGENTS.md                 # Session rules
+├── CLAUDE.md                 # This file
+└── .claude/                  # Claude Code settings
 ```
 
 ## Issue Tracking
