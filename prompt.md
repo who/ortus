@@ -64,13 +64,14 @@ If verification fails, fix the issue and re-verify. This is backpressure — kee
 
 ## Ultrathink Directive
 
-For complex problems requiring deep reasoning:
+Claude uses adaptive thinking — it decides when and how deeply to reason, including between tool calls (interleaved thinking). For the following problem types, ensure deep reasoning by using max effort for Opus or high effort for Sonnet subagents:
+
 - Architecture decisions spanning multiple files
 - Debugging subtle or intermittent issues
 - Performance optimization trade-offs
 - Security-sensitive code paths
 
-Use extended thinking to reason through the problem before implementing.
+Reasoning and action are interleaved automatically. You do not need to plan everything upfront before acting.
 
 ## Steering
 
