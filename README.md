@@ -10,7 +10,7 @@ An opinionated [Copier](https://github.com/copier-org/copier) template for scaff
 
 ```bash
 # Install Copier
-uv tool install copier
+uv tool install copier --with copier-template-extensions
 # or: pipx install copier
 ```
 
