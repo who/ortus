@@ -60,8 +60,6 @@ if ! copier copy --defaults --trust --skip-tasks \
   --data package_manager=uv \
   --data framework=none \
   --data linter=ruff \
-  --data license=MIT \
-  --data project_type=other \
   "$ORTUS_DIR" "$TEST_DIR/project" 2>&1; then
   log_error "Copier template generation failed"
   log_error "This may indicate malformed --data flags or template errors"

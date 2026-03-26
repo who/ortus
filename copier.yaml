@@ -50,85 +50,23 @@ author_email:
 
 language:
   type: str
-  help: Primary programming language
-  choices:
-    TypeScript: typescript
-    Python: python
-    Go: go
-    Rust: rust
-    Other: other
-  default: typescript
+  default: python
+  when: false
 
 package_manager:
   type: str
-  help: Package manager to use
-  choices: >-
-    {% if language == 'typescript' %}
-    {"bun": "bun", "npm": "npm", "pnpm": "pnpm", "yarn": "yarn", "None": "none"}
-    {% elif language == 'python' %}
-    {"uv": "uv", "pip": "pip", "None": "none"}
-    {% elif language == 'go' %}
-    {"go mod": "gomod", "None": "none"}
-    {% elif language == 'rust' %}
-    {"cargo": "cargo", "None": "none"}
-    {% else %}
-    {"None": "none"}
-    {% endif %}
-  default: >-
-    {% if language == 'typescript' %}npm{% elif language == 'python' %}uv{% elif language == 'go' %}gomod{% elif language == 'rust' %}cargo{% else %}none{% endif %}
-  when: "{{ language != 'other' }}"
+  default: uv
+  when: false
 
 framework:
   type: str
-  help: Web framework (optional)
-  choices: >-
-    {% if language == 'typescript' %}
-    {"Next.js": "nextjs", "Express": "express", "None": "none"}
-    {% elif language == 'python' %}
-    {"FastAPI": "fastapi", "Flask": "flask", "Django": "django", "None": "none"}
-    {% elif language == 'go' %}
-    {"Gin": "gin", "None": "none"}
-    {% elif language == 'rust' %}
-    {"Actix": "actix", "Axum": "axum", "None": "none"}
-    {% else %}
-    {"None": "none"}
-    {% endif %}
   default: none
-  when: "{{ language != 'other' }}"
+  when: false
 
 linter:
   type: str
-  help: Linter to use
-  choices: >-
-    {% if language == 'typescript' %}
-    {"ESLint": "eslint", "None": "none"}
-    {% elif language == 'python' %}
-    {"ruff": "ruff", "None": "none"}
-    {% elif language == 'go' %}
-    {"golangci-lint": "golangci", "None": "none"}
-    {% elif language == 'rust' %}
-    {"clippy": "clippy", "None": "none"}
-    {% else %}
-    {"None": "none"}
-    {% endif %}
-  default: >-
-    {% if language == 'typescript' %}eslint{% elif language == 'python' %}ruff{% elif language == 'go' %}golangci{% elif language == 'rust' %}clippy{% else %}none{% endif %}
-  when: "{{ language != 'other' }}"
-
-# =============================================================================
-# Project Type
-# =============================================================================
-
-project_type:
-  type: str
-  help: What type of project is this?
-  choices:
-    API service (endpoints, schemas, auth): api
-    CLI tool (commands, flags, I/O): cli
-    Library/package (public API, versioning): library
-    Full-stack app (frontend + backend): fullstack
-    Other/Generic: other
-  default: other
+  default: ruff
+  when: false
 
 # =============================================================================
 # Repository
@@ -164,22 +102,6 @@ model_path:
   help: Path to your model config file (will be copied as MODEL.md, optional)
   default: ""
   when: "{{ has_script }}"
-
-# =============================================================================
-# Optional Features
-# =============================================================================
-
-license:
-  type: str
-  help: License for your project
-  choices:
-    MIT: MIT
-    Apache 2.0: Apache-2.0
-    GPL 3.0: GPL-3.0
-    BSD 3-Clause: BSD-3-Clause
-    Proprietary: proprietary
-    None: none
-  default: MIT
 
 # =============================================================================
 # Copier Settings

@@ -9,59 +9,27 @@ You are conducting a product requirements interview for the following feature:
 {% raw %}{{FEATURE_DESCRIPTION}}{% endraw %}
 
 ## Project Context
-**Project Type**: {{ project_type }}
+**Project Type**: Video Generation Pipeline
 
 ## Your Task
 
-Conduct a dynamic, conversational interview to gather the information needed to write a comprehensive PRD. The interview adapts based on the project type and the quality of user responses.
+Conduct a dynamic, conversational interview to gather the information needed to write a comprehensive PRD. The interview adapts based on the quality of user responses.
 
-### Core Topics (All Projects)
+### Core Topics
 1. **Problem Space** - What problem does this solve? Who experiences it? How painful is it?
 2. **Users & Personas** - Who are the primary users? What are their goals?
 3. **Scope** - What's in scope for v1? What should be explicitly out of scope?
 4. **Success Criteria** - How will we measure if this succeeded?
 5. **Technical Constraints** - Are there specific technologies, integrations, or limitations?
 
-{% if project_type == 'api' %}
-### API-Specific Topics
-When the project type is **API**, also cover:
-- **Endpoints**: What resources/operations are needed? RESTful or GraphQL?
-- **Authentication**: How will clients authenticate? (API keys, OAuth, JWT, etc.)
-- **Rate Limiting**: What usage limits are appropriate? Different tiers?
-- **Data Models**: What are the core entities and their relationships?
-- **Versioning**: How will API versions be managed?
-- **Error Handling**: What error responses should be standardized?
-{% elif project_type == 'cli' %}
-### CLI-Specific Topics
-When the project type is **CLI**, also cover:
-- **Commands**: What are the main commands and subcommands?
-- **Flags/Options**: What configuration options are needed? Types and defaults?
-- **Input Sources**: Where does input come from? (args, stdin, files, env vars)
-- **Output Formats**: What output formats? (human-readable, JSON, YAML, etc.)
-- **Exit Codes**: What exit codes for different scenarios?
-- **Shell Completion**: Should shell completions be generated?
-{% elif project_type == 'library' %}
-### Library-Specific Topics
-When the project type is **Library**, also cover:
-- **Public API**: What functions/classes should be exposed?
-- **Versioning**: What's the versioning strategy? Semver?
-- **Backwards Compatibility**: What's the breaking change policy?
-- **Dependencies**: What are acceptable dependencies? Version ranges?
-- **Documentation**: What documentation is required? (API docs, examples, guides)
-- **Target Environments**: What platforms/runtimes must be supported?
-{% elif project_type == 'fullstack' %}
-### Full-Stack-Specific Topics
-When the project type is **Full-Stack**, also cover:
-- **Architecture Split**: How is work divided between frontend and backend?
-- **API Contract**: How do frontend and backend communicate?
-- **State Management**: How is application state managed on the frontend?
-- **Authentication Flow**: How do users log in? Session vs JWT?
-- **Deployment**: How will this be deployed? Monorepo or separate deployments?
-- **Database**: What data persistence is needed?
-{% else %}
-### General Topics
-Since this is a general project, adapt questions to what seems most relevant based on the feature description. Ask about architecture, data flow, and integration points as they come up naturally.
-{% endif %}
+### Video Pipeline Topics
+Also cover:
+- **Scenes**: What scenes are needed? Descriptions, shot types, durations?
+- **Visual Style**: Color grading, camera movement, lighting requirements?
+- **Audio**: Ambient audio, music, voiceover requirements?
+- **Continuity**: Cross-scene consistency requirements (color, subjects, resolution)?
+- **Output**: Final video format, resolution, total duration?
+- **Provider**: Which video generation provider/model to use?
 
 ## Interview Guidelines
 
@@ -142,10 +110,7 @@ A: [Answer summary]
 | Scope | High/Medium/Low | [Brief note on coverage] |
 | Success Criteria | High/Medium/Low | [Brief note on coverage] |
 | Technical Constraints | High/Medium/Low | [Brief note on coverage] |
-{% if project_type == 'api' %}| API Design | High/Medium/Low | [Brief note on coverage] |{% endif %}
-{% if project_type == 'cli' %}| CLI Design | High/Medium/Low | [Brief note on coverage] |{% endif %}
-{% if project_type == 'library' %}| Library API | High/Medium/Low | [Brief note on coverage] |{% endif %}
-{% if project_type == 'fullstack' %}| Architecture | High/Medium/Low | [Brief note on coverage] |{% endif %}
+| Video Pipeline | High/Medium/Low | [Brief note on coverage] |
 
 **Overall Confidence**: [High/Medium/Low]
 ```
@@ -209,35 +174,11 @@ If approved, do the following in sequence:
 3. **Generate PRD document** using the appropriate template based on project type.
 
    **Template Selection**:
-{% if project_type == 'api' %}
-   Use the template at `prd/templates/PRD-TEMPLATE-API.md` as your guide. This template includes:
-   - API Design section (endpoints, authentication, rate limiting, error handling)
-   - Request/Response schemas
-   - Versioning strategy
-{% elif project_type == 'cli' %}
-   Use the template at `prd/templates/PRD-TEMPLATE-CLI.md` as your guide. This template includes:
-   - CLI Design section (commands, flags, input/output)
-   - Exit codes and error messages
-   - Shell completion considerations
-{% elif project_type == 'library' %}
-   Use the template at `prd/templates/PRD-TEMPLATE-LIBRARY.md` as your guide. This template includes:
-   - Library API section (public interface, types)
-   - Versioning and compatibility policies
-   - Documentation requirements
-{% elif project_type == 'fullstack' %}
-   Use the template at `prd/templates/PRD-TEMPLATE-FULLSTACK.md` as your guide. This template includes:
-   - Frontend and Backend architecture sections
-   - API contract between layers
-   - State management and authentication flow
-   - Database design and data flow
-   - Deployment considerations
-{% else %}
    Use the template at `prd/templates/PRD-TEMPLATE-GENERIC.md` as your guide. This template includes:
    - Standard PRD sections (Overview, Background, Users, Requirements)
    - System Architecture
    - Milestones & Phases
    - Epic Breakdown
-{% endif %}
 
    **Important**: Read the template file to understand the full structure, then fill it in with the information gathered from the interview. Adapt sections as needed based on interview responses - not every section may be relevant.
 
@@ -262,8 +203,8 @@ Before asking for approval, validate the PRD against quality standards. Present 
 1. **Thin Sections**: Any section with fewer than 30 words
 2. **Unmeasurable Metrics**: Success metrics without numbers, percentages, or clear criteria
 3. **Requirements Missing Criteria**: Functional requirements without "shall" or acceptance criteria
-4. **Missing NFRs for Project Type**:
-{% if project_type == 'api' %}   - API projects should have security/auth and performance NFRs{% elif project_type == 'fullstack' %}   - Full-stack projects should have security/auth and performance NFRs{% elif project_type == 'library' %}   - Library projects should have compatibility and documentation NFRs{% elif project_type == 'cli' %}   - CLI projects should have usability and error handling NFRs{% endif %}
+4. **Missing NFRs for Video Pipeline**:
+   - Video projects should have quality/resolution and continuity NFRs
 
 5. **Large Scope Without Phasing**: More than 10 requirements without clear milestone breakdown
 
@@ -407,58 +348,17 @@ After tasks are created, tell the user:
 
 ## Example Question Flow
 
-Start with mode selection, then adapt based on project type:
+Start with mode selection, then adapt based on responses:
 
-{% if project_type == 'api' %}
-### API Project Flow
+### Video Pipeline Flow
 1. Mode selection (full interview vs one-shot)
-2. "What specific problem does this API solve?"
-3. "Who will consume this API? (internal services, external developers, mobile apps)"
-4. "What are the core resources/endpoints you envision?"
-5. "How should clients authenticate with this API?"
-6. "What are your performance expectations? (requests/sec, latency)"
-7. "Are there existing systems this needs to integrate with?"
+2. "What specific problem are you trying to solve with this video?"
+3. "Who is the target audience for this video?"
+4. "What scenes do you envision? Describe the key moments."
+5. "What visual style are you going for? (color grading, camera movement, lighting)"
+6. "What are the audio requirements? (ambient, music, voiceover)"
+7. "What's the target duration and resolution?"
 8. (Follow-ups based on answers)
-{% elif project_type == 'cli' %}
-### CLI Project Flow
-1. Mode selection (full interview vs one-shot)
-2. "What specific problem does this CLI tool solve?"
-3. "Who is the target user? (developers, ops, end users)"
-4. "What are the main commands you envision?"
-5. "Where will input come from? (args, files, stdin, interactive)"
-6. "What output formats do you need? (human-readable, JSON, etc.)"
-7. "Should this support shell completions?"
-8. (Follow-ups based on answers)
-{% elif project_type == 'library' %}
-### Library Project Flow
-1. Mode selection (full interview vs one-shot)
-2. "What specific problem does this library solve?"
-3. "Who will use this library? (internal teams, open source community)"
-4. "What are the key functions or classes you envision exposing?"
-5. "What platforms/runtimes must this support?"
-6. "What's your approach to versioning and breaking changes?"
-7. "What dependencies are acceptable?"
-8. (Follow-ups based on answers)
-{% elif project_type == 'fullstack' %}
-### Full-Stack Project Flow
-1. Mode selection (full interview vs one-shot)
-2. "What specific problem does this application solve?"
-3. "Who are the primary users and what's their workflow?"
-4. "What's the frontend technology preference?"
-5. "What data needs to be persisted? (database requirements)"
-6. "How will users authenticate?"
-7. "What's the deployment target? (cloud, self-hosted, etc.)"
-8. (Follow-ups based on answers)
-{% else %}
-### General Project Flow
-1. Mode selection (full interview vs one-shot)
-2. "What specific problem are you trying to solve with this feature?"
-3. "Who are the primary users, and what's their current workflow?"
-4. "What does success look like? How would you measure it?"
-5. "What should definitely NOT be included in the first version?"
-6. "Are there any technical constraints or existing systems this needs to integrate with?"
-7. (Follow-ups based on answers)
-{% endif %}
 
 ## Starting the Interview
 
@@ -471,11 +371,11 @@ Do NOT output any text before calling AskUserQuestion. Do NOT greet the user in 
 Your FIRST AskUserQuestion must ask the user whether they want to do a full interview or skip to one-shot PRD generation:
 
 ```
-question: "Hi! I'm here to help you define requirements for '{% raw %}{{FEATURE_TITLE}}{% endraw %}'. This is a {{ project_type }} project. Would you like to go through a full interview, or skip directly to one-shot PRD generation?"
+question: "Hi! I'm here to help you define requirements for '{% raw %}{{FEATURE_TITLE}}{% endraw %}'. This is a video generation pipeline project. Would you like to go through a full interview, or skip directly to one-shot PRD generation?"
 header: "Mode"
 options:
   - label: "Full interview (Recommended)"
-    description: "Ask clarifying questions tailored to {{ project_type }} projects"
+    description: "Ask clarifying questions tailored to video pipeline projects"
   - label: "One-shot PRD"
     description: "Skip interview, generate PRD directly from idea description"
 ```

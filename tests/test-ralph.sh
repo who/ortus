@@ -213,7 +213,6 @@ copier copy --defaults --trust --skip-tasks \
   --data package_manager=uv \
   --data framework=none \
   --data linter=ruff \
-  --data license=MIT \
   "$ORTUS_DIR" "$TEST_DIR/testproj"
 
 cd "$TEST_DIR/testproj"
