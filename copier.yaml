@@ -12,7 +12,7 @@ _message_before_copy: |
   - Beads issue tracking
   - Claude Code configuration
   - Ralph loop automation
-  - PRD templates
+  - Video generation pipeline
 
 _message_after_copy: |
   Project created successfully!
@@ -140,18 +140,30 @@ github_username:
   default: ""
 
 # =============================================================================
-# PRD Intake
+# Script Intake
 # =============================================================================
 
-has_prd:
+has_script:
   type: bool
-  help: Do you have a PRD (Product Requirements Document)?
+  help: Do you have a video script (SCRIPT.md)?
   default: false
 
-prd_path:
+script_path:
   type: str
-  help: Path to your PRD file (will be copied into project)
-  when: "{{ has_prd }}"
+  help: Path to your video script file (will be copied as SCRIPT.md)
+  when: "{{ has_script }}"
+
+style_path:
+  type: str
+  help: Path to your style guide file (will be copied as STYLE.md, optional)
+  default: ""
+  when: "{{ has_script }}"
+
+model_path:
+  type: str
+  help: Path to your model config file (will be copied as MODEL.md, optional)
+  default: ""
+  when: "{{ has_script }}"
 
 # =============================================================================
 # Optional Features
@@ -186,10 +198,12 @@ _skip_if_exists:
   - ".beads/*"
 
 _tasks:
-  - "chmod +x ortus/ralph.sh ortus/interview.sh ortus/idea.sh ortus/tail.sh"
+  - "chmod +x ortus/ralph.sh ortus/setup-video-beads.sh ortus/idea.sh ortus/tail.sh"
   - "git init"
   - "bd init"
   - "bd setup claude"
-  - "{{ 'cp \"' + prd_path + '\" prd/intake.md' if has_prd else 'true' }}"
+  - "{{ 'cp \"' + script_path + '\" SCRIPT.md' if has_script else 'true' }}"
+  - "{{ 'cp \"' + style_path + '\" STYLE.md' if has_script and style_path else 'true' }}"
+  - "{{ 'cp \"' + model_path + '\" MODEL.md' if has_script and model_path else 'true' }}"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
-  - "./ortus/idea.sh{{ ' --prd prd/intake.md' if has_prd else '' }}"
+  - "./ortus/idea.sh{{ ' --script SCRIPT.md' if has_script else '' }}"
