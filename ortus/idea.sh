@@ -4,7 +4,7 @@
 # Usage: ./ortus/idea.sh                           # Interactive menu
 #        ./ortus/idea.sh "Your idea description"   # Create from idea
 #        ./ortus/idea.sh --script <path>           # Process existing video script
-#        ./ortus/idea.sh --prd "Your idea"         # Create feature + run PRD interview
+#        ./ortus/idea.sh --prd <path>              # Attach existing PRD, skip interview
 #
 # Creates a feature bead. After creating the idea:
 #   ./ortus/setup-video-beads.sh  # Set up video generation tasks from script
@@ -63,37 +63,44 @@ handle_script() {
     echo "cd $(basename "$project_dir") && ./ortus/ralph.sh"
 }
 
-# Handle PRD interview flow
+# Handle PRD file intake flow (skip interview, attach directly)
 handle_prd() {
-    local idea="${1:-}"
+    local prd_path="${1:-}"
 
-    if [[ -z "$idea" ]]; then
-        echo "What's your idea?"
-        read -r -p "> " idea
-        if [[ -z "$idea" ]]; then
-            echo "No idea provided. Exiting."
+    if [[ -z "$prd_path" ]]; then
+        echo "What's the path to your PRD document?"
+        read -r -p "> " prd_path
+        if [[ -z "$prd_path" ]]; then
+            echo "No path provided. Exiting."
             exit 1
         fi
     fi
 
-    echo "Creating feature from your idea..."
-    description=$(claude --print "You are helping a developer capture a feature idea. Up-sample this brief idea into a 2-3 sentence feature description. Be concise and specific about what the feature should do. Output ONLY the description text, nothing else.
+    prd_path=$(realpath "$prd_path" 2>/dev/null || echo "$prd_path")
 
-Idea: $idea")
-
-    local feature_id
-    if [[ -z "$description" ]]; then
-        feature_id=$(bd create --title="$idea" --type=feature --json | jq -r '.id')
-    else
-        feature_id=$(bd create --title="$idea" --type=feature --body="$description" --json | jq -r '.id')
+    if [[ ! -f "$prd_path" ]]; then
+        echo "Hmm, I can't find a file at '$prd_path'. Double-check the path?"
+        exit 1
     fi
 
-    echo ""
-    echo "Feature created: $feature_id"
-    echo "Starting PRD interview..."
-    echo ""
+    # Extract title from the first heading or filename
+    local title
+    title=$(grep -m1 '^#' "$prd_path" | sed 's/^#\+[[:space:]]*//' || true)
+    if [[ -z "$title" ]]; then
+        title=$(basename "$prd_path" | sed 's/\.[^.]*$//')
+    fi
 
-    "$SCRIPT_DIR/interview.sh" "$feature_id"
+    echo "Attaching PRD to new feature: $title"
+
+    local feature_id
+    feature_id=$(bd create --title="$title" --type=feature --body-file="$prd_path" --labels="prd:ready" --json | jq -r '.id')
+
+    echo ""
+    echo "Feature created: $feature_id (label: prd:ready)"
+    echo "PRD attached — Ralph can begin task breakdown immediately."
+    echo ""
+    echo "Next step:"
+    echo "  ./ortus/ralph.sh"
 }
 
 # Handle idea intake flow
@@ -142,7 +149,12 @@ fi
 
 # Check for --prd flag
 if [[ "${1:-}" == "--prd" ]]; then
-    handle_prd "${2:-}"
+    if [[ -z "${2:-}" ]]; then
+        echo "Error: --prd requires a path to a PRD document"
+        echo "Usage: ./ortus/idea.sh --prd <path>"
+        exit 1
+    fi
+    handle_prd "$2"
     exit 0
 fi
 
