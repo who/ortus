@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffprobe *)",
+      "Bash(ffmpeg *)",
+      "Bash(python -m video.generate *)",
+      "Bash(python -m video.generate)",
+      "Bash(python -m video.verify.runner *)",
+      "Bash(python -m video.verify.runner)",
+      "Bash(python -m video.assemble.continuity *)",
+      "Bash(python -m video.assemble.continuity)",
+      "Bash(python -m video.assemble.stitch *)",
+      "Bash(python -m video.assemble.stitch)",
+      "Bash(./ortus/setup-video-beads.sh)"
+    ],
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(rm -rf *)",
+      "Bash(cat .env)",
+      "Bash(cat ~/.ssh/*)"
+    ]
+  }
+}
