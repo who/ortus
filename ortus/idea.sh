@@ -4,6 +4,7 @@
 # Usage: ./ortus/idea.sh                           # Interactive menu
 #        ./ortus/idea.sh "Your idea description"   # Create from idea
 #        ./ortus/idea.sh --script <path>           # Process existing video script
+#        ./ortus/idea.sh --prd "Your idea"         # Create feature + run PRD interview
 #
 # Creates a feature bead. After creating the idea:
 #   ./ortus/setup-video-beads.sh  # Set up video generation tasks from script
@@ -62,6 +63,39 @@ handle_script() {
     echo "cd $(basename "$project_dir") && ./ortus/ralph.sh"
 }
 
+# Handle PRD interview flow
+handle_prd() {
+    local idea="${1:-}"
+
+    if [[ -z "$idea" ]]; then
+        echo "What's your idea?"
+        read -r -p "> " idea
+        if [[ -z "$idea" ]]; then
+            echo "No idea provided. Exiting."
+            exit 1
+        fi
+    fi
+
+    echo "Creating feature from your idea..."
+    description=$(claude --print "You are helping a developer capture a feature idea. Up-sample this brief idea into a 2-3 sentence feature description. Be concise and specific about what the feature should do. Output ONLY the description text, nothing else.
+
+Idea: $idea")
+
+    local feature_id
+    if [[ -z "$description" ]]; then
+        feature_id=$(bd create --title="$idea" --type=feature --json | jq -r '.id')
+    else
+        feature_id=$(bd create --title="$idea" --type=feature --body="$description" --json | jq -r '.id')
+    fi
+
+    echo ""
+    echo "Feature created: $feature_id"
+    echo "Starting PRD interview..."
+    echo ""
+
+    "$SCRIPT_DIR/interview.sh" "$feature_id"
+}
+
 # Handle idea intake flow
 handle_idea() {
     local idea="${1:-}"
@@ -103,6 +137,12 @@ if [[ "${1:-}" == "--script" ]]; then
         exit 1
     fi
     handle_script "$2"
+    exit 0
+fi
+
+# Check for --prd flag
+if [[ "${1:-}" == "--prd" ]]; then
+    handle_prd "${2:-}"
     exit 0
 fi
 
