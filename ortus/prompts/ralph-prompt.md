@@ -14,7 +14,13 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 6. **Verify**: Run tests, linting, and builds (see Verification below). If they fail, fix and re-verify — this is backpressure, not a reason to stop.
 7. **Log**: Add structured completion comment (see format below)
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
-9. **Commit & Push**: Stage, commit with issue ID in message, then `git pull --rebase --autostash && bd dolt push && git push`
+9. **Commit & Push**: Stage, commit with issue ID in message, then run:
+
+       if [ -n "$(git remote)" ]; then
+         git pull --rebase --autostash && bd dolt push && git push
+       else
+         echo "No git remote configured; skipping push (local-only project)."
+       fi
 10. **Exit**: Output the appropriate signal (see Completion Signals) and stop. You are done. The loop will restart you for the next task.
 
 If you cannot complete the claimed issue (dependency, technical blocker, persistent test failure you cannot resolve), add a comment explaining the blocker via `bd comments add <id> "..."`, then output `<promise>BLOCKED</promise>` and stop.
