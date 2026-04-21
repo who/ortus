@@ -175,71 +175,23 @@ run_interview() {
   prompt_tmpfile=$(mktemp)
   trap "rm -f '$prompt_tmpfile'" EXIT
 
-  # Build the system prompt with feature context
-  cat > "$prompt_tmpfile" <<EOF
-You are conducting a product requirements interview for the following feature:
-
-## Feature Details
-**ID**: ${feature_id}
-**Title**: ${feature_title}
-**Description**:
-${feature_description}
-
-## Your Task
-
-Conduct a dynamic, conversational interview to gather the information needed to write a comprehensive PRD. Ask 5-8 targeted questions covering:
-
-1. **Problem Space** - What problem does this solve? Who experiences it? How painful is it?
-2. **Users & Personas** - Who are the primary users? What are their goals?
-3. **Scope** - What's in scope for v1? What should be explicitly out of scope?
-4. **Success Criteria** - How will we measure if this succeeded?
-5. **Technical Constraints** - Are there specific technologies, integrations, or limitations?
-6. **Timeline & Priority** - Any deadlines? How does this compare to other work?
-
-## Interview Guidelines
-
-- Use the AskUserQuestion tool to ask each question
-- Adapt follow-up questions based on previous answers
-- Don't ask about topics already clear from the description
-- Keep questions focused and specific
-- After each answer, save it as a comment on the feature bead using: bd comments add ${feature_id} "<answer summary>"
-
-## Completing the Interview
-
-When you have gathered sufficient information (usually 5-8 questions):
-1. Save a final summary comment with key insights
-2. Add the 'interviewed' label: bd label add ${feature_id} interviewed
-3. Thank the user, explain next steps (PRD and tasks will be generated), and prompt them to exit:
-   - Tell the user: "The interview is complete! Please type /exit or press Ctrl+C to exit this Claude session."
-   - IMPORTANT: Always end with a clear prompt telling the user to exit the session
-
-## CRITICAL: Start Immediately with AskUserQuestion
-
-**Your FIRST action MUST be to call the AskUserQuestion tool.** Do NOT output any text before calling AskUserQuestion. Your very first action must be a tool call containing your greeting AND first question together.
-
-Example first AskUserQuestion call:
-- question: "Hi! I'm here to help clarify requirements for your feature. What specific problem are you trying to solve?"
-- header: "Problem"
-- options: User pain point, Missing capability, Process improvement
-
-Do NOT greet the user in a text response first. Immediately call AskUserQuestion as your first action.
-EOF
-
-  # Check if interview-prompt.md exists and use it instead
-  # (Use script-relative path so script works from any directory)
+  # Read prompt from file (single source of truth; no inline fallback)
+  # Use script-relative path so script works from any directory
   local prompt_file="$(dirname "$0")/prompts/interview-prompt.md"
-  if [ -f "$prompt_file" ]; then
-    # Read the prompt file and substitute variables using awk for safety
-    # (handles special characters in descriptions)
-    awk -v id="$feature_id" -v title="$feature_title" -v desc="$feature_description" '
-      {
-        gsub(/\{\{FEATURE_ID\}\}/, id)
-        gsub(/\{\{FEATURE_TITLE\}\}/, title)
-        gsub(/\{\{FEATURE_DESCRIPTION\}\}/, desc)
-        print
-      }
-    ' "$prompt_file" > "$prompt_tmpfile"
+  if [ ! -f "$prompt_file" ]; then
+    echo_error "ERROR: interview prompt not found at $prompt_file — this is the single source of truth; please restore it."
+    exit 1
   fi
+
+  # Substitute variables using awk for safety (handles special characters in descriptions)
+  awk -v id="$feature_id" -v title="$feature_title" -v desc="$feature_description" '
+    {
+      gsub(/\{\{FEATURE_ID\}\}/, id)
+      gsub(/\{\{FEATURE_TITLE\}\}/, title)
+      gsub(/\{\{FEATURE_DESCRIPTION\}\}/, desc)
+      print
+    }
+  ' "$prompt_file" > "$prompt_tmpfile"
 
   # Initial prompt message to kick off the conversation
   # CRITICAL: This must instruct Claude to use AskUserQuestion as its FIRST action
@@ -249,7 +201,7 @@ EOF
   # This approach ensures Claude immediately processes the prompt and executes tool calls
   #
   # The prompt is structured as:
-  # 1. System instructions (from INTERVIEW-PROMPT.md or fallback)
+  # 1. System instructions (from prompts/interview-prompt.md)
   # 2. Explicit instruction to start immediately with AskUserQuestion
   #
   # We pipe to stdin because this triggers immediate execution vs positional args
