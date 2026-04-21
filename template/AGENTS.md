@@ -12,7 +12,7 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads to Dolt remote
 ```
 
-## Landing the Plane (Session Completion)
+## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 
