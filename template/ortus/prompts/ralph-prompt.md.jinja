@@ -6,7 +6,7 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 
 ## Your Task
 
-1. **Orient**: Run `bd activity --limit 10 --json | jq -r '.[].issue_id' | sort -u | xargs -I{} sh -c 'echo "=== {} ===" && bd comments {} 2>/dev/null'` to see what happened in previous loops
+1. **Orient**: Run `bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json` to see what happened in previous loops
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
 4. **Investigate**: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
@@ -14,7 +14,13 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 6. **Verify**: Run tests, linting, and builds (see Verification below). If they fail, fix and re-verify — this is backpressure, not a reason to stop.
 7. **Log**: Add structured completion comment (see format below)
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
-9. **Commit & Push**: Stage, commit with issue ID in message, then `git pull --rebase && bd sync && git push`
+9. **Commit & Push**: Stage, commit with issue ID in message, then run:
+
+       if [ -n "$(git remote)" ]; then
+         git pull --rebase --autostash && bd dolt push && git push
+       else
+         echo "No git remote configured; skipping push (local-only project)."
+       fi
 10. **Exit**: Output the appropriate signal (see Completion Signals) and stop. You are done. The loop will restart you for the next task.
 
 If you cannot complete the claimed issue (dependency, technical blocker, persistent test failure you cannot resolve), add a comment explaining the blocker via `bd comments add <id> "..."`, then output `<promise>BLOCKED</promise>` and stop.
@@ -96,25 +102,26 @@ cargo fmt --check   # Format
 
 For subjective quality criteria (UX polish, documentation clarity, creative output) where automated tests cannot provide a pass/fail signal, use LLM-as-Judge: spawn a subagent to evaluate the output against the acceptance criteria with a binary pass/fail verdict. Treat a "fail" verdict the same as a failing test — iterate until it passes.
 
-## Issue Type Rules
+## Issue Plan
 
-**task** — Implement exactly what's specified:
-- NO scope expansion
-- All acceptance criteria must pass before closing
-- Search the codebase first — don't assume something isn't already built
-- If you discover additional work, create a new issue with `bd create`
+Ask the model (subagent if needed) how to handle this issue given its type, labels, description, and acceptance criteria. The response must be a JSON plan:
 
-**bug** — Reproduce, diagnose, fix:
-- NO unrelated changes — fix only the bug
-- Minimal, focused fix — don't refactor surrounding code
-- Regression test is required
-- If you discover related bugs, create new issues with `bd create --type=bug`
+```json
+{
+  "has_enough_info": true,
+  "missing": [],
+  "implementation_steps": ["..."],
+  "verification_steps": ["..."],
+  "closure_reason": "brief reason passed to bd close"
+}
+```
 
-**epic/feature** — Milestone check:
-- These are containers for related work
-- Run `bd show <id>` to see child issues
-- If all children are closed, close with `bd close <id> --reason="All child issues complete"`
-- If children remain open, output `<promise>BLOCKED</promise>` — the loop will retry later
+The scheduler validates the shape — all five keys present, `has_enough_info` a boolean, `missing` an array of strings, `implementation_steps`/`verification_steps` arrays, `closure_reason` a non-empty string — then executes mechanically:
+
+- If `has_enough_info` is `false`, post a bd comment listing each entry in `missing` as a clarification gap, then emit BLOCKED. The scheduler does not judge ambiguity itself; this field is the sole signal.
+- Otherwise, execute `implementation_steps` then `verification_steps`, and close with `closure_reason`.
+
+Do not re-derive behavior from the issue's classification in the scheduler; the model folded those signals into the plan. If verification fails, re-prompt the model with the failing output and iterate.
 
 ## Subagent Strategy
 
@@ -134,16 +141,9 @@ For subjective quality criteria (UX polish, documentation clarity, creative outp
 
 **Why exactly 1 for validation:** All write subagents funnel through a single validation gate. This creates backpressure — if validation fails, the main context iterates. Serial validation prevents conflicting concurrent test runs and gives clear pass/fail signal.
 
-## Ultrathink Directive
+## Reasoning Depth
 
-Claude uses adaptive thinking — it decides when and how deeply to reason, including between tool calls (interleaved thinking). For the following problem types, ensure deep reasoning by using max effort for Opus or high effort for Sonnet subagents:
-
-- Architecture decisions spanning multiple files
-- Debugging subtle or intermittent issues
-- Performance optimization trade-offs
-- Security-sensitive code paths
-
-Reasoning and action are interleaved automatically. You do not need to plan everything upfront before acting.
+Reasoning depth is the model's decision; the scheduler does not infer it from keywords.
 
 ## Steering
 
@@ -151,7 +151,7 @@ Reasoning and action are interleaved automatically. You do not need to plan ever
 - The issue description is authoritative — implement what it says, not what you think it should say
 - Follow existing code patterns found in src/ — match style, naming, structure
 - Use shared utilities and existing abstractions before creating new ones
-- If the issue is ambiguous, add a comment asking for clarification and output BLOCKED
+- Ambiguity is a model judgment, not a scheduler inference: the Issue Plan's `has_enough_info` and `missing` fields are the sole clarification signal. On `has_enough_info: false`, the scheduler mechanically posts a bd comment listing the `missing` gaps and outputs BLOCKED.
 
 **Downstream (tests/lints/builds are your guardrails):**
 - Tests, lints, and builds reject invalid work — they are the final arbiter

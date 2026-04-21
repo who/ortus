@@ -18,7 +18,7 @@ bd list               # List all issues
 bd create "Title"     # Create a new issue
 bd show <id>          # Show issue details
 bd close <id>         # Close an issue
-bd sync               # Sync with git
+bd dolt push          # Push beads to Dolt remote
 ```
 
 See CLAUDE.md for full workflow documentation.
