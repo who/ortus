@@ -34,5 +34,5 @@
 # Debounce interval for auto-flush (can also use BEADS_FLUSH_DEBOUNCE)
 # flush-debounce: "5s"
 
-# Git branch for beads commits (bd sync will commit to this branch)
+# Git branch for beads commits (bd dolt push will commit to this branch)
 # sync-branch: "beads-sync"

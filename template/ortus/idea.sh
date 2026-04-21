@@ -11,6 +11,9 @@
 
 set -euo pipefail
 
+# Resolve ortus directory for prompt file access (must be done before cd)
+ORTUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Handle PRD intake flow
 handle_prd() {
     local prd_path="${1:-}"
@@ -44,7 +47,14 @@ handle_prd() {
     original_dir=$(pwd)
     cd "$project_dir"
 
-    echo "Read $prd_path . Decompose the provided PRD Markdown into a Beads issue graph using bd. For each work item, create an issue with: title, description (scope/context), acceptance_criteria (REQUIRED: must include testable conditions that define 'done' AND specific testing instructions for verification), design notes (technical approach), priority (0-4, 0=critical), type (epic/feature/task/bug/chore), labels, and estimated_minutes. CRITICAL: Every task MUST have acceptance_criteria with: (1) testable conditions - what must be true when done, (2) testing instructions - how to verify each condition. Structure hierarchically: epics for major features, decomposed into tasks via parent-child dependencies; use blocks for execution order constraints and related for shared context. Output all bd create and bd dep add commands to construct the complete graph with proper dependencies reflecting the PRD's requirements and sequence. Where atomically possible, run the bd tasks in parallel with 10 sub-agents.  When done, tell the user to type /exit to continue." | claude --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions 
+    prompt_file="$ORTUS_DIR/prompts/prd-decompose-prompt.md"
+    if [[ ! -f "$prompt_file" ]]; then
+        echo "ERROR: PRD decomposition prompt not found at $prompt_file" >&2
+        exit 1
+    fi
+    prompt_template="$(cat "$prompt_file")"
+    prompt="${prompt_template//\$prd_path/$prd_path}"
+    echo "$prompt" | claude --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions
 
     # Return to original directory
     cd "$original_dir"
@@ -68,7 +78,13 @@ handle_idea() {
     fi
 
     echo "Expanding your idea..."
-    description=$(claude --print "You are helping a developer capture a feature idea. Up-sample this brief idea into a 2-3 sentence feature description. Be concise and specific about what the feature should do. Output ONLY the description text, nothing else.
+    prompt_file="$ORTUS_DIR/prompts/idea-expand-prompt.md"
+    if [[ ! -f "$prompt_file" ]]; then
+        echo "ERROR: Idea expansion prompt not found at $prompt_file" >&2
+        exit 1
+    fi
+    prompt_template="$(cat "$prompt_file")"
+    description=$(claude --print "$prompt_template
 
 Idea: $idea")
 
@@ -89,6 +105,14 @@ Idea: $idea")
 }
 
 # Main flow
+
+# Handle help flag
+case "${1:-}" in
+    -h|--help)
+        head -n 10 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+        exit 0
+        ;;
+esac
 
 # Check for --prd flag
 if [[ "${1:-}" == "--prd" ]]; then

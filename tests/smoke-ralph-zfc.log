@@ -1,0 +1,102 @@
+# ZFC Ralph Smoke Test Log
+
+**Purpose**: Acceptance artifact for ortus-4b5 — proves the ZFC-refactored Ralph
+loop (see ortus-ejg, commits 0cf4588 / 7b3ac1d / f63b1f7 / ct1) produces a
+well-shaped Issue Plan and terminates with a valid `<promise>` tag. Future
+regressions in the Ralph prompt can be detected by re-running this smoke test
+and diffing against this log.
+
+## Run metadata
+
+- Date: 2026-04-21
+- Prompt under test: ortus/prompts/ralph-prompt.md
+- Mode: single real iteration via subagent acting as Ralph (ralph.sh has no
+  --dry-run flag; per issue design, one real iteration + revert via closing
+  the sacrificial test issue)
+- Operator context: iteration run from inside parent Ralph iteration for
+  ortus-4b5; subagent was targeted at a specific test issue to avoid the
+  normal `bd ready` selection path
+
+## Test issue (input)
+
+- ID: ortus-4b9h
+- Title: Smoke test target: write marker to tests/smoke-target.txt
+- Type: task
+- Priority: P3
+- Labels: smoke, testing
+- Description: Sacrificial test issue for ZFC smoke test. Ensure
+  tests/smoke-target.txt exists and contains a single line: 'zfc smoke ok'.
+- Acceptance criteria:
+  1. tests/smoke-target.txt exists
+  2. file contains exactly one non-empty line with the text 'zfc smoke ok'
+  3. no other files modified
+
+## Issue Plan JSON (model output)
+
+```json
+{
+  "has_enough_info": true,
+  "missing": [],
+  "implementation_steps": [
+    "Create file /home/condor/code/ortus/tests/smoke-target.txt with exactly one line: 'zfc smoke ok' followed by a trailing newline"
+  ],
+  "verification_steps": [
+    "Run `cat tests/smoke-target.txt` and confirm output is exactly `zfc smoke ok`",
+    "Run `wc -l tests/smoke-target.txt` and confirm line count is 1",
+    "Confirm no files other than tests/smoke-target.txt were modified"
+  ],
+  "closure_reason": "ZFC smoke test marker written: tests/smoke-target.txt contains 'zfc smoke ok' as specified; all acceptance criteria satisfied"
+}
+```
+
+### Shape validation
+
+All five required keys present with correct types:
+
+- `has_enough_info`: bool (true) ✓
+- `missing`: array of strings (empty) ✓
+- `implementation_steps`: array of strings (1 entry) ✓
+- `verification_steps`: array of strings (3 entries) ✓
+- `closure_reason`: non-empty string ✓
+
+## Execution
+
+- Implementation: tests/smoke-target.txt created with a single line `zfc smoke ok`
+- Verification:
+  - `cat tests/smoke-target.txt` → `zfc smoke ok`
+  - `wc -l tests/smoke-target.txt` → `1 tests/smoke-target.txt`
+  - No other files modified
+- Completion comment: posted via `bd comments add` in the structured
+  `**Changes** / **Verification**` format
+- Close: `bd close ortus-4b9h` succeeded; close reason matches plan's
+  `closure_reason`
+
+## Promise tag (final output)
+
+```
+<promise>COMPLETE</promise>
+```
+
+Valid member of `{EMPTY, COMPLETE, BLOCKED}`.
+
+## Errors
+
+None.
+
+## Verdict
+
+PASS. The ZFC Issue Plan mechanism produced a well-shaped JSON plan, the
+executor ran it mechanically, the test issue closed cleanly, and the loop
+emitted a valid promise tag. No regressions detected.
+
+## Regression guidance
+
+If a future edit to ortus/prompts/ralph-prompt.md breaks this flow, re-running
+the smoke test (create a fresh sacrificial issue, run one iteration) should
+surface the break as:
+
+- Missing/mistyped keys in the plan JSON → shape validation fails
+- No `<promise>` tag emitted → Ralph loop cannot terminate
+- Unexpected `closure_reason` shape → downstream bd close may be malformed
+
+Diff this log against the new run to localize the regression.
