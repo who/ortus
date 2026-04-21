@@ -1,6 +1,6 @@
 # Zero-Framework Cognition (ZFC) Rubric
 
-Use this rubric to evaluate any prompt or orchestration script in Ortus. It is the shared definition referenced by [`prd/PRD-zero-framework-cognition.md`](../../prd/PRD-zero-framework-cognition.md), which adapts Steve Yegge's ["Zero Framework Cognition: A Way to Build Resilient AI Applications"](https://steve-yegge.medium.com/zero-framework-cognition-a-way-to-build-resilient-ai-applications-56b090ed3e69) to this codebase.
+Use this rubric to evaluate any prompt or orchestration script in Ortus. It is the shared definition referenced by [`prd/PRD-zero-framework-cognition.md`](prd/PRD-zero-framework-cognition.md), which adapts Steve Yegge's ["Zero Framework Cognition: A Way to Build Resilient AI Applications"](https://steve-yegge.medium.com/zero-framework-cognition-a-way-to-build-resilient-ai-applications-56b090ed3e69) to this codebase.
 
 ## Definition
 
@@ -47,6 +47,6 @@ When in doubt, prefer "ask the model, validate the shape, execute mechanically" 
 
 ## Further reading
 
-- [`prd/PRD-zero-framework-cognition.md`](../../prd/PRD-zero-framework-cognition.md) — full audit, requirements, and phased rollout plan for Ortus.
+- [`prd/PRD-zero-framework-cognition.md`](prd/PRD-zero-framework-cognition.md) — full audit, requirements, and phased rollout plan for Ortus.
 - Yegge, ["Zero Framework Cognition"](https://steve-yegge.medium.com/zero-framework-cognition-a-way-to-build-resilient-ai-applications-56b090ed3e69) — the source post.
 - Fowler, ["Smart Endpoints and Dumb Pipes"](https://martinfowler.com/articles/microservices.html#SmartEndpointsAndDumbPipes) — the architectural pattern Yegge adapts.
