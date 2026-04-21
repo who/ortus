@@ -106,6 +106,14 @@ Idea: $idea")
 
 # Main flow
 
+# Handle help flag
+case "${1:-}" in
+    -h|--help)
+        head -n 10 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+        exit 0
+        ;;
+esac
+
 # Check for --prd flag
 if [[ "${1:-}" == "--prd" ]]; then
     if [[ -z "${2:-}" ]]; then
