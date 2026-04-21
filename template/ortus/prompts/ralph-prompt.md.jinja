@@ -134,16 +134,9 @@ For subjective quality criteria (UX polish, documentation clarity, creative outp
 
 **Why exactly 1 for validation:** All write subagents funnel through a single validation gate. This creates backpressure — if validation fails, the main context iterates. Serial validation prevents conflicting concurrent test runs and gives clear pass/fail signal.
 
-## Ultrathink Directive
+## Reasoning Depth
 
-Claude uses adaptive thinking — it decides when and how deeply to reason, including between tool calls (interleaved thinking). For the following problem types, ensure deep reasoning by using max effort for Opus or high effort for Sonnet subagents:
-
-- Architecture decisions spanning multiple files
-- Debugging subtle or intermittent issues
-- Performance optimization trade-offs
-- Security-sensitive code paths
-
-Reasoning and action are interleaved automatically. You do not need to plan everything upfront before acting.
+Reasoning depth is the model's decision; the scheduler does not infer it from keywords.
 
 ## Steering
 
