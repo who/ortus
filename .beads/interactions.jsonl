@@ -1,0 +1,2 @@
+{"id":"int-958e5b4a","kind":"field_change","created_at":"2026-04-21T00:07:42.91584397Z","actor":"who","issue_id":"ortus-9zf","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-6561c336","kind":"field_change","created_at":"2026-04-21T00:08:56.867634773Z","actor":"who","issue_id":"ortus-9zf","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"ZFC rubric written at ortus/prompts/ZFC.md (52 lines, <80 target). All acceptance criteria verified."}}
