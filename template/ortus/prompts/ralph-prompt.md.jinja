@@ -102,13 +102,20 @@ Ask the model (subagent if needed) how to handle this issue given its type, labe
 
 ```json
 {
+  "has_enough_info": true,
+  "missing": [],
   "implementation_steps": ["..."],
   "verification_steps": ["..."],
   "closure_reason": "brief reason passed to bd close"
 }
 ```
 
-The scheduler validates the shape — all three keys present, arrays non-empty, `closure_reason` a non-empty string — then executes the steps mechanically. Do not re-derive behavior from the issue's classification in the scheduler; the model folded those signals into the plan. If verification fails, re-prompt the model with the failing output and iterate.
+The scheduler validates the shape — all five keys present, `has_enough_info` a boolean, `missing` an array of strings, `implementation_steps`/`verification_steps` arrays, `closure_reason` a non-empty string — then executes mechanically:
+
+- If `has_enough_info` is `false`, post a bd comment listing each entry in `missing` as a clarification gap, then emit BLOCKED. The scheduler does not judge ambiguity itself; this field is the sole signal.
+- Otherwise, execute `implementation_steps` then `verification_steps`, and close with `closure_reason`.
+
+Do not re-derive behavior from the issue's classification in the scheduler; the model folded those signals into the plan. If verification fails, re-prompt the model with the failing output and iterate.
 
 ## Subagent Strategy
 
@@ -138,7 +145,7 @@ Reasoning depth is the model's decision; the scheduler does not infer it from ke
 - The issue description is authoritative — implement what it says, not what you think it should say
 - Follow existing code patterns found in src/ — match style, naming, structure
 - Use shared utilities and existing abstractions before creating new ones
-- If the issue is ambiguous, add a comment asking for clarification and output BLOCKED
+- Ambiguity is a model judgment, not a scheduler inference: the Issue Plan's `has_enough_info` and `missing` fields are the sole clarification signal. On `has_enough_info: false`, the scheduler mechanically posts a bd comment listing the `missing` gaps and outputs BLOCKED.
 
 **Downstream (tests/lints/builds are your guardrails):**
 - Tests, lints, and builds reject invalid work — they are the final arbiter
