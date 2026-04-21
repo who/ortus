@@ -14,6 +14,8 @@ uv tool install copier --with copier-template-extensions
 # or: pipx install copier
 ```
 
+Copier is all you need to generate a project. To run any `ortus/*.sh` script — either inside this repo or a generated project — you also need the tools listed under [Requirements](#requirements) (notably `beads`, `dolt`, `claude`, `jq`, `rg`, `fd`).
+
 ### Step 1: Generate Your Project
 
 ```bash
@@ -119,6 +121,12 @@ Install these tools before using generated projects:
 ### beads v1.0.0+ required
 
 Ortus requires **beads v1.0.0** (released 2026-04-03) or later. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that this workflow no longer supports. Ortus configures beads in Dolt server mode so concurrent Ralph loops (and parallel sessions) do not contend on an embedded flock; the `dolt` binary must therefore be available on `PATH`. Install via `brew install beads` or from [the v1.0.0 release](https://github.com/gastownhall/beads/releases/tag/v1.0.0) (or later).
+
+Remote sync uses `bd dolt push` / `bd dolt pull`. The v0.55-era `bd sync` command was removed in v1.0.0. See [AGENTS.md](AGENTS.md) for the full session-close workflow.
+
+### Development
+
+Run `make parity` before committing changes to `ortus/` or `template/ortus/`. It detects drift between the canonical tree and the Jinja mirror shipped in the template.
 
 ### Language-Specific Tools
 
