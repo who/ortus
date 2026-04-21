@@ -78,7 +78,13 @@ handle_idea() {
     fi
 
     echo "Expanding your idea..."
-    description=$(claude --print "You are helping a developer capture a feature idea. Up-sample this brief idea into a 2-3 sentence feature description. Be concise and specific about what the feature should do. Output ONLY the description text, nothing else.
+    prompt_file="$ORTUS_DIR/prompts/idea-expand-prompt.md"
+    if [[ ! -f "$prompt_file" ]]; then
+        echo "ERROR: Idea expansion prompt not found at $prompt_file" >&2
+        exit 1
+    fi
+    prompt_template="$(cat "$prompt_file")"
+    description=$(claude --print "$prompt_template
 
 Idea: $idea")
 
