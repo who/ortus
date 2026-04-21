@@ -6,7 +6,7 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 
 ## Your Task
 
-1. **Orient**: Run `bd activity --limit 10 --json | jq -r '.[].issue_id' | sort -u | xargs -I{} sh -c 'echo "=== {} ===" && bd comments {} 2>/dev/null'` to see what happened in previous loops
+1. **Orient**: Run `bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json` to see what happened in previous loops
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
 4. **Investigate**: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
