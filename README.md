@@ -109,11 +109,16 @@ Install these tools before using generated projects:
 | Tool | Purpose |
 |------|---------|
 | [copier](https://github.com/copier-org/copier) | Project generator |
-| [beads](https://github.com/steveyegge/beads) | Issue tracking |
+| [beads](https://github.com/steveyegge/beads) **v1.0.0+** | Issue tracking |
+| [dolt](https://docs.dolthub.com/introduction/installation) | SQL server backing beads |
 | [claude](https://github.com/anthropics/claude-code) | Claude CLI |
 | [jq](https://jqlang.github.io/jq/) | JSON processing |
 | [rg](https://github.com/BurntSushi/ripgrep) | Fast search (ripgrep) |
 | [fd](https://github.com/sharkdp/fd) | Fast file finder |
+
+### beads v1.0.0+ required
+
+Ortus requires **beads v1.0.0** (released 2026-04-03) or later. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that this workflow no longer supports. Ortus configures beads in Dolt server mode so concurrent Ralph loops (and parallel sessions) do not contend on an embedded flock; the `dolt` binary must therefore be available on `PATH`. Install via `brew install beads` or from [the v1.0.0 release](https://github.com/gastownhall/beads/releases/tag/v1.0.0) (or later).
 
 ### Language-Specific Tools
 

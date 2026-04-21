@@ -18,3 +18,10 @@ This project was scaffolded with [Ortus](https://github.com/who/ortus), which pr
 {%- if license and license != 'none' %}
 - **License**: {{ license }}
 {%- endif %}
+
+## Requirements
+
+- **[beads](https://github.com/steveyegge/beads) v1.0.0+** — issue tracking. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that the Ortus workflow no longer supports. This project runs beads in Dolt server mode (see `.beads/metadata.json`) so concurrent Ralph loops do not contend on an embedded flock.
+- **[dolt](https://docs.dolthub.com/introduction/installation)** — SQL server that backs beads. Must be on `PATH`; beads auto-starts the server on first invocation.
+- **[claude](https://github.com/anthropics/claude-code)** — Claude CLI for Ralph loops.
+- **[jq](https://jqlang.github.io/jq/)**, **[rg](https://github.com/BurntSushi/ripgrep)**, **[fd](https://github.com/sharkdp/fd)** — used by ortus scripts.
