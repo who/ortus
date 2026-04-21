@@ -24,25 +24,19 @@ Run all relevant testing for the task that you have completed.
 
 If verification fails, fix the issue and re-verify. This is backpressure — keep iterating until it passes or you determine the issue is a blocker outside your task's scope.
 
-## Issue Type Rules
+## Issue Plan
 
-**task** — Implement exactly what's specified:
-- NO scope expansion
-- All acceptance criteria must pass before closing
-- Search the codebase first — don't assume something isn't already built
-- If you discover additional work, create a new issue with `bd create`
+Ask the model (subagent if needed) how to handle this issue given its type, labels, description, and acceptance criteria. The response must be a JSON plan:
 
-**bug** — Reproduce, diagnose, fix:
-- NO unrelated changes — fix only the bug
-- Minimal, focused fix — don't refactor surrounding code
-- Regression test is required
-- If you discover related bugs, create new issues with `bd create --type=bug`
+```json
+{
+  "implementation_steps": ["..."],
+  "verification_steps": ["..."],
+  "closure_reason": "brief reason passed to bd close"
+}
+```
 
-**epic/feature** — Milestone check:
-- These are containers for related work
-- Run `bd show <id>` to see child issues
-- If all children are closed, close with `bd close <id> --reason="All child issues complete"`
-- If children remain open, output `<promise>BLOCKED</promise>` — the loop will retry later
+The scheduler validates the shape — all three keys present, arrays non-empty, `closure_reason` a non-empty string — then executes the steps mechanically. Do not re-derive behavior from the issue's classification in the scheduler; the model folded those signals into the plan. If verification fails, re-prompt the model with the failing output and iterate.
 
 ## Subagent Strategy
 
