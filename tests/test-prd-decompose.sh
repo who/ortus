@@ -279,6 +279,92 @@ done
 log_info "FR-303 annotation test PASSED — both prompt files require the Appendix F annotation and explicitly bound it as advisory"
 
 # ============================================================================
+# Static check: FR-303 phantom annotation lands; advisory bounds (body/desc/AC + priority/type)
+# ============================================================================
+# T5.6 — when codegraph_available is true and a work item references a phantom
+# symbol (one that does NOT resolve in the graph, e.g.,
+# AuthMiddleware.refreshToken in the fixture PRD), the FR-303 sub-paragraph
+# must instruct the decomposer to:
+#   1. After bd create, attach a bd comments add ... with the Appendix F
+#      **CodeGraph references** block surfacing the phantom under "Unresolved:".
+#   2. NEVER block issue creation, alter the issue body / description /
+#      acceptance_criteria, or change --priority / --type from what the
+#      decomposer would otherwise set absent the annotation.
+#   3. Omit the comment silently when codegraph_search errors or the graph
+#      is partial — defensive posture parity with the rest of the block.
+#
+# Locks the FR-303 advisory-bounds contract from accidental wording drift in
+# BOTH prompt files. Extends T5.5's FR-303 anchors with the full advisory
+# triplet (body/description/acceptance_criteria), the priority/type clause,
+# the "advisory only" classifier, and the silent-omission defensive posture
+# — none of which T5.5 locks. Couples explicitly to the fixture's
+# AuthMiddleware.refreshToken so a T5.6 regression surfaces the phantom-
+# symbol path the prompt is meant to handle.
+
+log_step "Static check: FR-303 phantom annotation lands; advisory bounds (body/desc/AC + priority/type)"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
+# (the tool the FR-301..304 sub-paragraph invokes per extracted reference).
+FR303_PHANTOM_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+
+# Phantom-symbol fixture: $FIXTURE_PHANTOM_REF (AuthMiddleware.refreshToken,
+# verified present in the fixture PRD on line 109). The stub codegraph_search
+# response is empty, so FR-302 partitions the reference into the *unresolved*
+# bucket; FR-303 must then surface it under "Unresolved:" in the Appendix F
+# annotation comment without altering the issue body/desc/AC or priority/type.
+echo "$FIXTURE_PHANTOM_REF" > "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph/.stub-phantom-ref"
+echo '{"results": []}' > "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty"
+
+if [ ! -d "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph" ] \
+   || [ ! -s "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ] \
+   || [ ! -s "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph/.stub-phantom-ref" ] \
+   || [ ! -s "$FR303_PHANTOM_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty" ]; then
+  log_error "Failed to mock FR-303 phantom fixture at $FR303_PHANTOM_FIXTURE_TMPDIR"
+  rm -rf "$FR303_PHANTOM_FIXTURE_TMPDIR"
+  exit 1
+fi
+log_info "Mocked FR-303 fixture at: $FR303_PHANTOM_FIXTURE_TMPDIR (phantom $FIXTURE_PHANTOM_REF + empty search stub)"
+
+# Anchors that prove the prompt instructs the decomposer to attach the
+# advisory annotation comment AND bound it from altering body/desc/AC or
+# priority/type. These extend T5.5's FR-303 anchors — the full triplet,
+# the priority/type clause, the "advisory only" classifier, and the
+# silent-omission defensive posture all live in a single sentence at line
+# 30 of prd-decompose-prompt.md (the "advisory only" paragraph), so wording
+# drift on any of them breaks this check.
+FR303_PHANTOM_PHRASES=(
+  'never alters the issue body / description / acceptance_criteria'
+  '`--priority` or `--type`'
+  'advisory only'
+  'omit the comment silently'
+  'graph is partial'
+  'Investigate step (Ralph step 4)'
+)
+
+for prompt_file in "${PRD_DECOMPOSE_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR303_PHANTOM_FIXTURE_TMPDIR"
+    exit 1
+  fi
+  for phrase in "${FR303_PHANTOM_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" "$prompt_file"; then
+      log_error "FR-303 advisory-bounds phrase missing in: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR303_PHANTOM_FIXTURE_TMPDIR"
+      exit 2
+    fi
+  done
+  log_info "Verified FR-303 advisory-bounds contract in: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR303_PHANTOM_FIXTURE_TMPDIR"
+
+log_info "FR-303 phantom-annotation test PASSED — both prompt files lock the full advisory triplet (body/desc/AC + priority/type), 'advisory only' classifier, and silent-omission defensive posture"
+
+# ============================================================================
 # Static check: FR-304 Likely files shortlist (description, not comment)
 # ============================================================================
 # FR-304 must require a one-line **Likely files**: ... shortlist appended to
@@ -326,6 +412,7 @@ log_info "Fixture PRD presence: tests/fixtures/prd-decompose-fixture.md ✓"
 log_info "FR-301 reference-extraction patterns: ✓"
 log_info "FR-302 codegraph_search per reference + main-session forbiddance: ✓"
 log_info "FR-303 advisory **CodeGraph references** annotation comment: ✓"
+log_info "FR-303 phantom annotation lands; advisory bounds (body/desc/AC + priority/type): ✓"
 log_info "FR-304 **Likely files** shortlist in description: ✓"
 echo ""
 log_info "T5.6/T5.7 will extend this script with end-to-end decomposition tests."
