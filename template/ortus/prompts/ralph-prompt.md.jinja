@@ -44,6 +44,54 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 
 **7.5. Spawn follow-ups (FR-201..206; best-effort).** When `codegraph_available` and the **CodeGraph v1** block emitted in step 7 lists at least one entry under `oos_callers`, create bd issues for those callers before closing. Step 7.5 runs after step 7 (the block is now parseable) and before step 8 (the closing issue is still `in_progress`, so `bd dep add <new-id> --depends-on <closing-id>` references an open issue — the spawned issues only enter `bd ready` once step 8 closes the closing one). Apply the FR-202 heuristic gate to filter callers, the FR-203 cap-and-umbrella mapping to choose per-caller vs umbrella shape, and the FR-206 idempotency check before each `bd create`.
 
+**Heuristic gate (FR-202, Appendix D).** A caller `C` of modified symbol `S` qualifies for spawning iff **all four** of the following conjunctive checks hold (drop on any false):
+
+1. **Cross top-level module.** `C.file` and `S.file` differ in their first path segment (cross top-level module).
+2. **Not a test/spec file.** `C.file` does not match any of: `*_test.*`, `tests/**`, `__tests__/**`, `test_*`, `*.test.*`, `*.spec.*`, `*_spec.*`.
+3. **Not in a utility directory.** `C.file` does not match any of: `examples/**`, `docs/**`, `scripts/**`, `tools/**`, `.ortus/**`.
+4. **Public symbol.** `S.name` does not start with `_`, and `S.file` contains neither `/internal/` nor `/private/`.
+
+Decision tree (Appendix D):
+
+```
+                ┌─────────────────────────────────────┐
+                │ caller C of modified symbol S       │
+                └─────────────────┬───────────────────┘
+                                  │
+              ┌───────────────────▼───────────────────┐
+              │ same top-level module as S?           │
+              └────yes────────────────no──────────────┘
+                   │                  │
+                ┌──▼──┐                │
+                │drop │   ┌────────────▼───────────────┐
+                └─────┘   │ C in tests/specs?          │
+                          └────yes──────────no─────────┘
+                               │            │
+                            ┌──▼──┐         │
+                            │drop │  ┌──────▼──────────┐
+                            └─────┘  │ C in examples/  │
+                                     │ docs/scripts/   │
+                                     │ tools/.ortus?   │
+                                     └──yes────no──────┘
+                                        │     │
+                                     ┌──▼──┐  │
+                                     │drop │  │
+                                     └─────┘  │
+                                           ┌──▼──────────┐
+                                           │ S "public"? │
+                                           │ (not _, not │
+                                           │ in internal/│
+                                           │ private/)   │
+                                           └─yes──no─────┘
+                                              │   │
+                                              │  ┌▼──┐
+                                              │  │drop│
+                                              │  └────┘
+                                            ┌─▼───────┐
+                                            │ qualify │
+                                            └─────────┘
+```
+
 Each spawned issue uses this metadata (FR-204):
 
 - `--type=task`
