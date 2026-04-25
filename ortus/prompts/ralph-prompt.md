@@ -72,6 +72,8 @@ Ask the model (subagent if needed) how to handle this issue given its type, labe
 }
 ```
 
+**Reference check (FR-501..503).** When `codegraph_available`, before emitting the plan JSON, extract code-shaped references from the issue body and acceptance criteria using these patterns: `[A-Z][A-Za-z0-9_]*` (CamelCase), `[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*` (dotted methods), and file paths ending in a recognized source extension (`.ts`, `.tsx`, `.js`, `.py`, `.rs`, `.go`, `.java`, `.rb`). Run `codegraph_search` on each extracted reference. For every unresolved reference, append one entry to `missing` per Appendix G in this exact form: `References <symbol> in <field>; no such symbol in graph. Confirm during Investigate or flag as new code.` (where `<field>` is `body` or `acceptance_criteria`). Existing model-judged `missing` entries are preserved verbatim — this is additive only. **Per FR-503, a graph-derived `missing` entry does NOT automatically flip `has_enough_info` to `false`** — the flip stays at the model's discretion, since the symbol may legitimately be new code introduced by this very issue. Skip silently when CodeGraph isn't available.
+
 The scheduler validates the shape — all five keys present, `has_enough_info` a boolean, `missing` an array of strings, `implementation_steps`/`verification_steps` arrays, `closure_reason` a non-empty string — then executes mechanically:
 
 - If `has_enough_info` is `false`, post a bd comment listing each entry in `missing` as a clarification gap, then emit BLOCKED. The scheduler does not judge ambiguity itself; this field is the sole signal.
