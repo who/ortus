@@ -52,6 +52,71 @@ Each spawned issue uses this metadata (FR-204):
 - Title and description from the Appendix E template (per-caller or umbrella), including the closing-issue id, the modified symbol, the caller's `symbol@file:line`, and the closing commit (`git rev-parse HEAD` if available).
 - After `bd create` succeeds, run `bd dep add <new-id> --depends-on <closing-id>` so the spawned issue does not enter `bd ready` until step 8 closes the closing one.
 
+**Cap rule (FR-203, Appendix E).** After the FR-202 gate filters callers, count qualifying callers `N` and pick the spawn shape:
+
+- `N == 0` → no-op (skip silently; no spawn).
+- `1-3` qualifying callers → spawn one bd issue per caller using the **per-caller template** below.
+- `4 or more` qualifying callers → spawn exactly one **umbrella** issue using the umbrella template below, listing every qualifying caller in its description.
+
+**Per-caller template (Appendix E, 1-3 callers).** Render verbatim — substitute the angle-bracket placeholders (`<closing-id>`, `<modified-symbol>`, `<S.file>:<S.line>`, `<caller-symbol>`, `<C.file>:<C.line>`, `<git-rev-parse-HEAD>`):
+
+```
+Title: Verify <caller-symbol> still behaves correctly after <modified-symbol> change (<closing-id>)
+
+Description:
+Closing issue <closing-id> modified `<modified-symbol>` at <S.file>:<S.line>.
+This issue tracks verification of caller `<caller-symbol>` at <C.file>:<C.line>,
+which was identified by CodeGraph as a cross-module caller of the modified symbol
+and falls outside the closing issue's stated scope.
+
+Modified symbol: <modified-symbol>@<S.file>:<S.line>
+Caller symbol:   <caller-symbol>@<C.file>:<C.line>
+Closing commit:  <git-rev-parse-HEAD>
+Closing issue:   <closing-id>
+
+Verification: Confirm <caller-symbol>'s behavior is preserved by the change to
+<modified-symbol>. If a behavioral change is intended for this call site,
+update or close this issue accordingly.
+
+Created by: auto-codegraph (Ralph step 7.5)
+
+Labels: auto-codegraph
+Type: task
+Priority: medium
+Depends on: <closing-id>
+```
+
+**Umbrella template (Appendix E, 4 or more callers).** Render verbatim — substitute the angle-bracket placeholders, including `<N>` (qualifying-caller count) and the per-caller bullet list under `Qualifying callers:`:
+
+```
+Title: Audit <N> cross-module callers of <modified-symbol> after <closing-id>
+
+Description:
+Closing issue <closing-id> modified `<modified-symbol>` at <S.file>:<S.line>.
+CodeGraph identified <N> qualifying cross-module callers; per the heuristic-gate
+cap, this single umbrella issue tracks them in lieu of <N> individual issues.
+
+Modified symbol: <modified-symbol>@<S.file>:<S.line>
+Closing commit:  <git-rev-parse-HEAD>
+Closing issue:   <closing-id>
+
+Qualifying callers:
+- <caller-1-symbol>@<C1.file>:<C1.line>
+- <caller-2-symbol>@<C2.file>:<C2.line>
+- ... (all N)
+
+Verification: For each caller, confirm behavior is preserved or update accordingly.
+Split this umbrella into individual issues if the audit reveals divergent treatment
+across callers.
+
+Created by: auto-codegraph (Ralph step 7.5)
+
+Labels: auto-codegraph
+Type: task
+Priority: medium
+Depends on: <closing-id>
+```
+
 **Non-blocking (FR-205).** Step 7.5 shall never block step 8. If `bd create` returns non-zero, if `codegraph_impact` errors, or if the gate evaluation throws, log to a comment if convenient and proceed to step 8 — same posture as step 6.5. If `codegraph_available` is false, or if the FR-101 block's `oos_callers` is `none`, skip silently.
 
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
