@@ -41,6 +41,19 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 **6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, skip silently — do not mention it in the completion comment.
 
 7. **Log**: Add structured completion comment (see format below)
+
+**7.5. Spawn follow-ups (FR-201..206; best-effort).** When `codegraph_available` and the **CodeGraph v1** block emitted in step 7 lists at least one entry under `oos_callers`, create bd issues for those callers before closing. Step 7.5 runs after step 7 (the block is now parseable) and before step 8 (the closing issue is still `in_progress`, so `bd dep add <new-id> --depends-on <closing-id>` references an open issue — the spawned issues only enter `bd ready` once step 8 closes the closing one). Apply the FR-202 heuristic gate to filter callers, the FR-203 cap-and-umbrella mapping to choose per-caller vs umbrella shape, and the FR-206 idempotency check before each `bd create`.
+
+Each spawned issue uses this metadata (FR-204):
+
+- `--type=task`
+- `--priority=2`
+- `--labels=auto-codegraph` (so the cohort is identifiable and bulk-managed).
+- Title and description from the Appendix E template (per-caller or umbrella), including the closing-issue id, the modified symbol, the caller's `symbol@file:line`, and the closing commit (`git rev-parse HEAD` if available).
+- After `bd create` succeeds, run `bd dep add <new-id> --depends-on <closing-id>` so the spawned issue does not enter `bd ready` until step 8 closes the closing one.
+
+**Non-blocking (FR-205).** Step 7.5 shall never block step 8. If `bd create` returns non-zero, if `codegraph_impact` errors, or if the gate evaluation throws, log to a comment if convenient and proceed to step 8 — same posture as step 6.5. If `codegraph_available` is false, or if the FR-101 block's `oos_callers` is `none`, skip silently.
+
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
 9. **Commit & Push**: Stage, commit with issue ID in message, then run:
 
