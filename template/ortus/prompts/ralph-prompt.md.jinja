@@ -232,6 +232,36 @@ bd comments add bd-a1b2c3 "**Changes**:
 
 **Keep it concise** — bullet points for changes, one line for verification.
 
+**When `codegraph_available`, append a `**CodeGraph v1**` block** to the comment so the structural change record is parseable by future loops (FR-101..103). Compute it from the main session using only `codegraph_search`, `codegraph_node`, and `codegraph_impact` against the symbols you modified — bound the work to ≤ 15 tool calls for a typical closure (≤ 5 modified symbols). The larger source-fetching CodeGraph tools remain subagent-only per step 4 and must not be invoked from the main session here.
+
+Schema (Appendix C):
+
+```
+**CodeGraph v1**:
+modified: <symbol>@<file>:<line> (<N> callers, <M> cross-module) [, ...]
+new: <symbol>@<file>:<line> (<kind>) [, ...]
+oos_callers: <caller-symbol>@<file>:<line> -> <modified-symbol> [, ...]
+```
+
+Each list field is comma-separated; emit `none` when empty. For docs- or test-only closures, all three lists may be `none` (e.g., `modified: none (test-only change)`).
+
+**Example with the block:**
+```bash
+bd comments add bd-a1b2c3 "**Changes**:
+- Added auth middleware in src/middleware/auth.ts
+- Created login/logout endpoints in src/routes/auth.ts
+- Added JWT token validation
+
+**Verification**: All tests passing (12/12), lint clean, manual login flow tested
+
+**CodeGraph v1**:
+modified: AuthMiddleware.validate@src/middleware/auth.ts:42 (3 callers, 1 cross-module), TokenStore.refresh@src/lib/token.ts:18 (1 caller, 0 cross-module)
+new: TokenStore@src/lib/token.ts:7 (class)
+oos_callers: ApiRouter.login@src/api/auth/login.ts:23 -> AuthMiddleware.validate"
+```
+
+When `codegraph_available` is false, omit the block entirely — the comment must remain byte-equivalent to a pre-PRD closure (NFR-101).
+
 ## Completion Signals
 
 **EMPTY** — When `bd ready` returns no issues (empty queue):
