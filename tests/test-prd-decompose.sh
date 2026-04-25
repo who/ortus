@@ -12,12 +12,14 @@
 #   1 - Test setup failed (fixture missing, prompt files missing, etc.)
 #   2 - A static check failed (wording drift in either prompt file)
 #
-# This file is the test substrate for T5.6 (FR-303 phantom annotation) and
-# T5.7 (FR-304 Likely files shortlist). T5.5 lands the scaffolding: the
-# fixture PRD and the static checks that lock the FR-301..304 wording in
-# both ortus/prompts/prd-decompose-prompt.md and the template mirror.
-# T5.6/T5.7 will extend this script with end-to-end decomposition tests
-# that exercise actual codegraph_search behavior.
+# This file is the test substrate for T5.5 (scaffolding fixture + FR-301..304
+# wording locks), T5.6 (FR-303 phantom annotation lands; advisory bounds), and
+# T5.7 (FR-304 resolved-symbol Likely files shortlist; description placement).
+# All three landings are static byte-checks on the prompt source coupled to
+# the fixture PRD's phantom (AuthMiddleware.refreshToken) and real
+# (GitConfigContext + extensions/context.py) references — verifying both
+# ortus/prompts/prd-decompose-prompt.md and the template mirror teach the
+# FR-301..304 contract verbatim.
 
 set -e
 
@@ -403,6 +405,103 @@ done
 log_info "FR-304 Likely files test PASSED — both prompt files require the shortlist in the issue description (not a comment)"
 
 # ============================================================================
+# Static check: FR-304 resolved-symbol Likely files lands; advisory bounds
+#               (description placement + derivation contract + silent skip)
+# ============================================================================
+# T5.7 — when codegraph_available is true and a work item references a real
+# symbol (one that DOES resolve in the graph, e.g., GitConfigContext at
+# extensions/context.py in the fixture PRD), the FR-304 sub-paragraph must
+# instruct the decomposer to:
+#   1. Before bd create of the work item's issue, append a one-line
+#      `**Likely files**: <file-1>, <file-2>, ...` shortlist to the issue's
+#      DESCRIPTION (not a comment) listing the resolved file path(s).
+#   2. Derive files from the resolved-set's <symbol>@<file> records (FR-302),
+#      deduplicating paths and preserving first-appearance order.
+#   3. Keep the description-vs-comment distinction explicit: shortlist lands
+#      in description (canonical starting scope for Investigate step 4), the
+#      FR-303 resolved/unresolved sets land in a comment (advisory hint).
+#   4. Skip silently when no references resolve, codegraph_search errors, or
+#      the graph is partial — defensive posture parity with the rest of the
+#      block.
+#
+# Locks the FR-304 resolved-symbol contract beyond T5.5's general FR-304
+# anchors. Couples explicitly to the fixture's GitConfigContext +
+# extensions/context.py so a regression on the resolved-symbol path
+# surfaces here. Static byte-check on both prompt files.
+
+log_step "Static check: FR-304 resolved-symbol Likely files lands; advisory bounds (description placement + derivation contract + silent skip)"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
+# (the tool the FR-301..304 sub-paragraph invokes per extracted reference).
+FR304_RESOLVED_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+
+# Resolved-symbol fixture: $FIXTURE_REAL_SYMBOL ($FIXTURE_REAL_PATH).
+# The stub codegraph_search response returns one match, so FR-302
+# partitions the reference into the *resolved* bucket; FR-304 must then
+# emit a `**Likely files**: <real-path>` shortlist into the issue's
+# description (not a comment) before bd create.
+echo "$FIXTURE_REAL_SYMBOL" > "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-real-symbol"
+echo "$FIXTURE_REAL_PATH"   > "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-real-path"
+printf '{"results":[{"symbol":"%s","file":"%s"}]}\n' \
+  "$FIXTURE_REAL_SYMBOL" "$FIXTURE_REAL_PATH" \
+  > "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-real"
+
+if [ ! -d "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph" ] \
+   || [ ! -s "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ] \
+   || [ ! -s "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-real-symbol" ] \
+   || [ ! -s "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-real-path" ] \
+   || [ ! -s "$FR304_RESOLVED_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-real" ]; then
+  log_error "Failed to mock FR-304 resolved fixture at $FR304_RESOLVED_FIXTURE_TMPDIR"
+  rm -rf "$FR304_RESOLVED_FIXTURE_TMPDIR"
+  exit 1
+fi
+log_info "Mocked FR-304 resolved fixture at: $FR304_RESOLVED_FIXTURE_TMPDIR ($FIXTURE_REAL_SYMBOL → $FIXTURE_REAL_PATH)"
+
+# Anchors that prove the prompt instructs the decomposer to emit the
+# Likely files shortlist into the description (not a comment) before
+# bd create when at least one reference resolves. These extend T5.5's
+# FR-304 anchors with: the verbatim template format, the temporal
+# placement (before bd create), the description-vs-comment distinction,
+# the derivation contract (from resolved-set <symbol>@<file>), the
+# first-appearance order, the Investigate-step-4 canonical-scope purpose,
+# and the silent-skip posture — all live in the FR-304 paragraph
+# (lines 32-38 of prd-decompose-prompt.md), so wording drift on any of
+# them breaks this check.
+FR304_RESOLVED_PHRASES=(
+  '<file-1>, <file-2>, ...'
+  'before issuing `bd create`'
+  '(not a comment)'
+  'from the resolved-set'\''s `<symbol>@<file>` records'
+  'preserve first-appearance order'
+  'step 4 (Investigate) treats it as canonical starting scope'
+  'description-vs-comment distinction explicit'
+  'skip silently when no references resolve'
+)
+
+for prompt_file in "${PRD_DECOMPOSE_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR304_RESOLVED_FIXTURE_TMPDIR"
+    exit 1
+  fi
+  for phrase in "${FR304_RESOLVED_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" "$prompt_file"; then
+      log_error "FR-304 resolved-symbol phrase missing in: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR304_RESOLVED_FIXTURE_TMPDIR"
+      exit 2
+    fi
+  done
+  log_info "Verified FR-304 resolved-symbol contract in: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR304_RESOLVED_FIXTURE_TMPDIR"
+
+log_info "FR-304 resolved-symbol test PASSED — both prompt files lock the description placement (not a comment, before bd create), the derivation contract (from resolved-set <symbol>@<file> with first-appearance order), the Investigate-step-4 canonical-scope purpose, and the silent-skip posture"
+
+# ============================================================================
 # Summary
 # ============================================================================
 
@@ -414,8 +513,9 @@ log_info "FR-302 codegraph_search per reference + main-session forbiddance: ✓"
 log_info "FR-303 advisory **CodeGraph references** annotation comment: ✓"
 log_info "FR-303 phantom annotation lands; advisory bounds (body/desc/AC + priority/type): ✓"
 log_info "FR-304 **Likely files** shortlist in description: ✓"
+log_info "FR-304 resolved-symbol Likely files lands; advisory bounds (description placement + derivation contract + silent skip): ✓"
 echo ""
-log_info "T5.6/T5.7 will extend this script with end-to-end decomposition tests."
+log_info "T5.5 + T5.6 + T5.7 lock the FR-301..304 contract via static checks coupled to the fixture PRD."
 
 if [ "$KEEP_PROJECT" = true ]; then
   log_info "Fixture preserved at: $FIXTURE_PRD"
