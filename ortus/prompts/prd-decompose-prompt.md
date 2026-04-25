@@ -28,3 +28,11 @@ Use only `codegraph_search` for this step (cheap, main-context-safe). Do not cal
 ```
 
 This annotation is **advisory only**: it never blocks issue creation, never alters the issue body / description / acceptance_criteria, and never changes `--priority` or `--type` from what the decomposer would otherwise set. It is a hint for the eventual Investigate step (Ralph step 4) to confirm or correct, not a gating signal. If `codegraph_search` errors or the graph is partial, omit the comment silently — same posture as the rest of this block.
+
+**Likely files shortlist (FR-304).** When at least one extracted reference *resolves* to a graph-known symbol, append a one-line `**Likely files**: ...` shortlist to the issue **description** (not a comment) before issuing `bd create`, using this Appendix F format verbatim:
+
+```
+**Likely files**: <file-1>, <file-2>, ...
+```
+
+Derive files from the resolved-set's `<symbol>@<file>` records (FR-302) — deduplicate paths, preserve first-appearance order. The shortlist lands in the **description** so step 4 (Investigate) treats it as canonical starting scope; the FR-303 resolved/unresolved sets land in a **comment** as advisory hint — keep the description-vs-comment distinction explicit. Same defensive posture: skip silently when no references resolve, when `codegraph_search` errors, or when the graph is partial.
