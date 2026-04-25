@@ -190,6 +190,44 @@ create_tasks_from_fixture() {
 }
 
 # ============================================================================
+# Static check: codegraph-absent fallback wording (byte-equivalent)
+# ============================================================================
+# When neither .codegraph/ nor mcp__codegraph__* tools are present (i.e.
+# codegraph_available is false), step 4 of the Ralph prompt must execute the
+# original fallback sentence verbatim. This guards the codegraph_unavailable
+# branch from accidental wording drift in BOTH prompt files: the source
+# ortus/prompts/ralph-prompt.md and the template/ralph-prompt.md.jinja.
+#
+# The fallback wording lives in the unconditional section of each prompt
+# file, so this is a static byte-equivalence check on the prompt source — no
+# copier render or shell setup is required. Runs before the heavy copier
+# setup so it exercises independently.
+
+log_step "Static check: codegraph-absent fallback wording"
+
+CODEGRAPH_FALLBACK_SENTENCE="Search the codebase first — don't assume not implemented. Use subagents for broad searches."
+
+CODEGRAPH_PROMPT_FILES=(
+  "$ORTUS_DIR/ortus/prompts/ralph-prompt.md"
+  "$ORTUS_DIR/template/ortus/prompts/ralph-prompt.md.jinja"
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    exit 1
+  fi
+  if ! grep -F -q -- "$CODEGRAPH_FALLBACK_SENTENCE" "$prompt_file"; then
+    log_error "codegraph-absent (codegraph_available=false) fallback wording missing in: $prompt_file"
+    log_error "Expected verbatim sentence: $CODEGRAPH_FALLBACK_SENTENCE"
+    exit 1
+  fi
+  log_info "Verified codegraph-absent fallback wording in: $(basename "$prompt_file")"
+done
+
+log_info "codegraph-absent test PASSED — both prompt files contain byte-equivalent fallback sentence"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
