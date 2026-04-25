@@ -484,6 +484,90 @@ rm -rf "$NFR101_ABSENT_TMPDIR"
 log_info "NFR-101 baseline test PASSED — both prompt files gate FR-401..404 sub-paragraphs in step 1 on codegraph_available with silent skip"
 
 # ============================================================================
+# Static check: FR-401+402 presence-when-on (bd-list preserved + activity surfaced)
+# ============================================================================
+# When codegraph_available is true, step 1 of the Ralph prompt must (a)
+# preserve the existing FR-401 bd-list comment-history pull verbatim AND
+# (b) additionally emit the FR-402 git-derived CodeGraph activity-read
+# block. This guards both halves of the orient context from accidental
+# wording drift in BOTH prompt files: the source ortus/prompts/ralph-prompt.md
+# and the template/ralph-prompt.md.jinja.
+#
+# Mocks the codegraph_available environment (.codegraph/ + a stub
+# mcp__codegraph__codegraph_files tool name) for environmental fidelity,
+# parallel to existing mocks above. The FR-402 activity-read contract lives
+# in the prompt source itself (it is instruction to the loop, not runnable
+# code), so this is a static byte-check on the prompt source. Narrowed to
+# the step-1 region so it cannot false-pass on later sections.
+
+log_step "Static check: FR-401+402 presence-when-on (bd-list preserved + CodeGraph activity surfaced)"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_files
+FR401_402_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR401_402_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_files" > "$FR401_402_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$FR401_402_TMPDIR/.codegraph" ] || [ ! -f "$FR401_402_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $FR401_402_TMPDIR"
+  rm -rf "$FR401_402_TMPDIR"
+  exit 1
+fi
+log_info "Mocked codegraph_available environment at: $FR401_402_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_files)"
+
+# FR-401: the bd-list comment-history pull invocation that must remain in step 1 verbatim
+FR401_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
+
+# FR-402: anchors for the git-derived CodeGraph activity-read sub-paragraph
+# that must additionally appear in step 1 alongside the bd-list pull when
+# codegraph_available. Together they prove the orient context contains BOTH
+# the bd-list comment-history block AND the new CodeGraph activity block.
+FR402_ACTIVITY_PHRASES=(
+  '**Activity read (FR-401..403).**'    # Sub-paragraph header
+  'surface recent CodeGraph activity'   # Semantic anchor
+  'git log -20 --name-only | sort -u'   # File-list derivation invocation
+  '`codegraph_files`'                   # Primary enrichment tool
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR401_402_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step-1 region (between "1. **Orient**" and "2. **Select**")
+  step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step1_region" ]; then
+    log_error "Could not extract step-1 region from: $prompt_file"
+    rm -rf "$FR401_402_TMPDIR"
+    exit 1
+  fi
+
+  # FR-401: assert bd-list invocation preserved verbatim within step 1
+  if ! grep -F -q -- "$FR401_BD_LIST_INVOCATION" <<< "$step1_region"; then
+    log_error "FR-401 bd-list invocation missing/altered in step 1 of: $prompt_file"
+    log_error "Expected verbatim: $FR401_BD_LIST_INVOCATION"
+    rm -rf "$FR401_402_TMPDIR"
+    exit 1
+  fi
+
+  # FR-402: assert each activity-read anchor is present within step 1
+  for phrase in "${FR402_ACTIVITY_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
+      log_error "FR-402 activity-read phrase missing in step 1 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR401_402_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified FR-401 bd-list AND FR-402 activity-read in step 1 of: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR401_402_TMPDIR"
+
+log_info "FR-401+402 presence-when-on test PASSED — both prompt files preserve bd-list verbatim AND surface CodeGraph activity in step 1"
+
+# ============================================================================
 # Static check: FR-403 activity-read cap (30 files / 50 symbols, no error)
 # ============================================================================
 # When codegraph_available is true and the recent-commits file list exceeds
