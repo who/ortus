@@ -9,7 +9,23 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 1. **Orient**: Run `bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json` to see what happened in previous loops
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
-4. **Investigate**: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
+4. **Investigate**: Before assuming anything is or isn't implemented, search the codebase. First, decide which path to take:
+
+   - **`codegraph_available`** if `.codegraph/` exists at the project root *and* at least one tool whose name starts with `mcp__codegraph__` is registered in this session.
+   - Otherwise, fall through to the default subagent-grep path. Do not mention CodeGraph in any output.
+
+   If **`codegraph_available`**, use these tools as the primary investigation surface (cheap, main-context-safe):
+
+   - `codegraph_search` — find symbols by name.
+   - `codegraph_callers` / `codegraph_callees` — trace call flow.
+   - `codegraph_impact` — assess blast radius before editing.
+   - `codegraph_node` — pull a single symbol's details (with source if needed).
+
+   For broader, task-shaped questions ("how does X work?", "where does feature Y live?"), spawn a subagent and have it call `codegraph_explore` or `codegraph_context`. Never call those two from the main context — they return large source-code payloads that will blow your scheduler budget.
+
+   Fall back to subagent grep/glob/Read **only** if CodeGraph returns nothing useful for the question.
+
+   If **not** `codegraph_available`: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
 5. **Implement**: Make the code changes described in the issue
 6. **Verify**: Run tests, linting, and builds (see Verification below). If they fail, fix and re-verify — this is backpressure, not a reason to stop.
 7. **Log**: Add structured completion comment (see format below)
