@@ -165,6 +165,8 @@ Priority: medium
 Depends on: <closing-id>
 ```
 
+**Idempotency on retry (FR-206).** Before each `bd create`, guard against duplicates by querying the existing auto-codegraph cohort. Run `bd list --label=auto-codegraph --json` and filter the result by description text containing **both** the closing-issue id (e.g., `ortus-a1b2c3`) **and** the modified-symbol name (e.g., `AuthMiddleware.validate`); if a matching issue already exists, skip the spawn for that caller in per-caller mode, or skip the entire umbrella spawn in umbrella mode. Idempotency is keyed on the `(closing-id, modified-symbol)` pair — the same closing id with a different modified symbol still spawns; the same modified symbol on a different closing id still spawns. This matters when a Ralph iteration is restarted partway (bash loop killed and resumed) and step 7.5 re-runs against an already-spawned cohort. Same non-blocking posture as FR-205: a failing `bd list` query never blocks step 8 — proceed without the guard rather than aborting.
+
 **Non-blocking (FR-205).** Step 7.5 shall never block step 8. If `bd create` returns non-zero, if `codegraph_impact` errors, or if the gate evaluation throws, log to a comment if convenient and proceed to step 8 — same posture as step 6.5. If `codegraph_available` is false, or if the FR-101 block's `oos_callers` is `none`, skip silently.
 
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
