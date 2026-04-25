@@ -14,6 +14,8 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
    - Fall back to per-file `codegraph_search` when `codegraph_files` is unavailable.
 
    Cap the result at **30 unique files** and **50 symbols** total; truncate beyond the cap rather than erroring. Add the surfaced symbols to the orient context block alongside the existing `bd list` output above — that invocation is preserved verbatim per FR-401, this sub-step is additive only. When CodeGraph isn't available, skip silently.
+
+   **CodeGraph block reuse (FR-404).** Additionally scan the recent bd comments returned by the `bd show --json` invocation above for `**CodeGraph v1**` headers (the FR-101 schema). For each recognized v1 block, parse the `modified:` line and surface the `symbol@file:line` entries into the orient context alongside the activity-read output — this is the compounding-memory payoff of FR-102's parseable schema. The parser is tolerant per Appendix Q4: silently skip blocks whose schema version is unrecognized (e.g., a future `**CodeGraph v2**` this prompt hasn't learned yet) rather than erroring. Gated on `codegraph_available`; skip silently when CodeGraph isn't available.
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
 4. **Investigate**: Before assuming anything is or isn't implemented, search the codebase. First, decide which path to take:
