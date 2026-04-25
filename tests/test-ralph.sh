@@ -951,6 +951,107 @@ rm -rf "$NFR101_STEP7_TMPDIR"
 log_info "NFR-101 step-7 baseline test PASSED — both prompt files gate the **CodeGraph v1** block on codegraph_available with byte-equivalent fallback to a pre-PRD closure"
 
 # ============================================================================
+# Static check: FR-101 CodeGraph v1 block presence on enabled fixture
+# ============================================================================
+# When codegraph_available is true, step 7's completion comment must append
+# a **CodeGraph v1** block whose schema matches Appendix C: a header line
+# (**CodeGraph v1**:), then three comma-separated list fields (modified:,
+# new:, oos_callers:), each of which may say `none` when empty (FR-101).
+# This guards the Appendix C schema from accidental wording drift in BOTH
+# prompt files: the source ortus/prompts/ralph-prompt.md and the
+# template/ralph-prompt.md.jinja.
+#
+# Mocks the codegraph_available environment (.codegraph/ + a stub
+# mcp__codegraph__* tool name) for environmental fidelity, parallel to
+# existing mocks above. The Appendix C schema lives in the prompt source
+# itself (it is instruction to the loop, not runnable code), so this is a
+# static byte-check on both prompt files. Narrowed to the step-7 region
+# (between "## Completion Comment Format" and "## Completion Signals") so
+# the check cannot false-pass on unrelated sections. Drift simulations
+# (e.g., omitting the oos_callers line from the schema) trigger exit 1.
+# Runs as a static check before the heavy copier setup so it exercises
+# independently.
+
+log_step "Static check: FR-101 CodeGraph v1 block presence on enabled fixture"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
+# (one of the three tools FR-103 restricts step-7 computation to).
+FR101_PRESENT_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR101_PRESENT_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$FR101_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$FR101_PRESENT_TMPDIR/.codegraph" ] || [ ! -f "$FR101_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $FR101_PRESENT_TMPDIR"
+  rm -rf "$FR101_PRESENT_TMPDIR"
+  exit 1
+fi
+log_info "Mocked codegraph_available environment at: $FR101_PRESENT_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_search)"
+
+# Appendix C schema anchors that must appear verbatim in step 7 of each
+# prompt file. Together they prove the **CodeGraph v1** block carries the
+# header AND all three list-field lines (modified, new, oos_callers).
+FR101_SCHEMA_HEADER='**CodeGraph v1**:'
+FR101_SCHEMA_FIELDS=(
+  'modified: <symbol>@<file>:<line> (<N> callers, <M> cross-module) [, ...]'
+  'new: <symbol>@<file>:<line> (<kind>) [, ...]'
+  'oos_callers: <caller-symbol>@<file>:<line> -> <modified-symbol> [, ...]'
+)
+
+# The "may say `none`" semantic — proves each list field can collapse to
+# `none` when empty, so docs-/test-only closures still emit a well-formed
+# block per Appendix C.
+FR101_NONE_SEMANTIC='Each list field is comma-separated; emit `none` when empty.'
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR101_PRESENT_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step-7 region (between "## Completion Comment Format" and
+  # "## Completion Signals") so the check cannot false-pass on unrelated
+  # sections of the prompt.
+  step7_region=$(awk '/^## Completion Comment Format/{flag=1} flag {print} /^## Completion Signals/{flag=0}' "$prompt_file")
+  if [ -z "$step7_region" ]; then
+    log_error "Could not extract step-7 region from: $prompt_file"
+    rm -rf "$FR101_PRESENT_TMPDIR"
+    exit 1
+  fi
+
+  # Assert the **CodeGraph v1**: header is present in step 7
+  if ! grep -F -q -- "$FR101_SCHEMA_HEADER" <<< "$step7_region"; then
+    log_error "FR-101 CodeGraph v1 header missing in step 7 of: $prompt_file"
+    log_error "Expected verbatim: $FR101_SCHEMA_HEADER"
+    rm -rf "$FR101_PRESENT_TMPDIR"
+    exit 1
+  fi
+
+  # Assert each Appendix C schema field line is present in step 7
+  for field in "${FR101_SCHEMA_FIELDS[@]}"; do
+    if ! grep -F -q -- "$field" <<< "$step7_region"; then
+      log_error "FR-101 Appendix C schema field missing in step 7 of: $prompt_file"
+      log_error "Expected verbatim: $field"
+      rm -rf "$FR101_PRESENT_TMPDIR"
+      exit 1
+    fi
+  done
+
+  # Assert the "may say `none`" semantic clause is present in step 7
+  if ! grep -F -q -- "$FR101_NONE_SEMANTIC" <<< "$step7_region"; then
+    log_error "FR-101 'emit `none` when empty' semantic missing in step 7 of: $prompt_file"
+    log_error "Expected verbatim: $FR101_NONE_SEMANTIC"
+    rm -rf "$FR101_PRESENT_TMPDIR"
+    exit 1
+  fi
+
+  log_info "Verified FR-101 CodeGraph v1 block (header + modified/new/oos_callers + none-semantic) in step 7 of: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR101_PRESENT_TMPDIR"
+
+log_info "FR-101 CodeGraph v1 block test PASSED — both prompt files emit the Appendix C schema (header + modified/new/oos_callers, each may say 'none') in step 7 when codegraph_available"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
