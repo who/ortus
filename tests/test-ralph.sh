@@ -1241,6 +1241,85 @@ done
 log_info "FR-204 spawn-metadata test PASSED — both prompt files lock --type=task, --priority=2, --labels=auto-codegraph, and the bd dep add edge so spawned issues stay out of bd ready until the closing issue closes"
 
 # ============================================================================
+# Static check: FR-203 cap rule + per-caller / umbrella templates
+# ============================================================================
+# Locks FR-203: step 7.5's cap rule maps qualifying-caller count `N` to spawn
+# shape — N==0 → no-op, 1-3 → per-caller issues (Appendix E per-caller
+# template), 4+ → exactly one umbrella issue (Appendix E umbrella template).
+# This guards (a) that all three branches are present, (b) that both Appendix
+# E templates are rendered with their canonical title formats, and (c) that
+# the umbrella template carries its `Qualifying callers:` bullet list and the
+# `<N>` substitution. Static byte-check on the prompt source — no copier
+# render or bd execution required. Narrowed to the step-7.5 region (between
+# "**7.5." and "8. **Close**") so the check cannot false-pass on similar
+# wording elsewhere in the prompt. Mirrors the FR-204 / FR-205 / FR-101 idiom
+# (awk extraction + grep -F per anchor).
+
+log_step "Static check: FR-203 cap rule and per-caller / umbrella templates in step 7.5"
+
+# FR-203 anchors that must appear verbatim within step 7.5 of each prompt
+# file. Together they prove (a) the cap-rule section is explicitly labeled
+# FR-203 with all three N-branches (0 / 1-3 / 4+), (b) both Appendix E
+# templates are rendered (per-caller for 1-3, umbrella for 4+), (c) the
+# canonical title formats are intact (Verify-caller per-caller; Audit-N
+# umbrella with `<N>` substitution), and (d) the umbrella template lists
+# qualifying callers via its `Qualifying callers:` section header.
+FR203_CAP_PHRASES=(
+  '**Cap rule (FR-203, Appendix E).**'                                                    # Section header anchor
+  '`N == 0` → no-op (skip silently; no spawn).'                                           # Branch 1: empty no-op
+  '`1-3` qualifying callers → spawn one bd issue per caller'                              # Branch 2: per-caller mapping
+  '`4 or more` qualifying callers → spawn exactly one **umbrella** issue'                 # Branch 3: umbrella mapping
+  '**Per-caller template (Appendix E, 1-3 callers).**'                                    # Per-caller template header
+  '**Umbrella template (Appendix E, 4 or more callers).**'                                # Umbrella template header
+  'Title: Verify <caller-symbol> still behaves correctly after <modified-symbol> change (<closing-id>)'  # Per-caller title
+  'Title: Audit <N> cross-module callers of <modified-symbol> after <closing-id>'         # Umbrella title (with <N>)
+  'Qualifying callers:'                                                                   # Umbrella bullet-list section
+  'Render verbatim'                                                                       # Verbatim-substitution contract
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    exit 1
+  fi
+
+  # Extract the step 7.5 region (between "**7.5." and "8. **Close**") so the
+  # check cannot false-pass on similar wording outside step 7.5.
+  step75_region=$(awk '/^\*\*7\.5\./{flag=1} flag {print} /^8\. \*\*Close\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step75_region" ]; then
+    log_error "Could not extract step-7.5 region from: $prompt_file"
+    exit 1
+  fi
+
+  # Assert each FR-203 cap-rule / template phrase is present within step 7.5
+  for phrase in "${FR203_CAP_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
+      log_error "FR-203 cap-rule / template phrase missing in step 7.5 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      exit 1
+    fi
+  done
+
+  # Lock template ordering: per-caller template (for 1-3) must appear before
+  # umbrella template (for 4+) so the document mirrors the cap-rule branch
+  # order. Line-number assertion against the step-7.5 region.
+  per_caller_line=$(grep -n -F -- '**Per-caller template (Appendix E, 1-3 callers).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  umbrella_line=$(grep -n -F -- '**Umbrella template (Appendix E, 4 or more callers).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  if [ -z "$per_caller_line" ] || [ -z "$umbrella_line" ]; then
+    log_error "FR-203 template-order check could not locate one or both template headers in: $prompt_file"
+    exit 1
+  fi
+  if [ "$per_caller_line" -ge "$umbrella_line" ]; then
+    log_error "FR-203 template ordering wrong in $prompt_file: per-caller (line $per_caller_line) must precede umbrella (line $umbrella_line)"
+    exit 1
+  fi
+
+  log_info "Verified FR-203 cap rule + per-caller / umbrella templates in step 7.5 of: $(basename "$prompt_file")"
+done
+
+log_info "FR-203 cap-and-template test PASSED — both prompt files lock the N==0 / 1-3 / 4+ cap rule and render both Appendix E templates (per-caller before umbrella) with their canonical title formats and the umbrella's Qualifying callers list"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
