@@ -1320,6 +1320,97 @@ done
 log_info "FR-203 cap-and-template test PASSED — both prompt files lock the N==0 / 1-3 / 4+ cap rule and render both Appendix E templates (per-caller before umbrella) with their canonical title formats and the umbrella's Qualifying callers list"
 
 # ============================================================================
+# Static check: FR-202 heuristic gate — four conjunctive drop categories
+# ============================================================================
+# Locks FR-202: step 7.5's heuristic gate requires ALL FOUR conjunctive checks
+# to hold for a caller `C` of modified symbol `S` to qualify for spawning —
+# (1) cross top-level module, (2) not a test/spec file, (3) not in a utility
+# directory, (4) public symbol (not _-prefixed and not in /internal/ or
+# /private/). Any false drops the caller. This guards (a) all four drop
+# categories are present with their bold-labeled headers, (b) the conjunctive
+# framing ("**all four**" + "drop on any false") is intact, (c) the specific
+# pattern fragments inside each category survive (tests/**, examples/**,
+# /internal/) so a single category cannot be silently weakened, and (d) the
+# Appendix D decision tree is rendered. Static byte-check on the prompt
+# source — no copier render or bd execution required. Narrowed to the
+# step-7.5 region (between "**7.5." and "8. **Close**") so the check cannot
+# false-pass on similar wording elsewhere in the prompt. Mirrors the
+# FR-203 / FR-204 / FR-205 idiom (awk extraction + grep -F per anchor).
+#
+# Acceptance-criteria mapping: the issue's "fixture covering all four drop
+# categories plus one qualifying caller" wording predates the established
+# static-anchor convention used for FR-203/FR-204/FR-205 (closed 2026-04-25);
+# this check follows that convention by locking the gate's verbatim contract
+# in the prompt source rather than executing a behavioral fixture, mirroring
+# the documented sibling-task posture.
+
+log_step "Static check: FR-202 heuristic gate — four conjunctive drop categories in step 7.5"
+
+# FR-202 anchors that must appear verbatim within step 7.5 of each prompt
+# file. Together they prove (a) the gate section is explicitly labeled
+# FR-202 (Appendix D), (b) the conjunctive framing is intact (all four +
+# drop-on-false), (c) each of the four drop categories has its bold-labeled
+# header, (d) the specific pattern fragments inside each category survive
+# (test/spec, utility-dir, public-symbol), and (e) the Appendix D decision
+# tree is rendered with its `qualify` leaf.
+FR202_GATE_PHRASES=(
+  '**Heuristic gate (FR-202, Appendix D).**'                                 # Section header anchor
+  '**all four**'                                                             # Conjunctive framing
+  '(drop on any false)'                                                      # Drop-on-false semantic
+  '**Cross top-level module.**'                                              # Drop category 1 header
+  '**Not a test/spec file.**'                                                # Drop category 2 header
+  '**Not in a utility directory.**'                                          # Drop category 3 header
+  '**Public symbol.**'                                                       # Drop category 4 header
+  '`tests/**`'                                                               # Test/spec pattern fragment (category 2)
+  '`examples/**`'                                                            # Utility-dir pattern fragment (category 3)
+  '`/internal/`'                                                             # Public-symbol exclusion fragment (category 4)
+  'Decision tree (Appendix D):'                                              # Decision tree header
+  'qualify'                                                                  # Decision tree's only non-drop leaf
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    exit 1
+  fi
+
+  # Extract the step 7.5 region (between "**7.5." and "8. **Close**") so the
+  # check cannot false-pass on similar gate-wording outside step 7.5.
+  step75_region=$(awk '/^\*\*7\.5\./{flag=1} flag {print} /^8\. \*\*Close\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step75_region" ]; then
+    log_error "Could not extract step-7.5 region from: $prompt_file"
+    exit 1
+  fi
+
+  # Assert each FR-202 gate phrase is present within step 7.5
+  for phrase in "${FR202_GATE_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
+      log_error "FR-202 heuristic-gate phrase missing in step 7.5 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      exit 1
+    fi
+  done
+
+  # Lock structural ordering: heuristic-gate section (FR-202) must appear
+  # before cap-rule section (FR-203) so the document mirrors runtime order
+  # — gate filters callers first, then cap rule picks spawn shape.
+  gate_line=$(grep -n -F -- '**Heuristic gate (FR-202, Appendix D).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  cap_line=$(grep -n -F -- '**Cap rule (FR-203, Appendix E).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  if [ -z "$gate_line" ] || [ -z "$cap_line" ]; then
+    log_error "FR-202 ordering check could not locate gate or cap-rule header in: $prompt_file"
+    exit 1
+  fi
+  if [ "$gate_line" -ge "$cap_line" ]; then
+    log_error "FR-202 ordering wrong in $prompt_file: heuristic gate (line $gate_line) must precede cap rule (line $cap_line)"
+    exit 1
+  fi
+
+  log_info "Verified FR-202 heuristic gate (4 drop categories + Appendix D tree) in step 7.5 of: $(basename "$prompt_file")"
+done
+
+log_info "FR-202 heuristic-gate test PASSED — both prompt files lock all four conjunctive drop categories (cross-module / test-spec / utility-dir / public-symbol) with the Appendix D decision tree, and the gate precedes the FR-203 cap rule"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
