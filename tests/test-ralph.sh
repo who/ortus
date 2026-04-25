@@ -650,6 +650,105 @@ rm -rf "$FR403_FIXTURE_TMPDIR"
 log_info "FR-403 cap test PASSED — both prompt files declare 30-file / 50-symbol caps and truncate beyond the cap rather than erroring"
 
 # ============================================================================
+# Static check: FR-503 auto-flip forbidden (model discretion preserved)
+# ============================================================================
+# When codegraph_available is true and step 5 appends a graph-derived missing
+# entry to the Plan JSON, the model-judged has_enough_info value MUST NOT
+# automatically flip to false on graph signal alone (FR-503). The flip stays
+# at the model's discretion, since the symbol may legitimately be new code
+# introduced by this very issue. This guards the FR-503 anti-auto-flip
+# contract from accidental wording drift in BOTH prompt files: the source
+# ortus/prompts/ralph-prompt.md and the template/ralph-prompt.md.jinja.
+#
+# Mocks the fixture conditions described in the issue's acceptance criteria:
+# a Plan JSON with has_enough_info=true and a single graph-derived missing
+# entry (per Appendix G), expecting has_enough_info to remain true after
+# step-5 enrichment. The contract lives in the prompt source itself (it is
+# instruction to the loop, not runnable code), so this is a static
+# byte-check on both prompt files. Narrowed to the Issue Plan region so it
+# cannot false-pass on the scheduler block that follows ("If has_enough_info
+# is false, post a bd comment ... and emit BLOCKED").
+
+log_step "Static check: FR-503 auto-flip forbidden (has_enough_info preserved on graph signal)"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
+# (the tool the FR-501..503 sub-paragraph invokes per extracted reference).
+FR503_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR503_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$FR503_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $FR503_FIXTURE_TMPDIR"
+  rm -rf "$FR503_FIXTURE_TMPDIR"
+  exit 1
+fi
+# Mock Plan JSON fixture: has_enough_info=true with one graph-derived missing
+# entry per Appendix G. This represents the post-enrichment state the FR-503
+# anti-auto-flip rule guards — the scenario in which a naive scheduler might
+# incorrectly flip has_enough_info to false purely because the graph could
+# not resolve a referenced symbol. The fixture is referenced by the test
+# log lines for environmental fidelity, parallel to the FR-403 fixture above.
+cat > "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" <<'FR503_PLAN_JSON'
+{
+  "has_enough_info": true,
+  "missing": ["References NoSuchClass.foo in body; no such symbol in graph. Confirm during Investigate or flag as new code."],
+  "implementation_steps": ["..."],
+  "verification_steps": ["..."],
+  "closure_reason": "..."
+}
+FR503_PLAN_JSON
+if [ ! -s "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" ]; then
+  log_error "Failed to mock FR-503 Plan JSON fixture at $FR503_FIXTURE_TMPDIR"
+  rm -rf "$FR503_FIXTURE_TMPDIR"
+  exit 1
+fi
+log_info "Mocked FR-503 fixture at: $FR503_FIXTURE_TMPDIR (Plan JSON: has_enough_info=true + 1 graph-derived missing entry)"
+
+# FR-503 anchors that must appear verbatim in the Issue Plan region of each
+# prompt file. Together they prove the prompt forbids auto-flipping
+# has_enough_info on graph signal alone AND explicitly attributes the flip
+# decision to the model's discretion (since a referenced symbol may
+# legitimately be new code introduced by this very issue).
+FR503_ANTI_AUTOFLIP_PHRASES=(
+  '**Per FR-503, a graph-derived'                                 # FR-503 anchor that opens the rule
+  'does NOT automatically flip'                                   # Anti-auto-flip imperative
+  "flip stays at the model's discretion"                          # Discretion clause
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR503_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the Issue Plan region (between "## Issue Plan" and "## Subagent Strategy")
+  # so the check cannot false-pass on the scheduler block that handles a
+  # has_enough_info=false plan further down in the same section.
+  plan_region=$(awk '/^## Issue Plan/{flag=1} flag {print} /^## Subagent Strategy/{flag=0}' "$prompt_file")
+  if [ -z "$plan_region" ]; then
+    log_error "Could not extract Issue Plan region from: $prompt_file"
+    rm -rf "$FR503_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Assert each anti-auto-flip phrase is present within the Issue Plan region
+  for phrase in "${FR503_ANTI_AUTOFLIP_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$plan_region"; then
+      log_error "FR-503 anti-auto-flip phrase missing in Issue Plan section of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR503_FIXTURE_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified FR-503 anti-auto-flip in Issue Plan section of: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR503_FIXTURE_TMPDIR"
+
+log_info "FR-503 auto-flip-forbidden test PASSED — both prompt files explicitly forbid auto-flipping has_enough_info on graph signal alone (model discretion preserved)"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
