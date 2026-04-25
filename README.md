@@ -118,7 +118,7 @@ Install these tools before using generated projects:
 | [rg](https://github.com/BurntSushi/ripgrep) | Fast search (ripgrep) |
 | [fd](https://github.com/sharkdp/fd) | Fast file finder |
 
-**Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** Ralph's investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so step-4 (Investigate) can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** Ralph detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, Ralph uses it; otherwise it falls back silently to the default search behavior.
+**Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** Ralph's investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so step-4 (Investigate) can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** Ralph detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, Ralph uses it; otherwise it falls back silently to the default search behavior. When CodeGraph is present, Ralph closure comments and PRD decomposition outputs also include CodeGraph-derived structural data (a parseable change record on closures; reference checks and likely-touched files on decompositions); when absent, both remain byte-equivalent to the pre-CodeGraph baseline.
 
 ### beads v1.0.0+ required
 
