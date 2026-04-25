@@ -650,6 +650,117 @@ rm -rf "$FR403_FIXTURE_TMPDIR"
 log_info "FR-403 cap test PASSED — both prompt files declare 30-file / 50-symbol caps and truncate beyond the cap rather than erroring"
 
 # ============================================================================
+# Static check: FR-404 prior bd comment's CodeGraph v1 block surfaces in step 1
+# ============================================================================
+# When codegraph_available is true and a recent bd comment (returned by the
+# `bd show --json` invocation in step 1) contains a **CodeGraph v1** block
+# (the FR-101 schema), step 1's CodeGraph-block-reuse sub-paragraph must
+# (a) scan those comments for **CodeGraph v1** headers, (b) parse the
+# `modified:` line, (c) surface the `symbol@file:line` entries directly into
+# the orient context, (d) tolerate unrecognized future schema versions
+# (e.g., **CodeGraph v2**) by silently skipping rather than erroring, and
+# (e) gate on codegraph_available with silent skip when off (FR-404).
+# This guards the FR-404 block-reuse contract from accidental wording drift
+# in BOTH prompt files: the source ortus/prompts/ralph-prompt.md and the
+# template/ralph-prompt.md.jinja.
+#
+# Mocks the fixture conditions described in the issue's acceptance criteria:
+# a bd-show JSON response containing a comment with **CodeGraph v1**
+# modified-symbol entries. The contract lives in the prompt source itself
+# (it is instruction to the loop, not runnable code), so this is a static
+# byte-check on both prompt files. Narrowed to the step-1 region so it
+# cannot false-pass on the FR-101 step-7 emission section that uses similar
+# **CodeGraph v1** language.
+
+log_step "Static check: FR-404 prior bd comment's CodeGraph v1 block surfaces in orient context"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
+# (the family of tools the FR-404 sub-paragraph implies are available).
+FR404_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR404_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$FR404_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $FR404_FIXTURE_TMPDIR"
+  rm -rf "$FR404_FIXTURE_TMPDIR"
+  exit 1
+fi
+# Mock bd-show JSON fixture: a comment containing a **CodeGraph v1** block
+# with two modified-symbol entries per Appendix C. This represents the
+# orient-time input the FR-404 block-reuse rule consumes — the `modified:`
+# line's `symbol@file:line` entries that step 1 must surface directly.
+# The fixture is referenced by the test log lines for environmental
+# fidelity, parallel to the FR-401+402 and FR-403 fixtures above.
+cat > "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" <<'FR404_BD_SHOW_JSON'
+[
+  {
+    "id": "ortus-fixture",
+    "comments": [
+      {
+        "body": "**Changes**:\n- Refactored auth\n\n**Verification**: tests pass\n\n**CodeGraph v1**:\nmodified: AuthMiddleware.validate@src/middleware/auth.ts:42 (3 callers, 1 cross-module), TokenStore.refresh@src/lib/token.ts:18 (1 caller, 0 cross-module)\nnew: TokenStore@src/lib/token.ts:7 (class)\noos_callers: ApiRouter.login@src/api/auth/login.ts:23 -> AuthMiddleware.validate"
+      }
+    ]
+  }
+]
+FR404_BD_SHOW_JSON
+if [ ! -s "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" ]; then
+  log_error "Failed to mock FR-404 bd-show JSON fixture at $FR404_FIXTURE_TMPDIR"
+  rm -rf "$FR404_FIXTURE_TMPDIR"
+  exit 1
+fi
+log_info "Mocked FR-404 fixture at: $FR404_FIXTURE_TMPDIR (bd-show JSON: comment with **CodeGraph v1** block, 2 modified-symbol entries)"
+
+# FR-404 anchors that must appear verbatim in step 1 of each prompt file.
+# Together they prove (a) the section is explicitly labeled FR-404 block
+# reuse, (b) the parser scans recent bd comments for **CodeGraph v1**
+# headers, (c) the derivation parses the `modified:` line, (d) the output
+# surfaces `symbol@file:line` entries directly, (e) the parser is tolerant
+# of unrecognized future schema versions, and (f) the contract is gated on
+# codegraph_available with silent skip when off.
+FR404_BLOCK_REUSE_PHRASES=(
+  '**CodeGraph block reuse (FR-404).**'                             # Section header anchor
+  '`**CodeGraph v1**` headers'                                      # Schema header the parser scans for
+  'parse the `modified:` line'                                      # Derivation contract
+  'surface the `symbol@file:line` entries into the orient context'  # Output format
+  'silently skip blocks whose schema version is unrecognized'       # FR-404 tolerance (Appendix Q4)
+  'Gated on `codegraph_available`'                                  # Gate
+  'skip silently when CodeGraph isn'                                # Silent fallback when off (NFR-101)
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR404_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step-1 region (between "1. **Orient**" and "2. **Select**")
+  # so the check cannot false-pass on the FR-101 step-7 emission section
+  # that uses similar **CodeGraph v1** language later in the prompt.
+  step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step1_region" ]; then
+    log_error "Could not extract step-1 region from: $prompt_file"
+    rm -rf "$FR404_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Assert each FR-404 block-reuse phrase is present within step 1
+  for phrase in "${FR404_BLOCK_REUSE_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
+      log_error "FR-404 block-reuse phrase missing in step 1 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR404_FIXTURE_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified FR-404 block reuse (header + scan + parse modified: + surface symbol@file:line + tolerant + gated) in step 1 of: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR404_FIXTURE_TMPDIR"
+
+log_info "FR-404 block-reuse test PASSED — both prompt files instruct Ralph to surface **CodeGraph v1** modified-symbol entries from recent bd comments directly into the orient context (compounding-memory payoff of FR-102's parseable schema)"
+
+# ============================================================================
 # Static check: FR-503 auto-flip forbidden (model discretion preserved)
 # ============================================================================
 # When codegraph_available is true and step 5 appends a graph-derived missing
