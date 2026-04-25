@@ -28,6 +28,9 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
    If **not** `codegraph_available`: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
 5. **Implement**: Make the code changes described in the issue
 6. **Verify**: Run tests, linting, and builds (see Verification below). If they fail, fix and re-verify — this is backpressure, not a reason to stop.
+
+**6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, skip silently — do not mention it in the completion comment.
+
 7. **Log**: Add structured completion comment (see format below)
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
 9. **Commit & Push**: Stage, commit with issue ID in message, then run:
