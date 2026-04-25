@@ -1184,6 +1184,63 @@ rm -rf "$FR205_FAIL_TMPDIR"
 log_info "FR-205 non-blocking test PASSED — both prompt files instruct Ralph to proceed to step 8 (Close) despite a failing bd create / codegraph_impact / gate evaluation"
 
 # ============================================================================
+# Static check: FR-204 spawn metadata — type / priority / label / dep-edge
+# ============================================================================
+# Locks FR-204: each issue spawned by step 7.5 must be created with
+# --type=task, --priority=2, --labels=auto-codegraph, AND followed by a
+# `bd dep add <new-id> --depends-on <closing-id>` edge so the spawned issue
+# does not enter `bd ready` while the closing issue is still open. This
+# guards the metadata + dep-edge contract from accidental drift in either
+# prompt file. Static byte-check on the prompt source — no copier render or
+# bd execution required. Narrowed to the step-7.5 region (between "**7.5."
+# and "8. **Close**") so the check cannot false-pass on similar metadata
+# wording elsewhere in the prompt.
+
+log_step "Static check: FR-204 spawn metadata in step 7.5 (type / priority / label / dep-edge)"
+
+# FR-204 anchors that must appear verbatim within step 7.5 of each prompt
+# file. Together they prove (a) each spawned issue carries the contracted
+# metadata (type=task, priority=2, label=auto-codegraph), and (b) the dep
+# edge is created so the spawned issue is gated behind the closing issue in
+# `bd ready` until step 8 closes it.
+FR204_METADATA_PHRASES=(
+  '(FR-204)'                                          # Section anchor on the metadata-list header
+  '`--type=task`'                                     # Type metadata
+  '`--priority=2`'                                    # Priority metadata
+  '`--labels=auto-codegraph`'                         # Label metadata
+  '`bd dep add <new-id> --depends-on <closing-id>`'   # Dep edge invocation
+  'does not enter `bd ready` until step 8 closes'     # NOT-in-bd-ready semantic
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    exit 1
+  fi
+
+  # Extract the step 7.5 region (between "**7.5." and "8. **Close**") so the
+  # check cannot false-pass on similar metadata wording outside step 7.5.
+  step75_region=$(awk '/^\*\*7\.5\./{flag=1} flag {print} /^8\. \*\*Close\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step75_region" ]; then
+    log_error "Could not extract step-7.5 region from: $prompt_file"
+    exit 1
+  fi
+
+  # Assert each FR-204 metadata phrase is present within step 7.5
+  for phrase in "${FR204_METADATA_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
+      log_error "FR-204 metadata phrase missing in step 7.5 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      exit 1
+    fi
+  done
+
+  log_info "Verified FR-204 spawn metadata (type / priority / label / dep-edge) in step 7.5 of: $(basename "$prompt_file")"
+done
+
+log_info "FR-204 spawn-metadata test PASSED — both prompt files lock --type=task, --priority=2, --labels=auto-codegraph, and the bd dep add edge so spawned issues stay out of bd ready until the closing issue closes"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
