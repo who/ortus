@@ -25,3 +25,5 @@ This project was scaffolded with [Ortus](https://github.com/who/ortus), which pr
 - **[dolt](https://docs.dolthub.com/introduction/installation)** — SQL server that backs beads. Must be on `PATH`; beads auto-starts the server on first invocation.
 - **[claude](https://github.com/anthropics/claude-code)** — Claude CLI for Ralph loops.
 - **[jq](https://jqlang.github.io/jq/)**, **[rg](https://github.com/BurntSushi/ripgrep)**, **[fd](https://github.com/sharkdp/fd)** — used by ortus scripts.
+
+**Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** Ralph's investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so step-4 (Investigate) can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** Ralph detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, Ralph uses it; otherwise it falls back silently to the default search behavior.
