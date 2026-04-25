@@ -1052,6 +1052,138 @@ rm -rf "$FR101_PRESENT_TMPDIR"
 log_info "FR-101 CodeGraph v1 block test PASSED — both prompt files emit the Appendix C schema (header + modified/new/oos_callers, each may say 'none') in step 7 when codegraph_available"
 
 # ============================================================================
+# Static check: FR-205 non-blocking — bd create failure does not stop step 8
+# ============================================================================
+# Locks FR-205: a failing `bd create` (stubbed to return non-zero) during step
+# 7.5's auto-spawn must not break the loop. Step 7.5 must contain language
+# that explicitly tells Ralph to proceed to step 8 (Close) even when bd create
+# returns non-zero, codegraph_impact errors, or the gate evaluation throws.
+# The prompt must continue uninterrupted from 7.5 → 8 (Close) → 9 (Commit & Push).
+#
+# Simulates a failing `bd create` by PATH-shadowing the bd binary with a stub
+# returning exit 1, then asserts the rendered step 7.5 still routes Ralph to
+# Close. Static byte-check on the prompt source — no copier render or shell
+# ralph invocation required. Narrowed to the step-7.5 region (between
+# "**7.5." and "8. **Close**") so the check cannot false-pass on step 6.5's
+# similar non-blocking language earlier in the prompt.
+
+log_step "Static check: FR-205 non-blocking on bd create failure during step 7.5"
+
+# Set up a failing bd-create stub in a PATH-shadow tmpdir for environmental
+# fidelity (parallel to the step 6.5 codegraph-sync-failure mock above). The
+# stub forwards everything except `create`; `create` returns exit 1 to model
+# the FR-205 failure scenario the prompt must handle non-blockingly.
+FR205_FAIL_TMPDIR="$(mktemp -d)"
+cat > "$FR205_FAIL_TMPDIR/bd" <<'STUB'
+#!/bin/bash
+if [ "$1" = "create" ]; then
+  echo "stub: bd create failed (simulated FR-205 failure)" >&2
+  exit 1
+fi
+# Forward all other bd subcommands to the real bd by stripping this dir from PATH
+real_bd_path="$(PATH="$(echo "$PATH" | sed -e "s|$(dirname "$0"):||" -e "s|:$(dirname "$0")||")" command -v bd)"
+exec "$real_bd_path" "$@"
+STUB
+chmod +x "$FR205_FAIL_TMPDIR/bd"
+
+# Verify the stub is wired and `bd create` actually fails (proves the failure mode is real)
+if ! PATH="$FR205_FAIL_TMPDIR:$PATH" command -v bd >/dev/null; then
+  log_error "Failed to PATH-shadow bd stub at $FR205_FAIL_TMPDIR"
+  rm -rf "$FR205_FAIL_TMPDIR"
+  exit 1
+fi
+if PATH="$FR205_FAIL_TMPDIR:$PATH" bd create --title=test --description=test --type=task --priority=2 >/dev/null 2>&1; then
+  log_error "Stub bd create returned 0; expected non-zero"
+  rm -rf "$FR205_FAIL_TMPDIR"
+  exit 1
+fi
+log_info "Simulated failing bd create at: $FR205_FAIL_TMPDIR (exits 1 on 'bd create')"
+
+# FR-205 anchors that must appear verbatim in step 7.5 of each prompt file.
+# Together they prove (a) the section is explicitly labeled FR-205 non-blocking,
+# (b) the contract is stated unambiguously ("Step 7.5 shall never block step 8"),
+# (c) all three failure modes from the issue are enumerated (bd create non-zero,
+# codegraph_impact error, gate evaluation throw), and (d) the prompt routes
+# Ralph onward to step 8 ("proceed to step 8") with the same posture as the
+# already-tested step 6.5 non-blocking hook.
+FR205_NONBLOCKING_PHRASES=(
+  '**Non-blocking (FR-205).**'                # Section header anchor
+  'Step 7.5 shall never block step 8.'        # Core contract
+  'If `bd create` returns non-zero'           # Failure mode 1: bd create
+  'if `codegraph_impact` errors'              # Failure mode 2: codegraph_impact
+  'if the gate evaluation throws'             # Failure mode 3: gate exception
+  'proceed to step 8'                         # Continuation instruction
+  'same posture as step 6.5'                  # Consistency anchor
+  'skip silently'                             # Silent fallback when off
+)
+
+# Steps that must follow 7.5 — proves the prompt continues to Close → Commit
+# without aborting on a failing bd create or impact/gate error.
+FR205_POST75_STEPS=(
+  '^8\. \*\*Close\*\*'
+  '^9\. \*\*Commit & Push\*\*'
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR205_FAIL_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step 7.5 region (between "**7.5." and "8. **Close**") so the
+  # check cannot false-pass on step 6.5's non-blocking phrases earlier in the
+  # same prompt or on unrelated sections.
+  step75_region=$(awk '/^\*\*7\.5\./{flag=1} flag {print} /^8\. \*\*Close\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step75_region" ]; then
+    log_error "Could not extract step-7.5 region from: $prompt_file"
+    rm -rf "$FR205_FAIL_TMPDIR"
+    exit 1
+  fi
+
+  # Assert each FR-205 non-blocking phrase is present within step 7.5
+  for phrase in "${FR205_NONBLOCKING_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
+      log_error "FR-205 non-blocking phrase missing in step 7.5 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR205_FAIL_TMPDIR"
+      exit 1
+    fi
+  done
+
+  # Assert step 7.5 is followed by Close → Commit & Push, in order, and both
+  # appear AFTER step 7.5 (so the prompt routes Ralph to Close, not Exit, on
+  # a failing bd create).
+  step75_lineno=$(grep -F -n -- '**7.5. Spawn follow-ups' "$prompt_file" | head -n 1 | cut -d: -f1)
+  if [ -z "$step75_lineno" ]; then
+    log_error "Step 7.5 anchor line missing in: $prompt_file"
+    rm -rf "$FR205_FAIL_TMPDIR"
+    exit 1
+  fi
+  prev_lineno="$step75_lineno"
+  for step_pattern in "${FR205_POST75_STEPS[@]}"; do
+    step_lineno=$(grep -E -n -- "$step_pattern" "$prompt_file" | head -n 1 | cut -d: -f1)
+    if [ -z "$step_lineno" ]; then
+      log_error "Post-7.5 step pattern '$step_pattern' missing in: $prompt_file"
+      rm -rf "$FR205_FAIL_TMPDIR"
+      exit 1
+    fi
+    if [ "$step_lineno" -le "$prev_lineno" ]; then
+      log_error "Post-7.5 step '$step_pattern' (line $step_lineno) does not follow previous step (line $prev_lineno) in: $prompt_file"
+      rm -rf "$FR205_FAIL_TMPDIR"
+      exit 1
+    fi
+    prev_lineno="$step_lineno"
+  done
+
+  log_info "Verified FR-205 non-blocking step 7.5 → 8 → 9 chain in: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR205_FAIL_TMPDIR"
+
+log_info "FR-205 non-blocking test PASSED — both prompt files instruct Ralph to proceed to step 8 (Close) despite a failing bd create / codegraph_impact / gate evaluation"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
