@@ -18,3 +18,13 @@ When `codegraph_available` (the `.codegraph/` directory exists at the project ro
 - *Unresolved* — the search returns nothing; the reference is graph-absent.
 
 Use only `codegraph_search` for this step (cheap, main-context-safe). Do not call `codegraph_explore` or `codegraph_context` from the main session. Downstream rendering of these resolved/unresolved sets is covered by FR-303 (annotation comment) and FR-304 (Likely files shortlist).
+
+**Annotation comment (FR-303).** When at least one extracted reference falls into either bucket, after `bd create` of the work item's issue, attach the resolved/unresolved sets as a `bd comments add <new-id> "..."` matching this Appendix F template verbatim:
+
+```
+**CodeGraph references** (decompose-time check):
+- Unresolved: <ref-1>, <ref-2>, ...    # if any
+- Resolved:   <sym-1>@<file>, <sym-2>@<file>, ...  # if any
+```
+
+This annotation is **advisory only**: it never blocks issue creation, never alters the issue body / description / acceptance_criteria, and never changes `--priority` or `--type` from what the decomposer would otherwise set. It is a hint for the eventual Investigate step (Ralph step 4) to confirm or correct, not a gating signal. If `codegraph_search` errors or the graph is partial, omit the comment silently — same posture as the rest of this block.
