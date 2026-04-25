@@ -145,7 +145,7 @@ FEATURE_TITLE="Test Feature for Interview"
 FEATURE_DESC="A test feature to verify interview.sh correctly triggers AskUserQuestion."
 
 FEATURE_OUTPUT=$(bd create --title="$FEATURE_TITLE" --type=feature --description="$FEATURE_DESC" 2>&1)
-FEATURE_ID=$(echo "$FEATURE_OUTPUT" | grep -oE '[a-z]+-[a-z0-9]+' | head -1)
+FEATURE_ID=$(echo "$FEATURE_OUTPUT" | grep "Created issue:" | grep -oE '[a-z]+-[a-z0-9]+' | head -1)
 
 if [ -z "$FEATURE_ID" ]; then
   log_error "Failed to create feature bead"
