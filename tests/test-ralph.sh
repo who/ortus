@@ -408,6 +408,82 @@ rm -rf "$CODEGRAPH_FAIL_TMPDIR"
 log_info "codegraph-sync-failure test PASSED — both prompt files instruct Ralph to proceed to Commit despite a failing codegraph sync"
 
 # ============================================================================
+# Static check: NFR-101 step-1 byte-equivalent baseline when CodeGraph off
+# ============================================================================
+# When codegraph_available is false, step 1's orient context must reduce to
+# the bd list pull verbatim — no activity-read block, no CodeGraph v1 block
+# reuse, no log lines, no warnings (NFR-101). The FR-401..403 (activity-read)
+# and FR-404 (block reuse) sub-paragraphs of step 1 must explicitly gate on
+# codegraph_available AND emit nothing when off ("skip silently" — not
+# log/warn/placeholder). Mocks codegraph-absent by removing .codegraph/ from
+# a tmpdir fixture; the gating contract lives in the prompt source itself, so
+# this is a static byte-check on both prompt files. Narrowed to the step-1
+# region so it cannot false-pass on step 6.5's gating language.
+
+log_step "Static check: NFR-101 step-1 byte-equivalent baseline when CodeGraph off"
+
+# Mock codegraph-absent fixture: tmpdir with NO .codegraph/ and NO
+# mcp__codegraph__* stubs (i.e., codegraph_available is false).
+NFR101_ABSENT_TMPDIR="$(mktemp -d)"
+if [ -d "$NFR101_ABSENT_TMPDIR/.codegraph" ]; then
+  log_error "Failed to mock codegraph-absent fixture (unexpected .codegraph/ present)"
+  rm -rf "$NFR101_ABSENT_TMPDIR"
+  exit 1
+fi
+log_info "Mocked codegraph-absent environment at: $NFR101_ABSENT_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
+
+# The verbatim FR-401 bd-list invocation that must remain in step 1 unchanged
+NFR101_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
+
+# Gating phrases — each FR-401..403 (activity-read) and FR-404 (block reuse)
+# sub-paragraph in step 1 must contain language that skips silently when off.
+NFR101_GATING_PHRASES=(
+  'When `codegraph_available`'        # Activity-read paragraph opens with this gate
+  'Gated on `codegraph_available`'    # FR-404 paragraph closes with this gate
+  "skip silently"                     # Silent fallback (no warnings, no extra blocks)
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$NFR101_ABSENT_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step-1 region (between "1. **Orient**" and "2. **Select**")
+  step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step1_region" ]; then
+    log_error "Could not extract step-1 region from: $prompt_file"
+    rm -rf "$NFR101_ABSENT_TMPDIR"
+    exit 1
+  fi
+
+  # Assert FR-401 bd-list invocation preserved verbatim within step 1
+  if ! grep -F -q -- "$NFR101_BD_LIST_INVOCATION" <<< "$step1_region"; then
+    log_error "NFR-101 bd-list invocation missing/altered in step 1 of: $prompt_file"
+    log_error "Expected: $NFR101_BD_LIST_INVOCATION"
+    rm -rf "$NFR101_ABSENT_TMPDIR"
+    exit 1
+  fi
+
+  # Assert gating phrases present within step 1
+  for phrase in "${NFR101_GATING_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
+      log_error "NFR-101 gating phrase missing in step 1 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$NFR101_ABSENT_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified NFR-101 baseline gating in step 1 of: $(basename "$prompt_file")"
+done
+
+rm -rf "$NFR101_ABSENT_TMPDIR"
+
+log_info "NFR-101 baseline test PASSED — both prompt files gate FR-401..404 sub-paragraphs in step 1 on codegraph_available with silent skip"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
