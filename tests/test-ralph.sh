@@ -228,6 +228,74 @@ done
 log_info "codegraph-absent test PASSED — both prompt files contain byte-equivalent fallback sentence"
 
 # ============================================================================
+# Static check: codegraph-present routing wording (byte-equivalent)
+# ============================================================================
+# When .codegraph/ exists at the project root AND at least one mcp__codegraph__*
+# tool is registered (i.e. codegraph_available is true), step 4 of the Ralph
+# prompt must route investigation to the codegraph_* tools FIRST as the
+# primary investigation surface. This guards the codegraph_available branch
+# from accidental wording drift in BOTH prompt files: the source
+# ortus/prompts/ralph-prompt.md and the template/ralph-prompt.md.jinja.
+#
+# The codegraph-present routing wording lives in the unconditional section
+# of each prompt file (no Jinja conditional), so this is a static
+# byte-equivalence check on the prompt source. We still mock the
+# codegraph_available prerequisites (a .codegraph/ directory + a stub MCP
+# tool name registration) for environmental fidelity. Runs before the heavy
+# copier setup so it exercises independently.
+
+log_step "Static check: codegraph-present routing wording"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__* tool name
+CODEGRAPH_PRESENT_TMPDIR="$(mktemp -d)"
+mkdir -p "$CODEGRAPH_PRESENT_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$CODEGRAPH_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$CODEGRAPH_PRESENT_TMPDIR/.codegraph" ] || [ ! -f "$CODEGRAPH_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $CODEGRAPH_PRESENT_TMPDIR"
+  rm -rf "$CODEGRAPH_PRESENT_TMPDIR"
+  exit 1
+fi
+log_info "Mocked codegraph_available environment at: $CODEGRAPH_PRESENT_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_search)"
+
+# Verbatim anchor: the routing sentence that opens the codegraph-present branch
+CODEGRAPH_PRESENT_SENTENCE="If **\`codegraph_available\`**, use these tools as the primary investigation surface"
+
+# The codegraph_* tools step 4 routes to first when codegraph_available
+CODEGRAPH_PRIMARY_TOOLS=(
+  "codegraph_search"
+  "codegraph_callers"
+  "codegraph_callees"
+  "codegraph_impact"
+  "codegraph_node"
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$CODEGRAPH_PRESENT_TMPDIR"
+    exit 1
+  fi
+  if ! grep -F -q -- "$CODEGRAPH_PRESENT_SENTENCE" "$prompt_file"; then
+    log_error "codegraph-present (codegraph_available=true) routing wording missing in: $prompt_file"
+    log_error "Expected verbatim phrase: $CODEGRAPH_PRESENT_SENTENCE"
+    rm -rf "$CODEGRAPH_PRESENT_TMPDIR"
+    exit 1
+  fi
+  for tool in "${CODEGRAPH_PRIMARY_TOOLS[@]}"; do
+    if ! grep -F -q -- "\`$tool\`" "$prompt_file"; then
+      log_error "Expected primary codegraph tool '\`$tool\`' to be listed in step 4 of: $prompt_file"
+      rm -rf "$CODEGRAPH_PRESENT_TMPDIR"
+      exit 1
+    fi
+  done
+  log_info "Verified codegraph-present routing wording in: $(basename "$prompt_file")"
+done
+
+rm -rf "$CODEGRAPH_PRESENT_TMPDIR"
+
+log_info "codegraph-present test PASSED — both prompt files route to mcp__codegraph__* tools first when codegraph_available"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
