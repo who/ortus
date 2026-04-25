@@ -6,13 +6,169 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 
 ## Your Task
 
-1. **Orient**: Run `bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json` to see what happened in previous loops
+1. **Orient**: Run `bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json` to see what happened in previous loops.
+
+   **Activity read (FR-401..403).** When `codegraph_available`, additionally surface recent CodeGraph activity for files touched in the last ~20 commits. Run `git log -20 --name-only | sort -u` to derive the file list, then enrich it:
+
+   - Prefer `codegraph_files` — one batched call across the file list when the tool is available.
+   - Fall back to per-file `codegraph_search` when `codegraph_files` is unavailable.
+
+   Cap the result at **30 unique files** and **50 symbols** total; truncate beyond the cap rather than erroring. Add the surfaced symbols to the orient context block alongside the existing `bd list` output above — that invocation is preserved verbatim per FR-401, this sub-step is additive only. When CodeGraph isn't available, skip silently.
+
+   **CodeGraph block reuse (FR-404).** Additionally scan the recent bd comments returned by the `bd show --json` invocation above for `**CodeGraph v1**` headers (the FR-101 schema). For each recognized v1 block, parse the `modified:` line and surface the `symbol@file:line` entries into the orient context alongside the activity-read output — this is the compounding-memory payoff of FR-102's parseable schema. The parser is tolerant per Appendix Q4: silently skip blocks whose schema version is unrecognized (e.g., a future `**CodeGraph v2**` this prompt hasn't learned yet) rather than erroring. Gated on `codegraph_available`; skip silently when CodeGraph isn't available.
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
-4. **Investigate**: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
+4. **Investigate**: Before assuming anything is or isn't implemented, search the codebase. First, decide which path to take:
+
+   - **`codegraph_available`** if `.codegraph/` exists at the project root *and* at least one tool whose name starts with `mcp__codegraph__` is registered in this session.
+   - Otherwise, fall through to the default subagent-grep path. Do not mention CodeGraph in any output.
+
+   If **`codegraph_available`**, use these tools as the primary investigation surface (cheap, main-context-safe):
+
+   - `codegraph_search` — find symbols by name.
+   - `codegraph_callers` / `codegraph_callees` — trace call flow.
+   - `codegraph_impact` — assess blast radius before editing.
+   - `codegraph_node` — pull a single symbol's details (with source if needed).
+
+   For broader, task-shaped questions ("how does X work?", "where does feature Y live?"), spawn a subagent and have it call `codegraph_explore` or `codegraph_context`. Never call those two from the main context — they return large source-code payloads that will blow your scheduler budget.
+
+   Fall back to subagent grep/glob/Read **only** if CodeGraph returns nothing useful for the question.
+
+   If **not** `codegraph_available`: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
 5. **Implement**: Make the code changes described in the issue
 6. **Verify**: Run tests, linting, and builds (see Verification below). If they fail, fix and re-verify — this is backpressure, not a reason to stop.
+
+**6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, skip silently — do not mention it in the completion comment.
+
 7. **Log**: Add structured completion comment (see format below)
+
+**7.5. Spawn follow-ups (FR-201..206; best-effort).** When `codegraph_available` and the **CodeGraph v1** block emitted in step 7 lists at least one entry under `oos_callers`, create bd issues for those callers before closing. Step 7.5 runs after step 7 (the block is now parseable) and before step 8 (the closing issue is still `in_progress`, so `bd dep add <new-id> --depends-on <closing-id>` references an open issue — the spawned issues only enter `bd ready` once step 8 closes the closing one). Apply the FR-202 heuristic gate to filter callers, the FR-203 cap-and-umbrella mapping to choose per-caller vs umbrella shape, and the FR-206 idempotency check before each `bd create`.
+
+**Heuristic gate (FR-202, Appendix D).** A caller `C` of modified symbol `S` qualifies for spawning iff **all four** of the following conjunctive checks hold (drop on any false):
+
+1. **Cross top-level module.** `C.file` and `S.file` differ in their first path segment (cross top-level module).
+2. **Not a test/spec file.** `C.file` does not match any of: `*_test.*`, `tests/**`, `__tests__/**`, `test_*`, `*.test.*`, `*.spec.*`, `*_spec.*`.
+3. **Not in a utility directory.** `C.file` does not match any of: `examples/**`, `docs/**`, `scripts/**`, `tools/**`, `.ortus/**`.
+4. **Public symbol.** `S.name` does not start with `_`, and `S.file` contains neither `/internal/` nor `/private/`.
+
+Decision tree (Appendix D):
+
+```
+                ┌─────────────────────────────────────┐
+                │ caller C of modified symbol S       │
+                └─────────────────┬───────────────────┘
+                                  │
+              ┌───────────────────▼───────────────────┐
+              │ same top-level module as S?           │
+              └────yes────────────────no──────────────┘
+                   │                  │
+                ┌──▼──┐                │
+                │drop │   ┌────────────▼───────────────┐
+                └─────┘   │ C in tests/specs?          │
+                          └────yes──────────no─────────┘
+                               │            │
+                            ┌──▼──┐         │
+                            │drop │  ┌──────▼──────────┐
+                            └─────┘  │ C in examples/  │
+                                     │ docs/scripts/   │
+                                     │ tools/.ortus?   │
+                                     └──yes────no──────┘
+                                        │     │
+                                     ┌──▼──┐  │
+                                     │drop │  │
+                                     └─────┘  │
+                                           ┌──▼──────────┐
+                                           │ S "public"? │
+                                           │ (not _, not │
+                                           │ in internal/│
+                                           │ private/)   │
+                                           └─yes──no─────┘
+                                              │   │
+                                              │  ┌▼──┐
+                                              │  │drop│
+                                              │  └────┘
+                                            ┌─▼───────┐
+                                            │ qualify │
+                                            └─────────┘
+```
+
+Each spawned issue uses this metadata (FR-204):
+
+- `--type=task`
+- `--priority=2`
+- `--labels=auto-codegraph` (so the cohort is identifiable and bulk-managed).
+- Title and description from the Appendix E template (per-caller or umbrella), including the closing-issue id, the modified symbol, the caller's `symbol@file:line`, and the closing commit (`git rev-parse HEAD` if available).
+- After `bd create` succeeds, run `bd dep add <new-id> --depends-on <closing-id>` so the spawned issue does not enter `bd ready` until step 8 closes the closing one.
+
+**Cap rule (FR-203, Appendix E).** After the FR-202 gate filters callers, count qualifying callers `N` and pick the spawn shape:
+
+- `N == 0` → no-op (skip silently; no spawn).
+- `1-3` qualifying callers → spawn one bd issue per caller using the **per-caller template** below.
+- `4 or more` qualifying callers → spawn exactly one **umbrella** issue using the umbrella template below, listing every qualifying caller in its description.
+
+**Per-caller template (Appendix E, 1-3 callers).** Render verbatim — substitute the angle-bracket placeholders (`<closing-id>`, `<modified-symbol>`, `<S.file>:<S.line>`, `<caller-symbol>`, `<C.file>:<C.line>`, `<git-rev-parse-HEAD>`):
+
+```
+Title: Verify <caller-symbol> still behaves correctly after <modified-symbol> change (<closing-id>)
+
+Description:
+Closing issue <closing-id> modified `<modified-symbol>` at <S.file>:<S.line>.
+This issue tracks verification of caller `<caller-symbol>` at <C.file>:<C.line>,
+which was identified by CodeGraph as a cross-module caller of the modified symbol
+and falls outside the closing issue's stated scope.
+
+Modified symbol: <modified-symbol>@<S.file>:<S.line>
+Caller symbol:   <caller-symbol>@<C.file>:<C.line>
+Closing commit:  <git-rev-parse-HEAD>
+Closing issue:   <closing-id>
+
+Verification: Confirm <caller-symbol>'s behavior is preserved by the change to
+<modified-symbol>. If a behavioral change is intended for this call site,
+update or close this issue accordingly.
+
+Created by: auto-codegraph (Ralph step 7.5)
+
+Labels: auto-codegraph
+Type: task
+Priority: medium
+Depends on: <closing-id>
+```
+
+**Umbrella template (Appendix E, 4 or more callers).** Render verbatim — substitute the angle-bracket placeholders, including `<N>` (qualifying-caller count) and the per-caller bullet list under `Qualifying callers:`:
+
+```
+Title: Audit <N> cross-module callers of <modified-symbol> after <closing-id>
+
+Description:
+Closing issue <closing-id> modified `<modified-symbol>` at <S.file>:<S.line>.
+CodeGraph identified <N> qualifying cross-module callers; per the heuristic-gate
+cap, this single umbrella issue tracks them in lieu of <N> individual issues.
+
+Modified symbol: <modified-symbol>@<S.file>:<S.line>
+Closing commit:  <git-rev-parse-HEAD>
+Closing issue:   <closing-id>
+
+Qualifying callers:
+- <caller-1-symbol>@<C1.file>:<C1.line>
+- <caller-2-symbol>@<C2.file>:<C2.line>
+- ... (all N)
+
+Verification: For each caller, confirm behavior is preserved or update accordingly.
+Split this umbrella into individual issues if the audit reveals divergent treatment
+across callers.
+
+Created by: auto-codegraph (Ralph step 7.5)
+
+Labels: auto-codegraph
+Type: task
+Priority: medium
+Depends on: <closing-id>
+```
+
+**Idempotency on retry (FR-206).** Before each `bd create`, guard against duplicates by querying the existing auto-codegraph cohort. Run `bd list --label=auto-codegraph --json` and filter the result by description text containing **both** the closing-issue id (e.g., `ortus-a1b2c3`) **and** the modified-symbol name (e.g., `AuthMiddleware.validate`); if a matching issue already exists, skip the spawn for that caller in per-caller mode, or skip the entire umbrella spawn in umbrella mode. Idempotency is keyed on the `(closing-id, modified-symbol)` pair — the same closing id with a different modified symbol still spawns; the same modified symbol on a different closing id still spawns. This matters when a Ralph iteration is restarted partway (bash loop killed and resumed) and step 7.5 re-runs against an already-spawned cohort. Same non-blocking posture as FR-205: a failing `bd list` query never blocks step 8 — proceed without the guard rather than aborting.
+
+**Non-blocking (FR-205).** Step 7.5 shall never block step 8. If `bd create` returns non-zero, if `codegraph_impact` errors, or if the gate evaluation throws, log to a comment if convenient and proceed to step 8 — same posture as step 6.5. If `codegraph_available` is false, or if the FR-101 block's `oos_callers` is `none`, skip silently.
+
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
 9. **Commit & Push**: Stage, commit with issue ID in message, then run:
 
@@ -116,6 +272,8 @@ Ask the model (subagent if needed) how to handle this issue given its type, labe
 }
 ```
 
+**Reference check (FR-501..503).** When `codegraph_available`, before emitting the plan JSON, extract code-shaped references from the issue body and acceptance criteria using these patterns: `[A-Z][A-Za-z0-9_]*` (CamelCase), `[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*` (dotted methods), and file paths ending in a recognized source extension (`.ts`, `.tsx`, `.js`, `.py`, `.rs`, `.go`, `.java`, `.rb`). Run `codegraph_search` on each extracted reference. For every unresolved reference, append one entry to `missing` per Appendix G in this exact form: `References <symbol> in <field>; no such symbol in graph. Confirm during Investigate or flag as new code.` (where `<field>` is `body` or `acceptance_criteria`). Existing model-judged `missing` entries are preserved verbatim — this is additive only. **Per FR-503, a graph-derived `missing` entry does NOT automatically flip `has_enough_info` to `false`** — the flip stays at the model's discretion, since the symbol may legitimately be new code introduced by this very issue. Skip silently when CodeGraph isn't available.
+
 The scheduler validates the shape — all five keys present, `has_enough_info` a boolean, `missing` an array of strings, `implementation_steps`/`verification_steps` arrays, `closure_reason` a non-empty string — then executes mechanically:
 
 - If `has_enough_info` is `false`, post a bd comment listing each entry in `missing` as a clarification gap, then emit BLOCKED. The scheduler does not judge ambiguity itself; this field is the sole signal.
@@ -201,6 +359,36 @@ bd comments add bd-a1b2c3 "**Changes**:
 ```
 
 **Keep it concise** — bullet points for changes, one line for verification.
+
+**When `codegraph_available`, append a `**CodeGraph v1**` block** to the comment so the structural change record is parseable by future loops (FR-101..103). Compute it from the main session using only `codegraph_search`, `codegraph_node`, and `codegraph_impact` against the symbols you modified — bound the work to ≤ 15 tool calls for a typical closure (≤ 5 modified symbols). The larger source-fetching CodeGraph tools remain subagent-only per step 4 and must not be invoked from the main session here.
+
+Schema (Appendix C):
+
+```
+**CodeGraph v1**:
+modified: <symbol>@<file>:<line> (<N> callers, <M> cross-module) [, ...]
+new: <symbol>@<file>:<line> (<kind>) [, ...]
+oos_callers: <caller-symbol>@<file>:<line> -> <modified-symbol> [, ...]
+```
+
+Each list field is comma-separated; emit `none` when empty. For docs- or test-only closures, all three lists may be `none` (e.g., `modified: none (test-only change)`).
+
+**Example with the block:**
+```bash
+bd comments add bd-a1b2c3 "**Changes**:
+- Added auth middleware in src/middleware/auth.ts
+- Created login/logout endpoints in src/routes/auth.ts
+- Added JWT token validation
+
+**Verification**: All tests passing (12/12), lint clean, manual login flow tested
+
+**CodeGraph v1**:
+modified: AuthMiddleware.validate@src/middleware/auth.ts:42 (3 callers, 1 cross-module), TokenStore.refresh@src/lib/token.ts:18 (1 caller, 0 cross-module)
+new: TokenStore@src/lib/token.ts:7 (class)
+oos_callers: ApiRouter.login@src/api/auth/login.ts:23 -> AuthMiddleware.validate"
+```
+
+When `codegraph_available` is false, omit the block entirely — the comment must remain byte-equivalent to a pre-PRD closure (NFR-101).
 
 ## Completion Signals
 
