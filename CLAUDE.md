@@ -144,6 +144,10 @@ This project uses **beads** (`bd`) for issue tracking. See **AGENTS.md** for wor
 * Use dependency trees to understand complex relationships
 * Higher priority issues (0-1) are usually more important than lower (2-4)
 
+## CodeGraph (optional)
+
+If you have [CodeGraph](https://github.com/colbymchenry/codegraph) installed, Ralph will use it automatically; if not, nothing changes. Not required — Ralph detects CodeGraph at runtime and falls back silently to grep/glob/Read when absent.
+
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
