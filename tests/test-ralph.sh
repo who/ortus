@@ -749,6 +749,118 @@ rm -rf "$FR503_FIXTURE_TMPDIR"
 log_info "FR-503 auto-flip-forbidden test PASSED — both prompt files explicitly forbid auto-flipping has_enough_info on graph signal alone (model discretion preserved)"
 
 # ============================================================================
+# Static check: FR-501+502 phantom-symbol reference produces Appendix G missing entry
+# ============================================================================
+# When codegraph_available is true and step 5's Reference check encounters a
+# code-shaped reference that does NOT resolve in the graph (e.g.,
+# `NoSuchClass.foo()`), the prompt must instruct Ralph to append exactly one
+# entry to the Plan's `missing` array per Appendix G in this verbatim form:
+#
+#   References <symbol> in <field>; no such symbol in graph. Confirm during
+#   Investigate or flag as new code.
+#
+# Conversely, when a reference DOES resolve (e.g., a real graph symbol),
+# the prompt must NOT produce a graph-derived missing entry — guarded by the
+# "For every unresolved reference" gating clause. Together these guard the
+# FR-501 extraction + FR-502 entry-form contract from accidental wording
+# drift in BOTH prompt files: the source ortus/prompts/ralph-prompt.md and
+# the template/ralph-prompt.md.jinja.
+#
+# Mocks the fixture conditions described in the issue's acceptance criteria:
+# a phantom-symbol issue body containing `NoSuchClass.foo()` paired with a
+# stub codegraph_search response returning empty, AND a resolved-symbol
+# variant returning a hit. The contract lives in the prompt source itself
+# (it is instruction to the loop, not runnable code), so this is a static
+# byte-check on both prompt files. Narrowed to the Issue Plan region so it
+# cannot false-pass on unrelated sections.
+
+log_step "Static check: FR-501+502 phantom-symbol reference produces Appendix G missing entry"
+
+# Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
+# (the tool the FR-501..503 sub-paragraph invokes per extracted reference).
+FR501_502_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR501_502_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$FR501_502_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $FR501_502_FIXTURE_TMPDIR"
+  rm -rf "$FR501_502_FIXTURE_TMPDIR"
+  exit 1
+fi
+
+# Phantom-symbol fixture: an issue body referencing NoSuchClass.foo() — a
+# code-shaped reference (dotted method) absent from the graph. After step 5
+# runs, Plan.missing must contain the Appendix G verbatim entry citing
+# NoSuchClass.foo and the field name (body or acceptance_criteria).
+cat > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-phantom-issue-body" <<'PHANTOM_ISSUE_BODY'
+Fix the timeout handling in NoSuchClass.foo() so the cache invalidation
+does not fail when the upstream timeout exceeds 30 seconds.
+PHANTOM_ISSUE_BODY
+# Stub codegraph_search response: empty (NoSuchClass.foo absent from graph)
+echo '{"results": []}' > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty"
+
+# Resolved-symbol variant: same fixture, but with a stub codegraph_search
+# response returning a hit. Per FR-502's "For every unresolved reference"
+# gating, this case must NOT produce a graph-derived missing entry.
+echo '{"results": [{"symbol": "AuthMiddleware.validate", "file": "src/middleware/auth.ts:42"}]}' \
+  > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-hit"
+
+if [ ! -s "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-phantom-issue-body" ] \
+   || [ ! -s "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty" ] \
+   || [ ! -s "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-hit" ]; then
+  log_error "Failed to mock FR-501/502 phantom + resolved fixtures at $FR501_502_FIXTURE_TMPDIR"
+  rm -rf "$FR501_502_FIXTURE_TMPDIR"
+  exit 1
+fi
+log_info "Mocked FR-501/502 fixture at: $FR501_502_FIXTURE_TMPDIR (phantom NoSuchClass.foo + resolved AuthMiddleware.validate stubs)"
+
+# Anchors that prove the prompt instructs Ralph to produce an Appendix G
+# missing entry per unresolved reference. The Appendix G verbatim form must
+# appear exactly so the entry shape is byte-identical across loops, and the
+# "For every unresolved reference" clause guards the negative case (resolved
+# refs add nothing).
+FR501_502_PHRASES=(
+  '**Reference check (FR-501..503).**'
+  'extract code-shaped references from the issue body and acceptance criteria'
+  '`codegraph_search`'
+  'For every unresolved reference, append one entry to `missing`'
+  'References <symbol> in <field>; no such symbol in graph. Confirm during Investigate or flag as new code.'
+  'Existing model-judged `missing` entries are preserved verbatim'
+  'additive only'
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR501_502_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the Issue Plan region (between "## Issue Plan" and "## Subagent
+  # Strategy") so the check cannot false-pass on unrelated sections.
+  plan_region=$(awk '/^## Issue Plan/{flag=1} flag {print} /^## Subagent Strategy/{flag=0}' "$prompt_file")
+  if [ -z "$plan_region" ]; then
+    log_error "Could not extract Issue Plan region from: $prompt_file"
+    rm -rf "$FR501_502_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  for phrase in "${FR501_502_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$plan_region"; then
+      log_error "FR-501/502 phrase missing in Issue Plan section of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR501_502_FIXTURE_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified FR-501 extraction + FR-502 Appendix G entry-form in Issue Plan section of: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR501_502_FIXTURE_TMPDIR"
+
+log_info "FR-501+502 phantom-symbol test PASSED — both prompt files instruct Ralph to append the Appendix G verbatim entry per unresolved reference (resolved refs add nothing)"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
