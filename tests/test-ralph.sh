@@ -1184,6 +1184,91 @@ rm -rf "$FR205_FAIL_TMPDIR"
 log_info "FR-205 non-blocking test PASSED — both prompt files instruct Ralph to proceed to step 8 (Close) despite a failing bd create / codegraph_impact / gate evaluation"
 
 # ============================================================================
+# Static check: FR-206 idempotency — (closing-id, modified-symbol) keyed dedup
+# ============================================================================
+# Locks FR-206: before each `bd create` in step 7.5, Ralph must query the
+# existing auto-codegraph cohort with `bd list --label=auto-codegraph --json`
+# and skip the spawn if a matching issue exists for the same
+# (closing-id, modified-symbol) pair. This guards against duplicate auto-spawns
+# when the bash loop is killed and resumed mid-step-7.5. Acceptance asks that
+# pre/post second-run `bd list --label=auto-codegraph` counts are equal — i.e.,
+# re-running step 7.5 on the same closing id produces no duplicates. Static
+# byte-check on the prompt source — narrowed to the step-7.5 region (between
+# "**7.5." and "8. **Close**") so the check cannot false-pass on similar
+# wording elsewhere. Mirrors the FR-204 / FR-205 idiom (awk extraction +
+# grep -F per anchor).
+
+log_step "Static check: FR-206 idempotency in step 7.5 ((closing-id, modified-symbol) keyed dedup)"
+
+# FR-206 anchors that must appear verbatim within step 7.5 of each prompt
+# file. Together they prove (a) the section is explicitly labeled FR-206
+# idempotency, (b) the dedup query targets the auto-codegraph label cohort,
+# (c) the dual-key conjunction (closing-id AND modified-symbol) is intact
+# (both halves named, plus the canonical tuple form), (d) both per-caller and
+# umbrella spawn modes have explicit skip semantics, (e) the non-collision
+# corollaries are stated (different closing id with same symbol still spawns,
+# and vice versa), (f) the restart scenario is named (bash loop killed and
+# resumed), and (g) FR-205 non-blocking posture is inherited so a failing
+# `bd list` query never blocks step 8.
+FR206_IDEMPOTENCY_PHRASES=(
+  '**Idempotency on retry (FR-206).**'                                # Section header anchor
+  'Before each `bd create`, guard against duplicates'                 # Pre-create guard semantic
+  'bd list --label=auto-codegraph --json'                             # Cohort query
+  '`(closing-id, modified-symbol)`'                                   # Keyed-on tuple
+  'closing-issue id'                                                  # First key half
+  'modified-symbol name'                                              # Second key half
+  'skip the spawn for that caller in per-caller mode'                 # Per-caller skip
+  'skip the entire umbrella spawn in umbrella mode'                   # Umbrella skip
+  'the same closing id with a different modified symbol still spawns' # Non-collision: same closing-id ≠ collision
+  'the same modified symbol on a different closing id still spawns'   # Non-collision: same symbol ≠ collision
+  'bash loop killed and resumed'                                      # Restart scenario
+  'Same non-blocking posture as FR-205'                               # Non-blocking inheritance
+  'a failing `bd list` query never blocks step 8'                     # Failing-query passthrough
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    exit 1
+  fi
+
+  # Extract the step 7.5 region (between "**7.5." and "8. **Close**") so the
+  # check cannot false-pass on similar wording outside step 7.5.
+  step75_region=$(awk '/^\*\*7\.5\./{flag=1} flag {print} /^8\. \*\*Close\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step75_region" ]; then
+    log_error "Could not extract step-7.5 region from: $prompt_file"
+    exit 1
+  fi
+
+  # Assert each FR-206 idempotency phrase is present within step 7.5
+  for phrase in "${FR206_IDEMPOTENCY_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
+      log_error "FR-206 idempotency phrase missing in step 7.5 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      exit 1
+    fi
+  done
+
+  # Lock structural ordering: FR-206 idempotency block must precede the FR-205
+  # non-blocking section in step 7.5, mirroring the prompt's literal layout
+  # (idempotency guard documented before the catch-all non-blocking posture).
+  idem_line=$(grep -n -F -- '**Idempotency on retry (FR-206).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  nb_line=$(grep -n -F -- '**Non-blocking (FR-205).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  if [ -z "$idem_line" ] || [ -z "$nb_line" ]; then
+    log_error "FR-206 ordering check could not locate idempotency or non-blocking header in: $prompt_file"
+    exit 1
+  fi
+  if [ "$idem_line" -ge "$nb_line" ]; then
+    log_error "FR-206 ordering wrong in $prompt_file: idempotency (line $idem_line) must precede non-blocking (line $nb_line)"
+    exit 1
+  fi
+
+  log_info "Verified FR-206 idempotency ((closing-id, modified-symbol) dedup + per-caller/umbrella skip + non-blocking inheritance) in step 7.5 of: $(basename "$prompt_file")"
+done
+
+log_info "FR-206 idempotency test PASSED — both prompt files lock the bd-list cohort query, dual-key (closing-id, modified-symbol) conjunction, per-caller/umbrella skip semantics, non-collision corollaries, restart scenario, and FR-205 non-blocking inheritance"
+
+# ============================================================================
 # Static check: FR-204 spawn metadata — type / priority / label / dep-edge
 # ============================================================================
 # Locks FR-204: each issue spawned by step 7.5 must be created with
