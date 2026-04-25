@@ -484,6 +484,88 @@ rm -rf "$NFR101_ABSENT_TMPDIR"
 log_info "NFR-101 baseline test PASSED — both prompt files gate FR-401..404 sub-paragraphs in step 1 on codegraph_available with silent skip"
 
 # ============================================================================
+# Static check: FR-403 activity-read cap (30 files / 50 symbols, no error)
+# ============================================================================
+# When codegraph_available is true and the recent-commits file list exceeds
+# the cap, step 1's activity-read sub-paragraph must (a) declare a 30-unique-
+# files cap, (b) declare a 50-symbols cap, and (c) instruct the loop to
+# truncate beyond the cap rather than erroring (FR-403). This guards the
+# cap contract from accidental wording drift in BOTH prompt files.
+#
+# Mocks the fixture conditions described in the issue's acceptance criteria:
+# 50 files in recent commits, 100 symbols total via a stub codegraph_files
+# response. The cap contract lives in the prompt source itself (it is
+# instruction to the loop, not runnable code), so this is a static
+# byte-check on both prompt files. Narrowed to the step-1 region so it
+# cannot false-pass on later sections of the prompt.
+
+log_step "Static check: FR-403 activity-read cap (30 files / 50 symbols, no error)"
+
+# Mock the >30-file / >50-symbol fixture: a tmpdir with 50 dummy files and
+# a stub codegraph_files response file claiming 100 symbols total. This
+# matches the issue's acceptance condition ("Fixture: 50 files in recent
+# commits, 100 symbols total via mocked codegraph_files response") for
+# environmental fidelity, parallel to existing mocks above.
+FR403_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$FR403_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_files" > "$FR403_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+for i in $(seq 1 50); do
+  : > "$FR403_FIXTURE_TMPDIR/file-$i.txt"
+done
+fr403_file_count=$(find "$FR403_FIXTURE_TMPDIR" -maxdepth 1 -type f -name 'file-*.txt' | wc -l)
+if [ "$fr403_file_count" -ne 50 ]; then
+  log_error "Failed to mock 50-file fixture (got $fr403_file_count)"
+  rm -rf "$FR403_FIXTURE_TMPDIR"
+  exit 1
+fi
+# Stub codegraph_files response claiming 100 symbols across the 50 files
+{
+  echo "files: 50"
+  echo "symbols: 100"
+} > "$FR403_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-files-response"
+log_info "Mocked FR-403 over-cap fixture at: $FR403_FIXTURE_TMPDIR (50 files, stub response: 100 symbols)"
+
+# Cap phrases that must appear verbatim in step 1 of each prompt file.
+# (a) and (b) declare the caps; (c) declares truncate-rather-than-error.
+FR403_CAP_PHRASES=(
+  '**30 unique files**'                         # File cap
+  '**50 symbols**'                              # Symbol cap
+  'truncate beyond the cap rather than erroring' # No-error truncation semantic
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$FR403_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step-1 region (between "1. **Orient**" and "2. **Select**")
+  step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
+  if [ -z "$step1_region" ]; then
+    log_error "Could not extract step-1 region from: $prompt_file"
+    rm -rf "$FR403_FIXTURE_TMPDIR"
+    exit 1
+  fi
+
+  # Assert each cap phrase is present within step 1
+  for phrase in "${FR403_CAP_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
+      log_error "FR-403 cap phrase missing in step 1 of: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$FR403_FIXTURE_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified FR-403 cap (30 files / 50 symbols / truncate-not-error) in step 1 of: $(basename "$prompt_file")"
+done
+
+rm -rf "$FR403_FIXTURE_TMPDIR"
+
+log_info "FR-403 cap test PASSED — both prompt files declare 30-file / 50-symbol caps and truncate beyond the cap rather than erroring"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
