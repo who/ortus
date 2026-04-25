@@ -861,6 +861,96 @@ rm -rf "$FR501_502_FIXTURE_TMPDIR"
 log_info "FR-501+502 phantom-symbol test PASSED — both prompt files instruct Ralph to append the Appendix G verbatim entry per unresolved reference (resolved refs add nothing)"
 
 # ============================================================================
+# Static check: NFR-101 step-7 byte-equivalent baseline when CodeGraph off
+# ============================================================================
+# When codegraph_available is false, step 7's completion comment must reduce
+# to the pre-PRD baseline — no **CodeGraph v1** block, no log lines, no
+# warnings (NFR-101). The Phase 1 conditional-emission paragraph in the
+# Completion Comment Format section must explicitly gate the CodeGraph v1
+# block on codegraph_available AND instruct omission of the entire block when
+# off so the comment remains byte-equivalent to a pre-PRD closure. Mocks
+# codegraph-absent by removing .codegraph/ from a tmpdir fixture; the gating
+# contract lives in the prompt source itself (it is instruction to the loop,
+# not runnable code), so this is a static byte-check on both prompt files.
+# Narrowed to the step-7 region (between "## Completion Comment Format" and
+# "## Completion Signals") so it cannot false-pass on step-1's separate
+# NFR-101 gating language. Runs as a static check before the heavy copier
+# setup so it exercises independently.
+
+log_step "Static check: NFR-101 step-7 byte-equivalent baseline when CodeGraph off"
+
+# Mock codegraph-absent fixture: tmpdir with NO .codegraph/ and NO
+# mcp__codegraph__* stubs (i.e., codegraph_available is false).
+NFR101_STEP7_TMPDIR="$(mktemp -d)"
+if [ -d "$NFR101_STEP7_TMPDIR/.codegraph" ]; then
+  log_error "Failed to mock codegraph-absent fixture (unexpected .codegraph/ present)"
+  rm -rf "$NFR101_STEP7_TMPDIR"
+  exit 1
+fi
+log_info "Mocked codegraph-absent environment at: $NFR101_STEP7_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
+
+# Pre-PRD baseline anchors that must remain unchanged in step 7 so the
+# closing-comment shape stays byte-equivalent when CodeGraph is off.
+NFR101_STEP7_BASELINE_ANCHORS=(
+  '**Changes**:'        # Pre-PRD bullet header for change list
+  '**Verification**:'   # Pre-PRD line for test/lint/build status
+)
+
+# Gating phrases — the Phase 1 Completion Comment paragraph must (a) gate the
+# **CodeGraph v1** block emission on codegraph_available AND (b) instruct
+# byte-equivalent omission when off. Both halves of the conditional must be
+# present verbatim in step 7 of each prompt file.
+NFR101_STEP7_GATING_PHRASES=(
+  '**When `codegraph_available`, append a'                               # Conditional-emission opener
+  'When `codegraph_available` is false, omit the block entirely'         # Off-branch omission instruction
+  'byte-equivalent to a pre-PRD closure (NFR-101)'                       # Baseline-equivalence assertion
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$NFR101_STEP7_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step-7 region (between "## Completion Comment Format" and
+  # "## Completion Signals") so the check cannot false-pass on step 1's
+  # NFR-101 language or any other section.
+  step7_region=$(awk '/^## Completion Comment Format/{flag=1} flag {print} /^## Completion Signals/{flag=0}' "$prompt_file")
+  if [ -z "$step7_region" ]; then
+    log_error "Could not extract step-7 region from: $prompt_file"
+    rm -rf "$NFR101_STEP7_TMPDIR"
+    exit 1
+  fi
+
+  # Assert pre-PRD baseline anchors preserved within step 7
+  for anchor in "${NFR101_STEP7_BASELINE_ANCHORS[@]}"; do
+    if ! grep -F -q -- "$anchor" <<< "$step7_region"; then
+      log_error "NFR-101 step-7 pre-PRD baseline anchor missing in: $prompt_file"
+      log_error "Expected verbatim: $anchor"
+      rm -rf "$NFR101_STEP7_TMPDIR"
+      exit 1
+    fi
+  done
+
+  # Assert gating phrases present within step 7
+  for phrase in "${NFR101_STEP7_GATING_PHRASES[@]}"; do
+    if ! grep -F -q -- "$phrase" <<< "$step7_region"; then
+      log_error "NFR-101 step-7 gating phrase missing in: $prompt_file"
+      log_error "Expected verbatim: $phrase"
+      rm -rf "$NFR101_STEP7_TMPDIR"
+      exit 1
+    fi
+  done
+
+  log_info "Verified NFR-101 step-7 baseline gating in: $(basename "$prompt_file")"
+done
+
+rm -rf "$NFR101_STEP7_TMPDIR"
+
+log_info "NFR-101 step-7 baseline test PASSED — both prompt files gate the **CodeGraph v1** block on codegraph_available with byte-equivalent fallback to a pre-PRD closure"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
