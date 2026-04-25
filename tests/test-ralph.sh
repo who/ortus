@@ -296,6 +296,118 @@ rm -rf "$CODEGRAPH_PRESENT_TMPDIR"
 log_info "codegraph-present test PASSED — both prompt files route to mcp__codegraph__* tools first when codegraph_available"
 
 # ============================================================================
+# Static check: step 6.5 freshness hook is non-blocking on codegraph sync failure
+# ============================================================================
+# Locks FR-005: a failing `codegraph sync` (missing binary or non-zero exit)
+# must not break the loop. Step 6.5 must contain language that explicitly
+# tells Ralph to ignore the exit code / proceed regardless, and the prompt
+# must continue uninterrupted from 6.5 → 7 (Log) → 8 (Close) → 9 (Commit & Push).
+#
+# Simulates a failing `codegraph sync` by PATH-shadowing the codegraph binary
+# with a stub returning exit 1, then asserts the rendered step 6.5 still
+# routes Ralph to Commit. Static byte-check on the prompt source — no copier
+# render or shell ralph invocation required.
+
+log_step "Static check: step 6.5 non-blocking on codegraph sync failure"
+
+# Set up a failing codegraph stub in a PATH-shadow tmpdir
+CODEGRAPH_FAIL_TMPDIR="$(mktemp -d)"
+cat > "$CODEGRAPH_FAIL_TMPDIR/codegraph" <<'STUB'
+#!/bin/bash
+echo "stub: codegraph sync failed (simulated)" >&2
+exit 1
+STUB
+chmod +x "$CODEGRAPH_FAIL_TMPDIR/codegraph"
+
+# Verify the stub is wired and actually fails (proves the failure mode is real)
+if ! PATH="$CODEGRAPH_FAIL_TMPDIR:$PATH" command -v codegraph >/dev/null; then
+  log_error "Failed to PATH-shadow codegraph stub at $CODEGRAPH_FAIL_TMPDIR"
+  rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+  exit 1
+fi
+if PATH="$CODEGRAPH_FAIL_TMPDIR:$PATH" codegraph sync >/dev/null 2>&1; then
+  log_error "Stub codegraph sync returned 0; expected non-zero"
+  rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+  exit 1
+fi
+log_info "Simulated failing codegraph sync at: $CODEGRAPH_FAIL_TMPDIR (exits 1)"
+
+# Anchor: the step 6.5 sentence opens with this exact bold marker
+CODEGRAPH_STEP65_ANCHOR="**6.5. Refresh the index (best-effort).**"
+
+# Phrases that explicitly state non-blocking semantics. At least one must
+# appear in step 6.5 of each prompt file.
+CODEGRAPH_NONBLOCKING_PHRASES=(
+  "Ignore the exit code"
+  "Do not block the loop"
+  "best-effort"
+)
+
+# Steps that must follow 6.5 — proves the prompt continues to Commit
+# without aborting on a failing sync.
+CODEGRAPH_POST65_STEPS=(
+  '^7\. \*\*Log\*\*'
+  '^8\. \*\*Close\*\*'
+  '^9\. \*\*Commit & Push\*\*'
+)
+
+for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
+  if [ ! -f "$prompt_file" ]; then
+    log_error "Prompt file not found: $prompt_file"
+    rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+    exit 1
+  fi
+
+  # Extract the step 6.5 line
+  step65_line=$(grep -F -- "$CODEGRAPH_STEP65_ANCHOR" "$prompt_file" || true)
+  if [ -z "$step65_line" ]; then
+    log_error "Step 6.5 anchor missing in: $prompt_file"
+    log_error "Expected anchor: $CODEGRAPH_STEP65_ANCHOR"
+    rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+    exit 1
+  fi
+
+  # Assert non-blocking language is present in step 6.5
+  found_nonblocking=0
+  for phrase in "${CODEGRAPH_NONBLOCKING_PHRASES[@]}"; do
+    if grep -F -q -- "$phrase" <<< "$step65_line"; then
+      found_nonblocking=$((found_nonblocking + 1))
+    fi
+  done
+  if [ "$found_nonblocking" -lt 1 ]; then
+    log_error "Step 6.5 in $prompt_file lacks non-blocking language"
+    log_error "Expected at least one of: ${CODEGRAPH_NONBLOCKING_PHRASES[*]}"
+    rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+    exit 1
+  fi
+
+  # Assert step 6.5 is followed by Log → Close → Commit & Push, in order, and
+  # all appear AFTER step 6.5 (so the prompt routes Ralph to Commit, not Exit).
+  step65_lineno=$(grep -F -n -- "$CODEGRAPH_STEP65_ANCHOR" "$prompt_file" | head -n 1 | cut -d: -f1)
+  prev_lineno="$step65_lineno"
+  for step_pattern in "${CODEGRAPH_POST65_STEPS[@]}"; do
+    step_lineno=$(grep -E -n -- "$step_pattern" "$prompt_file" | head -n 1 | cut -d: -f1)
+    if [ -z "$step_lineno" ]; then
+      log_error "Post-6.5 step pattern '$step_pattern' missing in: $prompt_file"
+      rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+      exit 1
+    fi
+    if [ "$step_lineno" -le "$prev_lineno" ]; then
+      log_error "Post-6.5 step '$step_pattern' (line $step_lineno) does not follow previous step (line $prev_lineno) in: $prompt_file"
+      rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+      exit 1
+    fi
+    prev_lineno="$step_lineno"
+  done
+
+  log_info "Verified non-blocking step 6.5 → 7 → 8 → 9 chain in: $(basename "$prompt_file")"
+done
+
+rm -rf "$CODEGRAPH_FAIL_TMPDIR"
+
+log_info "codegraph-sync-failure test PASSED — both prompt files instruct Ralph to proceed to Commit despite a failing codegraph sync"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
