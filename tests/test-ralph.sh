@@ -481,8 +481,8 @@ git add -A
 git diff --cached --quiet || git commit -m "Add test tasks for ralph.sh"
 
 # Verify initial state
-INITIAL_OPEN=$(count_ralph_tasks "open")
-INITIAL_CLOSED=$(count_ralph_tasks "closed")
+INITIAL_OPEN=$(count_tasks "open")
+INITIAL_CLOSED=$(count_tasks "closed")
 log_info "Initial state: $INITIAL_OPEN open tasks, $INITIAL_CLOSED closed tasks"
 
 if [ "$INITIAL_OPEN" != "3" ]; then
@@ -528,8 +528,8 @@ log_step "Test 1: ralph --tasks 1 (should complete exactly 1 task)"
 ./ortus/ralph.sh --tasks 1 --iterations 15
 
 # Verify exactly 1 task completed
-CLOSED_AFTER_T1=$(count_ralph_tasks "closed")
-OPEN_AFTER_T1=$(count_ralph_tasks "open")
+CLOSED_AFTER_T1=$(count_tasks "closed")
+OPEN_AFTER_T1=$(count_tasks "open")
 
 log_info "After Test 1: $CLOSED_AFTER_T1 closed, $OPEN_AFTER_T1 open"
 
@@ -566,8 +566,8 @@ log_step "Test 2: ralph unlimited (should complete all remaining tasks)"
 ./ortus/ralph.sh --iterations 15
 
 # Verify all tasks completed
-CLOSED_AFTER_T2=$(count_ralph_tasks "closed")
-OPEN_AFTER_T2=$(count_ralph_tasks "open")
+CLOSED_AFTER_T2=$(count_tasks "closed")
+OPEN_AFTER_T2=$(count_tasks "open")
 
 log_info "After Test 2: $CLOSED_AFTER_T2 closed, $OPEN_AFTER_T2 open"
 
