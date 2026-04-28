@@ -81,6 +81,20 @@ sandbox_smoke_test() {
 
 sandbox_smoke_test
 
+# Cache relocation (ortus-zj9v) — the OS sandbox profile mounts ~/.cache
+# read-only, which blocks package-manager writes (uv/pip/npm/cargo). Point
+# XDG and per-tool cache dirs into a project-local .cache/ inside the
+# sandbox-writable filesystem. Bounded, cleanable, and matches the
+# minimal-writable-surface stance from FR-001.
+mkdir -p .cache/uv .cache/pip .cache/npm .cache/cargo .cache/go-mod .cache/go-build
+export XDG_CACHE_HOME="$PWD/.cache"
+export UV_CACHE_DIR="$PWD/.cache/uv"
+export PIP_CACHE_DIR="$PWD/.cache/pip"
+export npm_config_cache="$PWD/.cache/npm"
+export CARGO_HOME="$PWD/.cache/cargo"
+export GOMODCACHE="$PWD/.cache/go-mod"
+export GOCACHE="$PWD/.cache/go-build"
+
 tasks_completed=0
 iteration=0
 
