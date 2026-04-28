@@ -2142,6 +2142,235 @@ STUB_CLAUDE_EOF
 fi
 
 # ============================================================================
+# Passthrough test: --fast / --tasks / --iterations forward in --docker mode
+# (ortus-lfft.3, FR-007)
+# ============================================================================
+# Locks T2.3's contract: when --docker is set, the existing ralph.sh flags
+# must continue to function:
+#   - --fast appears in the docker-routed claude argv (after `--`, since
+#     CLAUDE_CMD ends in `--` and $FAST_MODE follows in the iteration call).
+#   - --tasks N caps the outer loop at N COMPLETE signals (host-side counter).
+#   - --iterations N caps the outer loop at N iterations regardless of result.
+#   - Combinations compose without conflict.
+#
+# Skip-detection mirrors the routing test above: SKIP cleanly when
+# `docker sandbox` isn't available on the host. When available, runs with a
+# mocked `docker` stub on PATH that records every invocation arg-by-arg and
+# returns a configured signal (EMPTY/COMPLETE/BLOCKED) so the test stays
+# hermetic and doesn't depend on a real container runtime or claude binary.
+
+log_step "Passthrough test: --fast/--tasks/--iterations forward in --docker mode (skip when docker unavailable)"
+
+if ! command -v docker >/dev/null 2>&1 || ! docker sandbox --help >/dev/null 2>&1; then
+  log_info "SKIP: docker sandbox not available on host; --docker passthrough test skipped"
+else
+  # Stub builder: emits a docker stub that logs every arg on its own line
+  # (so multi-line prompt content in the iteration call doesn't confuse the
+  # grep-based assertions) and answers `sandbox run` by emitting the
+  # configured promise signal so the outer ralph loop interprets it.
+  build_docker_passthrough_stub_path() {
+    local signal="$1"  # "EMPTY", "COMPLETE", or "BLOCKED"
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    for cmd in mkdir date tee uname bash sed grep cat dirname; do
+      local cmd_path
+      cmd_path="$(command -v "$cmd" 2>/dev/null)"
+      if [ -z "$cmd_path" ]; then
+        log_error "Required utility not found in host PATH: $cmd"
+        rm -rf "$stub_dir"
+        return 1
+      fi
+      ln -s "$cmd_path" "$stub_dir/$cmd"
+    done
+
+    cat > "$stub_dir/docker" <<STUB_DOCKER_PT_EOF
+#!/bin/bash
+# Per-arg logging keeps assertions robust against multi-line prompt payloads
+# embedded in the iteration call's argv.
+echo "docker:invoke:start" >> "\${ROUTING_DOCKER_LOG:-/dev/null}"
+for a in "\$@"; do
+  echo "docker:arg:\$a" >> "\${ROUTING_DOCKER_LOG:-/dev/null}"
+done
+echo "docker:invoke:end" >> "\${ROUTING_DOCKER_LOG:-/dev/null}"
+case "\$1 \$2" in
+  "sandbox --help")
+    echo "Stub docker sandbox: help OK"
+    exit 0
+    ;;
+  "sandbox run")
+    echo "<promise>$signal</promise>"
+    exit 0
+    ;;
+esac
+exit 0
+STUB_DOCKER_PT_EOF
+    chmod +x "$stub_dir/docker"
+
+    cat > "$stub_dir/claude" <<'STUB_CLAUDE_PT_EOF'
+#!/bin/bash
+echo "ROUTING_FAILURE: host claude binary invoked in --docker mode" >&2
+exit 99
+STUB_CLAUDE_PT_EOF
+    chmod +x "$stub_dir/claude"
+
+    echo "$stub_dir"
+  }
+
+  PASSTHROUGH_RALPH_SCRIPTS=(
+    "$ORTUS_DIR/ortus/ralph.sh"
+    "$ORTUS_DIR/template/ortus/ralph.sh"
+  )
+
+  for ralph_script in "${PASSTHROUGH_RALPH_SCRIPTS[@]}"; do
+    if [ ! -x "$ralph_script" ]; then
+      log_error "ralph.sh script not executable: $ralph_script"
+      exit 1
+    fi
+
+    # Sub-case A (AC #1): --fast appears in docker invocation argv.
+    # EMPTY signal terminates the loop after iteration 1.
+    pt_stub_dir="$(build_docker_passthrough_stub_path EMPTY)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --fast --iterations 1 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --fast to exit 0 on EMPTY signal, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      cat "$pt_docker_log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- 'docker:arg:--fast' "$pt_docker_log"; then
+      log_error "Expected --fast to appear in docker stub argv for $ralph_script (AC #1)"
+      log_error "Docker invocation log:"
+      cat "$pt_docker_log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    # Sub-case B (AC #2): --tasks N caps the outer loop at N COMPLETE signals.
+    pt_stub_dir="$(build_docker_passthrough_stub_path COMPLETE)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --tasks 1 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --tasks 1 to exit 0 on tasks-limit hit, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "Reached --tasks limit (1)" "$pt_run_dir"/logs/ralph-*.log; then
+      log_error "Expected 'Reached --tasks limit (1)' in host log for $ralph_script (AC #2)"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    # Sub-case C (AC #3): --iterations N caps the outer loop at N iterations.
+    # BLOCKED signal: neither EMPTY nor task-cap fires; iterations cap is the
+    # only termination path, which is exactly what we want to verify.
+    pt_stub_dir="$(build_docker_passthrough_stub_path BLOCKED)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --iterations 2 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --iterations 2 to exit 0 on iterations-limit hit, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "Reached --iterations limit (2)" "$pt_run_dir"/logs/ralph-*.log; then
+      log_error "Expected 'Reached --iterations limit (2)' in host log for $ralph_script (AC #3)"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    iter_marker_count=$(grep -c -- "--- Starting iteration" "$pt_run_dir"/logs/ralph-*.log || true)
+    if [ "$iter_marker_count" -ne 2 ]; then
+      log_error "Expected 2 iteration boundary markers in host log for $ralph_script (AC #3), got $iter_marker_count"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    # Sub-case D (AC #4): combination --docker --fast --tasks 2 --iterations 5
+    # with COMPLETE signal. tasks=2 should hit before iterations=5; --fast must
+    # appear in every docker invocation argv, so docker:arg:--fast occurs
+    # exactly twice (once per task-iteration; the precondition `sandbox --help`
+    # call carries no --fast).
+    pt_stub_dir="$(build_docker_passthrough_stub_path COMPLETE)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --fast --tasks 2 --iterations 5 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --fast --tasks 2 --iterations 5 to exit 0, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "Reached --tasks limit (2)" "$pt_run_dir"/logs/ralph-*.log; then
+      log_error "Expected 'Reached --tasks limit (2)' in host log for combination test ($ralph_script, AC #4)"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    fast_invocation_count=$(grep -c -- 'docker:arg:--fast' "$pt_docker_log" || true)
+    if [ "$fast_invocation_count" -ne 2 ]; then
+      log_error "Expected exactly 2 docker invocations carrying --fast for combination test ($ralph_script, AC #4), got $fast_invocation_count"
+      cat "$pt_docker_log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    log_info "Passthrough test --docker: PASSED for ${ralph_script#$ORTUS_DIR/} (--fast in argv; --tasks and --iterations cap the loop; combinations compose)"
+  done
+
+  log_info "ralph.sh --docker passthrough test PASSED — --fast forwards into docker argv, --tasks and --iterations cap the outer loop, and the four-flag combination composes correctly in both ralph.sh copies"
+fi
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
