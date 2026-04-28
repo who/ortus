@@ -47,7 +47,7 @@ log "Watch live:"
 log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
-# Sandbox smoke test (FR-004) — fails fast if OS sandbox prerequisites are
+# Sandbox smoke test — fails fast if OS sandbox prerequisites are
 # missing, before any iteration runs claude with --dangerously-skip-permissions.
 # Per ortus-hhq9 decision, this check is intentionally NOT skippable via env
 # var: skippability re-introduces the silent-degradation failure mode that
@@ -126,7 +126,7 @@ fi
 # read-only, which blocks package-manager writes (uv/pip/npm/cargo). Point
 # XDG and per-tool cache dirs into a project-local .cache/ inside the
 # sandbox-writable filesystem. Bounded, cleanable, and matches the
-# minimal-writable-surface stance from FR-001.
+# minimal-writable-surface stance.
 mkdir -p .cache/uv .cache/pip .cache/npm .cache/cargo .cache/go-mod .cache/go-build
 export XDG_CACHE_HOME="$PWD/.cache"
 export UV_CACHE_DIR="$PWD/.cache/uv"
@@ -136,10 +136,10 @@ export CARGO_HOME="$PWD/.cache/cargo"
 export GOMODCACHE="$PWD/.cache/go-mod"
 export GOCACHE="$PWD/.cache/go-build"
 
-# Claude invocation routing (FR-006, ortus-lfft.2) — when --docker is set,
+# Claude invocation routing (ortus-lfft.2) — when --docker is set,
 # route the inner claude session through `docker sandbox run claude --name
 # ortus-ralph --` so it runs inside Docker's bundled-image sandbox. No
-# Dockerfile (NFR-003); bind-mount defaults map host cwd → /workspace; logs
+# Dockerfile; bind-mount defaults map host cwd → /workspace; logs
 # remain tee'd to the host LOG_FILE so tail.sh works in both modes.
 if [ -n "$USE_DOCKER" ]; then
   CLAUDE_CMD=(docker sandbox run claude --name ortus-ralph --)
