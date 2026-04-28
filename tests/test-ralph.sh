@@ -1607,6 +1607,102 @@ done
 log_info "FR-202 heuristic-gate test PASSED — both prompt files lock all four conjunctive drop categories (cross-module / test-spec / utility-dir / public-symbol) with the Appendix D decision tree, and the gate precedes the FR-203 cap rule"
 
 # ============================================================================
+# Smoke check: ralph.sh fails fast when bubblewrap is missing (FR-004)
+# ============================================================================
+# Locks FR-004's failure path: when ralph.sh runs on Linux without bubblewrap
+# (`bwrap`) on PATH, the sandbox smoke test must (a) exit non-zero, (b) emit
+# the install-hint string mentioning both "bubblewrap" and "socat", and (c)
+# do so without ever invoking claude. Simulates the missing-bubblewrap
+# condition by replacing PATH with a stub directory that holds symlinks to
+# only the bare-minimum utilities ralph.sh needs before its smoke test runs
+# (mkdir/date/tee/uname) — notably NO bwrap. Per the issue's acceptance
+# criteria, this MUST NOT require root or actually uninstall system binaries.
+# Linux-only by design (the smoke test's bwrap branch is Linux-gated).
+
+log_step "Smoke check: ralph.sh exits non-zero when bubblewrap missing"
+
+SMOKE_PLATFORM="$(uname -s)"
+if [ "$SMOKE_PLATFORM" != "Linux" ]; then
+  log_warn "Skipping bubblewrap-missing smoke test (platform: $SMOKE_PLATFORM, test designed for Linux)"
+else
+  # Helper: build a stub PATH directory with symlinks to the listed utilities
+  # but no bwrap. Echoes the directory path on success; exits non-zero on
+  # missing required utility. Future tests that need a similar
+  # "everything-but-bwrap PATH" can call this helper directly.
+  build_no_bwrap_stub_path() {
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    for cmd in mkdir date tee uname; do
+      local cmd_path
+      cmd_path="$(command -v "$cmd" 2>/dev/null)"
+      if [ -z "$cmd_path" ]; then
+        log_error "Required utility not found in host PATH: $cmd"
+        rm -rf "$stub_dir"
+        return 1
+      fi
+      ln -s "$cmd_path" "$stub_dir/$cmd"
+    done
+    # Sanity: the stub PATH genuinely does not resolve bwrap. Guards against a
+    # host where bwrap somehow ended up among the symlinked utilities.
+    if PATH="$stub_dir" command -v bwrap >/dev/null 2>&1; then
+      log_error "Stub PATH unexpectedly resolves bwrap; cannot simulate missing-bubblewrap"
+      rm -rf "$stub_dir"
+      return 1
+    fi
+    echo "$stub_dir"
+  }
+
+  SMOKE_NO_BWRAP_DIR="$(build_no_bwrap_stub_path)" || exit 1
+  log_info "Built no-bwrap stub PATH at: $SMOKE_NO_BWRAP_DIR (no bwrap; mkdir/date/tee/uname symlinked)"
+
+  SMOKE_RALPH_SCRIPTS=(
+    "$ORTUS_DIR/ortus/ralph.sh"
+    "$ORTUS_DIR/template/ortus/ralph.sh"
+  )
+
+  for ralph_script in "${SMOKE_RALPH_SCRIPTS[@]}"; do
+    if [ ! -x "$ralph_script" ]; then
+      log_error "ralph.sh script not executable: $ralph_script"
+      rm -rf "$SMOKE_NO_BWRAP_DIR"
+      exit 1
+    fi
+
+    smoke_run_dir="$(mktemp -d)"
+    smoke_output_file="$smoke_run_dir/output.log"
+    smoke_exit=0
+    (
+      cd "$smoke_run_dir"
+      PATH="$SMOKE_NO_BWRAP_DIR" "$ralph_script"
+    ) > "$smoke_output_file" 2>&1 || smoke_exit=$?
+
+    if [ "$smoke_exit" -eq 0 ]; then
+      log_error "Expected $ralph_script to exit non-zero when bwrap unavailable, got exit 0"
+      log_error "Captured output:"
+      cat "$smoke_output_file" >&2
+      rm -rf "$SMOKE_NO_BWRAP_DIR" "$smoke_run_dir"
+      exit 1
+    fi
+
+    smoke_output="$(cat "$smoke_output_file")"
+    for expected in "bubblewrap" "socat"; do
+      if ! grep -F -q -- "$expected" <<< "$smoke_output"; then
+        log_error "Expected install-hint substring '$expected' missing from output of $ralph_script (exit=$smoke_exit)"
+        log_error "Captured output:"
+        echo "$smoke_output" >&2
+        rm -rf "$SMOKE_NO_BWRAP_DIR" "$smoke_run_dir"
+        exit 1
+      fi
+    done
+
+    log_info "Verified bwrap-missing smoke test in: ${ralph_script#$ORTUS_DIR/} (exit=$smoke_exit)"
+    rm -rf "$smoke_run_dir"
+  done
+
+  rm -rf "$SMOKE_NO_BWRAP_DIR"
+  log_info "ralph.sh bwrap-missing smoke test PASSED — both ralph.sh copies fail fast with install-hint when bubblewrap is unavailable (no root required)"
+fi
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
