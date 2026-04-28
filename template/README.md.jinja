@@ -27,3 +27,13 @@ This project was scaffolded with [Ortus](https://github.com/who/ortus), which pr
 - **[jq](https://jqlang.github.io/jq/)**, **[rg](https://github.com/BurntSushi/ripgrep)**, **[fd](https://github.com/sharkdp/fd)** — used by ortus scripts.
 
 **Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** Ralph's investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so step-4 (Investigate) can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** Ralph detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, Ralph uses it; otherwise it falls back silently to the default search behavior. When CodeGraph is present, Ralph closure comments and PRD decomposition outputs also include CodeGraph-derived structural data (a parseable change record on closures; reference checks and likely-touched files on decompositions); when absent, both remain byte-equivalent to the pre-CodeGraph baseline.
+
+## Sandboxing prerequisites
+
+Ralph runs Claude Code inside the OS sandbox so that bash subprocesses spawned during a loop are confined to filesystem-write and network boundaries. The native sandbox is the actual containment surface; `--dangerously-skip-permissions` only suppresses interactive prompts and does not reduce containment (see [CLAUDE.md](CLAUDE.md) "Sandbox Model" for the layered defense). Without the OS dependencies below, `ortus/ralph.sh` will fail-fast at smoke-test time rather than silently degrade to unsandboxed execution.
+
+- **macOS**: Seatbelt is built into the OS — no install required.
+- **Linux / WSL2**: install bubblewrap and socat via `sudo apt-get install bubblewrap socat` (or your distro's equivalent).
+- **WSL1**: unsupported — the sandbox requires WSL2's Linux kernel.
+
+For stronger isolation on hosts where the native sandbox is insufficient, use Tier 2 (`./ortus/ralph.sh --docker`), which adds a Docker outer layer around the native inner sandbox.
