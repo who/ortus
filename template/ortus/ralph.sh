@@ -44,6 +44,43 @@ log "Watch live:"
 log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
+# Sandbox smoke test (FR-004) — fails fast if OS sandbox prerequisites are
+# missing, before any iteration runs claude with --dangerously-skip-permissions.
+# Per ortus-hhq9 decision, this check is intentionally NOT skippable via env
+# var: skippability re-introduces the silent-degradation failure mode that
+# sandbox hardening is designed to eliminate. For unsandboxed CI runners, use
+# the --docker mode (Phase 2) which provides container-level isolation instead.
+sandbox_smoke_test() {
+  log "Sandbox smoke test..."
+  local platform
+  platform=$(uname -s)
+  case "$platform" in
+    Linux)
+      if ! command -v bwrap >/dev/null 2>&1; then
+        log "ERROR: Sandbox prerequisite missing: bubblewrap (bwrap)"
+        log "  Install on Debian/Ubuntu/WSL2: sudo apt-get install bubblewrap socat"
+        log "  Note: WSL1 is unsupported (requires WSL2's Linux kernel)"
+        exit 1
+      fi
+      ;;
+    Darwin)
+      if ! command -v sandbox-exec >/dev/null 2>&1; then
+        log "ERROR: Sandbox prerequisite missing: Seatbelt (sandbox-exec)"
+        log "  Seatbelt is built into macOS; absence indicates a system-level issue"
+        exit 1
+      fi
+      ;;
+    *)
+      log "ERROR: Unsupported platform '$platform' for native sandbox"
+      log "  Supported: Linux/WSL2 (bubblewrap+socat), macOS (Seatbelt built-in)"
+      exit 1
+      ;;
+  esac
+  log "Sandbox smoke test: ok ($platform)"
+}
+
+sandbox_smoke_test
+
 tasks_completed=0
 iteration=0
 
