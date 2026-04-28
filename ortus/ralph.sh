@@ -1,13 +1,14 @@
 #!/bin/bash
 # ralph.sh - Autonomous task execution loop
 #
-# Usage: ./ortus/ralph.sh [--fast] [--idle-sleep N] [--tasks N] [--iterations N]
+# Usage: ./ortus/ralph.sh [--fast] [--idle-sleep N] [--tasks N] [--iterations N] [--docker]
 #
 # Options:
 #   --fast            Fast mode (2.5x faster output, premium pricing)
 #   --idle-sleep N    Seconds to sleep when no work available (default: 60)
 #   --tasks N         Stop after N tasks completed (default: unlimited)
 #   --iterations N    Stop after N loop iterations (default: unlimited)
+#   --docker          Tier 2 isolation: route claude through docker sandbox (parsed only; wired in T2.2)
 #
 # Runs until all ready work is complete. Logs to logs/ralph-<timestamp>.log
 # Watch live: ./ortus/tail.sh or tail -f logs/ralph-*.log
@@ -18,6 +19,7 @@ IDLE_SLEEP=60
 FAST_MODE=""
 MAX_TASKS=0
 MAX_ITERATIONS=0
+USE_DOCKER=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -25,6 +27,7 @@ while [[ $# -gt 0 ]]; do
     --idle-sleep) IDLE_SLEEP="$2"; shift 2 ;;
     --tasks) MAX_TASKS="$2"; shift 2 ;;
     --iterations) MAX_ITERATIONS="$2"; shift 2 ;;
+    --docker) USE_DOCKER=1; shift ;;
     -h|--help) sed -n '2,/^[^#]/{/^#/{s/^# \?//;p;}}' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
