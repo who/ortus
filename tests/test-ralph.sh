@@ -1703,6 +1703,164 @@ else
 fi
 
 # ============================================================================
+# Smoke check: ralph.sh --docker fails fast when Docker missing (ortus-lfft.7)
+# ============================================================================
+# Locks the ortus-heot detect-and-message decision: when ralph.sh --docker is
+# invoked on a host without `docker` on PATH, the precondition check must
+# (a) exit non-zero, (b) emit an ERROR string mentioning "Docker" plus an
+# install hint, and (c) do so before any iteration runs claude. A second case
+# locks the bundled-image detection: when `docker` is present but `docker
+# sandbox --help` fails, the script must exit non-zero with a distinct
+# "docker sandbox" hint pointing to Docker Desktop / bundled-image rollout.
+# Both cases simulate absence via PATH overrides + a stub docker binary — no
+# root required, no real Docker uninstall, no real claude invocation.
+
+log_step "Smoke check: ralph.sh --docker exits non-zero when Docker missing"
+
+# Helper: build a stub PATH directory with symlinks to the listed utilities
+# but no docker. Echoes the directory path on success; exits non-zero on a
+# missing required utility. Mirrors build_no_bwrap_stub_path() above.
+build_no_docker_stub_path() {
+  local stub_dir
+  stub_dir="$(mktemp -d)"
+  for cmd in mkdir date tee uname bash; do
+    local cmd_path
+    cmd_path="$(command -v "$cmd" 2>/dev/null)"
+    if [ -z "$cmd_path" ]; then
+      log_error "Required utility not found in host PATH: $cmd"
+      rm -rf "$stub_dir"
+      return 1
+    fi
+    ln -s "$cmd_path" "$stub_dir/$cmd"
+  done
+  if PATH="$stub_dir" command -v docker >/dev/null 2>&1; then
+    log_error "Stub PATH unexpectedly resolves docker; cannot simulate missing-Docker"
+    rm -rf "$stub_dir"
+    return 1
+  fi
+  echo "$stub_dir"
+}
+
+SMOKE_NO_DOCKER_DIR="$(build_no_docker_stub_path)" || exit 1
+log_info "Built no-docker stub PATH at: $SMOKE_NO_DOCKER_DIR (no docker; mkdir/date/tee/uname/bash symlinked)"
+
+# Build a separate stub PATH where `docker` is present but rejects every
+# subcommand (so `docker sandbox --help` exits non-zero) — exercises the
+# bundled-image-missing branch. Reuses the no-docker stub's symlinks plus a
+# stub `docker` script that always exits 1.
+build_docker_no_sandbox_stub_path() {
+  local stub_dir
+  stub_dir="$(mktemp -d)"
+  for cmd in mkdir date tee uname bash; do
+    local cmd_path
+    cmd_path="$(command -v "$cmd" 2>/dev/null)"
+    if [ -z "$cmd_path" ]; then
+      log_error "Required utility not found in host PATH: $cmd"
+      rm -rf "$stub_dir"
+      return 1
+    fi
+    ln -s "$cmd_path" "$stub_dir/$cmd"
+  done
+  cat > "$stub_dir/docker" <<'STUB_DOCKER_EOF'
+#!/bin/bash
+# Stub: pretend docker exists but reject every subcommand so that
+# `docker sandbox --help` exits non-zero.
+echo "stub docker: subcommand '$*' not supported" >&2
+exit 1
+STUB_DOCKER_EOF
+  chmod +x "$stub_dir/docker"
+  if ! PATH="$stub_dir" command -v docker >/dev/null 2>&1; then
+    log_error "Stub PATH unexpectedly does not resolve docker"
+    rm -rf "$stub_dir"
+    return 1
+  fi
+  echo "$stub_dir"
+}
+
+SMOKE_DOCKER_NO_SANDBOX_DIR="$(build_docker_no_sandbox_stub_path)" || exit 1
+log_info "Built docker-no-sandbox stub PATH at: $SMOKE_DOCKER_NO_SANDBOX_DIR (stub docker rejects subcommands)"
+
+SMOKE_DOCKER_RALPH_SCRIPTS=(
+  "$ORTUS_DIR/ortus/ralph.sh"
+  "$ORTUS_DIR/template/ortus/ralph.sh"
+)
+
+for ralph_script in "${SMOKE_DOCKER_RALPH_SCRIPTS[@]}"; do
+  if [ ! -x "$ralph_script" ]; then
+    log_error "ralph.sh script not executable: $ralph_script"
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR"
+    exit 1
+  fi
+
+  # Case A: --docker with no docker on PATH → exit non-zero, mention "Docker".
+  smoke_run_dir="$(mktemp -d)"
+  smoke_output_file="$smoke_run_dir/output.log"
+  smoke_exit=0
+  (
+    cd "$smoke_run_dir"
+    PATH="$SMOKE_NO_DOCKER_DIR" "$ralph_script" --docker --iterations 1
+  ) > "$smoke_output_file" 2>&1 || smoke_exit=$?
+
+  if [ "$smoke_exit" -eq 0 ]; then
+    log_error "Expected $ralph_script --docker to exit non-zero when docker unavailable, got exit 0"
+    log_error "Captured output:"
+    cat "$smoke_output_file" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+
+  smoke_output="$(cat "$smoke_output_file")"
+  if ! grep -F -q -- "Docker" <<< "$smoke_output"; then
+    log_error "Expected 'Docker' string in --docker missing-docker output of $ralph_script (exit=$smoke_exit)"
+    log_error "Captured output:"
+    echo "$smoke_output" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+  if ! grep -F -q -- "Install" <<< "$smoke_output"; then
+    log_error "Expected install hint ('Install') in --docker missing-docker output of $ralph_script (exit=$smoke_exit)"
+    log_error "Captured output:"
+    echo "$smoke_output" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+  rm -rf "$smoke_run_dir"
+
+  # Case B: --docker with docker present but `docker sandbox` failing →
+  # exit non-zero, mention "docker sandbox" specifically.
+  smoke_run_dir="$(mktemp -d)"
+  smoke_output_file="$smoke_run_dir/output.log"
+  smoke_exit=0
+  (
+    cd "$smoke_run_dir"
+    PATH="$SMOKE_DOCKER_NO_SANDBOX_DIR" "$ralph_script" --docker --iterations 1
+  ) > "$smoke_output_file" 2>&1 || smoke_exit=$?
+
+  if [ "$smoke_exit" -eq 0 ]; then
+    log_error "Expected $ralph_script --docker to exit non-zero when 'docker sandbox' unavailable, got exit 0"
+    log_error "Captured output:"
+    cat "$smoke_output_file" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+
+  smoke_output="$(cat "$smoke_output_file")"
+  if ! grep -F -q -- "docker sandbox" <<< "$smoke_output"; then
+    log_error "Expected 'docker sandbox' string in --docker missing-sandbox output of $ralph_script (exit=$smoke_exit)"
+    log_error "Captured output:"
+    echo "$smoke_output" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+  rm -rf "$smoke_run_dir"
+
+  log_info "Verified --docker precondition smoke test in: ${ralph_script#$ORTUS_DIR/} (both missing-docker and missing-sandbox cases)"
+done
+
+rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR"
+log_info "ralph.sh --docker precondition smoke test PASSED — both ralph.sh copies fail fast with install hints when Docker or 'docker sandbox' is unavailable"
+
+# ============================================================================
 # Unit test: ralph.sh argument parser handles --docker (ortus-lfft.1, FR-006)
 # ============================================================================
 # Locks T2.1's contract: the --docker flag is recognized by the argument

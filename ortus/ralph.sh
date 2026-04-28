@@ -82,7 +82,45 @@ sandbox_smoke_test() {
   log "Sandbox smoke test: ok ($platform)"
 }
 
-sandbox_smoke_test
+# Docker precondition check (ortus-heot decision, ortus-lfft.7) — when --docker
+# is set, fail fast with a friendly install hint if Docker or its bundled-image
+# `docker sandbox` subcommand is unavailable. Mirrors the detect-and-message
+# pattern from sandbox_smoke_test() so Tier 2 (--docker) and Tier 1 (native)
+# share the same friendly-error tone.
+docker_precondition_check() {
+  log "Docker precondition check..."
+  if ! command -v docker >/dev/null 2>&1; then
+    log "ERROR: --docker requires Docker, but 'docker' was not found on PATH"
+    local platform
+    platform=$(uname -s)
+    case "$platform" in
+      Darwin)
+        log "  Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
+        log "  Or via Homebrew: brew install --cask docker"
+        ;;
+      Linux)
+        log "  Install Docker Engine: https://docs.docker.com/engine/install/"
+        ;;
+      *)
+        log "  Install Docker for your platform: https://docs.docker.com/get-docker/"
+        ;;
+    esac
+    exit 1
+  fi
+  if ! docker sandbox --help >/dev/null 2>&1; then
+    log "ERROR: --docker requires the bundled-image 'docker sandbox' subcommand, which is unavailable"
+    log "  Update Docker Desktop to a version with the bundled-image rollout"
+    log "  See: https://docs.docker.com/desktop/release-notes/"
+    exit 1
+  fi
+  log "Docker precondition check: ok"
+}
+
+if [ -n "$USE_DOCKER" ]; then
+  docker_precondition_check
+else
+  sandbox_smoke_test
+fi
 
 # Cache relocation (ortus-zj9v) — the OS sandbox profile mounts ~/.cache
 # read-only, which blocks package-manager writes (uv/pip/npm/cargo). Point
