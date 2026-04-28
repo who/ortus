@@ -60,3 +60,7 @@ First-run authentication has two paths:
 - **Pre-exported `ANTHROPIC_API_KEY`** — export the env var on the host before invoking `ralph.sh --docker`; it is forwarded into the container and skips the OAuth prompt entirely. Use this for unattended/CI runs.
 
 Credentials are cached across runs in the `docker-claude-sandbox-data` Docker volume (created automatically on first run), so subsequent `--docker` invocations do not re-prompt.
+
+### Tier 2 on Linux: `enableWeakerNestedSandbox`
+
+On Linux, running the native sandbox inside the Docker container means nesting bubblewrap inside another containment layer, and nested bubblewrap has reduced isolation guarantees — so `.claude/settings.json` sets `enableWeakerNestedSandbox: true` to let the inner sandbox start under these conditions. In Tier 2 the container is the primary security boundary, and the inner native sandbox runs as defense-in-depth on top of it. The security trade-off — weaker nested isolation in exchange for the layered containment Tier 2 provides — is acceptable in this configuration, because the container itself already enforces the strong fs/net boundary against the host.
