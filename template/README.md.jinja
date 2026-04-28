@@ -37,3 +37,15 @@ Ralph runs Claude Code inside the OS sandbox so that bash subprocesses spawned d
 - **WSL1**: unsupported — the sandbox requires WSL2's Linux kernel.
 
 For stronger isolation on hosts where the native sandbox is insufficient, use Tier 2 (`./ortus/ralph.sh --docker`), which adds a Docker outer layer around the native inner sandbox.
+
+## Sandbox Tiers
+
+Ortus offers two sandboxing tiers. **Tier 1 (native sandbox only) is the default for solo interactive development.** **Tier 2 (`./ortus/ralph.sh --docker`) is opt-in for unattended runs** (overnight Ralph loops, CI, code review of unfamiliar code) where the broader blast radius of a misbehaving subprocess matters more than startup cost.
+
+| Dimension              | Tier 1 (native)                                                                | Tier 2 (`--docker`)                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| Isolation strength     | OS sandbox (Seatbelt on macOS, bubblewrap on Linux/WSL2) confines per-process. | Docker container as outer layer plus the native inner sandbox; container-level fs/net isolation from host. |
+| Host risk surface      | Subprocess runs on the host filesystem; containment is per-syscall.            | Subprocess runs inside a container; the host filesystem is bind-mounted at the project root only.        |
+| Startup cost           | None — direct `exec`.                                                          | Container start adds ~1–3s per loop, plus a one-time image pull on first run.             |
+| Docker required        | No.                                                                            | Yes — the `docker sandbox` CLI must be installed.                                         |
+| Recommended scenario   | Solo interactive development; fast iteration on trusted code.                  | Unattended overnight Ralph runs; CI; reviewing untrusted or unfamiliar code.              |
