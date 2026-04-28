@@ -1967,6 +1967,181 @@ done
 log_info "ralph.sh --docker argument-parsing unit test PASSED — both copies recognize the flag, set USE_DOCKER correctly, and continue to parse --fast/--tasks/--iterations alongside it"
 
 # ============================================================================
+# Routing test: ralph.sh --docker invokes 'docker sandbox run' (ortus-lfft.6)
+# ============================================================================
+# Locks FR-006 / T2.2: in --docker mode, ralph.sh must route the inner claude
+# session through `docker sandbox run claude --name ortus-ralph --` instead of
+# the host claude binary, while still producing logs/ralph-*.log on the host
+# filesystem so tail.sh and existing tooling continue to work.
+#
+# Skip-detection (acceptance #2): on a host lacking `docker sandbox`, this
+# case prints SKIP and continues so the full suite still exits 0 (acceptance
+# #4). The skip-check runs before any PATH manipulation so it reflects true
+# host state. When `docker sandbox` is available, the test uses fully mocked
+# stub PATHs to keep it fast and offline:
+#   - Sub-case A (acceptance #3 success half): stub `docker` accepts
+#     `sandbox --help` (precondition pass-through) and emits
+#     <promise>EMPTY</promise> on `sandbox run` so ralph's outer loop exits
+#     gracefully on iteration 1; stub `claude` exits 99 with a loud
+#     ROUTING_FAILURE marker if ever invoked, proving the host claude binary
+#     is bypassed (acceptance #1 routing assertion).
+#   - Sub-case B (acceptance #3 broken half): stub `docker` rejects every
+#     subcommand (including `sandbox --help`) so ralph's precondition check
+#     trips and exits non-zero before any iteration runs.
+
+log_step "Routing test: ralph.sh --docker routes through 'docker sandbox run' (skip when docker unavailable)"
+
+if ! command -v docker >/dev/null 2>&1 || ! docker sandbox --help >/dev/null 2>&1; then
+  log_info "SKIP: docker sandbox not available on host; --docker routing test skipped"
+else
+  build_docker_routing_stub_path() {
+    local mode="$1"  # "success" or "broken"
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    for cmd in mkdir date tee uname bash sed grep cat dirname; do
+      local cmd_path
+      cmd_path="$(command -v "$cmd" 2>/dev/null)"
+      if [ -z "$cmd_path" ]; then
+        log_error "Required utility not found in host PATH: $cmd"
+        rm -rf "$stub_dir"
+        return 1
+      fi
+      ln -s "$cmd_path" "$stub_dir/$cmd"
+    done
+
+    if [ "$mode" = "success" ]; then
+      cat > "$stub_dir/docker" <<'STUB_DOCKER_OK_EOF'
+#!/bin/bash
+# Record every invocation so the test can assert routing.
+echo "docker $*" >> "${ROUTING_DOCKER_LOG:-/dev/null}"
+case "$1 $2" in
+  "sandbox --help")
+    echo "Stub docker sandbox: help OK"
+    exit 0
+    ;;
+  "sandbox run")
+    # Simulate the in-container claude returning the EMPTY signal so ralph's
+    # outer loop terminates gracefully on iteration 1.
+    echo "<promise>EMPTY</promise>"
+    exit 0
+    ;;
+esac
+exit 0
+STUB_DOCKER_OK_EOF
+    else
+      cat > "$stub_dir/docker" <<'STUB_DOCKER_BROKEN_EOF'
+#!/bin/bash
+# Stub docker that fails every subcommand (including `sandbox --help`) so
+# ralph's docker_precondition_check trips and exits non-zero.
+echo "docker $*" >> "${ROUTING_DOCKER_LOG:-/dev/null}"
+echo "stub docker: subcommand '$*' not supported" >&2
+exit 1
+STUB_DOCKER_BROKEN_EOF
+    fi
+    chmod +x "$stub_dir/docker"
+
+    cat > "$stub_dir/claude" <<'STUB_CLAUDE_EOF'
+#!/bin/bash
+# Host claude must NOT be invoked in --docker mode — the routing forwards
+# through `docker sandbox run claude` instead. Loud failure marker so the
+# test detects any routing regression.
+echo "ROUTING_FAILURE: host claude binary invoked in --docker mode" >&2
+exit 99
+STUB_CLAUDE_EOF
+    chmod +x "$stub_dir/claude"
+
+    echo "$stub_dir"
+  }
+
+  ROUTING_RALPH_SCRIPTS=(
+    "$ORTUS_DIR/ortus/ralph.sh"
+    "$ORTUS_DIR/template/ortus/ralph.sh"
+  )
+
+  for ralph_script in "${ROUTING_RALPH_SCRIPTS[@]}"; do
+    if [ ! -x "$ralph_script" ]; then
+      log_error "ralph.sh script not executable: $ralph_script"
+      exit 1
+    fi
+
+    # Sub-case A: successful docker invocation → ralph exits 0, routes through
+    # `docker sandbox run claude`, produces a host log, host claude untouched.
+    routing_stub_dir="$(build_docker_routing_stub_path success)" || exit 1
+    routing_run_dir="$(mktemp -d)"
+    routing_docker_log="$routing_run_dir/docker-invoke.log"
+    : > "$routing_docker_log"
+    routing_exit=0
+    (
+      cd "$routing_run_dir"
+      PATH="$routing_stub_dir" ROUTING_DOCKER_LOG="$routing_docker_log" \
+        "$ralph_script" --docker --iterations 1 --idle-sleep 1
+    ) > "$routing_run_dir/output.log" 2>&1 || routing_exit=$?
+
+    if [ "$routing_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker to exit 0 on successful docker invocation, got exit $routing_exit"
+      log_error "Captured output:"
+      cat "$routing_run_dir/output.log" >&2
+      log_error "Docker invocation log:"
+      cat "$routing_docker_log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "sandbox run claude" "$routing_docker_log"; then
+      log_error "Expected docker stub to be invoked with 'sandbox run claude' for $ralph_script (routing assertion)"
+      log_error "Docker invocation log:"
+      cat "$routing_docker_log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    if ! ls "$routing_run_dir"/logs/ralph-*.log >/dev/null 2>&1; then
+      log_error "Expected log file at $routing_run_dir/logs/ralph-*.log for $ralph_script"
+      ls -la "$routing_run_dir" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    if grep -F -q -- "ROUTING_FAILURE" "$routing_run_dir/output.log"; then
+      log_error "Host claude binary invoked in --docker mode for $ralph_script (routing broken)"
+      log_error "Captured output:"
+      cat "$routing_run_dir/output.log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$routing_stub_dir" "$routing_run_dir"
+
+    # Sub-case B: broken docker invocation → ralph exits non-zero before any
+    # iteration runs (precondition check trips on stub `sandbox --help` failure).
+    routing_stub_dir="$(build_docker_routing_stub_path broken)" || exit 1
+    routing_run_dir="$(mktemp -d)"
+    routing_docker_log="$routing_run_dir/docker-invoke.log"
+    : > "$routing_docker_log"
+    routing_exit=0
+    (
+      cd "$routing_run_dir"
+      PATH="$routing_stub_dir" ROUTING_DOCKER_LOG="$routing_docker_log" \
+        "$ralph_script" --docker --iterations 1 --idle-sleep 1
+    ) > "$routing_run_dir/output.log" 2>&1 || routing_exit=$?
+
+    if [ "$routing_exit" -eq 0 ]; then
+      log_error "Expected $ralph_script --docker to exit non-zero on broken docker invocation, got exit 0"
+      log_error "Captured output:"
+      cat "$routing_run_dir/output.log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$routing_stub_dir" "$routing_run_dir"
+
+    log_info "Routing test --docker: PASSED for ${ralph_script#$ORTUS_DIR/} (success: exit 0 + routing + host log + host claude bypassed; broken: exit non-zero)"
+  done
+
+  log_info "ralph.sh --docker routing test PASSED — both copies route through 'docker sandbox run', produce host log files, bypass the host claude binary, and fail fast on broken docker invocation"
+fi
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
