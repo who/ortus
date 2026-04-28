@@ -136,6 +136,17 @@ export CARGO_HOME="$PWD/.cache/cargo"
 export GOMODCACHE="$PWD/.cache/go-mod"
 export GOCACHE="$PWD/.cache/go-build"
 
+# Claude invocation routing (FR-006, ortus-lfft.2) — when --docker is set,
+# route the inner claude session through `docker sandbox run claude --name
+# ortus-ralph --` so it runs inside Docker's bundled-image sandbox. No
+# Dockerfile (NFR-003); bind-mount defaults map host cwd → /workspace; logs
+# remain tee'd to the host LOG_FILE so tail.sh works in both modes.
+if [ -n "$USE_DOCKER" ]; then
+  CLAUDE_CMD=(docker sandbox run claude --name ortus-ralph --)
+else
+  CLAUDE_CMD=(claude)
+fi
+
 tasks_completed=0
 iteration=0
 
@@ -144,7 +155,7 @@ while true; do
   log ""
   log "--- Starting iteration $iteration ---"
 
-  result=$(claude -p "$(cat "$(dirname "$0")/prompts/ralph-prompt.md")" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE") || true
+  result=$("${CLAUDE_CMD[@]}" -p "$(cat "$(dirname "$0")/prompts/ralph-prompt.md")" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE") || true
 
   if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
     tasks_completed=$((tasks_completed + 1))
