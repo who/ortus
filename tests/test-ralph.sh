@@ -1703,6 +1703,112 @@ else
 fi
 
 # ============================================================================
+# Unit test: ralph.sh argument parser handles --docker (ortus-lfft.1, FR-006)
+# ============================================================================
+# Locks T2.1's contract: the --docker flag is recognized by the argument
+# parser, sets USE_DOCKER=1 when present, and leaves USE_DOCKER empty when
+# absent. Mixing --docker with --tasks N and --iterations N must not break
+# either flag's parsing. This test extracts the variable-init + while-shift
+# parser block from each ralph.sh copy and sources it in a subshell with
+# controlled positional parameters — exercising the real parser source
+# without triggering sandbox_smoke_test or invoking claude.
+
+log_step "Unit test: ralph.sh --docker argument parsing"
+
+UNIT_RALPH_SCRIPTS=(
+  "$ORTUS_DIR/ortus/ralph.sh"
+  "$ORTUS_DIR/template/ortus/ralph.sh"
+)
+
+# Extract the lines from `IDLE_SLEEP=...` (first variable initializer) through
+# the matching `done` of the argument-parsing while-loop. This is the entire
+# parse surface and is the chunk we want to exercise in isolation.
+extract_parser_block() {
+  local script="$1"
+  awk '
+    /^IDLE_SLEEP=/ { in_block = 1 }
+    in_block      { print }
+    in_block && /^done[[:space:]]*$/ { exit }
+  ' "$script"
+}
+
+# Run the extracted parser with the given positional arguments and echo the
+# resulting state of every flag-backed variable. Square brackets surround each
+# value so empty strings remain greppable.
+run_ralph_parser() {
+  local script="$1"; shift
+  local parser_block
+  parser_block="$(extract_parser_block "$script")"
+  bash -c "
+    set -e
+    $parser_block
+    echo \"USE_DOCKER=[\${USE_DOCKER:-}]\"
+    echo \"FAST_MODE=[\${FAST_MODE:-}]\"
+    echo \"MAX_TASKS=[\${MAX_TASKS:-}]\"
+    echo \"MAX_ITERATIONS=[\${MAX_ITERATIONS:-}]\"
+    echo \"IDLE_SLEEP=[\${IDLE_SLEEP:-}]\"
+  " bash "$@"
+}
+
+for ralph_script in "${UNIT_RALPH_SCRIPTS[@]}"; do
+  if [ ! -f "$ralph_script" ]; then
+    log_error "ralph.sh not found: $ralph_script"
+    exit 1
+  fi
+
+  # Static syntax check (acceptance criterion: bash -n exits 0).
+  if ! bash -n "$ralph_script"; then
+    log_error "bash -n failed for $ralph_script"
+    exit 1
+  fi
+
+  # Sanity-check the extracted parser block actually contains the --docker case
+  # — guards against silent extraction drift (e.g., if the parser is later
+  # refactored into a function and the IDLE_SLEEP= anchor moves).
+  block="$(extract_parser_block "$ralph_script")"
+  if ! grep -F -q -- '--docker' <<< "$block"; then
+    log_error "Extracted parser block for $ralph_script does not contain --docker case"
+    log_error "Block was:"
+    echo "$block" >&2
+    exit 1
+  fi
+
+  # Case 1: --docker alone sets USE_DOCKER=1.
+  out="$(run_ralph_parser "$ralph_script" --docker)"
+  if ! grep -F -q -- 'USE_DOCKER=[1]' <<< "$out"; then
+    log_error "Expected USE_DOCKER=[1] when --docker passed for $ralph_script"
+    log_error "Output was:"
+    echo "$out" >&2
+    exit 1
+  fi
+
+  # Case 2: no --docker leaves USE_DOCKER empty.
+  out="$(run_ralph_parser "$ralph_script")"
+  if ! grep -F -q -- 'USE_DOCKER=[]' <<< "$out"; then
+    log_error "Expected USE_DOCKER=[] when --docker absent for $ralph_script"
+    log_error "Output was:"
+    echo "$out" >&2
+    exit 1
+  fi
+
+  # Case 3: --docker mixes with --fast, --tasks, --iterations without breaking
+  # any of them (acceptance criterion #3).
+  out="$(run_ralph_parser "$ralph_script" --docker --fast --tasks 5 --iterations 3)"
+  for expected in 'USE_DOCKER=[1]' 'FAST_MODE=[--fast]' 'MAX_TASKS=[5]' 'MAX_ITERATIONS=[3]'; do
+    if ! grep -F -q -- "$expected" <<< "$out"; then
+      log_error "Mixed-flag parsing expected '$expected' in output of $ralph_script"
+      log_error "Output was:"
+      echo "$out" >&2
+      exit 1
+    fi
+  done
+
+  log_info "Unit test --docker: PASSED for ${ralph_script#$ORTUS_DIR/}"
+done
+
+log_info "ralph.sh --docker argument-parsing unit test PASSED — both copies recognize the flag, set USE_DOCKER correctly, and continue to parse --fast/--tasks/--iterations alongside it"
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
