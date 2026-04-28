@@ -26,6 +26,7 @@
   },
   "sandbox": {
     "enabled": true,
+    "failIfUnavailable": true,
     "autoAllowBashIfSandboxed": true,
     "allowUnsandboxedCommands": false,
     "network": {
