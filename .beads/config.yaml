@@ -60,3 +60,7 @@ issue-prefix: "ortus"
 # - linear.api-key
 # - github.org
 # - github.repo
+
+# sync.remote was previously set to a placeholder; removed for embedded mode.
+# Re-add and configure once you actually want git-based sync.
+# sync.remote: "git+ssh://git@github.com/owner/repo.git"
