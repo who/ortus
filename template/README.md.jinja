@@ -49,3 +49,14 @@ Ortus offers two sandboxing tiers. **Tier 1 (native sandbox only) is the default
 | Startup cost           | None — direct `exec`.                                                          | Container start adds ~1–3s per loop, plus a one-time image pull on first run.             |
 | Docker required        | No.                                                                            | Yes — the `docker sandbox` CLI must be installed.                                         |
 | Recommended scenario   | Solo interactive development; fast iteration on trusted code.                  | Unattended overnight Ralph runs; CI; reviewing untrusted or unfamiliar code.              |
+
+### Tier 2 (`--docker`): bind-mount and first-run auth
+
+When you run `./ortus/ralph.sh --docker`, the script invokes `docker sandbox run claude --name ortus-ralph -- ...`, which bind-mounts the host's current working directory (your project root) into the container as the workspace. Edits made inside the container land on your host filesystem in real time — there is no copy step. Logs continue to land at the same host path as Tier 1 (`logs/ralph-<timestamp>.log` under your project root), so `ortus/tail.sh` and any existing log tooling work unchanged in both tiers.
+
+First-run authentication has two paths:
+
+- **Interactive OAuth** — on the very first `--docker` run, Claude Code prompts inside the container; complete the OAuth flow once and credentials persist (see volume note below).
+- **Pre-exported `ANTHROPIC_API_KEY`** — export the env var on the host before invoking `ralph.sh --docker`; it is forwarded into the container and skips the OAuth prompt entirely. Use this for unattended/CI runs.
+
+Credentials are cached across runs in the `docker-claude-sandbox-data` Docker volume (created automatically on first run), so subsequent `--docker` invocations do not re-prompt.
