@@ -32,21 +32,20 @@
     "network": {
       "allowLocalBinding": true,
       "allowManagedDomainsOnly": true,
-      "allowedDomains": [
-        "api.anthropic.com",
-        "github.com",
-        "api.github.com",
-        "codeload.github.com",
-        "raw.githubusercontent.com",
-        "objects.githubusercontent.com",
-        "registry.npmjs.org",
-        "pypi.org",
-        "files.pythonhosted.org",
-        "crates.io",
-        "static.crates.io",
-        "proxy.golang.org",
-        "sum.golang.org"
-      ]
+      "allowedDomains": {{ (
+        [
+          "api.anthropic.com",
+          "github.com",
+          "api.github.com",
+          "codeload.github.com",
+          "raw.githubusercontent.com",
+          "objects.githubusercontent.com"
+        ]
+        + (["registry.npmjs.org"] if language_profile in ["javascript", "polyglot"] else [])
+        + (["pypi.org", "files.pythonhosted.org"] if language_profile in ["python", "polyglot"] else [])
+        + (["crates.io", "static.crates.io"] if language_profile in ["rust", "polyglot"] else [])
+        + (["proxy.golang.org", "sum.golang.org"] if language_profile in ["go", "polyglot"] else [])
+      ) | tojson }}
     }
   }
 }
