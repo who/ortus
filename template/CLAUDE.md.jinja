@@ -37,6 +37,18 @@ When asked to implement features, fix bugs, or make code changes:
 
 This ensures all work is tracked, atomic, and follows the defined workflow.
 
+## Sandbox Model
+
+**Rule**: The OS sandbox and `--dangerously-skip-permissions` (DSP) are complementary layers; both are in force during Ralph runs.
+
+The OS sandbox (Seatbelt on macOS, bubblewrap on Linux/WSL2) enforces filesystem-write and network boundaries on subprocesses spawned by Claude Code — it is the actual containment surface. DSP only suppresses Claude's interactive permission prompts so an unattended Ralph loop can proceed; it does not reduce containment. Together: DSP keeps the loop unblocked while the OS sandbox keeps the blast radius bounded.
+
+Two tiers are supported:
+- **Tier 1** (default): native OS sandbox only. Lighter-weight; requires Seatbelt (built-in on macOS) or bubblewrap+socat (Linux/WSL2).
+- **Tier 2**: Docker outer + native inner (`./ortus/ralph.sh --docker`). Stronger isolation for hosts where the native sandbox is insufficient or unavailable.
+
+See `README.md` for OS prerequisites and install instructions.
+
 ## Project Overview
 
 {{ project_description }}
