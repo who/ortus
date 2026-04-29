@@ -3,6 +3,7 @@ _min_copier_version: "9.0.0"
 _jinja_extensions:
   - copier_templates_extensions.TemplateExtensionLoader
   - extensions/context.py:GitConfigContext
+  - extensions/validators.py:AnswersValidator
   - extensions/prerequisites.py:PrerequisiteChecker
 
 _message_before_copy: |
@@ -114,6 +115,26 @@ linter:
   default: >-
     {% if language == 'typescript' %}eslint{% elif language == 'python' %}ruff{% elif language == 'go' %}golangci{% elif language == 'rust' %}clippy{% else %}none{% endif %}
   when: "{{ language != 'other' }}"
+
+language_profile:
+  type: str
+  help: >-
+    Sandbox language profile — controls which package registries appear in
+    .claude/settings.json allowedDomains. Single-language profiles keep the
+    allowlist small (lower blast radius); polyglot is the union of all four
+    and is the safe default for projects that may install across ecosystems.
+    Anthropic API and GitHub are always included.
+  choices:
+    Python only (PyPI): python
+    JavaScript/TypeScript only (npm): javascript
+    Go only (proxy.golang.org): go
+    Rust only (crates.io): rust
+    Polyglot (all registries): polyglot
+  default: polyglot
+  validator: >-
+    {% if language_profile not in ['python', 'javascript', 'go', 'rust', 'polyglot'] %}
+    language_profile must be one of: python, javascript, go, rust, polyglot.
+    {% endif %}
 
 # =============================================================================
 # Project Type

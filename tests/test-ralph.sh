@@ -1607,6 +1607,770 @@ done
 log_info "FR-202 heuristic-gate test PASSED — both prompt files lock all four conjunctive drop categories (cross-module / test-spec / utility-dir / public-symbol) with the Appendix D decision tree, and the gate precedes the FR-203 cap rule"
 
 # ============================================================================
+# Smoke check: ralph.sh fails fast when bubblewrap is missing (FR-004)
+# ============================================================================
+# Locks FR-004's failure path: when ralph.sh runs on Linux without bubblewrap
+# (`bwrap`) on PATH, the sandbox smoke test must (a) exit non-zero, (b) emit
+# the install-hint string mentioning both "bubblewrap" and "socat", and (c)
+# do so without ever invoking claude. Simulates the missing-bubblewrap
+# condition by replacing PATH with a stub directory that holds symlinks to
+# only the bare-minimum utilities ralph.sh needs before its smoke test runs
+# (mkdir/date/tee/uname) — notably NO bwrap. Per the issue's acceptance
+# criteria, this MUST NOT require root or actually uninstall system binaries.
+# Linux-only by design (the smoke test's bwrap branch is Linux-gated).
+
+log_step "Smoke check: ralph.sh exits non-zero when bubblewrap missing"
+
+SMOKE_PLATFORM="$(uname -s)"
+if [ "$SMOKE_PLATFORM" != "Linux" ]; then
+  log_warn "Skipping bubblewrap-missing smoke test (platform: $SMOKE_PLATFORM, test designed for Linux)"
+else
+  # Helper: build a stub PATH directory with symlinks to the listed utilities
+  # but no bwrap. Echoes the directory path on success; exits non-zero on
+  # missing required utility. Future tests that need a similar
+  # "everything-but-bwrap PATH" can call this helper directly.
+  build_no_bwrap_stub_path() {
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    for cmd in mkdir date tee uname; do
+      local cmd_path
+      cmd_path="$(command -v "$cmd" 2>/dev/null)"
+      if [ -z "$cmd_path" ]; then
+        log_error "Required utility not found in host PATH: $cmd"
+        rm -rf "$stub_dir"
+        return 1
+      fi
+      ln -s "$cmd_path" "$stub_dir/$cmd"
+    done
+    # Sanity: the stub PATH genuinely does not resolve bwrap. Guards against a
+    # host where bwrap somehow ended up among the symlinked utilities.
+    if PATH="$stub_dir" command -v bwrap >/dev/null 2>&1; then
+      log_error "Stub PATH unexpectedly resolves bwrap; cannot simulate missing-bubblewrap"
+      rm -rf "$stub_dir"
+      return 1
+    fi
+    echo "$stub_dir"
+  }
+
+  SMOKE_NO_BWRAP_DIR="$(build_no_bwrap_stub_path)" || exit 1
+  log_info "Built no-bwrap stub PATH at: $SMOKE_NO_BWRAP_DIR (no bwrap; mkdir/date/tee/uname symlinked)"
+
+  SMOKE_RALPH_SCRIPTS=(
+    "$ORTUS_DIR/ortus/ralph.sh"
+    "$ORTUS_DIR/template/ortus/ralph.sh"
+  )
+
+  for ralph_script in "${SMOKE_RALPH_SCRIPTS[@]}"; do
+    if [ ! -x "$ralph_script" ]; then
+      log_error "ralph.sh script not executable: $ralph_script"
+      rm -rf "$SMOKE_NO_BWRAP_DIR"
+      exit 1
+    fi
+
+    smoke_run_dir="$(mktemp -d)"
+    smoke_output_file="$smoke_run_dir/output.log"
+    smoke_exit=0
+    (
+      cd "$smoke_run_dir"
+      PATH="$SMOKE_NO_BWRAP_DIR" "$ralph_script"
+    ) > "$smoke_output_file" 2>&1 || smoke_exit=$?
+
+    if [ "$smoke_exit" -eq 0 ]; then
+      log_error "Expected $ralph_script to exit non-zero when bwrap unavailable, got exit 0"
+      log_error "Captured output:"
+      cat "$smoke_output_file" >&2
+      rm -rf "$SMOKE_NO_BWRAP_DIR" "$smoke_run_dir"
+      exit 1
+    fi
+
+    smoke_output="$(cat "$smoke_output_file")"
+    for expected in "bubblewrap" "socat"; do
+      if ! grep -F -q -- "$expected" <<< "$smoke_output"; then
+        log_error "Expected install-hint substring '$expected' missing from output of $ralph_script (exit=$smoke_exit)"
+        log_error "Captured output:"
+        echo "$smoke_output" >&2
+        rm -rf "$SMOKE_NO_BWRAP_DIR" "$smoke_run_dir"
+        exit 1
+      fi
+    done
+
+    log_info "Verified bwrap-missing smoke test in: ${ralph_script#$ORTUS_DIR/} (exit=$smoke_exit)"
+    rm -rf "$smoke_run_dir"
+  done
+
+  rm -rf "$SMOKE_NO_BWRAP_DIR"
+  log_info "ralph.sh bwrap-missing smoke test PASSED — both ralph.sh copies fail fast with install-hint when bubblewrap is unavailable (no root required)"
+fi
+
+# ============================================================================
+# Smoke check: ralph.sh --docker fails fast when Docker missing (ortus-lfft.7)
+# ============================================================================
+# Locks the ortus-heot detect-and-message decision: when ralph.sh --docker is
+# invoked on a host without `docker` on PATH, the precondition check must
+# (a) exit non-zero, (b) emit an ERROR string mentioning "Docker" plus an
+# install hint, and (c) do so before any iteration runs claude. A second case
+# locks the bundled-image detection: when `docker` is present but `docker
+# sandbox --help` fails, the script must exit non-zero with a distinct
+# "docker sandbox" hint pointing to Docker Desktop / bundled-image rollout.
+# Both cases simulate absence via PATH overrides + a stub docker binary — no
+# root required, no real Docker uninstall, no real claude invocation.
+
+log_step "Smoke check: ralph.sh --docker exits non-zero when Docker missing"
+
+# Helper: build a stub PATH directory with symlinks to the listed utilities
+# but no docker. Echoes the directory path on success; exits non-zero on a
+# missing required utility. Mirrors build_no_bwrap_stub_path() above.
+build_no_docker_stub_path() {
+  local stub_dir
+  stub_dir="$(mktemp -d)"
+  for cmd in mkdir date tee uname bash; do
+    local cmd_path
+    cmd_path="$(command -v "$cmd" 2>/dev/null)"
+    if [ -z "$cmd_path" ]; then
+      log_error "Required utility not found in host PATH: $cmd"
+      rm -rf "$stub_dir"
+      return 1
+    fi
+    ln -s "$cmd_path" "$stub_dir/$cmd"
+  done
+  if PATH="$stub_dir" command -v docker >/dev/null 2>&1; then
+    log_error "Stub PATH unexpectedly resolves docker; cannot simulate missing-Docker"
+    rm -rf "$stub_dir"
+    return 1
+  fi
+  echo "$stub_dir"
+}
+
+SMOKE_NO_DOCKER_DIR="$(build_no_docker_stub_path)" || exit 1
+log_info "Built no-docker stub PATH at: $SMOKE_NO_DOCKER_DIR (no docker; mkdir/date/tee/uname/bash symlinked)"
+
+# Build a separate stub PATH where `docker` is present but rejects every
+# subcommand (so `docker sandbox --help` exits non-zero) — exercises the
+# bundled-image-missing branch. Reuses the no-docker stub's symlinks plus a
+# stub `docker` script that always exits 1.
+build_docker_no_sandbox_stub_path() {
+  local stub_dir
+  stub_dir="$(mktemp -d)"
+  for cmd in mkdir date tee uname bash; do
+    local cmd_path
+    cmd_path="$(command -v "$cmd" 2>/dev/null)"
+    if [ -z "$cmd_path" ]; then
+      log_error "Required utility not found in host PATH: $cmd"
+      rm -rf "$stub_dir"
+      return 1
+    fi
+    ln -s "$cmd_path" "$stub_dir/$cmd"
+  done
+  cat > "$stub_dir/docker" <<'STUB_DOCKER_EOF'
+#!/bin/bash
+# Stub: pretend docker exists but reject every subcommand so that
+# `docker sandbox --help` exits non-zero.
+echo "stub docker: subcommand '$*' not supported" >&2
+exit 1
+STUB_DOCKER_EOF
+  chmod +x "$stub_dir/docker"
+  if ! PATH="$stub_dir" command -v docker >/dev/null 2>&1; then
+    log_error "Stub PATH unexpectedly does not resolve docker"
+    rm -rf "$stub_dir"
+    return 1
+  fi
+  echo "$stub_dir"
+}
+
+SMOKE_DOCKER_NO_SANDBOX_DIR="$(build_docker_no_sandbox_stub_path)" || exit 1
+log_info "Built docker-no-sandbox stub PATH at: $SMOKE_DOCKER_NO_SANDBOX_DIR (stub docker rejects subcommands)"
+
+SMOKE_DOCKER_RALPH_SCRIPTS=(
+  "$ORTUS_DIR/ortus/ralph.sh"
+  "$ORTUS_DIR/template/ortus/ralph.sh"
+)
+
+for ralph_script in "${SMOKE_DOCKER_RALPH_SCRIPTS[@]}"; do
+  if [ ! -x "$ralph_script" ]; then
+    log_error "ralph.sh script not executable: $ralph_script"
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR"
+    exit 1
+  fi
+
+  # Case A: --docker with no docker on PATH → exit non-zero, mention "Docker".
+  smoke_run_dir="$(mktemp -d)"
+  smoke_output_file="$smoke_run_dir/output.log"
+  smoke_exit=0
+  (
+    cd "$smoke_run_dir"
+    PATH="$SMOKE_NO_DOCKER_DIR" "$ralph_script" --docker --iterations 1
+  ) > "$smoke_output_file" 2>&1 || smoke_exit=$?
+
+  if [ "$smoke_exit" -eq 0 ]; then
+    log_error "Expected $ralph_script --docker to exit non-zero when docker unavailable, got exit 0"
+    log_error "Captured output:"
+    cat "$smoke_output_file" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+
+  smoke_output="$(cat "$smoke_output_file")"
+  if ! grep -F -q -- "Docker" <<< "$smoke_output"; then
+    log_error "Expected 'Docker' string in --docker missing-docker output of $ralph_script (exit=$smoke_exit)"
+    log_error "Captured output:"
+    echo "$smoke_output" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+  if ! grep -F -q -- "Install" <<< "$smoke_output"; then
+    log_error "Expected install hint ('Install') in --docker missing-docker output of $ralph_script (exit=$smoke_exit)"
+    log_error "Captured output:"
+    echo "$smoke_output" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+  rm -rf "$smoke_run_dir"
+
+  # Case B: --docker with docker present but `docker sandbox` failing →
+  # exit non-zero, mention "docker sandbox" specifically.
+  smoke_run_dir="$(mktemp -d)"
+  smoke_output_file="$smoke_run_dir/output.log"
+  smoke_exit=0
+  (
+    cd "$smoke_run_dir"
+    PATH="$SMOKE_DOCKER_NO_SANDBOX_DIR" "$ralph_script" --docker --iterations 1
+  ) > "$smoke_output_file" 2>&1 || smoke_exit=$?
+
+  if [ "$smoke_exit" -eq 0 ]; then
+    log_error "Expected $ralph_script --docker to exit non-zero when 'docker sandbox' unavailable, got exit 0"
+    log_error "Captured output:"
+    cat "$smoke_output_file" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+
+  smoke_output="$(cat "$smoke_output_file")"
+  if ! grep -F -q -- "docker sandbox" <<< "$smoke_output"; then
+    log_error "Expected 'docker sandbox' string in --docker missing-sandbox output of $ralph_script (exit=$smoke_exit)"
+    log_error "Captured output:"
+    echo "$smoke_output" >&2
+    rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR" "$smoke_run_dir"
+    exit 1
+  fi
+  rm -rf "$smoke_run_dir"
+
+  log_info "Verified --docker precondition smoke test in: ${ralph_script#$ORTUS_DIR/} (both missing-docker and missing-sandbox cases)"
+done
+
+rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR"
+log_info "ralph.sh --docker precondition smoke test PASSED — both ralph.sh copies fail fast with install hints when Docker or 'docker sandbox' is unavailable"
+
+# ============================================================================
+# Unit test: ralph.sh argument parser handles --docker (ortus-lfft.1, FR-006)
+# ============================================================================
+# Locks T2.1's contract: the --docker flag is recognized by the argument
+# parser, sets USE_DOCKER=1 when present, and leaves USE_DOCKER empty when
+# absent. Mixing --docker with --tasks N and --iterations N must not break
+# either flag's parsing. This test extracts the variable-init + while-shift
+# parser block from each ralph.sh copy and sources it in a subshell with
+# controlled positional parameters — exercising the real parser source
+# without triggering sandbox_smoke_test or invoking claude.
+
+log_step "Unit test: ralph.sh --docker argument parsing"
+
+UNIT_RALPH_SCRIPTS=(
+  "$ORTUS_DIR/ortus/ralph.sh"
+  "$ORTUS_DIR/template/ortus/ralph.sh"
+)
+
+# Extract the lines from `IDLE_SLEEP=...` (first variable initializer) through
+# the matching `done` of the argument-parsing while-loop. This is the entire
+# parse surface and is the chunk we want to exercise in isolation.
+extract_parser_block() {
+  local script="$1"
+  awk '
+    /^IDLE_SLEEP=/ { in_block = 1 }
+    in_block      { print }
+    in_block && /^done[[:space:]]*$/ { exit }
+  ' "$script"
+}
+
+# Run the extracted parser with the given positional arguments and echo the
+# resulting state of every flag-backed variable. Square brackets surround each
+# value so empty strings remain greppable.
+run_ralph_parser() {
+  local script="$1"; shift
+  local parser_block
+  parser_block="$(extract_parser_block "$script")"
+  bash -c "
+    set -e
+    $parser_block
+    echo \"USE_DOCKER=[\${USE_DOCKER:-}]\"
+    echo \"FAST_MODE=[\${FAST_MODE:-}]\"
+    echo \"MAX_TASKS=[\${MAX_TASKS:-}]\"
+    echo \"MAX_ITERATIONS=[\${MAX_ITERATIONS:-}]\"
+    echo \"IDLE_SLEEP=[\${IDLE_SLEEP:-}]\"
+  " bash "$@"
+}
+
+for ralph_script in "${UNIT_RALPH_SCRIPTS[@]}"; do
+  if [ ! -f "$ralph_script" ]; then
+    log_error "ralph.sh not found: $ralph_script"
+    exit 1
+  fi
+
+  # Static syntax check (acceptance criterion: bash -n exits 0).
+  if ! bash -n "$ralph_script"; then
+    log_error "bash -n failed for $ralph_script"
+    exit 1
+  fi
+
+  # Sanity-check the extracted parser block actually contains the --docker case
+  # — guards against silent extraction drift (e.g., if the parser is later
+  # refactored into a function and the IDLE_SLEEP= anchor moves).
+  block="$(extract_parser_block "$ralph_script")"
+  if ! grep -F -q -- '--docker' <<< "$block"; then
+    log_error "Extracted parser block for $ralph_script does not contain --docker case"
+    log_error "Block was:"
+    echo "$block" >&2
+    exit 1
+  fi
+
+  # Case 1: --docker alone sets USE_DOCKER=1.
+  out="$(run_ralph_parser "$ralph_script" --docker)"
+  if ! grep -F -q -- 'USE_DOCKER=[1]' <<< "$out"; then
+    log_error "Expected USE_DOCKER=[1] when --docker passed for $ralph_script"
+    log_error "Output was:"
+    echo "$out" >&2
+    exit 1
+  fi
+
+  # Case 2: no --docker leaves USE_DOCKER empty.
+  out="$(run_ralph_parser "$ralph_script")"
+  if ! grep -F -q -- 'USE_DOCKER=[]' <<< "$out"; then
+    log_error "Expected USE_DOCKER=[] when --docker absent for $ralph_script"
+    log_error "Output was:"
+    echo "$out" >&2
+    exit 1
+  fi
+
+  # Case 3: --docker mixes with --fast, --tasks, --iterations without breaking
+  # any of them (acceptance criterion #3).
+  out="$(run_ralph_parser "$ralph_script" --docker --fast --tasks 5 --iterations 3)"
+  for expected in 'USE_DOCKER=[1]' 'FAST_MODE=[--fast]' 'MAX_TASKS=[5]' 'MAX_ITERATIONS=[3]'; do
+    if ! grep -F -q -- "$expected" <<< "$out"; then
+      log_error "Mixed-flag parsing expected '$expected' in output of $ralph_script"
+      log_error "Output was:"
+      echo "$out" >&2
+      exit 1
+    fi
+  done
+
+  log_info "Unit test --docker: PASSED for ${ralph_script#$ORTUS_DIR/}"
+done
+
+log_info "ralph.sh --docker argument-parsing unit test PASSED — both copies recognize the flag, set USE_DOCKER correctly, and continue to parse --fast/--tasks/--iterations alongside it"
+
+# ============================================================================
+# Routing test: ralph.sh --docker invokes 'docker sandbox run' (ortus-lfft.6)
+# ============================================================================
+# Locks FR-006 / T2.2: in --docker mode, ralph.sh must route the inner claude
+# session through `docker sandbox run claude --name ortus-ralph --` instead of
+# the host claude binary, while still producing logs/ralph-*.log on the host
+# filesystem so tail.sh and existing tooling continue to work.
+#
+# Skip-detection (acceptance #2): on a host lacking `docker sandbox`, this
+# case prints SKIP and continues so the full suite still exits 0 (acceptance
+# #4). The skip-check runs before any PATH manipulation so it reflects true
+# host state. When `docker sandbox` is available, the test uses fully mocked
+# stub PATHs to keep it fast and offline:
+#   - Sub-case A (acceptance #3 success half): stub `docker` accepts
+#     `sandbox --help` (precondition pass-through) and emits
+#     <promise>EMPTY</promise> on `sandbox run` so ralph's outer loop exits
+#     gracefully on iteration 1; stub `claude` exits 99 with a loud
+#     ROUTING_FAILURE marker if ever invoked, proving the host claude binary
+#     is bypassed (acceptance #1 routing assertion).
+#   - Sub-case B (acceptance #3 broken half): stub `docker` rejects every
+#     subcommand (including `sandbox --help`) so ralph's precondition check
+#     trips and exits non-zero before any iteration runs.
+
+log_step "Routing test: ralph.sh --docker routes through 'docker sandbox run' (skip when docker unavailable)"
+
+if ! command -v docker >/dev/null 2>&1 || ! docker sandbox --help >/dev/null 2>&1; then
+  log_info "SKIP: docker sandbox not available on host; --docker routing test skipped"
+else
+  build_docker_routing_stub_path() {
+    local mode="$1"  # "success" or "broken"
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    for cmd in mkdir date tee uname bash sed grep cat dirname; do
+      local cmd_path
+      cmd_path="$(command -v "$cmd" 2>/dev/null)"
+      if [ -z "$cmd_path" ]; then
+        log_error "Required utility not found in host PATH: $cmd"
+        rm -rf "$stub_dir"
+        return 1
+      fi
+      ln -s "$cmd_path" "$stub_dir/$cmd"
+    done
+
+    if [ "$mode" = "success" ]; then
+      cat > "$stub_dir/docker" <<'STUB_DOCKER_OK_EOF'
+#!/bin/bash
+# Record every invocation so the test can assert routing.
+echo "docker $*" >> "${ROUTING_DOCKER_LOG:-/dev/null}"
+case "$1 $2" in
+  "sandbox --help")
+    echo "Stub docker sandbox: help OK"
+    exit 0
+    ;;
+  "sandbox run")
+    # Simulate the in-container claude returning the EMPTY signal so ralph's
+    # outer loop terminates gracefully on iteration 1.
+    echo "<promise>EMPTY</promise>"
+    exit 0
+    ;;
+esac
+exit 0
+STUB_DOCKER_OK_EOF
+    else
+      cat > "$stub_dir/docker" <<'STUB_DOCKER_BROKEN_EOF'
+#!/bin/bash
+# Stub docker that fails every subcommand (including `sandbox --help`) so
+# ralph's docker_precondition_check trips and exits non-zero.
+echo "docker $*" >> "${ROUTING_DOCKER_LOG:-/dev/null}"
+echo "stub docker: subcommand '$*' not supported" >&2
+exit 1
+STUB_DOCKER_BROKEN_EOF
+    fi
+    chmod +x "$stub_dir/docker"
+
+    cat > "$stub_dir/claude" <<'STUB_CLAUDE_EOF'
+#!/bin/bash
+# Host claude must NOT be invoked in --docker mode — the routing forwards
+# through `docker sandbox run claude` instead. Loud failure marker so the
+# test detects any routing regression.
+echo "ROUTING_FAILURE: host claude binary invoked in --docker mode" >&2
+exit 99
+STUB_CLAUDE_EOF
+    chmod +x "$stub_dir/claude"
+
+    echo "$stub_dir"
+  }
+
+  ROUTING_RALPH_SCRIPTS=(
+    "$ORTUS_DIR/ortus/ralph.sh"
+    "$ORTUS_DIR/template/ortus/ralph.sh"
+  )
+
+  for ralph_script in "${ROUTING_RALPH_SCRIPTS[@]}"; do
+    if [ ! -x "$ralph_script" ]; then
+      log_error "ralph.sh script not executable: $ralph_script"
+      exit 1
+    fi
+
+    # Sub-case A: successful docker invocation → ralph exits 0, routes through
+    # `docker sandbox run claude`, produces a host log, host claude untouched.
+    routing_stub_dir="$(build_docker_routing_stub_path success)" || exit 1
+    routing_run_dir="$(mktemp -d)"
+    routing_docker_log="$routing_run_dir/docker-invoke.log"
+    : > "$routing_docker_log"
+    routing_exit=0
+    (
+      cd "$routing_run_dir"
+      PATH="$routing_stub_dir" ROUTING_DOCKER_LOG="$routing_docker_log" \
+        "$ralph_script" --docker --iterations 1 --idle-sleep 1
+    ) > "$routing_run_dir/output.log" 2>&1 || routing_exit=$?
+
+    if [ "$routing_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker to exit 0 on successful docker invocation, got exit $routing_exit"
+      log_error "Captured output:"
+      cat "$routing_run_dir/output.log" >&2
+      log_error "Docker invocation log:"
+      cat "$routing_docker_log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "sandbox run claude" "$routing_docker_log"; then
+      log_error "Expected docker stub to be invoked with 'sandbox run claude' for $ralph_script (routing assertion)"
+      log_error "Docker invocation log:"
+      cat "$routing_docker_log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    if ! ls "$routing_run_dir"/logs/ralph-*.log >/dev/null 2>&1; then
+      log_error "Expected log file at $routing_run_dir/logs/ralph-*.log for $ralph_script"
+      ls -la "$routing_run_dir" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    if grep -F -q -- "ROUTING_FAILURE" "$routing_run_dir/output.log"; then
+      log_error "Host claude binary invoked in --docker mode for $ralph_script (routing broken)"
+      log_error "Captured output:"
+      cat "$routing_run_dir/output.log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$routing_stub_dir" "$routing_run_dir"
+
+    # Sub-case B: broken docker invocation → ralph exits non-zero before any
+    # iteration runs (precondition check trips on stub `sandbox --help` failure).
+    routing_stub_dir="$(build_docker_routing_stub_path broken)" || exit 1
+    routing_run_dir="$(mktemp -d)"
+    routing_docker_log="$routing_run_dir/docker-invoke.log"
+    : > "$routing_docker_log"
+    routing_exit=0
+    (
+      cd "$routing_run_dir"
+      PATH="$routing_stub_dir" ROUTING_DOCKER_LOG="$routing_docker_log" \
+        "$ralph_script" --docker --iterations 1 --idle-sleep 1
+    ) > "$routing_run_dir/output.log" 2>&1 || routing_exit=$?
+
+    if [ "$routing_exit" -eq 0 ]; then
+      log_error "Expected $ralph_script --docker to exit non-zero on broken docker invocation, got exit 0"
+      log_error "Captured output:"
+      cat "$routing_run_dir/output.log" >&2
+      rm -rf "$routing_stub_dir" "$routing_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$routing_stub_dir" "$routing_run_dir"
+
+    log_info "Routing test --docker: PASSED for ${ralph_script#$ORTUS_DIR/} (success: exit 0 + routing + host log + host claude bypassed; broken: exit non-zero)"
+  done
+
+  log_info "ralph.sh --docker routing test PASSED — both copies route through 'docker sandbox run', produce host log files, bypass the host claude binary, and fail fast on broken docker invocation"
+fi
+
+# ============================================================================
+# Passthrough test: --fast / --tasks / --iterations forward in --docker mode
+# (ortus-lfft.3, FR-007)
+# ============================================================================
+# Locks T2.3's contract: when --docker is set, the existing ralph.sh flags
+# must continue to function:
+#   - --fast appears in the docker-routed claude argv (after `--`, since
+#     CLAUDE_CMD ends in `--` and $FAST_MODE follows in the iteration call).
+#   - --tasks N caps the outer loop at N COMPLETE signals (host-side counter).
+#   - --iterations N caps the outer loop at N iterations regardless of result.
+#   - Combinations compose without conflict.
+#
+# Skip-detection mirrors the routing test above: SKIP cleanly when
+# `docker sandbox` isn't available on the host. When available, runs with a
+# mocked `docker` stub on PATH that records every invocation arg-by-arg and
+# returns a configured signal (EMPTY/COMPLETE/BLOCKED) so the test stays
+# hermetic and doesn't depend on a real container runtime or claude binary.
+
+log_step "Passthrough test: --fast/--tasks/--iterations forward in --docker mode (skip when docker unavailable)"
+
+if ! command -v docker >/dev/null 2>&1 || ! docker sandbox --help >/dev/null 2>&1; then
+  log_info "SKIP: docker sandbox not available on host; --docker passthrough test skipped"
+else
+  # Stub builder: emits a docker stub that logs every arg on its own line
+  # (so multi-line prompt content in the iteration call doesn't confuse the
+  # grep-based assertions) and answers `sandbox run` by emitting the
+  # configured promise signal so the outer ralph loop interprets it.
+  build_docker_passthrough_stub_path() {
+    local signal="$1"  # "EMPTY", "COMPLETE", or "BLOCKED"
+    local stub_dir
+    stub_dir="$(mktemp -d)"
+    for cmd in mkdir date tee uname bash sed grep cat dirname; do
+      local cmd_path
+      cmd_path="$(command -v "$cmd" 2>/dev/null)"
+      if [ -z "$cmd_path" ]; then
+        log_error "Required utility not found in host PATH: $cmd"
+        rm -rf "$stub_dir"
+        return 1
+      fi
+      ln -s "$cmd_path" "$stub_dir/$cmd"
+    done
+
+    cat > "$stub_dir/docker" <<STUB_DOCKER_PT_EOF
+#!/bin/bash
+# Per-arg logging keeps assertions robust against multi-line prompt payloads
+# embedded in the iteration call's argv.
+echo "docker:invoke:start" >> "\${ROUTING_DOCKER_LOG:-/dev/null}"
+for a in "\$@"; do
+  echo "docker:arg:\$a" >> "\${ROUTING_DOCKER_LOG:-/dev/null}"
+done
+echo "docker:invoke:end" >> "\${ROUTING_DOCKER_LOG:-/dev/null}"
+case "\$1 \$2" in
+  "sandbox --help")
+    echo "Stub docker sandbox: help OK"
+    exit 0
+    ;;
+  "sandbox run")
+    echo "<promise>$signal</promise>"
+    exit 0
+    ;;
+esac
+exit 0
+STUB_DOCKER_PT_EOF
+    chmod +x "$stub_dir/docker"
+
+    cat > "$stub_dir/claude" <<'STUB_CLAUDE_PT_EOF'
+#!/bin/bash
+echo "ROUTING_FAILURE: host claude binary invoked in --docker mode" >&2
+exit 99
+STUB_CLAUDE_PT_EOF
+    chmod +x "$stub_dir/claude"
+
+    echo "$stub_dir"
+  }
+
+  PASSTHROUGH_RALPH_SCRIPTS=(
+    "$ORTUS_DIR/ortus/ralph.sh"
+    "$ORTUS_DIR/template/ortus/ralph.sh"
+  )
+
+  for ralph_script in "${PASSTHROUGH_RALPH_SCRIPTS[@]}"; do
+    if [ ! -x "$ralph_script" ]; then
+      log_error "ralph.sh script not executable: $ralph_script"
+      exit 1
+    fi
+
+    # Sub-case A (AC #1): --fast appears in docker invocation argv.
+    # EMPTY signal terminates the loop after iteration 1.
+    pt_stub_dir="$(build_docker_passthrough_stub_path EMPTY)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --fast --iterations 1 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --fast to exit 0 on EMPTY signal, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      cat "$pt_docker_log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- 'docker:arg:--fast' "$pt_docker_log"; then
+      log_error "Expected --fast to appear in docker stub argv for $ralph_script (AC #1)"
+      log_error "Docker invocation log:"
+      cat "$pt_docker_log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    # Sub-case B (AC #2): --tasks N caps the outer loop at N COMPLETE signals.
+    pt_stub_dir="$(build_docker_passthrough_stub_path COMPLETE)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --tasks 1 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --tasks 1 to exit 0 on tasks-limit hit, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "Reached --tasks limit (1)" "$pt_run_dir"/logs/ralph-*.log; then
+      log_error "Expected 'Reached --tasks limit (1)' in host log for $ralph_script (AC #2)"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    # Sub-case C (AC #3): --iterations N caps the outer loop at N iterations.
+    # BLOCKED signal: neither EMPTY nor task-cap fires; iterations cap is the
+    # only termination path, which is exactly what we want to verify.
+    pt_stub_dir="$(build_docker_passthrough_stub_path BLOCKED)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --iterations 2 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --iterations 2 to exit 0 on iterations-limit hit, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "Reached --iterations limit (2)" "$pt_run_dir"/logs/ralph-*.log; then
+      log_error "Expected 'Reached --iterations limit (2)' in host log for $ralph_script (AC #3)"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    iter_marker_count=$(grep -c -- "--- Starting iteration" "$pt_run_dir"/logs/ralph-*.log || true)
+    if [ "$iter_marker_count" -ne 2 ]; then
+      log_error "Expected 2 iteration boundary markers in host log for $ralph_script (AC #3), got $iter_marker_count"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    # Sub-case D (AC #4): combination --docker --fast --tasks 2 --iterations 5
+    # with COMPLETE signal. tasks=2 should hit before iterations=5; --fast must
+    # appear in every docker invocation argv, so docker:arg:--fast occurs
+    # exactly twice (once per task-iteration; the precondition `sandbox --help`
+    # call carries no --fast).
+    pt_stub_dir="$(build_docker_passthrough_stub_path COMPLETE)" || exit 1
+    pt_run_dir="$(mktemp -d)"
+    pt_docker_log="$pt_run_dir/docker-invoke.log"
+    : > "$pt_docker_log"
+    pt_exit=0
+    (
+      cd "$pt_run_dir"
+      PATH="$pt_stub_dir" ROUTING_DOCKER_LOG="$pt_docker_log" \
+        "$ralph_script" --docker --fast --tasks 2 --iterations 5 --idle-sleep 1
+    ) > "$pt_run_dir/output.log" 2>&1 || pt_exit=$?
+
+    if [ "$pt_exit" -ne 0 ]; then
+      log_error "Expected $ralph_script --docker --fast --tasks 2 --iterations 5 to exit 0, got exit $pt_exit"
+      cat "$pt_run_dir/output.log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    if ! grep -F -q -- "Reached --tasks limit (2)" "$pt_run_dir"/logs/ralph-*.log; then
+      log_error "Expected 'Reached --tasks limit (2)' in host log for combination test ($ralph_script, AC #4)"
+      cat "$pt_run_dir"/logs/ralph-*.log >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    fast_invocation_count=$(grep -c -- 'docker:arg:--fast' "$pt_docker_log" || true)
+    if [ "$fast_invocation_count" -ne 2 ]; then
+      log_error "Expected exactly 2 docker invocations carrying --fast for combination test ($ralph_script, AC #4), got $fast_invocation_count"
+      cat "$pt_docker_log" >&2
+      rm -rf "$pt_stub_dir" "$pt_run_dir"
+      exit 1
+    fi
+
+    rm -rf "$pt_stub_dir" "$pt_run_dir"
+
+    log_info "Passthrough test --docker: PASSED for ${ralph_script#$ORTUS_DIR/} (--fast in argv; --tasks and --iterations cap the loop; combinations compose)"
+  done
+
+  log_info "ralph.sh --docker passthrough test PASSED — --fast forwards into docker argv, --tasks and --iterations cap the outer loop, and the four-flag combination composes correctly in both ralph.sh copies"
+fi
+
+# ============================================================================
 # Test Setup
 # ============================================================================
 
