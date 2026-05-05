@@ -298,7 +298,7 @@ log_info "codegraph-present test PASSED — both prompt files route to mcp__code
 # ============================================================================
 # Static check: step 6.5 freshness hook is non-blocking on codegraph sync failure
 # ============================================================================
-# Locks FR-005: a failing `codegraph sync` (missing binary or non-zero exit)
+# Locks the freshness-hook contract: a failing `codegraph sync` (missing binary or non-zero exit)
 # must not break the loop. Step 6.5 must contain language that explicitly
 # tells Ralph to ignore the exit code / proceed regardless, and the prompt
 # must continue uninterrupted from 6.5 → 7 (Log) → 8 (Close) → 9 (Commit & Push).
@@ -408,45 +408,45 @@ rm -rf "$CODEGRAPH_FAIL_TMPDIR"
 log_info "codegraph-sync-failure test PASSED — both prompt files instruct Ralph to proceed to Commit despite a failing codegraph sync"
 
 # ============================================================================
-# Static check: NFR-101 step-1 byte-equivalent baseline when CodeGraph off
+# Static check: step-1 byte-equivalent baseline when CodeGraph off
 # ============================================================================
 # When codegraph_available is false, step 1's orient context must reduce to
 # the bd list pull verbatim — no activity-read block, no CodeGraph v1 block
-# reuse, no log lines, no warnings (NFR-101). The FR-401..403 (activity-read)
-# and FR-404 (block reuse) sub-paragraphs of step 1 must explicitly gate on
+# reuse, no log lines, no warnings. The activity-read
+# and block-reuse sub-paragraphs of step 1 must explicitly gate on
 # codegraph_available AND emit nothing when off ("skip silently" — not
 # log/warn/placeholder). Mocks codegraph-absent by removing .codegraph/ from
 # a tmpdir fixture; the gating contract lives in the prompt source itself, so
 # this is a static byte-check on both prompt files. Narrowed to the step-1
 # region so it cannot false-pass on step 6.5's gating language.
 
-log_step "Static check: NFR-101 step-1 byte-equivalent baseline when CodeGraph off"
+log_step "Static check: step-1 byte-equivalent baseline when CodeGraph off"
 
 # Mock codegraph-absent fixture: tmpdir with NO .codegraph/ and NO
 # mcp__codegraph__* stubs (i.e., codegraph_available is false).
-NFR101_ABSENT_TMPDIR="$(mktemp -d)"
-if [ -d "$NFR101_ABSENT_TMPDIR/.codegraph" ]; then
+BASELINE_ABSENT_TMPDIR="$(mktemp -d)"
+if [ -d "$BASELINE_ABSENT_TMPDIR/.codegraph" ]; then
   log_error "Failed to mock codegraph-absent fixture (unexpected .codegraph/ present)"
-  rm -rf "$NFR101_ABSENT_TMPDIR"
+  rm -rf "$BASELINE_ABSENT_TMPDIR"
   exit 1
 fi
-log_info "Mocked codegraph-absent environment at: $NFR101_ABSENT_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
+log_info "Mocked codegraph-absent environment at: $BASELINE_ABSENT_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
 
-# The verbatim FR-401 bd-list invocation that must remain in step 1 unchanged
-NFR101_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
+# The verbatim bd-list invocation that must remain in step 1 unchanged
+BASELINE_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
 
-# Gating phrases — each FR-401..403 (activity-read) and FR-404 (block reuse)
+# Gating phrases — each activity-read and block-reuse
 # sub-paragraph in step 1 must contain language that skips silently when off.
-NFR101_GATING_PHRASES=(
+BASELINE_GATING_PHRASES=(
   'When `codegraph_available`'        # Activity-read paragraph opens with this gate
-  'Gated on `codegraph_available`'    # FR-404 paragraph closes with this gate
+  'Gated on `codegraph_available`'    # block-reuse paragraph closes with this gate
   "skip silently"                     # Silent fallback (no warnings, no extra blocks)
 )
 
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$NFR101_ABSENT_TMPDIR"
+    rm -rf "$BASELINE_ABSENT_TMPDIR"
     exit 1
   fi
 
@@ -454,74 +454,74 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
   if [ -z "$step1_region" ]; then
     log_error "Could not extract step-1 region from: $prompt_file"
-    rm -rf "$NFR101_ABSENT_TMPDIR"
+    rm -rf "$BASELINE_ABSENT_TMPDIR"
     exit 1
   fi
 
-  # Assert FR-401 bd-list invocation preserved verbatim within step 1
-  if ! grep -F -q -- "$NFR101_BD_LIST_INVOCATION" <<< "$step1_region"; then
-    log_error "NFR-101 bd-list invocation missing/altered in step 1 of: $prompt_file"
-    log_error "Expected: $NFR101_BD_LIST_INVOCATION"
-    rm -rf "$NFR101_ABSENT_TMPDIR"
+  # Assert bd-list invocation preserved verbatim within step 1
+  if ! grep -F -q -- "$BASELINE_BD_LIST_INVOCATION" <<< "$step1_region"; then
+    log_error "bd-list invocation missing/altered in step 1 of: $prompt_file"
+    log_error "Expected: $BASELINE_BD_LIST_INVOCATION"
+    rm -rf "$BASELINE_ABSENT_TMPDIR"
     exit 1
   fi
 
   # Assert gating phrases present within step 1
-  for phrase in "${NFR101_GATING_PHRASES[@]}"; do
+  for phrase in "${BASELINE_GATING_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
-      log_error "NFR-101 gating phrase missing in step 1 of: $prompt_file"
+      log_error "gating phrase missing in step 1 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$NFR101_ABSENT_TMPDIR"
+      rm -rf "$BASELINE_ABSENT_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified NFR-101 baseline gating in step 1 of: $(basename "$prompt_file")"
+  log_info "Verified baseline gating in step 1 of: $(basename "$prompt_file")"
 done
 
-rm -rf "$NFR101_ABSENT_TMPDIR"
+rm -rf "$BASELINE_ABSENT_TMPDIR"
 
-log_info "NFR-101 baseline test PASSED — both prompt files gate FR-401..404 sub-paragraphs in step 1 on codegraph_available with silent skip"
+log_info "step-1 baseline test PASSED — both prompt files gate activity-read and block-reuse sub-paragraphs in step 1 on codegraph_available with silent skip"
 
 # ============================================================================
-# Static check: FR-401+402 presence-when-on (bd-list preserved + activity surfaced)
+# Static check: activity-read presence-when-on (bd-list preserved + activity surfaced)
 # ============================================================================
 # When codegraph_available is true, step 1 of the Ralph prompt must (a)
-# preserve the existing FR-401 bd-list comment-history pull verbatim AND
-# (b) additionally emit the FR-402 git-derived CodeGraph activity-read
+# preserve the existing bd-list comment-history pull verbatim AND
+# (b) additionally emit the git-derived CodeGraph activity-read
 # block. This guards both halves of the orient context from accidental
 # wording drift in BOTH prompt files: the source ortus/prompts/ralph-prompt.md
 # and the template/ralph-prompt.md.jinja.
 #
 # Mocks the codegraph_available environment (.codegraph/ + a stub
 # mcp__codegraph__codegraph_files tool name) for environmental fidelity,
-# parallel to existing mocks above. The FR-402 activity-read contract lives
+# parallel to existing mocks above. The activity-read contract lives
 # in the prompt source itself (it is instruction to the loop, not runnable
 # code), so this is a static byte-check on the prompt source. Narrowed to
 # the step-1 region so it cannot false-pass on later sections.
 
-log_step "Static check: FR-401+402 presence-when-on (bd-list preserved + CodeGraph activity surfaced)"
+log_step "Static check: activity-read presence-when-on (bd-list preserved + CodeGraph activity surfaced)"
 
 # Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_files
-FR401_402_TMPDIR="$(mktemp -d)"
-mkdir -p "$FR401_402_TMPDIR/.codegraph"
-echo "mcp__codegraph__codegraph_files" > "$FR401_402_TMPDIR/.codegraph/.stub-mcp-tool"
-if [ ! -d "$FR401_402_TMPDIR/.codegraph" ] || [ ! -f "$FR401_402_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
-  log_error "Failed to set up codegraph_available mock fixture at $FR401_402_TMPDIR"
-  rm -rf "$FR401_402_TMPDIR"
+ACTIVITY_READ_TMPDIR="$(mktemp -d)"
+mkdir -p "$ACTIVITY_READ_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_files" > "$ACTIVITY_READ_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$ACTIVITY_READ_TMPDIR/.codegraph" ] || [ ! -f "$ACTIVITY_READ_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $ACTIVITY_READ_TMPDIR"
+  rm -rf "$ACTIVITY_READ_TMPDIR"
   exit 1
 fi
-log_info "Mocked codegraph_available environment at: $FR401_402_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_files)"
+log_info "Mocked codegraph_available environment at: $ACTIVITY_READ_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_files)"
 
-# FR-401: the bd-list comment-history pull invocation that must remain in step 1 verbatim
-FR401_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
+# the bd-list comment-history pull invocation that must remain in step 1 verbatim
+ACTIVITY_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
 
-# FR-402: anchors for the git-derived CodeGraph activity-read sub-paragraph
+# anchors for the git-derived CodeGraph activity-read sub-paragraph
 # that must additionally appear in step 1 alongside the bd-list pull when
 # codegraph_available. Together they prove the orient context contains BOTH
 # the bd-list comment-history block AND the new CodeGraph activity block.
-FR402_ACTIVITY_PHRASES=(
-  '**Activity read (FR-401..403).**'    # Sub-paragraph header
+ACTIVITY_READ_PHRASES=(
+  '**Activity read.**'    # Sub-paragraph header
   'surface recent CodeGraph activity'   # Semantic anchor
   'git log -20 --name-only | sort -u'   # File-list derivation invocation
   '`codegraph_files`'                   # Primary enrichment tool
@@ -530,7 +530,7 @@ FR402_ACTIVITY_PHRASES=(
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR401_402_TMPDIR"
+    rm -rf "$ACTIVITY_READ_TMPDIR"
     exit 1
   fi
 
@@ -538,42 +538,42 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
   if [ -z "$step1_region" ]; then
     log_error "Could not extract step-1 region from: $prompt_file"
-    rm -rf "$FR401_402_TMPDIR"
+    rm -rf "$ACTIVITY_READ_TMPDIR"
     exit 1
   fi
 
-  # FR-401: assert bd-list invocation preserved verbatim within step 1
-  if ! grep -F -q -- "$FR401_BD_LIST_INVOCATION" <<< "$step1_region"; then
-    log_error "FR-401 bd-list invocation missing/altered in step 1 of: $prompt_file"
-    log_error "Expected verbatim: $FR401_BD_LIST_INVOCATION"
-    rm -rf "$FR401_402_TMPDIR"
+  # Assert bd-list invocation preserved verbatim within step 1
+  if ! grep -F -q -- "$ACTIVITY_BD_LIST_INVOCATION" <<< "$step1_region"; then
+    log_error "bd-list invocation missing/altered in step 1 of: $prompt_file"
+    log_error "Expected verbatim: $ACTIVITY_BD_LIST_INVOCATION"
+    rm -rf "$ACTIVITY_READ_TMPDIR"
     exit 1
   fi
 
-  # FR-402: assert each activity-read anchor is present within step 1
-  for phrase in "${FR402_ACTIVITY_PHRASES[@]}"; do
+  # Assert each activity-read anchor is present within step 1
+  for phrase in "${ACTIVITY_READ_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
-      log_error "FR-402 activity-read phrase missing in step 1 of: $prompt_file"
+      log_error "activity-read phrase missing in step 1 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$FR401_402_TMPDIR"
+      rm -rf "$ACTIVITY_READ_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified FR-401 bd-list AND FR-402 activity-read in step 1 of: $(basename "$prompt_file")"
+  log_info "Verified bd-list AND activity-read in step 1 of: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR401_402_TMPDIR"
+rm -rf "$ACTIVITY_READ_TMPDIR"
 
-log_info "FR-401+402 presence-when-on test PASSED — both prompt files preserve bd-list verbatim AND surface CodeGraph activity in step 1"
+log_info "activity-read presence-when-on test PASSED — both prompt files preserve bd-list verbatim AND surface CodeGraph activity in step 1"
 
 # ============================================================================
-# Static check: FR-403 activity-read cap (30 files / 50 symbols, no error)
+# Static check: activity-read cap (30 files / 50 symbols, no error)
 # ============================================================================
 # When codegraph_available is true and the recent-commits file list exceeds
 # the cap, step 1's activity-read sub-paragraph must (a) declare a 30-unique-
 # files cap, (b) declare a 50-symbols cap, and (c) instruct the loop to
-# truncate beyond the cap rather than erroring (FR-403). This guards the
+# truncate beyond the cap rather than erroring. This guards the
 # cap contract from accidental wording drift in BOTH prompt files.
 #
 # Mocks the fixture conditions described in the issue's acceptance criteria:
@@ -583,35 +583,35 @@ log_info "FR-401+402 presence-when-on test PASSED — both prompt files preserve
 # byte-check on both prompt files. Narrowed to the step-1 region so it
 # cannot false-pass on later sections of the prompt.
 
-log_step "Static check: FR-403 activity-read cap (30 files / 50 symbols, no error)"
+log_step "Static check: activity-read cap (30 files / 50 symbols, no error)"
 
 # Mock the >30-file / >50-symbol fixture: a tmpdir with 50 dummy files and
 # a stub codegraph_files response file claiming 100 symbols total. This
 # matches the issue's acceptance condition ("Fixture: 50 files in recent
 # commits, 100 symbols total via mocked codegraph_files response") for
 # environmental fidelity, parallel to existing mocks above.
-FR403_FIXTURE_TMPDIR="$(mktemp -d)"
-mkdir -p "$FR403_FIXTURE_TMPDIR/.codegraph"
-echo "mcp__codegraph__codegraph_files" > "$FR403_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+OVERCAP_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$OVERCAP_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_files" > "$OVERCAP_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
 for i in $(seq 1 50); do
-  : > "$FR403_FIXTURE_TMPDIR/file-$i.txt"
+  : > "$OVERCAP_FIXTURE_TMPDIR/file-$i.txt"
 done
-fr403_file_count=$(find "$FR403_FIXTURE_TMPDIR" -maxdepth 1 -type f -name 'file-*.txt' | wc -l)
-if [ "$fr403_file_count" -ne 50 ]; then
-  log_error "Failed to mock 50-file fixture (got $fr403_file_count)"
-  rm -rf "$FR403_FIXTURE_TMPDIR"
+overcap_file_count=$(find "$OVERCAP_FIXTURE_TMPDIR" -maxdepth 1 -type f -name 'file-*.txt' | wc -l)
+if [ "$overcap_file_count" -ne 50 ]; then
+  log_error "Failed to mock 50-file fixture (got $overcap_file_count)"
+  rm -rf "$OVERCAP_FIXTURE_TMPDIR"
   exit 1
 fi
 # Stub codegraph_files response claiming 100 symbols across the 50 files
 {
   echo "files: 50"
   echo "symbols: 100"
-} > "$FR403_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-files-response"
-log_info "Mocked FR-403 over-cap fixture at: $FR403_FIXTURE_TMPDIR (50 files, stub response: 100 symbols)"
+} > "$OVERCAP_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-files-response"
+log_info "Mocked over-cap fixture at: $OVERCAP_FIXTURE_TMPDIR (50 files, stub response: 100 symbols)"
 
 # Cap phrases that must appear verbatim in step 1 of each prompt file.
 # (a) and (b) declare the caps; (c) declares truncate-rather-than-error.
-FR403_CAP_PHRASES=(
+OVERCAP_CAP_PHRASES=(
   '**30 unique files**'                         # File cap
   '**50 symbols**'                              # Symbol cap
   'truncate beyond the cap rather than erroring' # No-error truncation semantic
@@ -620,7 +620,7 @@ FR403_CAP_PHRASES=(
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR403_FIXTURE_TMPDIR"
+    rm -rf "$OVERCAP_FIXTURE_TMPDIR"
     exit 1
   fi
 
@@ -628,39 +628,39 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
   if [ -z "$step1_region" ]; then
     log_error "Could not extract step-1 region from: $prompt_file"
-    rm -rf "$FR403_FIXTURE_TMPDIR"
+    rm -rf "$OVERCAP_FIXTURE_TMPDIR"
     exit 1
   fi
 
   # Assert each cap phrase is present within step 1
-  for phrase in "${FR403_CAP_PHRASES[@]}"; do
+  for phrase in "${OVERCAP_CAP_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
-      log_error "FR-403 cap phrase missing in step 1 of: $prompt_file"
+      log_error "cap phrase missing in step 1 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$FR403_FIXTURE_TMPDIR"
+      rm -rf "$OVERCAP_FIXTURE_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified FR-403 cap (30 files / 50 symbols / truncate-not-error) in step 1 of: $(basename "$prompt_file")"
+  log_info "Verified cap (30 files / 50 symbols / truncate-not-error) in step 1 of: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR403_FIXTURE_TMPDIR"
+rm -rf "$OVERCAP_FIXTURE_TMPDIR"
 
-log_info "FR-403 cap test PASSED — both prompt files declare 30-file / 50-symbol caps and truncate beyond the cap rather than erroring"
+log_info "activity-read cap test PASSED — both prompt files declare 30-file / 50-symbol caps and truncate beyond the cap rather than erroring"
 
 # ============================================================================
-# Static check: FR-404 prior bd comment's CodeGraph v1 block surfaces in step 1
+# Static check: prior bd comment's CodeGraph v1 block surfaces in step 1
 # ============================================================================
 # When codegraph_available is true and a recent bd comment (returned by the
 # `bd show --json` invocation in step 1) contains a **CodeGraph v1** block
-# (the FR-101 schema), step 1's CodeGraph-block-reuse sub-paragraph must
+# (the v1 schema), step 1's CodeGraph-block-reuse sub-paragraph must
 # (a) scan those comments for **CodeGraph v1** headers, (b) parse the
 # `modified:` line, (c) surface the `symbol@file:line` entries directly into
 # the orient context, (d) tolerate unrecognized future schema versions
 # (e.g., **CodeGraph v2**) by silently skipping rather than erroring, and
-# (e) gate on codegraph_available with silent skip when off (FR-404).
-# This guards the FR-404 block-reuse contract from accidental wording drift
+# (e) gate on codegraph_available with silent skip when off.
+# This guards the block-reuse contract from accidental wording drift
 # in BOTH prompt files: the source ortus/prompts/ralph-prompt.md and the
 # template/ralph-prompt.md.jinja.
 #
@@ -669,28 +669,28 @@ log_info "FR-403 cap test PASSED — both prompt files declare 30-file / 50-symb
 # modified-symbol entries. The contract lives in the prompt source itself
 # (it is instruction to the loop, not runnable code), so this is a static
 # byte-check on both prompt files. Narrowed to the step-1 region so it
-# cannot false-pass on the FR-101 step-7 emission section that uses similar
+# cannot false-pass on the step-7 emission section that uses similar
 # **CodeGraph v1** language.
 
-log_step "Static check: FR-404 prior bd comment's CodeGraph v1 block surfaces in orient context"
+log_step "Static check: prior bd comment's CodeGraph v1 block surfaces in orient context"
 
 # Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
-# (the family of tools the FR-404 sub-paragraph implies are available).
-FR404_FIXTURE_TMPDIR="$(mktemp -d)"
-mkdir -p "$FR404_FIXTURE_TMPDIR/.codegraph"
-echo "mcp__codegraph__codegraph_search" > "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
-if [ ! -d "$FR404_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
-  log_error "Failed to set up codegraph_available mock fixture at $FR404_FIXTURE_TMPDIR"
-  rm -rf "$FR404_FIXTURE_TMPDIR"
+# (the family of tools the block-reuse sub-paragraph implies are available).
+BLOCK_REUSE_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$BLOCK_REUSE_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$BLOCK_REUSE_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$BLOCK_REUSE_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$BLOCK_REUSE_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $BLOCK_REUSE_FIXTURE_TMPDIR"
+  rm -rf "$BLOCK_REUSE_FIXTURE_TMPDIR"
   exit 1
 fi
 # Mock bd-show JSON fixture: a comment containing a **CodeGraph v1** block
 # with two modified-symbol entries per Appendix C. This represents the
-# orient-time input the FR-404 block-reuse rule consumes — the `modified:`
+# orient-time input the block-reuse rule consumes — the `modified:`
 # line's `symbol@file:line` entries that step 1 must surface directly.
 # The fixture is referenced by the test log lines for environmental
-# fidelity, parallel to the FR-401+402 and FR-403 fixtures above.
-cat > "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" <<'FR404_BD_SHOW_JSON'
+# fidelity, parallel to the activity-read and over-cap fixtures above.
+cat > "$BLOCK_REUSE_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" <<'BLOCK_REUSE_BD_SHOW_JSON'
 [
   {
     "id": "ortus-fixture",
@@ -701,73 +701,73 @@ cat > "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" <<'FR404_BD_SHOW_JSO
     ]
   }
 ]
-FR404_BD_SHOW_JSON
-if [ ! -s "$FR404_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" ]; then
-  log_error "Failed to mock FR-404 bd-show JSON fixture at $FR404_FIXTURE_TMPDIR"
-  rm -rf "$FR404_FIXTURE_TMPDIR"
+BLOCK_REUSE_BD_SHOW_JSON
+if [ ! -s "$BLOCK_REUSE_FIXTURE_TMPDIR/.codegraph/.stub-bd-show-json" ]; then
+  log_error "Failed to mock block-reuse bd-show JSON fixture at $BLOCK_REUSE_FIXTURE_TMPDIR"
+  rm -rf "$BLOCK_REUSE_FIXTURE_TMPDIR"
   exit 1
 fi
-log_info "Mocked FR-404 fixture at: $FR404_FIXTURE_TMPDIR (bd-show JSON: comment with **CodeGraph v1** block, 2 modified-symbol entries)"
+log_info "Mocked block-reuse fixture at: $BLOCK_REUSE_FIXTURE_TMPDIR (bd-show JSON: comment with **CodeGraph v1** block, 2 modified-symbol entries)"
 
-# FR-404 anchors that must appear verbatim in step 1 of each prompt file.
-# Together they prove (a) the section is explicitly labeled FR-404 block
+# Block-reuse anchors that must appear verbatim in step 1 of each prompt file.
+# Together they prove (a) the section is explicitly labeled block
 # reuse, (b) the parser scans recent bd comments for **CodeGraph v1**
 # headers, (c) the derivation parses the `modified:` line, (d) the output
 # surfaces `symbol@file:line` entries directly, (e) the parser is tolerant
 # of unrecognized future schema versions, and (f) the contract is gated on
 # codegraph_available with silent skip when off.
-FR404_BLOCK_REUSE_PHRASES=(
-  '**CodeGraph block reuse (FR-404).**'                             # Section header anchor
+BLOCK_REUSE_PHRASES=(
+  '**CodeGraph block reuse.**'                             # Section header anchor
   '`**CodeGraph v1**` headers'                                      # Schema header the parser scans for
   'parse the `modified:` line'                                      # Derivation contract
   'surface the `symbol@file:line` entries into the orient context'  # Output format
-  'silently skip blocks whose schema version is unrecognized'       # FR-404 tolerance (Appendix Q4)
+  'silently skip blocks whose schema version is unrecognized'       # Block-reuse tolerance (Appendix Q4)
   'Gated on `codegraph_available`'                                  # Gate
-  'skip silently when CodeGraph isn'                                # Silent fallback when off (NFR-101)
+  'skip silently when CodeGraph isn'                                # Silent fallback when off
 )
 
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR404_FIXTURE_TMPDIR"
+    rm -rf "$BLOCK_REUSE_FIXTURE_TMPDIR"
     exit 1
   fi
 
   # Extract the step-1 region (between "1. **Orient**" and "2. **Select**")
-  # so the check cannot false-pass on the FR-101 step-7 emission section
+  # so the check cannot false-pass on the step-7 emission section
   # that uses similar **CodeGraph v1** language later in the prompt.
   step1_region=$(awk '/^1\. \*\*Orient\*\*/{flag=1} flag {print} /^2\. \*\*Select\*\*/{flag=0}' "$prompt_file")
   if [ -z "$step1_region" ]; then
     log_error "Could not extract step-1 region from: $prompt_file"
-    rm -rf "$FR404_FIXTURE_TMPDIR"
+    rm -rf "$BLOCK_REUSE_FIXTURE_TMPDIR"
     exit 1
   fi
 
-  # Assert each FR-404 block-reuse phrase is present within step 1
-  for phrase in "${FR404_BLOCK_REUSE_PHRASES[@]}"; do
+  # Assert each block-reuse phrase is present within step 1
+  for phrase in "${BLOCK_REUSE_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step1_region"; then
-      log_error "FR-404 block-reuse phrase missing in step 1 of: $prompt_file"
+      log_error "block-reuse phrase missing in step 1 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$FR404_FIXTURE_TMPDIR"
+      rm -rf "$BLOCK_REUSE_FIXTURE_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified FR-404 block reuse (header + scan + parse modified: + surface symbol@file:line + tolerant + gated) in step 1 of: $(basename "$prompt_file")"
+  log_info "Verified block reuse (header + scan + parse modified: + surface symbol@file:line + tolerant + gated) in step 1 of: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR404_FIXTURE_TMPDIR"
+rm -rf "$BLOCK_REUSE_FIXTURE_TMPDIR"
 
-log_info "FR-404 block-reuse test PASSED — both prompt files instruct Ralph to surface **CodeGraph v1** modified-symbol entries from recent bd comments directly into the orient context (compounding-memory payoff of FR-102's parseable schema)"
+log_info "block-reuse test PASSED — both prompt files instruct Ralph to surface **CodeGraph v1** modified-symbol entries from recent bd comments directly into the orient context (compounding-memory payoff of the parseable schema)"
 
 # ============================================================================
-# Static check: FR-503 auto-flip forbidden (model discretion preserved)
+# Static check: auto-flip forbidden (model discretion preserved)
 # ============================================================================
 # When codegraph_available is true and step 5 appends a graph-derived missing
 # entry to the Plan JSON, the model-judged has_enough_info value MUST NOT
-# automatically flip to false on graph signal alone (FR-503). The flip stays
+# automatically flip to false on graph signal alone. The flip stays
 # at the model's discretion, since the symbol may legitimately be new code
-# introduced by this very issue. This guards the FR-503 anti-auto-flip
+# introduced by this very issue. This guards the anti-auto-flip
 # contract from accidental wording drift in BOTH prompt files: the source
 # ortus/prompts/ralph-prompt.md and the template/ralph-prompt.md.jinja.
 #
@@ -780,25 +780,25 @@ log_info "FR-404 block-reuse test PASSED — both prompt files instruct Ralph to
 # cannot false-pass on the scheduler block that follows ("If has_enough_info
 # is false, post a bd comment ... and emit BLOCKED").
 
-log_step "Static check: FR-503 auto-flip forbidden (has_enough_info preserved on graph signal)"
+log_step "Static check: auto-flip forbidden (has_enough_info preserved on graph signal)"
 
 # Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
-# (the tool the FR-501..503 sub-paragraph invokes per extracted reference).
-FR503_FIXTURE_TMPDIR="$(mktemp -d)"
-mkdir -p "$FR503_FIXTURE_TMPDIR/.codegraph"
-echo "mcp__codegraph__codegraph_search" > "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
-if [ ! -d "$FR503_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
-  log_error "Failed to set up codegraph_available mock fixture at $FR503_FIXTURE_TMPDIR"
-  rm -rf "$FR503_FIXTURE_TMPDIR"
+# (the tool the reference-check sub-paragraph invokes per extracted reference).
+AUTOFLIP_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$AUTOFLIP_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$AUTOFLIP_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$AUTOFLIP_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$AUTOFLIP_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $AUTOFLIP_FIXTURE_TMPDIR"
+  rm -rf "$AUTOFLIP_FIXTURE_TMPDIR"
   exit 1
 fi
 # Mock Plan JSON fixture: has_enough_info=true with one graph-derived missing
-# entry per Appendix G. This represents the post-enrichment state the FR-503
+# entry per Appendix G. This represents the post-enrichment state the anti-auto-flip
 # anti-auto-flip rule guards — the scenario in which a naive scheduler might
 # incorrectly flip has_enough_info to false purely because the graph could
 # not resolve a referenced symbol. The fixture is referenced by the test
-# log lines for environmental fidelity, parallel to the FR-403 fixture above.
-cat > "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" <<'FR503_PLAN_JSON'
+# log lines for environmental fidelity, parallel to the over-cap fixture above.
+cat > "$AUTOFLIP_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" <<'AUTOFLIP_PLAN_JSON'
 {
   "has_enough_info": true,
   "missing": ["References NoSuchClass.foo in body; no such symbol in graph. Confirm during Investigate or flag as new code."],
@@ -806,21 +806,21 @@ cat > "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" <<'FR503_PLAN_JSON'
   "verification_steps": ["..."],
   "closure_reason": "..."
 }
-FR503_PLAN_JSON
-if [ ! -s "$FR503_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" ]; then
-  log_error "Failed to mock FR-503 Plan JSON fixture at $FR503_FIXTURE_TMPDIR"
-  rm -rf "$FR503_FIXTURE_TMPDIR"
+AUTOFLIP_PLAN_JSON
+if [ ! -s "$AUTOFLIP_FIXTURE_TMPDIR/.codegraph/.stub-plan-json" ]; then
+  log_error "Failed to mock auto-flip Plan JSON fixture at $AUTOFLIP_FIXTURE_TMPDIR"
+  rm -rf "$AUTOFLIP_FIXTURE_TMPDIR"
   exit 1
 fi
-log_info "Mocked FR-503 fixture at: $FR503_FIXTURE_TMPDIR (Plan JSON: has_enough_info=true + 1 graph-derived missing entry)"
+log_info "Mocked auto-flip fixture at: $AUTOFLIP_FIXTURE_TMPDIR (Plan JSON: has_enough_info=true + 1 graph-derived missing entry)"
 
-# FR-503 anchors that must appear verbatim in the Issue Plan region of each
+# Anti-auto-flip anchors that must appear verbatim in the Issue Plan region of each
 # prompt file. Together they prove the prompt forbids auto-flipping
 # has_enough_info on graph signal alone AND explicitly attributes the flip
 # decision to the model's discretion (since a referenced symbol may
 # legitimately be new code introduced by this very issue).
-FR503_ANTI_AUTOFLIP_PHRASES=(
-  '**Per FR-503, a graph-derived'                                 # FR-503 anchor that opens the rule
+ANTI_AUTOFLIP_PHRASES=(
+  '**A graph-derived'                                 # Anchor that opens the rule
   'does NOT automatically flip'                                   # Anti-auto-flip imperative
   "flip stays at the model's discretion"                          # Discretion clause
 )
@@ -828,7 +828,7 @@ FR503_ANTI_AUTOFLIP_PHRASES=(
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR503_FIXTURE_TMPDIR"
+    rm -rf "$AUTOFLIP_FIXTURE_TMPDIR"
     exit 1
   fi
 
@@ -838,29 +838,29 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   plan_region=$(awk '/^## Issue Plan/{flag=1} flag {print} /^## Subagent Strategy/{flag=0}' "$prompt_file")
   if [ -z "$plan_region" ]; then
     log_error "Could not extract Issue Plan region from: $prompt_file"
-    rm -rf "$FR503_FIXTURE_TMPDIR"
+    rm -rf "$AUTOFLIP_FIXTURE_TMPDIR"
     exit 1
   fi
 
   # Assert each anti-auto-flip phrase is present within the Issue Plan region
-  for phrase in "${FR503_ANTI_AUTOFLIP_PHRASES[@]}"; do
+  for phrase in "${ANTI_AUTOFLIP_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$plan_region"; then
-      log_error "FR-503 anti-auto-flip phrase missing in Issue Plan section of: $prompt_file"
+      log_error "anti-auto-flip phrase missing in Issue Plan section of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$FR503_FIXTURE_TMPDIR"
+      rm -rf "$AUTOFLIP_FIXTURE_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified FR-503 anti-auto-flip in Issue Plan section of: $(basename "$prompt_file")"
+  log_info "Verified anti-auto-flip in Issue Plan section of: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR503_FIXTURE_TMPDIR"
+rm -rf "$AUTOFLIP_FIXTURE_TMPDIR"
 
-log_info "FR-503 auto-flip-forbidden test PASSED — both prompt files explicitly forbid auto-flipping has_enough_info on graph signal alone (model discretion preserved)"
+log_info "auto-flip-forbidden test PASSED — both prompt files explicitly forbid auto-flipping has_enough_info on graph signal alone (model discretion preserved)"
 
 # ============================================================================
-# Static check: FR-501+502 phantom-symbol reference produces Appendix G missing entry
+# Static check: phantom-symbol reference produces Appendix G missing entry
 # ============================================================================
 # When codegraph_available is true and step 5's Reference check encounters a
 # code-shaped reference that does NOT resolve in the graph (e.g.,
@@ -873,7 +873,7 @@ log_info "FR-503 auto-flip-forbidden test PASSED — both prompt files explicitl
 # Conversely, when a reference DOES resolve (e.g., a real graph symbol),
 # the prompt must NOT produce a graph-derived missing entry — guarded by the
 # "For every unresolved reference" gating clause. Together these guard the
-# FR-501 extraction + FR-502 entry-form contract from accidental wording
+# extraction + entry-form contract from accidental wording
 # drift in BOTH prompt files: the source ortus/prompts/ralph-prompt.md and
 # the template/ralph-prompt.md.jinja.
 #
@@ -885,16 +885,16 @@ log_info "FR-503 auto-flip-forbidden test PASSED — both prompt files explicitl
 # byte-check on both prompt files. Narrowed to the Issue Plan region so it
 # cannot false-pass on unrelated sections.
 
-log_step "Static check: FR-501+502 phantom-symbol reference produces Appendix G missing entry"
+log_step "Static check: phantom-symbol reference produces Appendix G missing entry"
 
 # Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
-# (the tool the FR-501..503 sub-paragraph invokes per extracted reference).
-FR501_502_FIXTURE_TMPDIR="$(mktemp -d)"
-mkdir -p "$FR501_502_FIXTURE_TMPDIR/.codegraph"
-echo "mcp__codegraph__codegraph_search" > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
-if [ ! -d "$FR501_502_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
-  log_error "Failed to set up codegraph_available mock fixture at $FR501_502_FIXTURE_TMPDIR"
-  rm -rf "$FR501_502_FIXTURE_TMPDIR"
+# (the tool the reference-check sub-paragraph invokes per extracted reference).
+REF_CHECK_FIXTURE_TMPDIR="$(mktemp -d)"
+mkdir -p "$REF_CHECK_FIXTURE_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$REF_CHECK_FIXTURE_TMPDIR/.codegraph" ] || [ ! -f "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $REF_CHECK_FIXTURE_TMPDIR"
+  rm -rf "$REF_CHECK_FIXTURE_TMPDIR"
   exit 1
 fi
 
@@ -902,35 +902,35 @@ fi
 # code-shaped reference (dotted method) absent from the graph. After step 5
 # runs, Plan.missing must contain the Appendix G verbatim entry citing
 # NoSuchClass.foo and the field name (body or acceptance_criteria).
-cat > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-phantom-issue-body" <<'PHANTOM_ISSUE_BODY'
+cat > "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-phantom-issue-body" <<'PHANTOM_ISSUE_BODY'
 Fix the timeout handling in NoSuchClass.foo() so the cache invalidation
 does not fail when the upstream timeout exceeds 30 seconds.
 PHANTOM_ISSUE_BODY
 # Stub codegraph_search response: empty (NoSuchClass.foo absent from graph)
-echo '{"results": []}' > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty"
+echo '{"results": []}' > "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty"
 
 # Resolved-symbol variant: same fixture, but with a stub codegraph_search
-# response returning a hit. Per FR-502's "For every unresolved reference"
+# response returning a hit. Per the "For every unresolved reference"
 # gating, this case must NOT produce a graph-derived missing entry.
 echo '{"results": [{"symbol": "AuthMiddleware.validate", "file": "src/middleware/auth.ts:42"}]}' \
-  > "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-hit"
+  > "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-hit"
 
-if [ ! -s "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-phantom-issue-body" ] \
-   || [ ! -s "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty" ] \
-   || [ ! -s "$FR501_502_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-hit" ]; then
-  log_error "Failed to mock FR-501/502 phantom + resolved fixtures at $FR501_502_FIXTURE_TMPDIR"
-  rm -rf "$FR501_502_FIXTURE_TMPDIR"
+if [ ! -s "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-phantom-issue-body" ] \
+   || [ ! -s "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-empty" ] \
+   || [ ! -s "$REF_CHECK_FIXTURE_TMPDIR/.codegraph/.stub-codegraph-search-hit" ]; then
+  log_error "Failed to mock phantom-symbol + resolved fixtures at $REF_CHECK_FIXTURE_TMPDIR"
+  rm -rf "$REF_CHECK_FIXTURE_TMPDIR"
   exit 1
 fi
-log_info "Mocked FR-501/502 fixture at: $FR501_502_FIXTURE_TMPDIR (phantom NoSuchClass.foo + resolved AuthMiddleware.validate stubs)"
+log_info "Mocked phantom-symbol fixture at: $REF_CHECK_FIXTURE_TMPDIR (phantom NoSuchClass.foo + resolved AuthMiddleware.validate stubs)"
 
 # Anchors that prove the prompt instructs Ralph to produce an Appendix G
 # missing entry per unresolved reference. The Appendix G verbatim form must
 # appear exactly so the entry shape is byte-identical across loops, and the
 # "For every unresolved reference" clause guards the negative case (resolved
 # refs add nothing).
-FR501_502_PHRASES=(
-  '**Reference check (FR-501..503).**'
+REF_CHECK_PHRASES=(
+  '**Reference check.**'
   'extract code-shaped references from the issue body and acceptance criteria'
   '`codegraph_search`'
   'For every unresolved reference, append one entry to `missing`'
@@ -942,7 +942,7 @@ FR501_502_PHRASES=(
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR501_502_FIXTURE_TMPDIR"
+    rm -rf "$REF_CHECK_FIXTURE_TMPDIR"
     exit 1
   fi
 
@@ -951,32 +951,32 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   plan_region=$(awk '/^## Issue Plan/{flag=1} flag {print} /^## Subagent Strategy/{flag=0}' "$prompt_file")
   if [ -z "$plan_region" ]; then
     log_error "Could not extract Issue Plan region from: $prompt_file"
-    rm -rf "$FR501_502_FIXTURE_TMPDIR"
+    rm -rf "$REF_CHECK_FIXTURE_TMPDIR"
     exit 1
   fi
 
-  for phrase in "${FR501_502_PHRASES[@]}"; do
+  for phrase in "${REF_CHECK_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$plan_region"; then
-      log_error "FR-501/502 phrase missing in Issue Plan section of: $prompt_file"
+      log_error "reference-check phrase missing in Issue Plan section of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$FR501_502_FIXTURE_TMPDIR"
+      rm -rf "$REF_CHECK_FIXTURE_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified FR-501 extraction + FR-502 Appendix G entry-form in Issue Plan section of: $(basename "$prompt_file")"
+  log_info "Verified extraction + Appendix G entry-form in Issue Plan section of: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR501_502_FIXTURE_TMPDIR"
+rm -rf "$REF_CHECK_FIXTURE_TMPDIR"
 
-log_info "FR-501+502 phantom-symbol test PASSED — both prompt files instruct Ralph to append the Appendix G verbatim entry per unresolved reference (resolved refs add nothing)"
+log_info "phantom-symbol test PASSED — both prompt files instruct Ralph to append the Appendix G verbatim entry per unresolved reference (resolved refs add nothing)"
 
 # ============================================================================
-# Static check: NFR-101 step-7 byte-equivalent baseline when CodeGraph off
+# Static check: step-7 byte-equivalent baseline when CodeGraph off
 # ============================================================================
 # When codegraph_available is false, step 7's completion comment must reduce
 # to the pre-PRD baseline — no **CodeGraph v1** block, no log lines, no
-# warnings (NFR-101). The Phase 1 conditional-emission paragraph in the
+# warnings. The Phase 1 conditional-emission paragraph in the
 # Completion Comment Format section must explicitly gate the CodeGraph v1
 # block on codegraph_available AND instruct omission of the entire block when
 # off so the comment remains byte-equivalent to a pre-PRD closure. Mocks
@@ -985,24 +985,24 @@ log_info "FR-501+502 phantom-symbol test PASSED — both prompt files instruct R
 # not runnable code), so this is a static byte-check on both prompt files.
 # Narrowed to the step-7 region (between "## Completion Comment Format" and
 # "## Completion Signals") so it cannot false-pass on step-1's separate
-# NFR-101 gating language. Runs as a static check before the heavy copier
+# baseline gating language. Runs as a static check before the heavy copier
 # setup so it exercises independently.
 
-log_step "Static check: NFR-101 step-7 byte-equivalent baseline when CodeGraph off"
+log_step "Static check: step-7 byte-equivalent baseline when CodeGraph off"
 
 # Mock codegraph-absent fixture: tmpdir with NO .codegraph/ and NO
 # mcp__codegraph__* stubs (i.e., codegraph_available is false).
-NFR101_STEP7_TMPDIR="$(mktemp -d)"
-if [ -d "$NFR101_STEP7_TMPDIR/.codegraph" ]; then
+BASELINE_STEP7_TMPDIR="$(mktemp -d)"
+if [ -d "$BASELINE_STEP7_TMPDIR/.codegraph" ]; then
   log_error "Failed to mock codegraph-absent fixture (unexpected .codegraph/ present)"
-  rm -rf "$NFR101_STEP7_TMPDIR"
+  rm -rf "$BASELINE_STEP7_TMPDIR"
   exit 1
 fi
-log_info "Mocked codegraph-absent environment at: $NFR101_STEP7_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
+log_info "Mocked codegraph-absent environment at: $BASELINE_STEP7_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
 
 # Pre-PRD baseline anchors that must remain unchanged in step 7 so the
 # closing-comment shape stays byte-equivalent when CodeGraph is off.
-NFR101_STEP7_BASELINE_ANCHORS=(
+BASELINE_STEP7_ANCHORS=(
   '**Changes**:'        # Pre-PRD bullet header for change list
   '**Verification**:'   # Pre-PRD line for test/lint/build status
 )
@@ -1011,63 +1011,63 @@ NFR101_STEP7_BASELINE_ANCHORS=(
 # **CodeGraph v1** block emission on codegraph_available AND (b) instruct
 # byte-equivalent omission when off. Both halves of the conditional must be
 # present verbatim in step 7 of each prompt file.
-NFR101_STEP7_GATING_PHRASES=(
+BASELINE_STEP7_GATING_PHRASES=(
   '**When `codegraph_available`, append a'                               # Conditional-emission opener
   'When `codegraph_available` is false, omit the block entirely'         # Off-branch omission instruction
-  'byte-equivalent to a pre-PRD closure (NFR-101)'                       # Baseline-equivalence assertion
+  'byte-equivalent to a pre-PRD closure'                       # Baseline-equivalence assertion
 )
 
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$NFR101_STEP7_TMPDIR"
+    rm -rf "$BASELINE_STEP7_TMPDIR"
     exit 1
   fi
 
   # Extract the step-7 region (between "## Completion Comment Format" and
   # "## Completion Signals") so the check cannot false-pass on step 1's
-  # NFR-101 language or any other section.
+  # baseline gating language or any other section.
   step7_region=$(awk '/^## Completion Comment Format/{flag=1} flag {print} /^## Completion Signals/{flag=0}' "$prompt_file")
   if [ -z "$step7_region" ]; then
     log_error "Could not extract step-7 region from: $prompt_file"
-    rm -rf "$NFR101_STEP7_TMPDIR"
+    rm -rf "$BASELINE_STEP7_TMPDIR"
     exit 1
   fi
 
   # Assert pre-PRD baseline anchors preserved within step 7
-  for anchor in "${NFR101_STEP7_BASELINE_ANCHORS[@]}"; do
+  for anchor in "${BASELINE_STEP7_ANCHORS[@]}"; do
     if ! grep -F -q -- "$anchor" <<< "$step7_region"; then
-      log_error "NFR-101 step-7 pre-PRD baseline anchor missing in: $prompt_file"
+      log_error "step-7 pre-PRD baseline anchor missing in: $prompt_file"
       log_error "Expected verbatim: $anchor"
-      rm -rf "$NFR101_STEP7_TMPDIR"
+      rm -rf "$BASELINE_STEP7_TMPDIR"
       exit 1
     fi
   done
 
   # Assert gating phrases present within step 7
-  for phrase in "${NFR101_STEP7_GATING_PHRASES[@]}"; do
+  for phrase in "${BASELINE_STEP7_GATING_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step7_region"; then
-      log_error "NFR-101 step-7 gating phrase missing in: $prompt_file"
+      log_error "step-7 gating phrase missing in: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$NFR101_STEP7_TMPDIR"
+      rm -rf "$BASELINE_STEP7_TMPDIR"
       exit 1
     fi
   done
 
-  log_info "Verified NFR-101 step-7 baseline gating in: $(basename "$prompt_file")"
+  log_info "Verified step-7 baseline gating in: $(basename "$prompt_file")"
 done
 
-rm -rf "$NFR101_STEP7_TMPDIR"
+rm -rf "$BASELINE_STEP7_TMPDIR"
 
-log_info "NFR-101 step-7 baseline test PASSED — both prompt files gate the **CodeGraph v1** block on codegraph_available with byte-equivalent fallback to a pre-PRD closure"
+log_info "step-7 baseline test PASSED — both prompt files gate the **CodeGraph v1** block on codegraph_available with byte-equivalent fallback to a pre-PRD closure"
 
 # ============================================================================
-# Static check: FR-101 CodeGraph v1 block presence on enabled fixture
+# Static check: CodeGraph v1 block presence on enabled fixture
 # ============================================================================
 # When codegraph_available is true, step 7's completion comment must append
 # a **CodeGraph v1** block whose schema matches Appendix C: a header line
 # (**CodeGraph v1**:), then three comma-separated list fields (modified:,
-# new:, oos_callers:), each of which may say `none` when empty (FR-101).
+# new:, oos_callers:), each of which may say `none` when empty.
 # This guards the Appendix C schema from accidental wording drift in BOTH
 # prompt files: the source ortus/prompts/ralph-prompt.md and the
 # template/ralph-prompt.md.jinja.
@@ -1083,25 +1083,25 @@ log_info "NFR-101 step-7 baseline test PASSED — both prompt files gate the **C
 # Runs as a static check before the heavy copier setup so it exercises
 # independently.
 
-log_step "Static check: FR-101 CodeGraph v1 block presence on enabled fixture"
+log_step "Static check: CodeGraph v1 block presence on enabled fixture"
 
 # Mock codegraph_available environment: .codegraph/ + stub mcp__codegraph__codegraph_search
-# (one of the three tools FR-103 restricts step-7 computation to).
-FR101_PRESENT_TMPDIR="$(mktemp -d)"
-mkdir -p "$FR101_PRESENT_TMPDIR/.codegraph"
-echo "mcp__codegraph__codegraph_search" > "$FR101_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool"
-if [ ! -d "$FR101_PRESENT_TMPDIR/.codegraph" ] || [ ! -f "$FR101_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
-  log_error "Failed to set up codegraph_available mock fixture at $FR101_PRESENT_TMPDIR"
-  rm -rf "$FR101_PRESENT_TMPDIR"
+# (one of the three tools step-7 computation is restricted to).
+CG_BLOCK_PRESENT_TMPDIR="$(mktemp -d)"
+mkdir -p "$CG_BLOCK_PRESENT_TMPDIR/.codegraph"
+echo "mcp__codegraph__codegraph_search" > "$CG_BLOCK_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool"
+if [ ! -d "$CG_BLOCK_PRESENT_TMPDIR/.codegraph" ] || [ ! -f "$CG_BLOCK_PRESENT_TMPDIR/.codegraph/.stub-mcp-tool" ]; then
+  log_error "Failed to set up codegraph_available mock fixture at $CG_BLOCK_PRESENT_TMPDIR"
+  rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
   exit 1
 fi
-log_info "Mocked codegraph_available environment at: $FR101_PRESENT_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_search)"
+log_info "Mocked codegraph_available environment at: $CG_BLOCK_PRESENT_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_search)"
 
 # Appendix C schema anchors that must appear verbatim in step 7 of each
 # prompt file. Together they prove the **CodeGraph v1** block carries the
 # header AND all three list-field lines (modified, new, oos_callers).
-FR101_SCHEMA_HEADER='**CodeGraph v1**:'
-FR101_SCHEMA_FIELDS=(
+CG_BLOCK_SCHEMA_HEADER='**CodeGraph v1**:'
+CG_BLOCK_SCHEMA_FIELDS=(
   'modified: <symbol>@<file>:<line> (<N> callers, <M> cross-module) [, ...]'
   'new: <symbol>@<file>:<line> (<kind>) [, ...]'
   'oos_callers: <caller-symbol>@<file>:<line> -> <modified-symbol> [, ...]'
@@ -1110,12 +1110,12 @@ FR101_SCHEMA_FIELDS=(
 # The "may say `none`" semantic — proves each list field can collapse to
 # `none` when empty, so docs-/test-only closures still emit a well-formed
 # block per Appendix C.
-FR101_NONE_SEMANTIC='Each list field is comma-separated; emit `none` when empty.'
+CG_BLOCK_NONE_SEMANTIC='Each list field is comma-separated; emit `none` when empty.'
 
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR101_PRESENT_TMPDIR"
+    rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
     exit 1
   fi
 
@@ -1125,47 +1125,47 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   step7_region=$(awk '/^## Completion Comment Format/{flag=1} flag {print} /^## Completion Signals/{flag=0}' "$prompt_file")
   if [ -z "$step7_region" ]; then
     log_error "Could not extract step-7 region from: $prompt_file"
-    rm -rf "$FR101_PRESENT_TMPDIR"
+    rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
     exit 1
   fi
 
   # Assert the **CodeGraph v1**: header is present in step 7
-  if ! grep -F -q -- "$FR101_SCHEMA_HEADER" <<< "$step7_region"; then
-    log_error "FR-101 CodeGraph v1 header missing in step 7 of: $prompt_file"
-    log_error "Expected verbatim: $FR101_SCHEMA_HEADER"
-    rm -rf "$FR101_PRESENT_TMPDIR"
+  if ! grep -F -q -- "$CG_BLOCK_SCHEMA_HEADER" <<< "$step7_region"; then
+    log_error "CodeGraph v1 header missing in step 7 of: $prompt_file"
+    log_error "Expected verbatim: $CG_BLOCK_SCHEMA_HEADER"
+    rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
     exit 1
   fi
 
   # Assert each Appendix C schema field line is present in step 7
-  for field in "${FR101_SCHEMA_FIELDS[@]}"; do
+  for field in "${CG_BLOCK_SCHEMA_FIELDS[@]}"; do
     if ! grep -F -q -- "$field" <<< "$step7_region"; then
-      log_error "FR-101 Appendix C schema field missing in step 7 of: $prompt_file"
+      log_error "Appendix C schema field missing in step 7 of: $prompt_file"
       log_error "Expected verbatim: $field"
-      rm -rf "$FR101_PRESENT_TMPDIR"
+      rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
       exit 1
     fi
   done
 
   # Assert the "may say `none`" semantic clause is present in step 7
-  if ! grep -F -q -- "$FR101_NONE_SEMANTIC" <<< "$step7_region"; then
-    log_error "FR-101 'emit `none` when empty' semantic missing in step 7 of: $prompt_file"
-    log_error "Expected verbatim: $FR101_NONE_SEMANTIC"
-    rm -rf "$FR101_PRESENT_TMPDIR"
+  if ! grep -F -q -- "$CG_BLOCK_NONE_SEMANTIC" <<< "$step7_region"; then
+    log_error "'emit `none` when empty' semantic missing in step 7 of: $prompt_file"
+    log_error "Expected verbatim: $CG_BLOCK_NONE_SEMANTIC"
+    rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
     exit 1
   fi
 
-  log_info "Verified FR-101 CodeGraph v1 block (header + modified/new/oos_callers + none-semantic) in step 7 of: $(basename "$prompt_file")"
+  log_info "Verified CodeGraph v1 block (header + modified/new/oos_callers + none-semantic) in step 7 of: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR101_PRESENT_TMPDIR"
+rm -rf "$CG_BLOCK_PRESENT_TMPDIR"
 
-log_info "FR-101 CodeGraph v1 block test PASSED — both prompt files emit the Appendix C schema (header + modified/new/oos_callers, each may say 'none') in step 7 when codegraph_available"
+log_info "CodeGraph v1 block test PASSED — both prompt files emit the Appendix C schema (header + modified/new/oos_callers, each may say 'none') in step 7 when codegraph_available"
 
 # ============================================================================
-# Static check: FR-205 non-blocking — bd create failure does not stop step 8
+# Static check: non-blocking — bd create failure does not stop step 8
 # ============================================================================
-# Locks FR-205: a failing `bd create` (stubbed to return non-zero) during step
+# Locks the non-blocking contract: a failing `bd create` (stubbed to return non-zero) during step
 # 7.5's auto-spawn must not break the loop. Step 7.5 must contain language
 # that explicitly tells Ralph to proceed to step 8 (Close) even when bd create
 # returns non-zero, codegraph_impact errors, or the gate evaluation throws.
@@ -1178,47 +1178,47 @@ log_info "FR-101 CodeGraph v1 block test PASSED — both prompt files emit the A
 # "**7.5." and "8. **Close**") so the check cannot false-pass on step 6.5's
 # similar non-blocking language earlier in the prompt.
 
-log_step "Static check: FR-205 non-blocking on bd create failure during step 7.5"
+log_step "Static check: non-blocking on bd create failure during step 7.5"
 
 # Set up a failing bd-create stub in a PATH-shadow tmpdir for environmental
 # fidelity (parallel to the step 6.5 codegraph-sync-failure mock above). The
 # stub forwards everything except `create`; `create` returns exit 1 to model
-# the FR-205 failure scenario the prompt must handle non-blockingly.
-FR205_FAIL_TMPDIR="$(mktemp -d)"
-cat > "$FR205_FAIL_TMPDIR/bd" <<'STUB'
+# the failure scenario the prompt must handle non-blockingly.
+NONBLOCKING_FAIL_TMPDIR="$(mktemp -d)"
+cat > "$NONBLOCKING_FAIL_TMPDIR/bd" <<'STUB'
 #!/bin/bash
 if [ "$1" = "create" ]; then
-  echo "stub: bd create failed (simulated FR-205 failure)" >&2
+  echo "stub: bd create failed (simulated non-blocking failure)" >&2
   exit 1
 fi
 # Forward all other bd subcommands to the real bd by stripping this dir from PATH
 real_bd_path="$(PATH="$(echo "$PATH" | sed -e "s|$(dirname "$0"):||" -e "s|:$(dirname "$0")||")" command -v bd)"
 exec "$real_bd_path" "$@"
 STUB
-chmod +x "$FR205_FAIL_TMPDIR/bd"
+chmod +x "$NONBLOCKING_FAIL_TMPDIR/bd"
 
 # Verify the stub is wired and `bd create` actually fails (proves the failure mode is real)
-if ! PATH="$FR205_FAIL_TMPDIR:$PATH" command -v bd >/dev/null; then
-  log_error "Failed to PATH-shadow bd stub at $FR205_FAIL_TMPDIR"
-  rm -rf "$FR205_FAIL_TMPDIR"
+if ! PATH="$NONBLOCKING_FAIL_TMPDIR:$PATH" command -v bd >/dev/null; then
+  log_error "Failed to PATH-shadow bd stub at $NONBLOCKING_FAIL_TMPDIR"
+  rm -rf "$NONBLOCKING_FAIL_TMPDIR"
   exit 1
 fi
-if PATH="$FR205_FAIL_TMPDIR:$PATH" bd create --title=test --description=test --type=task --priority=2 >/dev/null 2>&1; then
+if PATH="$NONBLOCKING_FAIL_TMPDIR:$PATH" bd create --title=test --description=test --type=task --priority=2 >/dev/null 2>&1; then
   log_error "Stub bd create returned 0; expected non-zero"
-  rm -rf "$FR205_FAIL_TMPDIR"
+  rm -rf "$NONBLOCKING_FAIL_TMPDIR"
   exit 1
 fi
-log_info "Simulated failing bd create at: $FR205_FAIL_TMPDIR (exits 1 on 'bd create')"
+log_info "Simulated failing bd create at: $NONBLOCKING_FAIL_TMPDIR (exits 1 on 'bd create')"
 
-# FR-205 anchors that must appear verbatim in step 7.5 of each prompt file.
-# Together they prove (a) the section is explicitly labeled FR-205 non-blocking,
+# Non-blocking anchors that must appear verbatim in step 7.5 of each prompt file.
+# Together they prove (a) the section is explicitly labeled non-blocking,
 # (b) the contract is stated unambiguously ("Step 7.5 shall never block step 8"),
 # (c) all three failure modes from the issue are enumerated (bd create non-zero,
 # codegraph_impact error, gate evaluation throw), and (d) the prompt routes
 # Ralph onward to step 8 ("proceed to step 8") with the same posture as the
 # already-tested step 6.5 non-blocking hook.
-FR205_NONBLOCKING_PHRASES=(
-  '**Non-blocking (FR-205).**'                # Section header anchor
+NONBLOCKING_PHRASES=(
+  '**Non-blocking.**'                # Section header anchor
   'Step 7.5 shall never block step 8.'        # Core contract
   'If `bd create` returns non-zero'           # Failure mode 1: bd create
   'if `codegraph_impact` errors'              # Failure mode 2: codegraph_impact
@@ -1230,7 +1230,7 @@ FR205_NONBLOCKING_PHRASES=(
 
 # Steps that must follow 7.5 — proves the prompt continues to Close → Commit
 # without aborting on a failing bd create or impact/gate error.
-FR205_POST75_STEPS=(
+POST75_STEPS=(
   '^8\. \*\*Close\*\*'
   '^9\. \*\*Commit & Push\*\*'
 )
@@ -1238,7 +1238,7 @@ FR205_POST75_STEPS=(
 for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   if [ ! -f "$prompt_file" ]; then
     log_error "Prompt file not found: $prompt_file"
-    rm -rf "$FR205_FAIL_TMPDIR"
+    rm -rf "$NONBLOCKING_FAIL_TMPDIR"
     exit 1
   fi
 
@@ -1248,16 +1248,16 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   step75_region=$(awk '/^\*\*7\.5\./{flag=1} flag {print} /^8\. \*\*Close\*\*/{flag=0}' "$prompt_file")
   if [ -z "$step75_region" ]; then
     log_error "Could not extract step-7.5 region from: $prompt_file"
-    rm -rf "$FR205_FAIL_TMPDIR"
+    rm -rf "$NONBLOCKING_FAIL_TMPDIR"
     exit 1
   fi
 
-  # Assert each FR-205 non-blocking phrase is present within step 7.5
-  for phrase in "${FR205_NONBLOCKING_PHRASES[@]}"; do
+  # Assert each non-blocking phrase is present within step 7.5
+  for phrase in "${NONBLOCKING_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
-      log_error "FR-205 non-blocking phrase missing in step 7.5 of: $prompt_file"
+      log_error "non-blocking phrase missing in step 7.5 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
-      rm -rf "$FR205_FAIL_TMPDIR"
+      rm -rf "$NONBLOCKING_FAIL_TMPDIR"
       exit 1
     fi
   done
@@ -1268,36 +1268,36 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   step75_lineno=$(grep -F -n -- '**7.5. Spawn follow-ups' "$prompt_file" | head -n 1 | cut -d: -f1)
   if [ -z "$step75_lineno" ]; then
     log_error "Step 7.5 anchor line missing in: $prompt_file"
-    rm -rf "$FR205_FAIL_TMPDIR"
+    rm -rf "$NONBLOCKING_FAIL_TMPDIR"
     exit 1
   fi
   prev_lineno="$step75_lineno"
-  for step_pattern in "${FR205_POST75_STEPS[@]}"; do
+  for step_pattern in "${POST75_STEPS[@]}"; do
     step_lineno=$(grep -E -n -- "$step_pattern" "$prompt_file" | head -n 1 | cut -d: -f1)
     if [ -z "$step_lineno" ]; then
       log_error "Post-7.5 step pattern '$step_pattern' missing in: $prompt_file"
-      rm -rf "$FR205_FAIL_TMPDIR"
+      rm -rf "$NONBLOCKING_FAIL_TMPDIR"
       exit 1
     fi
     if [ "$step_lineno" -le "$prev_lineno" ]; then
       log_error "Post-7.5 step '$step_pattern' (line $step_lineno) does not follow previous step (line $prev_lineno) in: $prompt_file"
-      rm -rf "$FR205_FAIL_TMPDIR"
+      rm -rf "$NONBLOCKING_FAIL_TMPDIR"
       exit 1
     fi
     prev_lineno="$step_lineno"
   done
 
-  log_info "Verified FR-205 non-blocking step 7.5 → 8 → 9 chain in: $(basename "$prompt_file")"
+  log_info "Verified non-blocking step 7.5 → 8 → 9 chain in: $(basename "$prompt_file")"
 done
 
-rm -rf "$FR205_FAIL_TMPDIR"
+rm -rf "$NONBLOCKING_FAIL_TMPDIR"
 
-log_info "FR-205 non-blocking test PASSED — both prompt files instruct Ralph to proceed to step 8 (Close) despite a failing bd create / codegraph_impact / gate evaluation"
+log_info "non-blocking test PASSED — both prompt files instruct Ralph to proceed to step 8 (Close) despite a failing bd create / codegraph_impact / gate evaluation"
 
 # ============================================================================
-# Static check: FR-206 idempotency — (closing-id, modified-symbol) keyed dedup
+# Static check: idempotency — (closing-id, modified-symbol) keyed dedup
 # ============================================================================
-# Locks FR-206: before each `bd create` in step 7.5, Ralph must query the
+# Locks the idempotency contract: before each `bd create` in step 7.5, Ralph must query the
 # existing auto-codegraph cohort with `bd list --label=auto-codegraph --json`
 # and skip the spawn if a matching issue exists for the same
 # (closing-id, modified-symbol) pair. This guards against duplicate auto-spawns
@@ -1306,23 +1306,23 @@ log_info "FR-205 non-blocking test PASSED — both prompt files instruct Ralph t
 # re-running step 7.5 on the same closing id produces no duplicates. Static
 # byte-check on the prompt source — narrowed to the step-7.5 region (between
 # "**7.5." and "8. **Close**") so the check cannot false-pass on similar
-# wording elsewhere. Mirrors the FR-204 / FR-205 idiom (awk extraction +
+# wording elsewhere. Mirrors the spawn-metadata / non-blocking idiom (awk extraction +
 # grep -F per anchor).
 
-log_step "Static check: FR-206 idempotency in step 7.5 ((closing-id, modified-symbol) keyed dedup)"
+log_step "Static check: idempotency in step 7.5 ((closing-id, modified-symbol) keyed dedup)"
 
-# FR-206 anchors that must appear verbatim within step 7.5 of each prompt
-# file. Together they prove (a) the section is explicitly labeled FR-206
+# Idempotency anchors that must appear verbatim within step 7.5 of each prompt
+# file. Together they prove (a) the section is explicitly labeled
 # idempotency, (b) the dedup query targets the auto-codegraph label cohort,
 # (c) the dual-key conjunction (closing-id AND modified-symbol) is intact
 # (both halves named, plus the canonical tuple form), (d) both per-caller and
 # umbrella spawn modes have explicit skip semantics, (e) the non-collision
 # corollaries are stated (different closing id with same symbol still spawns,
 # and vice versa), (f) the restart scenario is named (bash loop killed and
-# resumed), and (g) FR-205 non-blocking posture is inherited so a failing
+# resumed), and (g) the non-blocking posture is inherited so a failing
 # `bd list` query never blocks step 8.
-FR206_IDEMPOTENCY_PHRASES=(
-  '**Idempotency on retry (FR-206).**'                                # Section header anchor
+IDEMPOTENCY_PHRASES=(
+  '**Idempotency on retry.**'                                # Section header anchor
   'Before each `bd create`, guard against duplicates'                 # Pre-create guard semantic
   'bd list --label=auto-codegraph --json'                             # Cohort query
   '`(closing-id, modified-symbol)`'                                   # Keyed-on tuple
@@ -1333,7 +1333,7 @@ FR206_IDEMPOTENCY_PHRASES=(
   'the same closing id with a different modified symbol still spawns' # Non-collision: same closing-id ≠ collision
   'the same modified symbol on a different closing id still spawns'   # Non-collision: same symbol ≠ collision
   'bash loop killed and resumed'                                      # Restart scenario
-  'Same non-blocking posture as FR-205'                               # Non-blocking inheritance
+  'Same non-blocking posture'                                         # Non-blocking inheritance
   'a failing `bd list` query never blocks step 8'                     # Failing-query passthrough
 )
 
@@ -1351,38 +1351,38 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
     exit 1
   fi
 
-  # Assert each FR-206 idempotency phrase is present within step 7.5
-  for phrase in "${FR206_IDEMPOTENCY_PHRASES[@]}"; do
+  # Assert each idempotency phrase is present within step 7.5
+  for phrase in "${IDEMPOTENCY_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
-      log_error "FR-206 idempotency phrase missing in step 7.5 of: $prompt_file"
+      log_error "idempotency phrase missing in step 7.5 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
       exit 1
     fi
   done
 
-  # Lock structural ordering: FR-206 idempotency block must precede the FR-205
+  # Lock structural ordering: idempotency block must precede the
   # non-blocking section in step 7.5, mirroring the prompt's literal layout
   # (idempotency guard documented before the catch-all non-blocking posture).
-  idem_line=$(grep -n -F -- '**Idempotency on retry (FR-206).**' <<< "$step75_region" | head -1 | cut -d: -f1)
-  nb_line=$(grep -n -F -- '**Non-blocking (FR-205).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  idem_line=$(grep -n -F -- '**Idempotency on retry.**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  nb_line=$(grep -n -F -- '**Non-blocking.**' <<< "$step75_region" | head -1 | cut -d: -f1)
   if [ -z "$idem_line" ] || [ -z "$nb_line" ]; then
-    log_error "FR-206 ordering check could not locate idempotency or non-blocking header in: $prompt_file"
+    log_error "ordering check could not locate idempotency or non-blocking header in: $prompt_file"
     exit 1
   fi
   if [ "$idem_line" -ge "$nb_line" ]; then
-    log_error "FR-206 ordering wrong in $prompt_file: idempotency (line $idem_line) must precede non-blocking (line $nb_line)"
+    log_error "idempotency ordering wrong in $prompt_file: idempotency (line $idem_line) must precede non-blocking (line $nb_line)"
     exit 1
   fi
 
-  log_info "Verified FR-206 idempotency ((closing-id, modified-symbol) dedup + per-caller/umbrella skip + non-blocking inheritance) in step 7.5 of: $(basename "$prompt_file")"
+  log_info "Verified idempotency ((closing-id, modified-symbol) dedup + per-caller/umbrella skip + non-blocking inheritance) in step 7.5 of: $(basename "$prompt_file")"
 done
 
-log_info "FR-206 idempotency test PASSED — both prompt files lock the bd-list cohort query, dual-key (closing-id, modified-symbol) conjunction, per-caller/umbrella skip semantics, non-collision corollaries, restart scenario, and FR-205 non-blocking inheritance"
+log_info "idempotency test PASSED — both prompt files lock the bd-list cohort query, dual-key (closing-id, modified-symbol) conjunction, per-caller/umbrella skip semantics, non-collision corollaries, restart scenario, and non-blocking inheritance"
 
 # ============================================================================
-# Static check: FR-204 spawn metadata — type / priority / label / dep-edge
+# Static check: spawn metadata — type / priority / label / dep-edge
 # ============================================================================
-# Locks FR-204: each issue spawned by step 7.5 must be created with
+# Locks the spawn-metadata contract: each issue spawned by step 7.5 must be created with
 # --type=task, --priority=2, --labels=auto-codegraph, AND followed by a
 # `bd dep add <new-id> --depends-on <closing-id>` edge so the spawned issue
 # does not enter `bd ready` while the closing issue is still open. This
@@ -1392,15 +1392,15 @@ log_info "FR-206 idempotency test PASSED — both prompt files lock the bd-list 
 # and "8. **Close**") so the check cannot false-pass on similar metadata
 # wording elsewhere in the prompt.
 
-log_step "Static check: FR-204 spawn metadata in step 7.5 (type / priority / label / dep-edge)"
+log_step "Static check: spawn metadata in step 7.5 (type / priority / label / dep-edge)"
 
-# FR-204 anchors that must appear verbatim within step 7.5 of each prompt
+# Spawn-metadata anchors that must appear verbatim within step 7.5 of each prompt
 # file. Together they prove (a) each spawned issue carries the contracted
 # metadata (type=task, priority=2, label=auto-codegraph), and (b) the dep
 # edge is created so the spawned issue is gated behind the closing issue in
 # `bd ready` until step 8 closes it.
-FR204_METADATA_PHRASES=(
-  '(FR-204)'                                          # Section anchor on the metadata-list header
+SPAWN_METADATA_PHRASES=(
+  'Each spawned issue uses this metadata:'                                          # Section anchor on the metadata-list header
   '`--type=task`'                                     # Type metadata
   '`--priority=2`'                                    # Priority metadata
   '`--labels=auto-codegraph`'                         # Label metadata
@@ -1422,24 +1422,24 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
     exit 1
   fi
 
-  # Assert each FR-204 metadata phrase is present within step 7.5
-  for phrase in "${FR204_METADATA_PHRASES[@]}"; do
+  # Assert each spawn-metadata phrase is present within step 7.5
+  for phrase in "${SPAWN_METADATA_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
-      log_error "FR-204 metadata phrase missing in step 7.5 of: $prompt_file"
+      log_error "spawn-metadata phrase missing in step 7.5 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
       exit 1
     fi
   done
 
-  log_info "Verified FR-204 spawn metadata (type / priority / label / dep-edge) in step 7.5 of: $(basename "$prompt_file")"
+  log_info "Verified spawn metadata (type / priority / label / dep-edge) in step 7.5 of: $(basename "$prompt_file")"
 done
 
-log_info "FR-204 spawn-metadata test PASSED — both prompt files lock --type=task, --priority=2, --labels=auto-codegraph, and the bd dep add edge so spawned issues stay out of bd ready until the closing issue closes"
+log_info "spawn-metadata test PASSED — both prompt files lock --type=task, --priority=2, --labels=auto-codegraph, and the bd dep add edge so spawned issues stay out of bd ready until the closing issue closes"
 
 # ============================================================================
-# Static check: FR-203 cap rule + per-caller / umbrella templates
+# Static check: cap rule + per-caller / umbrella templates
 # ============================================================================
-# Locks FR-203: step 7.5's cap rule maps qualifying-caller count `N` to spawn
+# Locks the cap-rule contract: step 7.5's cap rule maps qualifying-caller count `N` to spawn
 # shape — N==0 → no-op, 1-3 → per-caller issues (Appendix E per-caller
 # template), 4+ → exactly one umbrella issue (Appendix E umbrella template).
 # This guards (a) that all three branches are present, (b) that both Appendix
@@ -1448,20 +1448,20 @@ log_info "FR-204 spawn-metadata test PASSED — both prompt files lock --type=ta
 # `<N>` substitution. Static byte-check on the prompt source — no copier
 # render or bd execution required. Narrowed to the step-7.5 region (between
 # "**7.5." and "8. **Close**") so the check cannot false-pass on similar
-# wording elsewhere in the prompt. Mirrors the FR-204 / FR-205 / FR-101 idiom
+# wording elsewhere in the prompt. Mirrors the spawn-metadata / non-blocking / CodeGraph-block idiom
 # (awk extraction + grep -F per anchor).
 
-log_step "Static check: FR-203 cap rule and per-caller / umbrella templates in step 7.5"
+log_step "Static check: cap rule and per-caller / umbrella templates in step 7.5"
 
-# FR-203 anchors that must appear verbatim within step 7.5 of each prompt
+# Cap-rule anchors that must appear verbatim within step 7.5 of each prompt
 # file. Together they prove (a) the cap-rule section is explicitly labeled
-# FR-203 with all three N-branches (0 / 1-3 / 4+), (b) both Appendix E
+# the cap rule with all three N-branches (0 / 1-3 / 4+), (b) both Appendix E
 # templates are rendered (per-caller for 1-3, umbrella for 4+), (c) the
 # canonical title formats are intact (Verify-caller per-caller; Audit-N
 # umbrella with `<N>` substitution), and (d) the umbrella template lists
 # qualifying callers via its `Qualifying callers:` section header.
-FR203_CAP_PHRASES=(
-  '**Cap rule (FR-203, Appendix E).**'                                                    # Section header anchor
+CAP_RULE_PHRASES=(
+  '**Cap rule (Appendix E).**'                                                    # Section header anchor
   '`N == 0` → no-op (skip silently; no spawn).'                                           # Branch 1: empty no-op
   '`1-3` qualifying callers → spawn one bd issue per caller'                              # Branch 2: per-caller mapping
   '`4 or more` qualifying callers → spawn exactly one **umbrella** issue'                 # Branch 3: umbrella mapping
@@ -1487,10 +1487,10 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
     exit 1
   fi
 
-  # Assert each FR-203 cap-rule / template phrase is present within step 7.5
-  for phrase in "${FR203_CAP_PHRASES[@]}"; do
+  # Assert each cap-rule / template phrase is present within step 7.5
+  for phrase in "${CAP_RULE_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
-      log_error "FR-203 cap-rule / template phrase missing in step 7.5 of: $prompt_file"
+      log_error "cap-rule / template phrase missing in step 7.5 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
       exit 1
     fi
@@ -1502,23 +1502,23 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
   per_caller_line=$(grep -n -F -- '**Per-caller template (Appendix E, 1-3 callers).**' <<< "$step75_region" | head -1 | cut -d: -f1)
   umbrella_line=$(grep -n -F -- '**Umbrella template (Appendix E, 4 or more callers).**' <<< "$step75_region" | head -1 | cut -d: -f1)
   if [ -z "$per_caller_line" ] || [ -z "$umbrella_line" ]; then
-    log_error "FR-203 template-order check could not locate one or both template headers in: $prompt_file"
+    log_error "template-order check could not locate one or both template headers in: $prompt_file"
     exit 1
   fi
   if [ "$per_caller_line" -ge "$umbrella_line" ]; then
-    log_error "FR-203 template ordering wrong in $prompt_file: per-caller (line $per_caller_line) must precede umbrella (line $umbrella_line)"
+    log_error "template ordering wrong in $prompt_file: per-caller (line $per_caller_line) must precede umbrella (line $umbrella_line)"
     exit 1
   fi
 
-  log_info "Verified FR-203 cap rule + per-caller / umbrella templates in step 7.5 of: $(basename "$prompt_file")"
+  log_info "Verified cap rule + per-caller / umbrella templates in step 7.5 of: $(basename "$prompt_file")"
 done
 
-log_info "FR-203 cap-and-template test PASSED — both prompt files lock the N==0 / 1-3 / 4+ cap rule and render both Appendix E templates (per-caller before umbrella) with their canonical title formats and the umbrella's Qualifying callers list"
+log_info "cap-and-template test PASSED — both prompt files lock the N==0 / 1-3 / 4+ cap rule and render both Appendix E templates (per-caller before umbrella) with their canonical title formats and the umbrella's Qualifying callers list"
 
 # ============================================================================
-# Static check: FR-202 heuristic gate — four conjunctive drop categories
+# Static check: heuristic gate — four conjunctive drop categories
 # ============================================================================
-# Locks FR-202: step 7.5's heuristic gate requires ALL FOUR conjunctive checks
+# Locks the heuristic-gate contract: step 7.5's heuristic gate requires ALL FOUR conjunctive checks
 # to hold for a caller `C` of modified symbol `S` to qualify for spawning —
 # (1) cross top-level module, (2) not a test/spec file, (3) not in a utility
 # directory, (4) public symbol (not _-prefixed and not in /internal/ or
@@ -1531,26 +1531,26 @@ log_info "FR-203 cap-and-template test PASSED — both prompt files lock the N==
 # source — no copier render or bd execution required. Narrowed to the
 # step-7.5 region (between "**7.5." and "8. **Close**") so the check cannot
 # false-pass on similar wording elsewhere in the prompt. Mirrors the
-# FR-203 / FR-204 / FR-205 idiom (awk extraction + grep -F per anchor).
+# cap-rule / spawn-metadata / non-blocking idiom (awk extraction + grep -F per anchor).
 #
 # Acceptance-criteria mapping: the issue's "fixture covering all four drop
 # categories plus one qualifying caller" wording predates the established
-# static-anchor convention used for FR-203/FR-204/FR-205 (closed 2026-04-25);
+# static-anchor convention used for the cap-rule / spawn-metadata / non-blocking checks (closed 2026-04-25);
 # this check follows that convention by locking the gate's verbatim contract
 # in the prompt source rather than executing a behavioral fixture, mirroring
 # the documented sibling-task posture.
 
-log_step "Static check: FR-202 heuristic gate — four conjunctive drop categories in step 7.5"
+log_step "Static check: heuristic gate — four conjunctive drop categories in step 7.5"
 
-# FR-202 anchors that must appear verbatim within step 7.5 of each prompt
+# Heuristic-gate anchors that must appear verbatim within step 7.5 of each prompt
 # file. Together they prove (a) the gate section is explicitly labeled
-# FR-202 (Appendix D), (b) the conjunctive framing is intact (all four +
+# the heuristic gate (Appendix D), (b) the conjunctive framing is intact (all four +
 # drop-on-false), (c) each of the four drop categories has its bold-labeled
 # header, (d) the specific pattern fragments inside each category survive
 # (test/spec, utility-dir, public-symbol), and (e) the Appendix D decision
 # tree is rendered with its `qualify` leaf.
-FR202_GATE_PHRASES=(
-  '**Heuristic gate (FR-202, Appendix D).**'                                 # Section header anchor
+HEURISTIC_GATE_PHRASES=(
+  '**Heuristic gate (Appendix D).**'                                 # Section header anchor
   '**all four**'                                                             # Conjunctive framing
   '(drop on any false)'                                                      # Drop-on-false semantic
   '**Cross top-level module.**'                                              # Drop category 1 header
@@ -1578,38 +1578,38 @@ for prompt_file in "${CODEGRAPH_PROMPT_FILES[@]}"; do
     exit 1
   fi
 
-  # Assert each FR-202 gate phrase is present within step 7.5
-  for phrase in "${FR202_GATE_PHRASES[@]}"; do
+  # Assert each heuristic-gate phrase is present within step 7.5
+  for phrase in "${HEURISTIC_GATE_PHRASES[@]}"; do
     if ! grep -F -q -- "$phrase" <<< "$step75_region"; then
-      log_error "FR-202 heuristic-gate phrase missing in step 7.5 of: $prompt_file"
+      log_error "heuristic-gate phrase missing in step 7.5 of: $prompt_file"
       log_error "Expected verbatim: $phrase"
       exit 1
     fi
   done
 
-  # Lock structural ordering: heuristic-gate section (FR-202) must appear
-  # before cap-rule section (FR-203) so the document mirrors runtime order
+  # Lock structural ordering: heuristic-gate section must appear
+  # before cap-rule section so the document mirrors runtime order
   # — gate filters callers first, then cap rule picks spawn shape.
-  gate_line=$(grep -n -F -- '**Heuristic gate (FR-202, Appendix D).**' <<< "$step75_region" | head -1 | cut -d: -f1)
-  cap_line=$(grep -n -F -- '**Cap rule (FR-203, Appendix E).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  gate_line=$(grep -n -F -- '**Heuristic gate (Appendix D).**' <<< "$step75_region" | head -1 | cut -d: -f1)
+  cap_line=$(grep -n -F -- '**Cap rule (Appendix E).**' <<< "$step75_region" | head -1 | cut -d: -f1)
   if [ -z "$gate_line" ] || [ -z "$cap_line" ]; then
-    log_error "FR-202 ordering check could not locate gate or cap-rule header in: $prompt_file"
+    log_error "ordering check could not locate gate or cap-rule header in: $prompt_file"
     exit 1
   fi
   if [ "$gate_line" -ge "$cap_line" ]; then
-    log_error "FR-202 ordering wrong in $prompt_file: heuristic gate (line $gate_line) must precede cap rule (line $cap_line)"
+    log_error "heuristic-gate ordering wrong in $prompt_file: heuristic gate (line $gate_line) must precede cap rule (line $cap_line)"
     exit 1
   fi
 
-  log_info "Verified FR-202 heuristic gate (4 drop categories + Appendix D tree) in step 7.5 of: $(basename "$prompt_file")"
+  log_info "Verified heuristic gate (4 drop categories + Appendix D tree) in step 7.5 of: $(basename "$prompt_file")"
 done
 
-log_info "FR-202 heuristic-gate test PASSED — both prompt files lock all four conjunctive drop categories (cross-module / test-spec / utility-dir / public-symbol) with the Appendix D decision tree, and the gate precedes the FR-203 cap rule"
+log_info "heuristic-gate test PASSED — both prompt files lock all four conjunctive drop categories (cross-module / test-spec / utility-dir / public-symbol) with the Appendix D decision tree, and the gate precedes the cap rule"
 
 # ============================================================================
-# Smoke check: ralph.sh fails fast when bubblewrap is missing (FR-004)
+# Smoke check: ralph.sh fails fast when bubblewrap is missing
 # ============================================================================
-# Locks FR-004's failure path: when ralph.sh runs on Linux without bubblewrap
+# Locks the bubblewrap-missing failure path: when ralph.sh runs on Linux without bubblewrap
 # (`bwrap`) on PATH, the sandbox smoke test must (a) exit non-zero, (b) emit
 # the install-hint string mentioning both "bubblewrap" and "socat", and (c)
 # do so without ever invoking claude. Simulates the missing-bubblewrap
@@ -1861,7 +1861,7 @@ rm -rf "$SMOKE_NO_DOCKER_DIR" "$SMOKE_DOCKER_NO_SANDBOX_DIR"
 log_info "ralph.sh --docker precondition smoke test PASSED — both ralph.sh copies fail fast with install hints when Docker or 'docker sandbox' is unavailable"
 
 # ============================================================================
-# Unit test: ralph.sh argument parser handles --docker (ortus-lfft.1, FR-006)
+# Unit test: ralph.sh argument parser handles --docker (ortus-lfft.1)
 # ============================================================================
 # Locks T2.1's contract: the --docker flag is recognized by the argument
 # parser, sets USE_DOCKER=1 when present, and leaves USE_DOCKER empty when
@@ -1969,7 +1969,7 @@ log_info "ralph.sh --docker argument-parsing unit test PASSED — both copies re
 # ============================================================================
 # Routing test: ralph.sh --docker invokes 'docker sandbox run' (ortus-lfft.6)
 # ============================================================================
-# Locks FR-006 / T2.2: in --docker mode, ralph.sh must route the inner claude
+# Locks the docker-routing contract: in --docker mode, ralph.sh must route the inner claude
 # session through `docker sandbox run claude --name ortus-ralph --` instead of
 # the host claude binary, while still producing logs/ralph-*.log on the host
 # filesystem so tail.sh and existing tooling continue to work.
@@ -2143,7 +2143,7 @@ fi
 
 # ============================================================================
 # Passthrough test: --fast / --tasks / --iterations forward in --docker mode
-# (ortus-lfft.3, FR-007)
+# (ortus-lfft.3)
 # ============================================================================
 # Locks T2.3's contract: when --docker is set, the existing ralph.sh flags
 # must continue to function:
