@@ -12,7 +12,8 @@
       "Edit(./template/.claude/settings.json)",
       "Edit(./template/.claude/settings.json.jinja)",
       "Write(./template/.claude/settings.json)",
-      "Write(./template/.claude/settings.json.jinja)"
+      "Write(./template/.claude/settings.json.jinja)",
+      "Bash(git push:*)"
     ],
     "deny": [
       "Bash(sudo *)",
@@ -23,9 +24,6 @@
       "Read(~/.aws/**)",
       "Read(**/credentials.json)"
     ],
-    "ask": [
-      "Bash(git push:*)"
-    ],
     "defaultMode": "acceptEdits"
   },
   "sandbox": {
@@ -33,6 +31,7 @@
     "failIfUnavailable": true,
     "autoAllowBashIfSandboxed": true,
     "allowUnsandboxedCommands": false,
+    "excludedCommands": ["bd", "bd *"],
     "network": {
       "allowLocalBinding": true,
       "allowManagedDomainsOnly": true,
