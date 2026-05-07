@@ -119,6 +119,29 @@ acceptable for our threat model.
 | `noms/LOCK` corruption | never touched (upstream #2933) |
 | Hook (`SessionStart: bd prime`) silently spawning dolt | empirically reaches host dolt via `excludedCommands` and connects |
 
+## When pile-up still happens — recovery
+
+If you hit the cascade despite the architecture above (most often when bd's
+auto-start fails for unrelated reasons — e.g. `.beads/dolt-server.{pid,port}`
+go missing while a server keeps running, see
+[gastownhall/beads#3392](https://github.com/gastownhall/beads/issues/3392)),
+run:
+
+```bash
+./ortus/recover-dolt.sh
+```
+
+The script SIGKILLs all dolt sql-server processes visible to your shell,
+clears bd-owned state files (NOT `noms/LOCK` per
+[gastownhall/beads#2933](https://github.com/gastownhall/beads/issues/2933)),
+clears stale circuit breakers in `/tmp/beads-circuit/`, then runs
+`bd dolt start` and verifies. It refuses to run if `ralph.sh` is currently
+holding `.beads/ralph.flock` (ralph already manages dolt's lifecycle —
+don't fight it).
+
+`./ortus/recover-dolt.sh --dry-run` prints what it would do without making
+changes.
+
 ## Verification
 
 ```bash
