@@ -182,12 +182,13 @@ export CARGO_HOME="$PWD/.cache/cargo"
 export GOMODCACHE="$PWD/.cache/go-mod"
 export GOCACHE="$PWD/.cache/go-build"
 
-# Disable bd's per-call dolt auto-start (gastownhall/beads#3392). Ralph
-# owns the dolt lifecycle via start_dolt/stop_dolt above; any stray bd
-# that briefly can't reach the server should fail loudly rather than
-# silently spawn a replacement (which would kill ralph's dolt and orphan
-# itself when waitForReady fails).
-export BEADS_DOLT_AUTO_START=0
+# Note: we deliberately DO NOT disable bd's per-call auto-start here.
+# `bd config set dolt.auto-start false` (or BEADS_DOLT_AUTO_START=0) breaks
+# bd usage outside ralph — any parallel terminal or separate Claude session
+# in this repo can no longer file issues until ralph is running. The
+# flock guard + ralph-owned dolt lifecycle above are sufficient to prevent
+# the orphan-pile-up failure mode (bubbles 2026-05-07); auto-start disable
+# was belt-and-suspenders that wasn't worth the parallel-use cost.
 
 # Note: previous versions of this script wrapped `bd` calls in a flock
 # helper that serialized concurrent dolt sql-server starts, and prepended
