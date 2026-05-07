@@ -47,6 +47,22 @@ log "Watch live:"
 log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
+# Clean stale dolt LOCK files left by killed sql-servers (sandbox teardown,
+# OOM, ralph timeout). Only remove a LOCK file if no live dolt process is
+# holding the parent directory open, so we never yank the rug from a running
+# server.
+cleanup_stale_dolt_locks() {
+  [ -d .beads/dolt ] || return 0
+  while IFS= read -r -d '' lock; do
+    if pgrep -af "dolt sql-server" 2>/dev/null | grep -qF "$(dirname "$lock")"; then
+      continue
+    fi
+    rm -f "$lock"
+    log "Removed stale dolt LOCK: $lock"
+  done < <(find .beads/dolt -type f -name LOCK -print0 2>/dev/null)
+}
+cleanup_stale_dolt_locks
+
 # Sandbox smoke test — fails fast if OS sandbox prerequisites are
 # missing, before any iteration runs claude with --dangerously-skip-permissions.
 # Per ortus-hhq9 decision, this check is intentionally NOT skippable via env
