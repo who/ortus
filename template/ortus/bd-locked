@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Serialize bd invocations per project to avoid concurrent dolt sql-server
+# launches contending for .beads/dolt/.dolt/noms/LOCK. Sandbox-friendly: no
+# daemon, no network, just a per-project file lock.
+set -euo pipefail
+
+# Locate project root (directory containing .beads/) walking up from $PWD.
+root="$PWD"
+while [ "$root" != "/" ] && [ ! -d "$root/.beads" ]; do
+  root="$(dirname "$root")"
+done
+lock="${root}/.beads/dolt.flock"
+mkdir -p "$(dirname "$lock")"
+
+# 60s wait turns "lock conflict" into "tiny queue". Tune via BD_FLOCK_WAIT.
+exec flock -w "${BD_FLOCK_WAIT:-60}" "$lock" bd "$@"
