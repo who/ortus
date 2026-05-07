@@ -126,6 +126,22 @@ Ortus requires **beads v1.0.0** (released 2026-04-03) or later. The v0.55.0 → 
 
 Remote sync uses `bd dolt push` / `bd dolt pull`. The v0.55-era `bd sync` command was removed in v1.0.0. See [AGENTS.md](AGENTS.md) for the full session-close workflow.
 
+### Sandbox + bd setup
+
+Generated projects run Ralph inside the OS sandbox, which blocks loopback TCP by default. `bd` (beads) needs loopback to reach its Dolt SQL server, so the generated `.claude/settings.json` exempts `bd` from sandbox network containment:
+
+```json
+{
+  "sandbox": {
+    "excludedCommands": ["bd", "bd *"]
+  }
+}
+```
+
+Both entries are required: `bd` matches bare invocations, `bd *` matches subcommands. If you customize `.claude/settings.json`, preserve both `bd` and `bd *` entries in `sandbox.excludedCommands`.
+
+**Never pipe bd into other commands or use `xargs bd`.** The exemption only applies when `bd` is directly invoked. Inside `bd list | jq ... | xargs bd show`, the inner `bd` is a child of `xargs` and inherits the sandboxed network namespace, where it hangs on the Dolt connection. Use multi-id `bd show <id1> <id2> ...` (accepts space-separated ids natively) instead of piping. Full context lives in the generated project's README under "Sandbox + bd setup".
+
 ### Development
 
 Run `make parity` before committing changes to `ortus/` or `template/ortus/`. It detects drift between the canonical tree and the Jinja mirror shipped in the template.
