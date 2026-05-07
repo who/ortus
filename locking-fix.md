@@ -37,7 +37,7 @@ holding noms/LOCK contention. Root cause:
 
 ## Current architecture (in `ortus/ralph.sh` and `template/ortus/ralph.sh`)
 
-Four pieces, all sandbox-friendly:
+Three pieces, all sandbox-friendly:
 
 ### 1. Single-instance flock guard
 
@@ -64,19 +64,7 @@ state-file cleanup is bounded to *bd-owned* files (`.beads/dolt-server.{lock,pid
 removing `noms/LOCK` while another process holds the flock causes silent
 corruption (orphan-inode race).
 
-### 3. Per-call auto-start disabled
-
-```bash
-export BEADS_DOLT_AUTO_START=0
-```
-
-Defense in depth. With ralph owning the lifecycle, no other bd should ever
-need to auto-start. If the dolt dies for any reason, the next bd call
-fails *loudly* (unreachable error) rather than silently spawning a
-replacement that would kill ralph's dolt via `KillStaleServers` (see
-[gastownhall/beads#3392](https://github.com/gastownhall/beads/issues/3392)).
-
-### 4. bd in `sandbox.excludedCommands`
+### 3. bd in `sandbox.excludedCommands`
 
 In `template/.claude/settings.json.jinja` (and the working copy in
 `.claude/settings.json`):
@@ -110,6 +98,16 @@ acceptable for our threat model.
   pgrep predicate never matched dolt's argv) and dangerous (#2933).
 - **No retry-on-lock-error wrappers.** With single-server architecture
   there is no lock contention to retry around.
+- **No auto-start disable.** An earlier draft of this fix recommended
+  `bd config set dolt.auto-start false` (or `BEADS_DOLT_AUTO_START=0`) as
+  belt-and-suspenders against bd's `KillStaleServers` race
+  ([gastownhall/beads#3392](https://github.com/gastownhall/beads/issues/3392)).
+  **Don't.** It breaks bd in any non-ralph context: a parallel terminal or
+  separate Claude session in the same repo can no longer file or update
+  issues until ralph is running. The flock guard + ralph-owned lifecycle
+  alone are sufficient to prevent the orphan pile-up; the marginal
+  protection against KillStaleServers (a rare race that requires the
+  dolt to be briefly unreachable) is not worth the parallel-use cost.
 
 ## Failure modes prevented
 
@@ -117,10 +115,9 @@ acceptable for our threat model.
 |---|---|
 | Multi-ralph race spawning N dolts | flock guard — refuses second instance |
 | Per-iteration auto-start orphans | ralph owns lifecycle; one dolt for whole session |
-| Stray bd silently killing ralph's dolt | `BEADS_DOLT_AUTO_START=0` makes failures loud |
 | Stale crash state confusing next ralph | `start_dolt` clears bd-owned state when prior PID is dead |
 | `noms/LOCK` corruption | never touched (upstream #2933) |
-| Hook (`SessionStart: bd prime`) silently spawning dolt | empirically reaches host dolt; auto-start=0 fails loud if not |
+| Hook (`SessionStart: bd prime`) silently spawning dolt | empirically reaches host dolt via `excludedCommands` and connects |
 
 ## Verification
 
