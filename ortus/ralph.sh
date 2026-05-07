@@ -152,35 +152,12 @@ export CARGO_HOME="$PWD/.cache/cargo"
 export GOMODCACHE="$PWD/.cache/go-mod"
 export GOCACHE="$PWD/.cache/go-build"
 
-# Serialize bd calls (locking-fix.md §1) — prepend ortus/ to PATH so the
-# bd-locked flock wrapper takes precedence for both this script and the
-# inner Claude session. The wrapper file lives at ortus/bd-locked; we
-# expose it as 'bd' via a sibling symlink committed to the repo.
-export PATH="$PWD/ortus:$PATH"
-
-# bd_retry (locking-fix.md §3) — defense-in-depth retry on the specific
-# dolt-lock failure mode. Other failures fail fast so real regressions are
-# never masked. Use bd_retry in any shell script that calls bd: the inner
-# call invokes whichever 'bd' is on PATH (so it composes with bd-locked).
-# Downstream pattern: replace `bd ...` with `bd_retry ...`. Tunable knob:
-# BD_RETRY_MAX (default 5).
-bd_retry() {
-  local n=0 max="${BD_RETRY_MAX:-5}" delay=0.25 out
-  while :; do
-    if out=$(bd "$@" 2>&1); then
-      printf '%s\n' "$out"
-      return 0
-    fi
-    if [[ "$out" == *"locked by another dolt process"* || "$out" == *"database is locked"* ]] && (( n < max )); then
-      sleep "$delay"
-      delay=$(awk "BEGIN{print $delay*2}")
-      n=$((n+1))
-      continue
-    fi
-    printf '%s\n' "$out" >&2
-    return 1
-  done
-}
+# Note: previous versions of this script wrapped `bd` calls in a flock
+# helper that serialized concurrent dolt sql-server starts, and prepended
+# the wrapper directory to PATH. Both were removed (see ortus-ugky):
+# under the OS sandbox the flock-wrapped bd would hang on a sandboxed
+# loopback connection and hold the lock project-wide. bd 1.0.3's built-in
+# dolt lifecycle handling supersedes the narrow concurrency benefit.
 
 # Claude invocation routing (ortus-lfft.2) — when --docker is set,
 # route the inner claude session through `docker sandbox run claude --name
