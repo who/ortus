@@ -38,6 +38,22 @@ Ralph runs Claude Code inside the OS sandbox so that bash subprocesses spawned d
 
 For stronger isolation on hosts where the native sandbox is insufficient, use Tier 2 (`./ortus/ralph.sh --docker`), which adds a Docker outer layer around the native inner sandbox.
 
+### Sandbox + bd setup
+
+Tier 1's native sandbox blocks loopback TCP by default, but `bd` (beads) needs loopback to talk to its Dolt SQL server. The generated `.claude/settings.json` therefore exempts `bd` from sandbox network containment:
+
+```json
+{
+  "sandbox": {
+    "excludedCommands": ["bd", "bd *"]
+  }
+}
+```
+
+Both entries are required: `bd` matches bare invocations, `bd *` matches subcommands (`bd ready`, `bd show ...`). If you customize `.claude/settings.json`, preserve both entries.
+
+**Never pipe bd into other commands or use `xargs bd`.** The sandbox exemption only applies when `bd` is the directly-invoked binary on the bash command line. Inside `bd list | jq ... | xargs bd show`, the inner `bd` is a child of `xargs` and inherits the sandboxed network namespace, where it hangs indefinitely on the Dolt connection. Use multi-id `bd show <id1> <id2> ...` (which accepts space-separated ids natively) instead of piping into bd.
+
 ## Sandbox Tiers
 
 Ortus offers two sandboxing tiers. **Tier 1 (native sandbox only) is the default for solo interactive development.** **Tier 2 (`./ortus/ralph.sh --docker`) is opt-in for unattended runs** (overnight Ralph loops, CI, code review of unfamiliar code) where the broader blast radius of a misbehaving subprocess matters more than startup cost.
