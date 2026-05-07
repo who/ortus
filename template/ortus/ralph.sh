@@ -136,6 +136,12 @@ export CARGO_HOME="$PWD/.cache/cargo"
 export GOMODCACHE="$PWD/.cache/go-mod"
 export GOCACHE="$PWD/.cache/go-build"
 
+# Serialize bd calls (locking-fix.md §1) — prepend ortus/ to PATH so the
+# bd-locked flock wrapper takes precedence for both this script and the
+# inner Claude session. The wrapper file lives at ortus/bd-locked; we
+# expose it as 'bd' via a sibling symlink committed to the repo.
+export PATH="$PWD/ortus:$PATH"
+
 # Claude invocation routing (ortus-lfft.2) — when --docker is set,
 # route the inner claude session through `docker sandbox run claude --name
 # ortus-ralph --` so it runs inside Docker's bundled-image sandbox. No
