@@ -33,6 +33,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Single-instance guard. Concurrent ralph instances against the same repo
+# race each other through bd's auto-start path and pile up orphan dolt
+# sql-server processes (observed: 49 zombies in one bubbles session,
+# 2026-05-07). A flock prevents the race entirely. Kernel auto-releases the
+# lock when this process exits, so a crashed prior ralph doesn't block new
+# starts.
+mkdir -p .beads
+exec 9>".beads/ralph.flock"
+if ! flock -n 9; then
+  echo "Another ralph is already running against this repo. Exiting." >&2
+  exit 0
+fi
+
 mkdir -p logs
 LOG_FILE="logs/ralph-$(date '+%Y%m%d-%H%M%S').log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
@@ -47,21 +60,38 @@ log "Watch live:"
 log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
-# Clean stale dolt LOCK files left by killed sql-servers (sandbox teardown,
-# OOM, ralph timeout). Only remove a LOCK file if no live dolt process is
-# holding the parent directory open, so we never yank the rug from a running
-# server.
-cleanup_stale_dolt_locks() {
-  [ -d .beads/dolt ] || return 0
-  while IFS= read -r -d '' lock; do
-    if pgrep -af "dolt sql-server" 2>/dev/null | grep -qF "$(dirname "$lock")"; then
-      continue
+# Single long-lived dolt sql-server owned by this ralph session. With bd in
+# sandbox.excludedCommands, every bd call inside the inner Claude session
+# runs on the host and connects to this server via .beads/dolt-server.port.
+# Eliminates the per-iteration auto-start race that pile-ups N orphan dolts
+# when waitForReady times out (observed in bubbles 2026-05-07).
+#
+# Per upstream TROUBLESHOOTING.md and gastownhall/beads#2933, we never touch
+# noms/LOCK directly — bd manages those. We only manage bd-owned state files
+# (.beads/dolt-server.{lock,pid,port}).
+start_dolt() {
+  if [ -f .beads/dolt-server.pid ]; then
+    local pid
+    pid=$(cat .beads/dolt-server.pid 2>/dev/null || true)
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+      log "Clearing stale bd state files (prior PID '$pid' no longer alive)"
+      rm -f .beads/dolt-server.lock .beads/dolt-server.pid .beads/dolt-server.port
     fi
-    rm -f "$lock"
-    log "Removed stale dolt LOCK: $lock"
-  done < <(find .beads/dolt -type f -name LOCK -print0 2>/dev/null)
+  fi
+  log "Starting shared dolt sql-server for this session..."
+  if ! bd dolt start 2>&1 | tee -a "$LOG_FILE"; then
+    log "ERROR: bd dolt start failed; exiting"
+    exit 1
+  fi
 }
-cleanup_stale_dolt_locks
+stop_dolt() {
+  log "Stopping shared dolt sql-server..."
+  bd dolt stop 2>&1 | tee -a "$LOG_FILE" || true
+}
+# trap fires on normal exit, ctrl-c, and SIGTERM — guarantees cleanup so
+# the next ralph (or other bd user) finds noms/LOCK released.
+trap stop_dolt EXIT INT TERM
+start_dolt
 
 # Sandbox smoke test — fails fast if OS sandbox prerequisites are
 # missing, before any iteration runs claude with --dangerously-skip-permissions.
@@ -151,6 +181,13 @@ export npm_config_cache="$PWD/.cache/npm"
 export CARGO_HOME="$PWD/.cache/cargo"
 export GOMODCACHE="$PWD/.cache/go-mod"
 export GOCACHE="$PWD/.cache/go-build"
+
+# Disable bd's per-call dolt auto-start (gastownhall/beads#3392). Ralph
+# owns the dolt lifecycle via start_dolt/stop_dolt above; any stray bd
+# that briefly can't reach the server should fail loudly rather than
+# silently spawn a replacement (which would kill ralph's dolt and orphan
+# itself when waitForReady fails).
+export BEADS_DOLT_AUTO_START=0
 
 # Note: previous versions of this script wrapped `bd` calls in a flock
 # helper that serialized concurrent dolt sql-server starts, and prepended
