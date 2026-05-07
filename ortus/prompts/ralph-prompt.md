@@ -6,7 +6,7 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 
 ## Your Task
 
-1. **Orient**: Run `bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json` to see what happened in previous loops.
+1. **Orient**: Run `bd list --status=closed --sort closed --limit 3 --json` to find recently completed issues. Then run `bd show --long <id1> <id2> <id3>` (space-separated) to read full details and comments. **Never pipe bd into other commands or use `xargs bd`** — the sandbox exemption only applies when bd is the directly-invoked binary; piping makes bd a child of another process and it hangs on dolt.
 
    **Activity read.** When `codegraph_available`, additionally surface recent CodeGraph activity for files touched in the last ~20 commits. Run `git log -20 --name-only | sort -u` to derive the file list, then enrich it:
 
@@ -15,7 +15,7 @@ You are invoked in a bash loop. Each invocation = one task. The loop restarts yo
 
    Cap the result at **30 unique files** and **50 symbols** total; truncate beyond the cap rather than erroring. Add the surfaced symbols to the orient context block alongside the existing `bd list` output above — that invocation is preserved verbatim, this sub-step is additive only. When CodeGraph isn't available, skip silently.
 
-   **CodeGraph block reuse.** Additionally scan the recent bd comments returned by the `bd show --json` invocation above for `**CodeGraph v1**` headers. For each recognized v1 block, parse the `modified:` line and surface the `symbol@file:line` entries into the orient context alongside the activity-read output — this is the compounding-memory payoff of the parseable schema. The parser is tolerant per Appendix Q4: silently skip blocks whose schema version is unrecognized (e.g., a future `**CodeGraph v2**` this prompt hasn't learned yet) rather than erroring. Gated on `codegraph_available`; skip silently when CodeGraph isn't available.
+   **CodeGraph block reuse.** Additionally scan the recent bd comments returned by the `bd show --long` invocation above for `**CodeGraph v1**` headers. For each recognized v1 block, parse the `modified:` line and surface the `symbol@file:line` entries into the orient context alongside the activity-read output — this is the compounding-memory payoff of the parseable schema. The parser is tolerant per Appendix Q4: silently skip blocks whose schema version is unrecognized (e.g., a future `**CodeGraph v2**` this prompt hasn't learned yet) rather than erroring. Gated on `codegraph_available`; skip silently when CodeGraph isn't available.
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, output `<promise>EMPTY</promise>` and stop immediately (do not output BLOCKED).
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
 4. **Investigate**: Before assuming anything is or isn't implemented, search the codebase. First, decide which path to take:

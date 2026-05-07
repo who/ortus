@@ -433,7 +433,7 @@ fi
 log_info "Mocked codegraph-absent environment at: $BASELINE_ABSENT_TMPDIR (no .codegraph/, no mcp__codegraph__* stubs)"
 
 # The verbatim bd-list invocation that must remain in step 1 unchanged
-BASELINE_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
+BASELINE_BD_LIST_INVOCATION="bd list --status=closed --sort closed --limit 3 --json"
 
 # Gating phrases — each activity-read and block-reuse
 # sub-paragraph in step 1 must contain language that skips silently when off.
@@ -514,7 +514,7 @@ fi
 log_info "Mocked codegraph_available environment at: $ACTIVITY_READ_TMPDIR (.codegraph/ + stub mcp__codegraph__codegraph_files)"
 
 # the bd-list comment-history pull invocation that must remain in step 1 verbatim
-ACTIVITY_BD_LIST_INVOCATION="bd list --sort updated --all --limit 10 --json | jq -r '.[].id' | xargs bd show --json"
+ACTIVITY_BD_LIST_INVOCATION="bd list --status=closed --sort closed --limit 3 --json"
 
 # anchors for the git-derived CodeGraph activity-read sub-paragraph
 # that must additionally appear in step 1 alongside the bd-list pull when
@@ -653,7 +653,7 @@ log_info "activity-read cap test PASSED — both prompt files declare 30-file / 
 # Static check: prior bd comment's CodeGraph v1 block surfaces in step 1
 # ============================================================================
 # When codegraph_available is true and a recent bd comment (returned by the
-# `bd show --json` invocation in step 1) contains a **CodeGraph v1** block
+# `bd show --long` invocation in step 1) contains a **CodeGraph v1** block
 # (the v1 schema), step 1's CodeGraph-block-reuse sub-paragraph must
 # (a) scan those comments for **CodeGraph v1** headers, (b) parse the
 # `modified:` line, (c) surface the `symbol@file:line` entries directly into
