@@ -11,6 +11,29 @@
 
 set -euo pipefail
 
+# bd_retry (locking-fix.md §3) — retry only on the dolt-lock failure mode;
+# any other error fails fast so real regressions are surfaced. Wrap every
+# `bd` call in this script with `bd_retry` so brief lock-handoff windows
+# (even with bd-locked flock in place) don't surface as user-visible
+# failures. Tunable knob: BD_RETRY_MAX (default 5).
+bd_retry() {
+  local n=0 max="${BD_RETRY_MAX:-5}" delay=0.25 out
+  while :; do
+    if out=$(bd "$@" 2>&1); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    if [[ "$out" == *"locked by another dolt process"* || "$out" == *"database is locked"* ]] && (( n < max )); then
+      sleep "$delay"
+      delay=$(awk "BEGIN{print $delay*2}")
+      n=$((n+1))
+      continue
+    fi
+    printf '%s\n' "$out" >&2
+    return 1
+  done
+}
+
 # Resolve ortus directory for prompt file access (must be done before cd)
 ORTUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -90,9 +113,9 @@ Idea: $idea")
 
     local feature_id
     if [[ -z "$description" ]]; then
-        feature_id=$(bd create --title="$idea" --type=feature --json | jq -r '.id')
+        feature_id=$(bd_retry create --title="$idea" --type=feature --json | jq -r '.id')
     else
-        feature_id=$(bd create --title="$idea" --type=feature --body="$description" --json | jq -r '.id')
+        feature_id=$(bd_retry create --title="$idea" --type=feature --body="$description" --json | jq -r '.id')
     fi
 
     echo ""
