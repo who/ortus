@@ -142,6 +142,30 @@ export GOCACHE="$PWD/.cache/go-build"
 # expose it as 'bd' via a sibling symlink committed to the repo.
 export PATH="$PWD/ortus:$PATH"
 
+# bd_retry (locking-fix.md §3) — defense-in-depth retry on the specific
+# dolt-lock failure mode. Other failures fail fast so real regressions are
+# never masked. Use bd_retry in any shell script that calls bd: the inner
+# call invokes whichever 'bd' is on PATH (so it composes with bd-locked).
+# Downstream pattern: replace `bd ...` with `bd_retry ...`. Tunable knob:
+# BD_RETRY_MAX (default 5).
+bd_retry() {
+  local n=0 max="${BD_RETRY_MAX:-5}" delay=0.25 out
+  while :; do
+    if out=$(bd "$@" 2>&1); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    if [[ "$out" == *"locked by another dolt process"* || "$out" == *"database is locked"* ]] && (( n < max )); then
+      sleep "$delay"
+      delay=$(awk "BEGIN{print $delay*2}")
+      n=$((n+1))
+      continue
+    fi
+    printf '%s\n' "$out" >&2
+    return 1
+  done
+}
+
 # Claude invocation routing (ortus-lfft.2) — when --docker is set,
 # route the inner claude session through `docker sandbox run claude --name
 # ortus-ralph --` so it runs inside Docker's bundled-image sandbox. No
