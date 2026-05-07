@@ -26,29 +26,6 @@
 
 set -e
 
-# bd_retry (locking-fix.md §3) — retry only on the dolt-lock failure mode;
-# any other error fails fast so real regressions are surfaced. Wrap every
-# `bd` call in this script with `bd_retry` so brief lock-handoff windows
-# (even with bd-locked flock in place) don't surface as user-visible
-# failures. Tunable knob: BD_RETRY_MAX (default 5).
-bd_retry() {
-  local n=0 max="${BD_RETRY_MAX:-5}" delay=0.25 out
-  while :; do
-    if out=$(bd "$@" 2>&1); then
-      printf '%s\n' "$out"
-      return 0
-    fi
-    if [[ "$out" == *"locked by another dolt process"* || "$out" == *"database is locked"* ]] && (( n < max )); then
-      sleep "$delay"
-      delay=$(awk "BEGIN{print $delay*2}")
-      n=$((n+1))
-      continue
-    fi
-    printf '%s\n' "$out" >&2
-    return 1
-  done
-}
-
 # Parse arguments
 FEATURE_ID=""
 while [[ $# -gt 0 ]]; do
@@ -101,7 +78,7 @@ echo_error() {
 find_pending_features() {
   # Get all features assigned to ralph
   local features_json
-  features_json=$(bd_retry list --type feature --status open --json 2>/dev/null || echo "[]")
+  features_json=$(bd list --type feature --status open --json 2>/dev/null || echo "[]")
 
   # Filter out features that already have 'interviewed' label
   echo "$features_json" | jq -c '[.[] | select(.labels | (. == null) or (index("interviewed") | not) and (index("prd:interviewing") | not) and (index("prd:ready") | not) and (index("approved") | not))]'
@@ -161,7 +138,7 @@ validate_feature() {
   local feature_id="$1"
 
   local feature_json
-  feature_json=$(bd_retry show "$feature_id" --json 2>/dev/null) || {
+  feature_json=$(bd show "$feature_id" --json 2>/dev/null) || {
     echo_error "Feature '$feature_id' not found"
     exit 1
   }
@@ -282,7 +259,7 @@ else
 
   FEATURE_ID=$(select_feature "$pending_json")
 
-  feature_json=$(bd_retry show "$FEATURE_ID" --json 2>/dev/null)
+  feature_json=$(bd show "$FEATURE_ID" --json 2>/dev/null)
   feature_title=$(echo "$feature_json" | jq -r '.[0].title')
   feature_description=$(echo "$feature_json" | jq -r '.[0].description // "No description provided"')
 fi
