@@ -36,14 +36,24 @@ done
 # Single-instance guard. Concurrent ralph instances against the same repo
 # race each other through bd's auto-start path and pile up orphan dolt
 # sql-server processes (observed: 49 zombies in one bubbles session,
-# 2026-05-07). A flock prevents the race entirely. Kernel auto-releases the
-# lock when this process exits, so a crashed prior ralph doesn't block new
-# starts.
+# 2026-05-07).
+#
+# We re-exec ourselves under flock(1) instead of `exec 9>file; flock -n 9`
+# because the latter leaks the lock to children: dolt sql-server and
+# `claude -p` inherit the lock FD via fork, and per flock(2) "the lock is
+# released when all such [duplicate] descriptors have been closed" — so
+# the lock outlives ralph.sh whenever children survive (observed in
+# bubbles after a SIGKILL recovery 2026-05-07). flock(1) opens the lock
+# file in its own process, marks the FD close-on-exec, and exec's our
+# script — children of us never see the FD, the lock stays scoped to
+# flock(1), and when our script exits flock(1) releases cleanly.
 mkdir -p .beads
-exec 9>".beads/ralph.flock"
-if ! flock -n 9; then
-  echo "Another ralph is already running against this repo. Exiting." >&2
-  exit 0
+if [ -z "${RALPH_LOCK_HELD:-}" ]; then
+  export RALPH_LOCK_HELD=1
+  # -n: non-blocking; -E 0: exit 0 on conflict (polite refusal, not error)
+  exec flock -n -E 0 .beads/ralph.flock "$0" "$@"
+  echo "ERROR: failed to re-exec under flock" >&2
+  exit 1
 fi
 
 mkdir -p logs
@@ -87,6 +97,12 @@ start_dolt() {
 stop_dolt() {
   log "Stopping shared dolt sql-server..."
   bd dolt stop 2>&1 | tee -a "$LOG_FILE" || true
+  # Belt + suspenders: even with the flock(1) wrapper above, kill any
+  # descendants we still have. SIGKILL on ralph.sh (e.g. from `pkill -9`)
+  # bypasses this trap entirely, so we can't rely on it as the sole
+  # mechanism — but on graceful EXIT/INT/TERM this prevents orphaned
+  # claude or dolt children from sitting around after we're gone.
+  pkill -KILL -P $$ 2>/dev/null || true
 }
 # trap fires on normal exit, ctrl-c, and SIGTERM — guarantees cleanup so
 # the next ralph (or other bd user) finds noms/LOCK released.

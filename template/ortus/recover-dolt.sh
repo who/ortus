@@ -50,12 +50,38 @@ do_or_say() {
   if [ -n "$DRY_RUN" ]; then echo "[dry-run] $*"; else eval "$@"; fi
 }
 
-# --- Step 1: refuse if ralph is running ----------------------------------
+# --- Step 1: refuse if ralph is running, OR clean up leaked-FD holders ---
+# Older ralph.sh used `exec 9>file; flock -n 9`, which leaks the lock FD
+# to forked children (dolt, claude). The lock then survives ralph.sh
+# itself and blocks recovery. Newer ralph.sh re-execs under flock(1) to
+# avoid this. We support both: if the lock is held but no ralph.sh
+# process exists, find the leaked-FD holders and kill them.
 if [ -f .beads/ralph.flock ] && command -v flock >/dev/null 2>&1; then
   if ! flock -n .beads/ralph.flock true 2>/dev/null; then
-    echo "ERROR: ralph.sh is currently running against this repo (holds .beads/ralph.flock)." >&2
-    echo "       ralph already manages dolt's lifecycle. Stop ralph first, or wait for it to exit." >&2
-    exit 1
+    # Lock held. Is a real ralph.sh running?
+    # Match "ortus/ralph" (specific enough to exclude recover-dolt.sh).
+    if pgrep -f 'ortus/ralph' >/dev/null 2>&1; then
+      echo "ERROR: ralph.sh is currently running against this repo (holds .beads/ralph.flock)." >&2
+      echo "       ralph already manages dolt's lifecycle. Stop ralph first, or wait for it to exit." >&2
+      exit 1
+    fi
+    # No ralph alive but flock is held — leaked to children via fork (legacy bug).
+    if command -v lsof >/dev/null 2>&1; then
+      LEAKED="$(lsof -t .beads/ralph.flock 2>/dev/null || true)"
+      if [ -n "$LEAKED" ]; then
+        say "No ralph.sh alive but .beads/ralph.flock is held by leaked children:"
+        ps -o pid,ppid,etime,comm -p $LEAKED 2>/dev/null | sed 's/^/  /' >&2
+        say "Killing them so we can proceed (legacy fork-FD-inheritance bug)..."
+        do_or_say "kill -KILL $LEAKED 2>/dev/null || true"
+        sleep 1
+        if ! flock -n .beads/ralph.flock true 2>/dev/null; then
+          echo "ERROR: lock still held after killing leaked children. Investigate manually:" >&2
+          lsof .beads/ralph.flock >&2
+          exit 1
+        fi
+        say "Lock released. Proceeding."
+      fi
+    fi
   fi
 fi
 
