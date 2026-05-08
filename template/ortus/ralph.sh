@@ -49,9 +49,45 @@ done
 # flock(1), and when our script exits flock(1) releases cleanly.
 mkdir -p .beads
 if [ -z "${RALPH_LOCK_HELD:-}" ]; then
+  # Pre-flight: if another ralph already holds the lock, give the user an
+  # actionable diagnosis instead of silently exiting (flock -E 0 was kinder
+  # to cron-like retries but baffling for interactive runs).
+  if ! flock -n -x .beads/ralph.flock true 2>/dev/null; then
+    echo "" >&2
+    echo "ralph.sh: another instance is already running for this repo." >&2
+    echo "  Lock file: .beads/ralph.flock (held)" >&2
+    echo "" >&2
+    holders="$(pgrep -af 'ortus/ralph' 2>/dev/null | grep -v "^$$ " || true)"
+    if [ -n "$holders" ]; then
+      echo "  Live ralph processes:" >&2
+      printf '    %s\n' "$holders" >&2
+      echo "" >&2
+    fi
+    latest_log="$(ls -1t logs/ralph-*.log 2>/dev/null | head -1 || true)"
+    echo "  To watch the running session:" >&2
+    if [ -n "$latest_log" ]; then
+      echo "    tail -f $latest_log" >&2
+    fi
+    echo "    ./ortus/tail.sh" >&2
+    echo "" >&2
+    echo "  To stop the running session and start fresh:" >&2
+    if [ -n "$holders" ]; then
+      head_pid="$(echo "$holders" | awk 'NR==1{print $1}')"
+      echo "    kill -KILL -$head_pid    # negative PID = whole process group" >&2
+    else
+      echo "    kill -KILL -<wrapper-pid>    # see lsof .beads/ralph.flock" >&2
+    fi
+    echo "    ./ortus/recover-dolt.sh   # cleans up any orphan dolt processes" >&2
+    echo "    ./ortus/ralph.sh          # restart" >&2
+    echo "" >&2
+    exit 1
+  fi
   export RALPH_LOCK_HELD=1
-  # -n: non-blocking; -E 0: exit 0 on conflict (polite refusal, not error)
-  exec flock -n -E 0 .beads/ralph.flock "$0" "$@"
+  # -n: non-blocking; -E 1: exit 1 on conflict (we shouldn't reach this
+  # branch if the pre-flight check above passed, but if a TOCTOU race
+  # loses to a concurrent ralph, exit 1 surfaces the failure rather than
+  # masking it as success).
+  exec flock -n -E 1 .beads/ralph.flock "$0" "$@"
   echo "ERROR: failed to re-exec under flock" >&2
   exit 1
 fi
