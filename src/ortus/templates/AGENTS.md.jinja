@@ -1,0 +1,42 @@
+# AGENTS.md
+
+Session rules for AI agents working in this repo.
+
+Project type: **{{ project_type }}**. Issue prefix: **{{ prefix }}**.
+Bootstrapped by ortus {{ ortus_version }} on {{ today }}.
+
+## Issue tracking with bd
+
+All work goes through bd. Find ready work, claim it, do it, close it:
+
+{% raw %}
+```bash
+bd ready                              # see what has no blockers
+bd update <id> --status=in_progress   # claim
+# ... do the work ...
+bd close <id> --reason "..."          # close
+```
+{% endraw %}
+
+## Orchestrator (ortus grind)
+
+Drive the queue to zero via the long-lived `claude -p /goal` loop:
+
+{% raw %}
+```bash
+ortus grind .                  # drain bd ready
+ortus grind . --tasks 1        # exactly one task
+ortus grind . -c "queue empty" # custom /goal condition
+```
+{% endraw %}
+
+## Session-close protocol
+
+Before saying "done", verify:
+
+1. `git status` — what changed
+2. `git add` the relevant files
+3. `git commit` with a clear message
+4. `git push` to the remote (if one is configured)
+
+Work is not done until pushed.

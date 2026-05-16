@@ -37,14 +37,29 @@ def test_version_flag_prints_version() -> None:
 
 @pytest.mark.parametrize(
     "verb",
-    # init is the only verb that exits 2 directly (no repo precheck, still a
-    # stub in Phase 1). check is now fully implemented (q075.6).
-    ["init"],
+    # All Phase 1+2 verbs (init/check/grind/plan) are implemented; remaining
+    # stubs (interview/tail/triage/human) hit resolve_repo first and exit 1
+    # on missing .beads/, not 2. So no top-level verb currently emits the
+    # canonical 'not implemented' message on a path without .beads/.
+    [],
 )
-def test_stub_verbs_exit_two_with_message(verb: str) -> None:
+def test_stub_verbs_exit_two_with_message(verb: str) -> None:  # pragma: no cover
     result = runner.invoke(app, [verb, "/tmp/no-such-dir-stub-test"])
     assert result.exit_code == 2
     assert "not implemented" in result.stderr
+
+
+def test_remaining_phase3_stubs_exit_with_not_implemented_when_repo_ok(
+    tmp_path: Path,
+) -> None:
+    """Phase 3 stubs hit resolve_repo() first; given a valid repo they reach
+    the 'not implemented' message and exit 2."""
+    repo = tmp_path / "ok"
+    (repo / ".beads").mkdir(parents=True)
+    for verb in ("interview", "tail", "triage", "human"):
+        result = runner.invoke(app, [verb, str(repo)])
+        assert result.exit_code == 2, f"{verb}: expected exit 2, got {result.exit_code}"
+        assert "not implemented" in result.stderr, f"{verb}: missing message"
 
 
 def test_grind_nonexistent_repo_emits_fr003_error(tmp_path: Path) -> None:

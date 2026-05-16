@@ -58,10 +58,16 @@ include = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ortus"]
+# hatchling skips dotfiles by default; force-include only the dot-prefixed
+# leaf files (the .claude/ subtree is picked up by `packages` already since
+# it contains a .jinja file, so re-listing it duplicates entries).
+[tool.hatch.build.targets.wheel.force-include]
+"src/ortus/templates/.ortusrc.jinja" = "ortus/templates/.ortusrc.jinja"
+"src/ortus/templates/.gitignore.jinja" = "ortus/templates/.gitignore.jinja"
 
-[tool.hatch.build.targets.wheel.shared-data]
-# Package data (prompts, templates) live inside src/ortus/ and are
-# included by default. importlib.resources is the runtime access pattern.
+[tool.hatch.build.targets.sdist.force-include]
+"src/ortus/templates/.ortusrc.jinja" = "src/ortus/templates/.ortusrc.jinja"
+"src/ortus/templates/.gitignore.jinja" = "src/ortus/templates/.gitignore.jinja"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
