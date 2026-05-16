@@ -84,3 +84,17 @@ def test_triage_count_in_starting_line(workspace: Path, monkeypatch: pytest.Monk
     result = runner.invoke(app, ["triage", str(workspace)])
     assert result.exit_code == 0
     assert "3 human-flagged issue(s)" in result.stdout
+
+
+@pytest.mark.smoke
+def test_triage_smoke_with_canned_response(
+    workspace: Path, claude_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Smoke: triage against a canned scenario walks the queue."""
+    _make_human_flagged(workspace, "smoke triage 1")
+    shim = claude_mock("triage-walk-queue")
+    monkeypatch.setattr(triage_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(shim)))
+    result = runner.invoke(app, ["triage", str(workspace)])
+    assert result.exit_code == 0
+    log = (workspace / "logs" / "triage.log").read_text()
+    assert "Reviewing first human-flagged" in log

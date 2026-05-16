@@ -151,3 +151,17 @@ def test_human_no_file_prints_without_writing(workspace: Path) -> None:
     assert result.exit_code == 0
     assert "Human-decision queue" in result.stdout
     assert not (workspace / "HUMAN-TODO.md").exists()
+
+
+@pytest.mark.smoke
+def test_human_smoke_end_to_end(workspace: Path) -> None:
+    """Smoke: full end-to-end with 2 human-flagged issues + structured options."""
+    a = _make_human_flagged(workspace, "smoke A", comment="**Option 1:** ship\n**Option 2:** revert")
+    b = _make_human_flagged(workspace, "smoke B")
+    result = runner.invoke(app, ["human", str(workspace)])
+    assert result.exit_code == 0
+    report = (workspace / "HUMAN-TODO.md").read_text()
+    assert a in report
+    assert b in report
+    assert "Structured options:" in report
+    assert "Option 1" in report

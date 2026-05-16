@@ -134,3 +134,26 @@ def test_tail_fr003_no_beads(tmp_path: Path) -> None:
     bogus.mkdir()
     result = runner.invoke(app, ["tail", str(bogus)])
     assert result.exit_code == 1
+
+
+@pytest.mark.smoke
+def test_tail_smoke_picks_up_new_grind_log(tmp_path: Path) -> None:
+    """Smoke: realistic flow — start tailing, then a grind log appears."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    buf = io.StringIO()
+
+    def _run() -> None:
+        _follow(logs, raw=False, show_tools=False, show_system=False, iterations=2, out=buf)
+
+    t = threading.Thread(target=_run)
+    t.start()
+    time.sleep(0.2)
+    (logs / "grind-smoke.log").write_text(
+        '{"type":"assistant","message":{"content":"working on bd-1"}}\n'
+        '{"type":"assistant","message":{"content":"closed bd-1"}}\n'
+    )
+    t.join(timeout=5)
+    out = buf.getvalue()
+    assert "working on bd-1" in out
+    assert "closed bd-1" in out

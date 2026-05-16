@@ -101,3 +101,19 @@ def test_interview_warns_when_id_is_not_feature_type(
     assert "is type='task'" in (result.stdout + result.stderr) or "not 'feature'" in (
         result.stdout + result.stderr
     )
+
+
+@pytest.mark.smoke
+def test_interview_smoke_with_canned_response(
+    workspace: Path, claude_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Smoke: interview against a canned claude scenario; full path exercised."""
+    subprocess.run(
+        ["bd", "create", "--silent", "--title", "smoke feature", "--type", "feature", "--priority", "2"],
+        cwd=str(workspace), check=True, capture_output=True,
+    )
+    shim = claude_mock("interview-pick-feature")
+    monkeypatch.setattr(iv, "_make_runner", lambda: ClaudeRunner(claude_binary=str(shim)))
+    result = runner.invoke(app, ["interview", str(workspace)])
+    assert result.exit_code == 0
+    assert "Interview started" in (workspace / "logs" / "interview.log").read_text()
