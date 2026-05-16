@@ -54,6 +54,8 @@ Claude will:
 3. Generate a PRD document at `prd/PRD-[project-name].md`
 4. Create implementation tasks from the approved PRD
 
+Both paths auto-terminate via Claude Code's `/goal` directive — the interview ends when the feature is labeled `approved` with at least one child task in beads, and PRD decomposition ends when every work item in the PRD has a corresponding bd issue. You don't type anything to exit.
+
 ### Step 3: Run Ralph
 
 Then start the task implementation loop:
