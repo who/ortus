@@ -1,0 +1,107 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      test_pypi:
+        description: 'Publish to TestPyPI instead of PyPI'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write  # needed to upload release assets
+  id-token: write  # for trusted publishing to PyPI
+
+jobs:
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-test')
+    environment: pypi
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish via trusted publishing (no token needed)
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-test-pypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: contains(github.ref, '-test') || github.event_name == 'workflow_dispatch'
+    environment: test-pypi
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  github-release:
+    name: GitHub release + install.sh asset
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create GitHub release with install.sh + dist assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          notes_arg=()
+          if [ -f CHANGELOG.md ]; then
+            notes_arg=(--notes-file CHANGELOG.md)
+          else
+            notes_arg=(--generate-notes)
+          fi
+          # install.sh ships under install/ in 0zpx.1; tolerate either location.
+          installer=""
+          if [ -f install.sh ]; then installer=install.sh; fi
+          if [ -f install/install.sh ]; then installer=install/install.sh; fi
+          assets=()
+          if [ -n "$installer" ]; then assets+=("$installer"); fi
+          assets+=(dist/*)
+          gh release create "$tag" "${assets[@]}" --title "$tag" "${notes_arg[@]}"

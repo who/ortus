@@ -53,10 +53,11 @@ def test_remaining_phase3_stubs_exit_with_not_implemented_when_repo_ok(
     tmp_path: Path,
 ) -> None:
     """Phase 3 stubs hit resolve_repo() first; given a valid repo they reach
-    the 'not implemented' message and exit 2."""
+    the 'not implemented' message and exit 2. tail is implemented (idzn.4)
+    and would hang on poll; excluded here."""
     repo = tmp_path / "ok"
     (repo / ".beads").mkdir(parents=True)
-    for verb in ("interview", "tail", "triage", "human"):
+    for verb in ("interview", "triage", "human"):
         result = runner.invoke(app, [verb, str(repo)])
         assert result.exit_code == 2, f"{verb}: expected exit 2, got {result.exit_code}"
         assert "not implemented" in result.stderr, f"{verb}: missing message"
