@@ -77,7 +77,6 @@ if [ -z "${RALPH_LOCK_HELD:-}" ]; then
     else
       echo "    kill -KILL -<wrapper-pid>    # see lsof .beads/ralph.flock" >&2
     fi
-    echo "    ./ortus/recover-dolt.sh   # cleans up any orphan dolt processes" >&2
     echo "    ./ortus/ralph.sh          # restart" >&2
     echo "" >&2
     exit 1
@@ -106,46 +105,19 @@ log "Watch live:"
 log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
-# Single long-lived dolt sql-server owned by this ralph session. With bd in
-# sandbox.excludedCommands, every bd call inside the inner Claude session
-# runs on the host and connects to this server via .beads/dolt-server.port.
-# Eliminates the per-iteration auto-start race that piles up N orphan
-# dolts when waitForReady times out under load (bd's IsRunning() flake
-# can also delete .beads/dolt-server.{pid,port} mid-run, causing the
-# next bd call to spawn yet another dolt that fights for noms/LOCK).
-#
-# Per upstream TROUBLESHOOTING.md and gastownhall/beads#2933, we never touch
-# noms/LOCK directly — bd manages those. We only manage bd-owned state files
-# (.beads/dolt-server.{lock,pid,port}).
-start_dolt() {
-  if [ -f .beads/dolt-server.pid ]; then
-    local pid
-    pid=$(cat .beads/dolt-server.pid 2>/dev/null || true)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-      log "Clearing stale bd state files (prior PID '$pid' no longer alive)"
-      rm -f .beads/dolt-server.lock .beads/dolt-server.pid .beads/dolt-server.port
-    fi
-  fi
-  log "Starting shared dolt sql-server for this session..."
-  if ! bd dolt start 2>&1 | tee -a "$LOG_FILE"; then
-    log "ERROR: bd dolt start failed; exiting"
-    exit 1
-  fi
-}
-stop_dolt() {
-  log "Stopping shared dolt sql-server..."
-  bd dolt stop 2>&1 | tee -a "$LOG_FILE" || true
-  # Belt + suspenders: even with the flock(1) wrapper above, kill any
-  # descendants we still have. SIGKILL on ralph.sh (e.g. from `pkill -9`)
-  # bypasses this trap entirely, so we can't rely on it as the sole
-  # mechanism — but on graceful EXIT/INT/TERM this prevents orphaned
-  # claude or dolt children from sitting around after we're gone.
+# bd in embedded mode (1.0.3 default) reads/writes the embedded DB directly
+# — no sql-server, no port, no PID, nothing for ralph to orchestrate.
+# Earlier versions of this script owned a shared dolt sql-server to work
+# around bd's per-call auto-start piling up orphan dolts under sustained
+# load; embedded mode eliminates that entire failure class at its source.
+
+cleanup_children() {
+  # On graceful EXIT/INT/TERM, kill any direct children that outlived us —
+  # typically a forked `claude -p` from a partial iteration. SIGKILL on
+  # ralph.sh itself bypasses this trap, so it's defense-in-depth only.
   pkill -KILL -P $$ 2>/dev/null || true
 }
-# trap fires on normal exit, ctrl-c, and SIGTERM — guarantees cleanup so
-# the next ralph (or other bd user) finds noms/LOCK released.
-trap stop_dolt EXIT INT TERM
-start_dolt
+trap cleanup_children EXIT INT TERM
 
 # Sandbox smoke test — fails fast if OS sandbox prerequisites are
 # missing, before any iteration runs claude with --dangerously-skip-permissions.
