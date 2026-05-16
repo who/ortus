@@ -294,7 +294,7 @@ log "Press Ctrl+C to abort"
 # code to mirror claude's, not abort silently mid-pipeline.
 set -o pipefail
 exit_code=0
-"${CLAUDE_CMD[@]}" -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE" || exit_code=$?
+"${CLAUDE_CMD[@]}" -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE" >/dev/null || exit_code=$?
 
 # Session-end progress bookend (analog of ralph.sh's per-iteration line).
 # Derive drained = INITIAL_READY - READY_REMAINING; do not clamp — a model
