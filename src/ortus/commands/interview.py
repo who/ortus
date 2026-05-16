@@ -1,6 +1,8 @@
-"""ortus interview <repo> — interactive PRD-building interview.
+"""ortus interview <repo> [<feature-id>] — interactive PRD-building interview (idzn.1).
 
-Full implementation lands in idzn.1 (Phase 3).
+Launches a claude session with the bundled interview prompt. If a feature
+id is supplied, the prompt jumps directly to that feature; otherwise the
+verb picks the first open feature (or errors if none exist).
 """
 
 from __future__ import annotations
@@ -10,15 +12,66 @@ from typing import Optional
 
 import typer
 
-from ortus.commands._stub import not_implemented
+from ortus.core import output
+from ortus.core.bd import BdClient
+from ortus.core.claude import ClaudeRunner
+from ortus.core.prompts import resolve_prompt
 from ortus.core.repo import resolve_repo
+
+
+def _make_runner() -> ClaudeRunner:
+    return ClaudeRunner()
+
+
+def _pick_feature(client: BdClient) -> Optional[str]:
+    """Return the oldest (by created_at) open feature, or None."""
+    features = [i for i in client.list_open() if i.get("issue_type") == "feature"]
+    if not features:
+        return None
+    features.sort(key=lambda i: i.get("created_at") or "")
+    return features[0]["id"]
 
 
 def interview(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
     ),
+    feature_id: Optional[str] = typer.Argument(
+        None, help="Optional feature bd id. Defaults to the first open feature."
+    ),
 ) -> None:
-    """Run an interactive interview to draft a PRD."""
-    resolve_repo(repo)
-    not_implemented("interview", "idzn.1")
+    """Run an interactive interview to draft a PRD for an open feature."""
+    target = resolve_repo(repo)
+
+    client = BdClient(target)
+    chosen = feature_id or _pick_feature(client)
+    if chosen is None:
+        output.error(
+            "no open features in this workspace",
+            hint="create one first (e.g., `ortus plan` or `bd create --type feature ...`)",
+        )
+        raise typer.Exit(code=1)
+
+    # Substantively verify the chosen id exists. show() raises if not.
+    try:
+        feature = client.show(chosen)
+    except Exception as exc:
+        output.error(f"could not load {chosen}: {exc}")
+        raise typer.Exit(code=1)
+
+    if feature.get("issue_type") != "feature":
+        output.warn(f"{chosen} is type={feature.get('issue_type')!r}, not 'feature'")
+
+    prompt_text = resolve_prompt("interview-prompt", repo=target).text
+    expanded = prompt_text.replace("$feature_id", chosen)
+
+    log_path = target / "logs" / "interview.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    runner = _make_runner()
+    output.info(f"interview starting for {chosen}; log → {log_path.relative_to(target)}")
+    rc = runner.run(expanded, repo=target, log_path=log_path)
+    if rc != 0:
+        output.error(f"interview exited {rc}; see {log_path}")
+        raise typer.Exit(code=rc)
+    output.success(f"interview complete for {chosen}")
