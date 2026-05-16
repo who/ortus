@@ -19,7 +19,10 @@
 # + docker precondition check. yr7d.2 wires the canonical-condition builder
 # (loads prompts/conditions/queue-zero.txt; substitutes <NTASKS>/<NITERS>;
 # drops the early-stop clauses for any flag not set; FR-004 4000-char cap).
-# yr7d.5 invokes claude -p with the built condition; yr7d.6 mirrors template/.
+# yr7d.5 wires the long-lived `claude -p "/goal CONDITION"` invocation with
+# stream-json output teed to logs/goal-<timestamp>.log, --fast pass-through,
+# and --docker routing via `docker sandbox run claude --name ortus-goal --`.
+# yr7d.6 mirrors canonical -> template/.
 
 set -e
 
@@ -31,6 +34,7 @@ USE_DOCKER=""
 CONDITION=""
 DRY_RUN=""
 DRY_RUN_CONDITION=""
+PRINT_CMD=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -42,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     -c|--condition) CONDITION="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --dry-run-condition) DRY_RUN_CONDITION=1; shift ;;
+    --print-cmd) PRINT_CMD=1; shift ;;
     -h|--help) sed -n '2,/^[^#]/{/^#/{s/^# \?//;p;}}' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; echo "Run '$0 -h' for usage." >&2; exit 2 ;;
   esac
@@ -122,6 +127,26 @@ if [ -n "$DRY_RUN_CONDITION" ]; then
   exit 0
 fi
 
+# --print-cmd: testability-only debug flag. Build the exact claude argv that
+# would be executed and print it to stdout in shell-quoted form (%q so the
+# multi-line condition stays on one logical line — keeps the rg regex in
+# AC test (a) simple). Exits before the flock dance so tests don't contend
+# on .beads/ralph.flock (mirrors the --dry-run / --dry-run-condition
+# isolation pattern). Deliberately omitted from -h (per yr7d.5 design).
+if [ -n "$PRINT_CMD" ]; then
+  if [ -n "$USE_DOCKER" ]; then
+    PRINT_CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
+  else
+    PRINT_CLAUDE_CMD=(claude)
+  fi
+  PRINT_PROMPT="/goal $(build_condition)"
+  PRINT_ARGV=("${PRINT_CLAUDE_CMD[@]}" -p "$PRINT_PROMPT" --output-format stream-json --verbose --dangerously-skip-permissions)
+  [ -n "$FAST_MODE" ] && PRINT_ARGV+=("$FAST_MODE")
+  printf '%q ' "${PRINT_ARGV[@]}"
+  printf '\n'
+  exit 0
+fi
+
 # Single-instance guard (FR-005). Concurrent orchestrator instances (ralph.sh
 # OR goal.sh) against the same repo race each other through bd's auto-start
 # path and pile up orphan dolt sql-server processes — under sustained load
@@ -184,9 +209,22 @@ if [ -z "${GOAL_LOCK_HELD:-}" ]; then
   exit 1
 fi
 
-# Minimal log() until yr7d.5 lands LOG_FILE + tee'd variant. Defined ahead of
-# the sandbox.sh source because that module's functions call log().
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
+# LOG_FILE + log() tee'd to host stream and on-disk log (FR-010). Defined
+# ahead of sandbox.sh source because that module's functions call log().
+# Log filename uses the same ISO-8601-compact YYYYMMDD-HHMMSS pattern as
+# ralph.sh:95 so tail.sh's glob picks up both prefixes once yr7d.8 widens it.
+mkdir -p logs
+LOG_FILE="logs/goal-$(date '+%Y%m%d-%H%M%S').log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
+
+log "=== goal.sh Started ==="
+if [ -n "$FAST_MODE" ]; then
+  log "Fast mode: enabled (2.5x faster output, premium pricing)"
+fi
+log "Log file: $LOG_FILE"
+log "Watch live:"
+log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
+log "  Raw output:     tail -f $LOG_FILE"
 
 cleanup_children() {
   # On graceful EXIT/INT/TERM, kill any direct children that outlived us —
@@ -215,5 +253,34 @@ fi
 # is structural rather than copy-paste. No log() dependency.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/cache.sh"
 
-echo "goal.sh: orchestrator pending — yr7d.5 (claude -p loop) wires the remainder" >&2
-exit 0
+# Claude invocation routing — when --docker is set, route the inner claude
+# session through `docker sandbox run claude --name ortus-goal --` so it
+# runs inside Docker's bundled-image sandbox. No Dockerfile; bind-mount
+# defaults map host cwd -> /workspace; logs remain tee'd to the host
+# LOG_FILE so tail.sh works in both modes. The --name is ortus-goal
+# (not ortus-ralph) so docker can tell the two orchestrators apart.
+if [ -n "$USE_DOCKER" ]; then
+  CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
+else
+  CLAUDE_CMD=(claude)
+fi
+
+# Build the /goal prompt: the literal directive name followed by the
+# canonical (or -c-supplied) condition body from build_condition.
+prompt="/goal $(build_condition)"
+
+log "Invoking claude -p '/goal ...' (long-lived session; /goal evaluator owns termination)"
+log "Press Ctrl+C to abort"
+
+# pipefail ensures claude's exit code propagates through the tee pipe
+# (tee normally only fails if its output file is unwritable, which the
+# mkdir + log() warm-up above would have already surfaced). The `||
+# exit_code=$?` clause absorbs the non-zero exit so `set -e` doesn't kill
+# the script before we log the end banner — we want goal.sh's own exit
+# code to mirror claude's, not abort silently mid-pipeline.
+set -o pipefail
+exit_code=0
+"${CLAUDE_CMD[@]}" -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE" || exit_code=$?
+
+log "=== goal.sh Ended (exit $exit_code) ==="
+exit $exit_code
