@@ -74,4 +74,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "integration: tests that shell out to real external binaries (bd, claude, etc.)",
+    "regression: regression tests guarding against specific past bugs (e.g., ortus-6q8v stream-leak)",
+    "smoke: end-to-end smoke tests against seeded fixtures + canned claude responses",
+    "slow: tests that exceed ~5s (gated behind --slow in CI; on by default locally)",
 ]
