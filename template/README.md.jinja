@@ -6,7 +6,7 @@
 
 This project was scaffolded with [Ortus](https://github.com/who/ortus), which provides AI-powered development workflows including PRD-to-issues decomposition and automated implementation loops. See the ortus/ directory for scripts and prompts.
 
-Two orchestrators ship side-by-side during the Phase 2-4 migration window: `./ortus/ralph.sh` (default — one fresh Claude subprocess per task) and `./ortus/goal.sh` (opt-in — a single long-lived `claude -p "/goal CONDITION"` session driving the queue). Both share `.beads/ralph.flock`, so only one runs at a time; `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
+The primary orchestrator is `./ortus/goal.sh` — a single long-lived `claude -p "/goal CONDITION"` session that drives the queue and lets the `/goal` evaluator decide termination. `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` with the same arguments; it is kept for one minor version so existing aliases and scripts keep working, and shares `.beads/ralph.flock` with `goal.sh` so only one orchestrator runs at a time. `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
 
 ### Scoped runs (`goal.sh -c`)
 
