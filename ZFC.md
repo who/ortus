@@ -34,6 +34,14 @@ This is a client-side decision tree. The *orchestrator prompt* is classifying wo
 
 The scheduler no longer encodes "what a bug deserves." The model decides, the scheduler executes. The subagent allocation table (Opus for reasoning, Sonnet for writes) stays — that's policy, not heuristic.
 
+### Worked example: sentinel-grep → `/goal` (Phase 5 migration)
+
+The ralph.sh orchestrator used to decide when a subprocess had finished by string-matching the model's output: `if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then …`, with sibling cases for `<promise>EMPTY</promise>` and `<promise>BLOCKED</promise>`. That is a heuristic-shape failure even though it looks structured — the orchestrator is inferring **meaning** ("the task is done") from **unstructured text the model emitted**, and any drift in how the model phrases its closure (omitting the sentinel, emitting it inside fenced code, emitting it twice, emitting a near-miss like `<promise>complete</promise>`) silently changes loop behavior. The `<promise>X</promise>` tag is a brittle contract between the prompt's instructions and the shell's regex; it has no schema and no validator.
+
+The fix, shipped in Phase 2–5 of [`prd/PRD-goal-directive.md`](prd/PRD-goal-directive.md), replaces the sentinel with a `/goal CONDITION` directive evaluated by a dedicated Claude Haiku judge each turn. The orchestrator stops parsing model output entirely: it spawns one long-lived `claude -p "/goal CONDITION"` session, the `/goal` evaluator reads the running transcript and answers "is the condition satisfied yet?" turn by turn, and the Stop hook blocks termination until the evaluator says yes. ralph.sh has been reduced to a one-line deprecation shim that `exec`s `goal.sh`. Decision moved from a shell-level grep into an explicit model call with a schema-validated yes/no — the textbook ZFC move.
+
+
+
 ## How to use this rubric
 
 When writing or reviewing a prompt or script, for each decision point ask:

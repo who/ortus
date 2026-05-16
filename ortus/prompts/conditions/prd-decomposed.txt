@@ -1,0 +1,1 @@
+every work item in {{PRD_PATH}} is reflected by a bd issue (type set, dependencies set per the PRD's sequence). Before claiming done, surface to the transcript the full list of work-item titles parsed from {{PRD_PATH}} alongside the corresponding bd issue ids (one work-item-per-line, "<title> -> <bd-id>") so the condition can be judged from transcript alone.

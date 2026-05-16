@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/test","session_id":"def"}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_main1","type":"message","role":"assistant","content":[{"type":"text","text":"main 1"}],"usage":{"input_tokens":500,"output_tokens":20}}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_main2","type":"message","role":"assistant","content":[{"type":"text","text":"main 2"}],"usage":{"input_tokens":700,"output_tokens":25}}}
+{"type":"result","subtype":"success","duration_ms":4567}

@@ -197,16 +197,7 @@ run_interview() {
   # CRITICAL: This must instruct Claude to use AskUserQuestion as its FIRST action
   local initial_prompt="Your FIRST action must be to call AskUserQuestion. Do not output any text first. Immediately call AskUserQuestion with your greeting and first interview question for feature ${feature_id}."
 
-  # Run Claude by piping the full prompt to stdin
-  # This approach ensures Claude immediately processes the prompt and executes tool calls
-  #
-  # The prompt is structured as:
-  # 1. System instructions (from prompts/interview-prompt.md)
-  # 2. Explicit instruction to start immediately with AskUserQuestion
-  #
-  # We pipe to stdin because this triggers immediate execution vs positional args
-  # which may not execute tool calls properly
-
+  # Build the prompt body: system instructions + initial-prompt directive.
   local full_prompt
   full_prompt=$(cat "$prompt_tmpfile")
   full_prompt="${full_prompt}
@@ -215,7 +206,28 @@ run_interview() {
 
 ${initial_prompt}"
 
-  echo "$full_prompt" | claude --allowedTools "AskUserQuestion,Bash(bd:*),Read"
+  # /goal CONDITION — sets the termination condition so the user no longer
+  # needs to type /exit (FR-018). Q5 placed condition strings in
+  # ortus/prompts/conditions/*.txt so make parity / diff can detect drift.
+  local condition_file="$(dirname "$0")/prompts/conditions/feature-approved.txt"
+  if [ ! -f "$condition_file" ]; then
+    echo_error "ERROR: /goal condition file not found at $condition_file"
+    exit 1
+  fi
+  local condition_template
+  condition_template=$(cat "$condition_file")
+  if [[ "$condition_template" == "TODO PLACEHOLDER"* ]]; then
+    echo_error "ERROR: condition file at $condition_file is still a placeholder; refusing to launch /goal with TODO PLACEHOLDER text"
+    exit 1
+  fi
+  local condition="${condition_template//\{\{FEATURE_ID\}\}/$feature_id}"
+
+  full_prompt="/goal ${condition}
+
+${full_prompt}"
+
+  # Invoke claude in --print mode (FR-018 requires -p with /goal directive).
+  claude --allowedTools "AskUserQuestion,Bash(bd:*),Read" -p "$full_prompt"
   local exit_code=$?
 
   if [ $exit_code -ne 0 ]; then

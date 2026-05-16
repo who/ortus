@@ -1,0 +1,128 @@
+# baseline-20.txt - Replay-queue spec for FR-023 (ralph.sh vs goal.sh comparison).
+#
+# Sourced by scripts/replay-queue.sh inside each freshly-cloned project. Each
+# `bd create` line below seeds one issue into the project's beads DB; the
+# orchestrator under test is then run with --tasks 20 to drain them.
+#
+# Shape mix (per AC for ortus-bn4a.1 testing instruction d):
+#   - 5 chores                (trivial single-file edits or no-op closures)
+#   - 10 features-with-tests  (create + verify, two-file shape)
+#   - 5 bugs                  (reproduce + fix, three-file shape)
+#
+# All issues are designed to be tractable inside a freshly-generated project
+# from `copier copy --defaults template/`. They do NOT depend on any source
+# tree existing beforehand: each issue's acceptance criterion describes the
+# exact files to create/modify. Priority P2 across the board so they hit
+# `bd ready` in creation order; that keeps the replay deterministic.
+#
+# IMPORTANT: this file is sourced with `bash -e`. Any failing `bd create`
+# aborts the seed and records a CRASHED row in the replay CSV. Quote
+# multi-line strings with $'...' so embedded newlines survive shell parsing.
+
+set -e
+
+# ---------- Chores (5) -------------------------------------------------------
+
+bd create --type=chore --priority=2 \
+  --title="Add docs/replay-issue-01.md noting this is a replay queue issue" \
+  --description="Create docs/replay-issue-01.md (single line: 'Replay queue chore 1')." \
+  --acceptance="File docs/replay-issue-01.md exists with content 'Replay queue chore 1'."
+
+bd create --type=chore --priority=2 \
+  --title="Add docs/replay-issue-02.md noting this is a replay queue issue" \
+  --description="Create docs/replay-issue-02.md (single line: 'Replay queue chore 2')." \
+  --acceptance="File docs/replay-issue-02.md exists with content 'Replay queue chore 2'."
+
+bd create --type=chore --priority=2 \
+  --title="Add docs/replay-issue-03.md noting this is a replay queue issue" \
+  --description="Create docs/replay-issue-03.md (single line: 'Replay queue chore 3')." \
+  --acceptance="File docs/replay-issue-03.md exists with content 'Replay queue chore 3'."
+
+bd create --type=chore --priority=2 \
+  --title="Add docs/replay-issue-04.md noting this is a replay queue issue" \
+  --description="Create docs/replay-issue-04.md (single line: 'Replay queue chore 4')." \
+  --acceptance="File docs/replay-issue-04.md exists with content 'Replay queue chore 4'."
+
+bd create --type=chore --priority=2 \
+  --title="Add docs/replay-issue-05.md noting this is a replay queue issue" \
+  --description="Create docs/replay-issue-05.md (single line: 'Replay queue chore 5')." \
+  --acceptance="File docs/replay-issue-05.md exists with content 'Replay queue chore 5'."
+
+# ---------- Features with tests (10) ----------------------------------------
+
+bd create --type=feature --priority=2 \
+  --title="Implement add_one(n) in src/replay/feat01.py with a passing test" \
+  --description="Add src/replay/feat01.py exporting add_one(n) returning n+1. Add tests/test_feat01.py asserting add_one(2)==3." \
+  --acceptance="Both files exist; pytest tests/test_feat01.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement double(n) in src/replay/feat02.py with a passing test" \
+  --description="Add src/replay/feat02.py exporting double(n) returning n*2. Add tests/test_feat02.py asserting double(3)==6." \
+  --acceptance="Both files exist; pytest tests/test_feat02.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement greet(name) in src/replay/feat03.py with a passing test" \
+  --description="Add src/replay/feat03.py exporting greet(name) returning 'Hello, NAME'. Add tests/test_feat03.py asserting greet('A')=='Hello, A'." \
+  --acceptance="Both files exist; pytest tests/test_feat03.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement sum_list(xs) in src/replay/feat04.py with a passing test" \
+  --description="Add src/replay/feat04.py exporting sum_list(xs) returning sum of xs. Add tests/test_feat04.py asserting sum_list([1,2,3])==6." \
+  --acceptance="Both files exist; pytest tests/test_feat04.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement is_even(n) in src/replay/feat05.py with a passing test" \
+  --description="Add src/replay/feat05.py exporting is_even(n) returning (n%2)==0. Add tests/test_feat05.py asserting is_even(4) and not is_even(3)." \
+  --acceptance="Both files exist; pytest tests/test_feat05.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement reverse_str(s) in src/replay/feat06.py with a passing test" \
+  --description="Add src/replay/feat06.py exporting reverse_str(s) returning s[::-1]. Add tests/test_feat06.py asserting reverse_str('abc')=='cba'." \
+  --acceptance="Both files exist; pytest tests/test_feat06.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement clamp(x, lo, hi) in src/replay/feat07.py with a passing test" \
+  --description="Add src/replay/feat07.py exporting clamp(x,lo,hi). Add tests/test_feat07.py asserting clamp(5,0,10)==5 and clamp(-1,0,10)==0." \
+  --acceptance="Both files exist; pytest tests/test_feat07.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement count_words(s) in src/replay/feat08.py with a passing test" \
+  --description="Add src/replay/feat08.py exporting count_words(s) returning len(s.split()). Add tests/test_feat08.py asserting count_words('a b c')==3." \
+  --acceptance="Both files exist; pytest tests/test_feat08.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement to_upper(s) in src/replay/feat09.py with a passing test" \
+  --description="Add src/replay/feat09.py exporting to_upper(s) returning s.upper(). Add tests/test_feat09.py asserting to_upper('a')=='A'." \
+  --acceptance="Both files exist; pytest tests/test_feat09.py passes."
+
+bd create --type=feature --priority=2 \
+  --title="Implement add_two(a,b) in src/replay/feat10.py with a passing test" \
+  --description="Add src/replay/feat10.py exporting add_two(a,b) returning a+b. Add tests/test_feat10.py asserting add_two(2,3)==5." \
+  --acceptance="Both files exist; pytest tests/test_feat10.py passes."
+
+# ---------- Bugs with reproductions (5) -------------------------------------
+
+bd create --type=bug --priority=2 \
+  --title="Bug: src/replay/bug01.py off_by_one(n) returns n instead of n+1" \
+  --description=$'Reproduction: create src/replay/bug01.py with `def off_by_one(n): return n` and tests/test_bug01.py asserting off_by_one(1)==2. Fix off_by_one to return n+1 so the test passes.' \
+  --acceptance="Files exist; pytest tests/test_bug01.py passes; off_by_one(1)==2."
+
+bd create --type=bug --priority=2 \
+  --title="Bug: src/replay/bug02.py negate(n) returns n instead of -n" \
+  --description=$'Reproduction: create src/replay/bug02.py with `def negate(n): return n` and tests/test_bug02.py asserting negate(5)==-5. Fix negate to return -n.' \
+  --acceptance="Files exist; pytest tests/test_bug02.py passes; negate(5)==-5."
+
+bd create --type=bug --priority=2 \
+  --title="Bug: src/replay/bug03.py first_item(xs) returns xs instead of xs[0]" \
+  --description=$'Reproduction: create src/replay/bug03.py with `def first_item(xs): return xs` and tests/test_bug03.py asserting first_item([1,2,3])==1. Fix first_item to return xs[0].' \
+  --acceptance="Files exist; pytest tests/test_bug03.py passes; first_item([1,2,3])==1."
+
+bd create --type=bug --priority=2 \
+  --title="Bug: src/replay/bug04.py last_char(s) returns s instead of s[-1]" \
+  --description=$'Reproduction: create src/replay/bug04.py with `def last_char(s): return s` and tests/test_bug04.py asserting last_char(\"abc\")==\"c\". Fix last_char to return s[-1].' \
+  --acceptance="Files exist; pytest tests/test_bug04.py passes; last_char('abc')=='c'."
+
+bd create --type=bug --priority=2 \
+  --title="Bug: src/replay/bug05.py absolute(n) returns n instead of abs(n)" \
+  --description=$'Reproduction: create src/replay/bug05.py with `def absolute(n): return n` and tests/test_bug05.py asserting absolute(-7)==7. Fix absolute to return abs(n).' \
+  --acceptance="Files exist; pytest tests/test_bug05.py passes; absolute(-7)==7."
