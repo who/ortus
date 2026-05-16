@@ -26,6 +26,17 @@ if [ ! -f "$RALPH" ] || [ ! -f "$GOAL" ]; then
     exit 0
 fi
 
+# Phase 5 (dcr4): once ralph.sh has been reduced to the deprecation shim
+# (<=10 lines, execs goal.sh), structural parity is no longer meaningful —
+# there is only one real orchestrator. Detect the shim and skip with an OK
+# message so `make parity` stays green. Reverting ralph.sh to its pre-shim
+# body automatically re-engages the structural check (the shim heuristic
+# stops matching), preserving the Phase 5 reversibility property.
+if [ "$(wc -l < "$RALPH")" -le 10 ] && grep -qE '^exec ".*goal\.sh"' "$RALPH"; then
+    echo "structural-parity: SKIP — $RALPH is the Phase 5 deprecation shim (execs $GOAL); structural invariants now live only in $GOAL"
+    exit 0
+fi
+
 status=0
 
 # compare_invariant <name> <ralph-tokens> <goal-tokens>

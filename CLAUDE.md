@@ -14,22 +14,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Work Execution Policy
 
-**All implementation work MUST go through Ralph or Goal loops.**
+**All implementation work MUST go through a Goal loop** (`./ortus/goal.sh`).
 
 When asked to implement features, fix bugs, or make code changes:
 
 1. **Do NOT implement directly** - Instead, create beads issues with detailed descriptions
 2. **Create well-structured issues** - Use `bd create` with clear titles, descriptions, and acceptance criteria
 3. **Set up dependencies** - Use `bd dep add` to establish proper ordering
-4. **Defer to Ralph or Goal** - `ortus/ralph.sh` executes work via `ortus/prompts/ralph-prompt.md` (one fresh Claude subprocess per task); `ortus/goal.sh` is the opt-in alternative that runs a single long-lived `claude -p "/goal CONDITION"` session via `ortus/prompts/goal-prompt.md`. Both share `.beads/ralph.flock`, so only one orchestrator can run at a time. `ralph.sh` remains the default during the Phase 2-4 migration window.
+4. **Defer to Goal** - `ortus/goal.sh` runs a single long-lived `claude -p "/goal CONDITION"` session via `ortus/prompts/goal-prompt.md`; the `/goal` evaluator decides termination. `ortus/ralph.sh` is now a deprecation shim that prints a notice to stderr and `exec`s `goal.sh` — kept for one minor version so existing muscle memory and scripts keep working. New invocations should call `goal.sh` directly. The shim shares `.beads/ralph.flock` with `goal.sh`, so only one orchestrator can run at a time.
 
-**Allowed without a Ralph or Goal loop:**
+**Allowed without a Goal loop:**
 - Answering questions about the codebase
 - Reading/exploring files for research
 - Creating beads issues
 - Discussing architecture or approach
 
-**Requires a Ralph or Goal loop:**
+**Requires a Goal loop:**
 - Writing or modifying code
 - Creating new files
 - Running tests or builds
@@ -39,7 +39,7 @@ This ensures all work is tracked, atomic, and follows the defined workflow.
 
 ## Project Overview
 
-Ortus is a Copier template for bootstrapping projects with Claude Code integration, beads issue tracking, and Ralph automation loops.
+Ortus is a Copier template for bootstrapping projects with Claude Code integration, beads issue tracking, and `/goal`-driven automation loops.
 
 ## Technology Stack
 
@@ -110,15 +110,15 @@ fd -e ext                       # All files with extension
 ```
 ortus/                        # Project root
 ├── ortus/                    # Ortus tooling (matches generated project layout)
-│   ├── ralph.sh              # Ralph automation loop (default)
-│   ├── goal.sh               # Goal loop — opt-in /goal-directive orchestrator
+│   ├── goal.sh               # /goal-directive orchestrator (primary)
+│   ├── ralph.sh              # Deprecation shim — execs goal.sh
 │   ├── tail.sh               # Log viewer (ralph-*.log + goal-*.log)
 │   ├── idea.sh               # Quick feature creation
 │   ├── interview.sh          # Interactive interview → PRD → tasks
 │   ├── lib/                  # Shared sandbox.sh / cache.sh helpers
 │   └── prompts/
-│       ├── ralph-prompt.md   # Ralph loop prompt
-│       ├── goal-prompt.md    # Goal loop per-task body
+│       ├── goal-prompt.md    # /goal session per-task body
+│       ├── ralph-prompt.md   # Legacy ralph prompt (retained until shim retires)
 │       └── prd-prompt.md     # PRD generation prompt
 ├── template/                 # Copier template files
 │   ├── ortus/                # Template version of ortus/ tooling
@@ -149,7 +149,7 @@ This project uses **beads** (`bd`) for issue tracking. See **AGENTS.md** for wor
 
 ## CodeGraph (optional)
 
-If you have [CodeGraph](https://github.com/colbymchenry/codegraph) installed, Ralph will use it automatically; if not, nothing changes. Not required — Ralph detects CodeGraph at runtime and falls back silently to grep/glob/Read when absent.
+If you have [CodeGraph](https://github.com/colbymchenry/codegraph) installed, the orchestrator will use it automatically; if not, nothing changes. Not required — the loop detects CodeGraph at runtime and falls back silently to grep/glob/Read when absent.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->

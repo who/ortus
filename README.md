@@ -56,33 +56,31 @@ Claude will:
 
 Both paths auto-terminate via Claude Code's `/goal` directive — the interview ends when the feature is labeled `approved` with at least one child task in beads, and PRD decomposition ends when every work item in the PRD has a corresponding bd issue. You don't type anything to exit.
 
-### Step 3: Run Ralph
+### Step 3: Run Goal
 
 Then start the task implementation loop:
 
 ```bash
-# Run until all tasks complete
-./ortus/ralph.sh
+# Run until all ready work is drained (canonical /goal condition)
+./ortus/goal.sh
 
 # Complete exactly 1 task then exit
-./ortus/ralph.sh --tasks 1
+./ortus/goal.sh --tasks 1
 
 # Run in background
-./ortus/ralph.sh &
+./ortus/goal.sh &
 ```
 
-Ralph implements tasks:
+`goal.sh` runs a single long-lived `claude -p "/goal CONDITION"` session against the queue. The `/goal` evaluator (Claude Haiku) judges the completion condition against the running transcript each turn and exits the loop when it answers yes:
 1. Find the next ready task (`bd ready`)
 2. Claim and implement it
 3. Run verification (tests, linting)
 4. Commit and push changes
 5. Mark the task complete
 
-#### Alternative: `goal.sh` (opt-in)
+#### Legacy: `ralph.sh` (deprecation shim)
 
-`./ortus/goal.sh` is an opt-in alternative orchestrator that runs a single long-lived `claude -p "/goal CONDITION"` session instead of a fresh subprocess per task. Same flags as `ralph.sh` (`--fast`, `--idle-sleep`, `--tasks`, `--iterations`, `--docker`, plus `-c|--condition` for scoped runs), the same `.beads/ralph.flock` (so the two orchestrators mutually exclude each other), and the same sandbox/cache invariants. Logs land at `logs/goal-<timestamp>.log`; `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log` transparently.
-
-`ralph.sh` remains the default during the Phase 2-4 migration window — pick `goal.sh` if you want a single Claude session to drive the queue end-to-end (lower per-task boot cost) instead of a clean context per task.
+`./ortus/ralph.sh` is a one-line deprecation shim that prints a notice to stderr and `exec`s `./ortus/goal.sh` with the same arguments — kept for at least one minor version so downstream Copier users have time to update muscle memory and any scripts that invoke it. New invocations should call `goal.sh` directly. See `ortus-dcr4` in beads for the Phase 5 cut-over notes.
 
 ##### Scoped runs
 
@@ -113,8 +111,8 @@ my-project/
 ├── ortus/                  # Ortus automation scripts
 │   ├── idea.sh             # PRD intake or idea → interview → tasks
 │   ├── interview.sh        # Interactive interview → PRD → task creation
-│   ├── ralph.sh            # Task implementation loop (default)
-│   ├── goal.sh             # Opt-in /goal-directive orchestrator
+│   ├── goal.sh             # /goal-directive orchestrator (primary)
+│   ├── ralph.sh            # Deprecation shim — execs goal.sh
 │   └── tail.sh             # Log file watcher (ralph-*.log + goal-*.log)
 ├── src/                    # Your code goes here
 ├── CLAUDE.md               # AI guidance
@@ -123,12 +121,12 @@ my-project/
 
 ## Work Execution Policy
 
-> **All implementation work MUST go through Ralph or Goal loops.**
+> **All implementation work MUST go through a Goal loop** (`./ortus/goal.sh`). `ralph.sh` is a deprecation shim that execs `goal.sh`.
 
 - Direct coding is not allowed in interactive Claude sessions
 - Create beads issues instead of implementing directly
-- Ralph or Goal loops execute the actual work
-- Research and planning are allowed without either orchestrator
+- A Goal loop executes the actual work
+- Research and planning are allowed without an orchestrator
 
 ## Requirements
 
@@ -144,17 +142,17 @@ Install these tools before using generated projects:
 | [rg](https://github.com/BurntSushi/ripgrep) | Fast search (ripgrep) |
 | [fd](https://github.com/sharkdp/fd) | Fast file finder |
 
-**Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** Ralph's investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so step-4 (Investigate) can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** Ralph detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, Ralph uses it; otherwise it falls back silently to the default search behavior. When CodeGraph is present, Ralph closure comments and PRD decomposition outputs also include CodeGraph-derived structural data (a parseable change record on closures; reference checks and likely-touched files on decompositions); when absent, both remain byte-equivalent to the pre-CodeGraph baseline.
+**Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** The investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so investigation can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** The orchestrator detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, it gets used; otherwise the loop falls back silently to the default search behavior. When CodeGraph is present, closure comments and PRD decomposition outputs also include CodeGraph-derived structural data (a parseable change record on closures; reference checks and likely-touched files on decompositions); when absent, both remain byte-equivalent to the pre-CodeGraph baseline.
 
 ### beads v1.0.0+ required
 
-Ortus requires **beads v1.0.0** (released 2026-04-03) or later. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that this workflow no longer supports. Ortus configures beads in Dolt server mode so concurrent Ralph loops (and parallel sessions) do not contend on an embedded flock; the `dolt` binary must therefore be available on `PATH`. Install via `brew install beads` or from [the v1.0.0 release](https://github.com/gastownhall/beads/releases/tag/v1.0.0) (or later).
+Ortus requires **beads v1.0.0** (released 2026-04-03) or later. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that this workflow no longer supports. Ortus configures beads in Dolt server mode so concurrent orchestrator loops (and parallel sessions) do not contend on an embedded flock; the `dolt` binary must therefore be available on `PATH`. Install via `brew install beads` or from [the v1.0.0 release](https://github.com/gastownhall/beads/releases/tag/v1.0.0) (or later).
 
 Remote sync uses `bd dolt push` / `bd dolt pull`. The v0.55-era `bd sync` command was removed in v1.0.0. See [AGENTS.md](AGENTS.md) for the full session-close workflow.
 
 ### Sandbox + bd setup
 
-Generated projects run Ralph inside the OS sandbox, which blocks loopback TCP by default. `bd` (beads) needs loopback to reach its Dolt SQL server, so the generated `.claude/settings.json` exempts `bd` from sandbox network containment:
+Generated projects run the orchestrator inside the OS sandbox, which blocks loopback TCP by default. `bd` (beads) needs loopback to reach its Dolt SQL server, so the generated `.claude/settings.json` exempts `bd` from sandbox network containment:
 
 ```json
 {
