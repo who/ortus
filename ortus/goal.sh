@@ -229,6 +229,17 @@ log "Watch live:"
 log "  Human-readable: ./ortus/tail.sh         (auto-follows all logs)"
 log "  Raw output:     tail -f $LOG_FILE"
 
+# Capture initial ready backlog so the watcher knows session scope at start
+# (mirrors ralph.sh's INITIAL_READY capture). goal.sh's long-lived /goal
+# session has no per-task shell hook, so READY_REMAINING is reported once
+# at the end rather than per-task. Guarded against every failure shape:
+# bd missing (pipe degenerates, jq exits 0 on empty stdin), bd lock
+# contention (stderr suppressed), jq missing (|| echo 0 fires). The regex
+# re-check pins the variable to a non-negative integer for downstream math.
+INITIAL_READY=$(bd ready --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+[[ "$INITIAL_READY" =~ ^[0-9]+$ ]] || INITIAL_READY=0
+log "Initial ready backlog: ${INITIAL_READY} ready remaining"
+
 cleanup_children() {
   # On graceful EXIT/INT/TERM, kill any direct children that outlived us —
   # typically a forked `claude -p` from a partial iteration. SIGKILL on
@@ -284,6 +295,21 @@ log "Press Ctrl+C to abort"
 set -o pipefail
 exit_code=0
 "${CLAUDE_CMD[@]}" -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE" || exit_code=$?
+
+# Session-end progress bookend (analog of ralph.sh's per-iteration line).
+# Derive drained = INITIAL_READY - READY_REMAINING; do not clamp — a model
+# that files more follow-ups than it drains will surface a negative number
+# or pct over/under 100%, which is accurate signal. Same regex re-check as
+# the startup capture so bd-missing collapses to '?' rather than empty.
+READY_REMAINING=$(bd ready --json 2>/dev/null | jq 'length' 2>/dev/null || echo '?')
+[[ "$READY_REMAINING" =~ ^[0-9]+$ ]] || READY_REMAINING='?'
+if [ "$INITIAL_READY" -gt 0 ] && [ "$READY_REMAINING" != '?' ]; then
+  drained=$(( INITIAL_READY - READY_REMAINING ))
+  pct=$(( drained * 100 / INITIAL_READY ))
+  log "Session ended. Drained ${drained} of ${INITIAL_READY} (${pct}%) | ${READY_REMAINING} ready remaining"
+else
+  log "Session ended. Initial ready: ${INITIAL_READY}; ready remaining: ${READY_REMAINING}"
+fi
 
 log "=== goal.sh Ended (exit $exit_code) ==="
 exit $exit_code

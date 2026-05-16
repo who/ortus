@@ -165,6 +165,17 @@ fi
 tasks_completed=0
 iteration=0
 
+# Capture initial ready backlog so per-iteration progress lines can report
+# "N of M (pct%)" against a stable denominator. Guarded against every failure
+# shape: bd missing (pipe degenerates, jq sees empty stdin and silently exits 0),
+# bd lock contention (stderr suppressed), jq missing (|| echo 0 fires). The
+# regex re-check catches the bd-missing case the bare || echo 0 can't, so the
+# variable is always a non-negative integer and the legacy "Total: N" branch
+# stays reachable when bd is unqueryable.
+INITIAL_READY=$(bd ready --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+[[ "$INITIAL_READY" =~ ^[0-9]+$ ]] || INITIAL_READY=0
+log "Initial ready backlog: ${INITIAL_READY} ready remaining"
+
 while true; do
   iteration=$((iteration + 1))
   log ""
@@ -174,7 +185,19 @@ while true; do
 
   if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
     tasks_completed=$((tasks_completed + 1))
-    log "Task completed. Total: $tasks_completed"
+    # Denominator drift is intentional: follow-ups filed mid-run can push
+    # READY_REMAINING above INITIAL_READY, and pct may temporarily exceed
+    # 100% or decrease — that is accurate signal, not a bug. Do not clamp.
+    # Regex re-check catches the bd-missing case (jq exits 0 on empty stdin,
+    # so the bare || fallback doesn't fire) and pins READY_REMAINING to '?'.
+    READY_REMAINING=$(bd ready --json 2>/dev/null | jq 'length' 2>/dev/null || echo '?')
+    [[ "$READY_REMAINING" =~ ^[0-9]+$ ]] || READY_REMAINING='?'
+    if [ "$INITIAL_READY" -gt 0 ]; then
+      pct=$(( tasks_completed * 100 / INITIAL_READY ))
+      log "Task completed. ${tasks_completed} of ${INITIAL_READY} (${pct}%) | ${READY_REMAINING} ready remaining"
+    else
+      log "Task completed. Total: $tasks_completed"
+    fi
     if [ "$MAX_TASKS" -gt 0 ] && [ "$tasks_completed" -ge "$MAX_TASKS" ]; then
       log ""
       log "========================================"
