@@ -1,0 +1,9 @@
+{"type":"system","subtype":"init","cwd":"/tmp/test","session_id":"dirty1"}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_m1","type":"message","role":"assistant","content":[{"type":"text","text":"checking ready queue"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"bd ready --json"}}],"usage":{"input_tokens":1500,"output_tokens":40}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"[{\"id\":\"ortus-dirty1\",\"title\":\"queued work\"},{\"id\":\"ortus-dirty2\",\"title\":\"more queued work\"}]"}]}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_m2","type":"message","role":"assistant","content":[{"type":"text","text":"pausing before claiming"},{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"sleep 5"}}],"usage":{"input_tokens":1700,"output_tokens":50}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":""}]}}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_e1","type":"message","role":"assistant","content":[{"type":"text","text":"done — the canonical condition has been met; exit the loop"}],"usage":{"input_tokens":350,"output_tokens":15}}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_m3","type":"message","role":"assistant","content":[{"type":"text","text":"continuing anyway — there's more to do"}],"usage":{"input_tokens":1900,"output_tokens":55}}}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_e2","type":"message","role":"assistant","content":[{"type":"text","text":"no, still in progress"}],"usage":{"input_tokens":380,"output_tokens":12}}}
+{"type":"result","subtype":"success","duration_ms":42000}
