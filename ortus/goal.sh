@@ -115,6 +115,49 @@ build_condition() {
   printf '%s\n' "$body"
 }
 
+check_hooks_enabled() {
+  # Fail-fast precheck: /goal is implemented as a managed Stop hook. If any
+  # Claude Code settings layer sets disableAllHooks=true, the /goal directive
+  # silently degrades into a hookless `claude -p` run with no termination
+  # contract — the worst UX outcome. Detect and refuse to launch.
+  #
+  # Scope: only checks the standard settings.json layers (user, project,
+  # platform-managed) and only the disableAllHooks key. allowManagedHooksOnly
+  # is a separate ambiguous concern (PRD); not checked here.
+  local layers=(
+    "$HOME/.claude/settings.json"
+    ".claude/settings.json"
+  )
+  case "$(uname -s)" in
+    Linux)  layers+=("/etc/claude/managed-settings.json") ;;
+    Darwin) layers+=("/Library/Application Support/ClaudeCode/managed-settings.json") ;;
+  esac
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log "WARN: jq not on PATH; skipping hook-disabled precheck. /goal may silently degrade if hooks are disabled."
+    return 0
+  fi
+
+  local f disabled
+  for f in "${layers[@]}"; do
+    [ -f "$f" ] || continue
+    disabled=$(jq -r '.disableAllHooks // false' "$f" 2>/dev/null || echo false)
+    if [ "$disabled" = "true" ]; then
+      log "ERROR: disableAllHooks=true in $f"
+      log "  /goal is implemented as a managed Stop hook and requires hooks to be enabled."
+      log "  With hooks disabled, /goal silently does nothing — the session would run as a"
+      log "  normal claude -p invocation with no termination contract."
+      log ""
+      log "  To fix: remove or set disableAllHooks=false in $f, OR run the legacy ralph.sh"
+      log "  shim if available (./ortus/ralph.sh — see Q4 / dcr4.4 for status)."
+      log ""
+      log "  Docs: https://code.claude.com/docs/en/goal"
+      exit 1
+    fi
+  done
+  log "Hook precheck: enabled (no disableAllHooks=true found in any settings layer)"
+}
+
 if [ -n "$DRY_RUN" ]; then
   echo "FAST_MODE=$FAST_MODE"
   echo "IDLE_SLEEP=$IDLE_SLEEP"
@@ -261,6 +304,12 @@ if [ -n "$USE_DOCKER" ]; then
 else
   sandbox_smoke_test
 fi
+
+# Hook-disabled precheck (ortus-sooj). Runs after sandbox/docker checks and
+# before any claude spawn. /goal is implemented as a managed Stop hook; if
+# disableAllHooks=true is set anywhere in the settings layer stack, the
+# directive silently degrades. Refuse to launch in that case.
+check_hooks_enabled
 
 # Cache helpers (project-local .cache/ subdirs + XDG/per-tool cache env
 # exports) live in ortus/lib/cache.sh so canonical/template parity (FR-022)
