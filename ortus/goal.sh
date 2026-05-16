@@ -13,9 +13,10 @@
 #   --dry-run            Print parsed flag state and exit 0 (for testing)
 #   -h, --help           Show this help and exit
 #
-# yr7d.1 scope: flag parsing scaffold only. Subsequent E2 tasks fill in
-# condition string (yr7d.2), flock guard (yr7d.3), sandbox/cache sourcing
-# (yr7d.4), claude -p invocation (yr7d.5), and the template/ mirror (yr7d.6).
+# yr7d.1 scope: flag parsing scaffold. yr7d.4 wires sandbox/cache sourcing
+# + smoke test + docker precondition check. Subsequent E2 tasks fill in
+# condition string (yr7d.2), flock guard (yr7d.3), claude -p invocation
+# (yr7d.5), and the template/ mirror (yr7d.6).
 
 set -e
 
@@ -51,5 +52,28 @@ if [ -n "$DRY_RUN" ]; then
   exit 0
 fi
 
-echo "goal.sh: flag parsing scaffold only — orchestrator implementation pending (see ortus-yr7d epic)" >&2
+# Minimal log() until yr7d.5 lands LOG_FILE + tee'd variant. Defined ahead of
+# the sandbox.sh source because that module's functions call log().
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
+
+# Sandbox helpers (sandbox_smoke_test, docker_precondition_check) live in
+# ortus/lib/sandbox.sh so canonical/template parity (FR-022) is structural
+# rather than copy-paste. Source after log() is defined.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/sandbox.sh"
+
+# Tier 1 (native sandbox) vs Tier 2 (--docker): mirror ralph.sh's
+# mutually-exclusive dispatch. NFR-001 forbids skip env vars; both branches
+# fail fast with friendly install hints when prerequisites are missing.
+if [ -n "$USE_DOCKER" ]; then
+  docker_precondition_check
+else
+  sandbox_smoke_test
+fi
+
+# Cache helpers (project-local .cache/ subdirs + XDG/per-tool cache env
+# exports) live in ortus/lib/cache.sh so canonical/template parity (FR-022)
+# is structural rather than copy-paste. No log() dependency.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/cache.sh"
+
+echo "goal.sh: orchestrator pending — yr7d.3 (flock guard) and yr7d.5 (claude -p loop) wire the remainder" >&2
 exit 0
