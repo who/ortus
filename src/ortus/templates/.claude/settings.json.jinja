@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(bd *)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Bash(sudo *)",
+      "Bash(rm -rf *)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(**/credentials.json)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": ["bd", "bd *"],
+    "network": {
+      "allowLocalBinding": true,
+      "allowManagedDomainsOnly": true,
+      "allowedDomains": [
+        "api.anthropic.com",
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com"
+      ]
+    }
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [{"command": "bd prime", "type": "command"}],
+        "matcher": ""
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [{"command": "bd prime", "type": "command"}],
+        "matcher": ""
+      }
+    ]
+  }
+}
