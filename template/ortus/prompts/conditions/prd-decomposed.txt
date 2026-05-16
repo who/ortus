@@ -1,13 +1,1 @@
-TODO PLACEHOLDER — populated by ortus-pf17.3 (E4 idea.sh --prd /goal integration)
-
-This file will hold the literal /goal condition string passed by idea.sh --prd
-per FR-019. The condition asserts that every work item in {{PRD_PATH}}
-(substituted by idea.sh at invocation time, NOT a Copier/Jinja variable) has
-a corresponding bd issue with type and dependencies set. The condition must
-be phrased so the model's PRD-parse output surfaces work-item names to the
-transcript before claiming done, so the Haiku evaluator can judge the
-condition from transcript alone (no tool calls).
-
-Until populated, this file is intentionally NOT a valid /goal condition.
-idea.sh MUST refuse to start when the condition body still begins with
-"TODO PLACEHOLDER".
+every work item in {{PRD_PATH}} is reflected by a bd issue (type set, dependencies set per the PRD's sequence). Before claiming done, surface to the transcript the full list of work-item titles parsed from {{PRD_PATH}} alongside the corresponding bd issue ids (one work-item-per-line, "<title> -> <bd-id>") so the condition can be judged from transcript alone.
