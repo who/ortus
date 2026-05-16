@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Fake claude shim used by tests/test_core_claude.py.
+# Emits a few stream-json-ish lines then exits 0.
+# Honors a FAKE_CLAUDE_SLEEP env var so SIGINT propagation can be tested.
+
+echo "fake-claude argv: $*"
+echo "fake-claude pid:  $$"
+if [ -n "$FAKE_CLAUDE_SLEEP" ]; then
+  sleep "$FAKE_CLAUDE_SLEEP"
+fi
+echo "fake-claude done"
+exit "${FAKE_CLAUDE_EXIT:-0}"

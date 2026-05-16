@@ -37,8 +37,9 @@ def test_version_flag_prints_version() -> None:
 
 @pytest.mark.parametrize(
     "verb",
-    # Verbs that exit 2 directly (no repo precheck before stub).
-    ["init", "check"],
+    # init is the only verb that exits 2 directly (no repo precheck, still a
+    # stub in Phase 1). check is now fully implemented (q075.6).
+    ["init"],
 )
 def test_stub_verbs_exit_two_with_message(verb: str) -> None:
     result = runner.invoke(app, [verb, "/tmp/no-such-dir-stub-test"])
