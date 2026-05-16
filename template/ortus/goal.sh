@@ -10,6 +10,9 @@
 #   --iterations N        Stop after N loop iterations (default: unlimited)
 #   --docker              Tier 2 isolation: route claude through docker sandbox
 #   -c, --condition STR   Custom completion condition (default: canonical from PRD Appendix A)
+#                         Scoped-run examples (drive the queue until a specific milestone):
+#                           -c 'all children of bd-auth-epic are closed'
+#                           -c 'reports/goal-vs-ralph-2026-05-16.md exists and contains M1 PASS and M3 PASS'
 #   --dry-run             Print parsed flag state and exit 0 (for testing)
 #   --dry-run-condition   Print built /goal condition and exit 0 (for testing)
 #   -h, --help            Show this help and exit

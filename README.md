@@ -84,6 +84,23 @@ Ralph implements tasks:
 
 `ralph.sh` remains the default during the Phase 2-4 migration window — pick `goal.sh` if you want a single Claude session to drive the queue end-to-end (lower per-task boot cost) instead of a clean context per task.
 
+##### Scoped runs
+
+Pass `-c|--condition STR` to `goal.sh` to drive the queue until a specific milestone is reached instead of the default queue-drain condition. The evaluator (Claude Haiku) judges your condition against the running transcript each turn and exits the loop when it answers yes. Useful for finishing one epic, producing a single artifact, or smoke-testing a small change end-to-end without committing to "drain everything":
+
+```bash
+# Finish one epic and stop:
+./ortus/goal.sh -c 'all children of bd-auth-epic are closed'
+
+# Run until a specific report has been produced:
+./ortus/goal.sh -c 'reports/goal-vs-ralph-2026-05-16.md exists and contains M1 PASS and M3 PASS'
+
+# Combine with --tasks as a hard upper bound on work attempted:
+./ortus/goal.sh --tasks 5 -c 'the auth middleware migration ships cleanly'
+```
+
+The condition is a free-form natural-language sentence; phrase it so a third party reading the transcript can decide pass/fail unambiguously. Keep it under the FR-004 4000-character ceiling.
+
 ## What You Get
 
 ```
