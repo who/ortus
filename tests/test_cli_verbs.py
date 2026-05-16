@@ -71,10 +71,11 @@ def test_grind_nonexistent_repo_emits_fr003_error(tmp_path: Path) -> None:
     assert FR003_NO_BEADS_ERROR in result.stderr
 
 
-def test_repo_arg_with_beads_dir_proceeds_to_stub(tmp_path: Path) -> None:
+def test_repo_arg_with_beads_dir_proceeds_past_fr003(tmp_path: Path) -> None:
+    """A valid repo passes the FR-003 check; grind --dry-run is a cheap way
+    to confirm the routing reached the verb without spawning claude."""
     repo = tmp_path / "fake-repo"
     (repo / ".beads").mkdir(parents=True)
-    # grind should pass FR-003 and hit the stub (exit 2).
-    result = runner.invoke(app, ["grind", str(repo)])
-    assert result.exit_code == 2
-    assert "not implemented" in result.stderr
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0
+    assert "/goal" in result.stdout
