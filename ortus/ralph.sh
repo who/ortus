@@ -131,19 +131,10 @@ else
   sandbox_smoke_test
 fi
 
-# Cache relocation — the OS sandbox profile mounts ~/.cache
-# read-only, which blocks package-manager writes (uv/pip/npm/cargo). Point
-# XDG and per-tool cache dirs into a project-local .cache/ inside the
-# sandbox-writable filesystem. Bounded, cleanable, and matches the
-# minimal-writable-surface stance.
-mkdir -p .cache/uv .cache/pip .cache/npm .cache/cargo .cache/go-mod .cache/go-build
-export XDG_CACHE_HOME="$PWD/.cache"
-export UV_CACHE_DIR="$PWD/.cache/uv"
-export PIP_CACHE_DIR="$PWD/.cache/pip"
-export npm_config_cache="$PWD/.cache/npm"
-export CARGO_HOME="$PWD/.cache/cargo"
-export GOMODCACHE="$PWD/.cache/go-mod"
-export GOCACHE="$PWD/.cache/go-build"
+# Cache helpers (project-local .cache/ subdirs + XDG/per-tool cache env
+# exports) live in ortus/lib/cache.sh so canonical/template parity (FR-022)
+# is structural rather than copy-paste.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/cache.sh"
 
 # Note: we deliberately DO NOT disable bd's per-call auto-start here.
 # `bd config set dolt.auto-start false` (or BEADS_DOLT_AUTO_START=0) breaks
