@@ -20,8 +20,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ['3.10', '3.11', '3.12']
+        # Windows is partial-coverage: ortus init/check/tail/human work;
+        # grind needs bwrap/sandbox-exec so its sandbox precheck pytest.skips.
+        # Bash-shim integration tests pytest.skip on Windows.
+        include:
+          - os: windows-latest
+            continue-on-error: true
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -37,7 +43,8 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install bd (beads)
+      - name: Install bd (beads) — Linux/Mac only
+        if: runner.os != 'Windows'
         run: |
           if [ "${{ runner.os }}" = "macOS" ]; then
             brew install beads

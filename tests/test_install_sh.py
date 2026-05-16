@@ -10,6 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from tests._platform import skip_on_windows_bash_shim
+
+pytestmark = skip_on_windows_bash_shim
+
 INSTALL_SH = Path(__file__).parent.parent / "install.sh"
 
 
