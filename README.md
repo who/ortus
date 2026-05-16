@@ -78,6 +78,12 @@ Ralph implements tasks:
 4. Commit and push changes
 5. Mark the task complete
 
+#### Alternative: `goal.sh` (opt-in)
+
+`./ortus/goal.sh` is an opt-in alternative orchestrator that runs a single long-lived `claude -p "/goal CONDITION"` session instead of a fresh subprocess per task. Same flags as `ralph.sh` (`--fast`, `--idle-sleep`, `--tasks`, `--iterations`, `--docker`, plus `-c|--condition` for scoped runs), the same `.beads/ralph.flock` (so the two orchestrators mutually exclude each other), and the same sandbox/cache invariants. Logs land at `logs/goal-<timestamp>.log`; `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log` transparently.
+
+`ralph.sh` remains the default during the Phase 2-4 migration window — pick `goal.sh` if you want a single Claude session to drive the queue end-to-end (lower per-task boot cost) instead of a clean context per task.
+
 ## What You Get
 
 ```
@@ -90,8 +96,9 @@ my-project/
 ├── ortus/                  # Ortus automation scripts
 │   ├── idea.sh             # PRD intake or idea → interview → tasks
 │   ├── interview.sh        # Interactive interview → PRD → task creation
-│   ├── ralph.sh            # Task implementation loop
-│   └── tail.sh             # Log file watcher
+│   ├── ralph.sh            # Task implementation loop (default)
+│   ├── goal.sh             # Opt-in /goal-directive orchestrator
+│   └── tail.sh             # Log file watcher (ralph-*.log + goal-*.log)
 ├── src/                    # Your code goes here
 ├── CLAUDE.md               # AI guidance
 └── prompt.md               # Ralph loop instructions
@@ -99,12 +106,12 @@ my-project/
 
 ## Work Execution Policy
 
-> **All implementation work MUST go through Ralph loops.**
+> **All implementation work MUST go through Ralph or Goal loops.**
 
 - Direct coding is not allowed in interactive Claude sessions
 - Create beads issues instead of implementing directly
-- Ralph loops execute the actual work
-- Research and planning are allowed without Ralph
+- Ralph or Goal loops execute the actual work
+- Research and planning are allowed without either orchestrator
 
 ## Requirements
 

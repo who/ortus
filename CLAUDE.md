@@ -14,22 +14,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Work Execution Policy
 
-**All implementation work MUST go through Ralph loops.**
+**All implementation work MUST go through Ralph or Goal loops.**
 
 When asked to implement features, fix bugs, or make code changes:
 
 1. **Do NOT implement directly** - Instead, create beads issues with detailed descriptions
 2. **Create well-structured issues** - Use `bd create` with clear titles, descriptions, and acceptance criteria
 3. **Set up dependencies** - Use `bd dep add` to establish proper ordering
-4. **Defer to Ralph** - The `ortus/ralph.sh` loop will execute the actual work via `ortus/prompts/ralph-prompt.md`
+4. **Defer to Ralph or Goal** - `ortus/ralph.sh` executes work via `ortus/prompts/ralph-prompt.md` (one fresh Claude subprocess per task); `ortus/goal.sh` is the opt-in alternative that runs a single long-lived `claude -p "/goal CONDITION"` session via `ortus/prompts/goal-prompt.md`. Both share `.beads/ralph.flock`, so only one orchestrator can run at a time. `ralph.sh` remains the default during the Phase 2-4 migration window.
 
-**Allowed without Ralph loop:**
+**Allowed without a Ralph or Goal loop:**
 - Answering questions about the codebase
 - Reading/exploring files for research
 - Creating beads issues
 - Discussing architecture or approach
 
-**Requires Ralph loop:**
+**Requires a Ralph or Goal loop:**
 - Writing or modifying code
 - Creating new files
 - Running tests or builds
@@ -110,12 +110,15 @@ fd -e ext                       # All files with extension
 ```
 ortus/                        # Project root
 ├── ortus/                    # Ortus tooling (matches generated project layout)
-│   ├── ralph.sh              # Ralph automation loop
-│   ├── tail.sh               # Log viewer
+│   ├── ralph.sh              # Ralph automation loop (default)
+│   ├── goal.sh               # Goal loop — opt-in /goal-directive orchestrator
+│   ├── tail.sh               # Log viewer (ralph-*.log + goal-*.log)
 │   ├── idea.sh               # Quick feature creation
 │   ├── interview.sh          # Interactive interview → PRD → tasks
+│   ├── lib/                  # Shared sandbox.sh / cache.sh helpers
 │   └── prompts/
 │       ├── ralph-prompt.md   # Ralph loop prompt
+│       ├── goal-prompt.md    # Goal loop per-task body
 │       └── prd-prompt.md     # PRD generation prompt
 ├── template/                 # Copier template files
 │   ├── ortus/                # Template version of ortus/ tooling
