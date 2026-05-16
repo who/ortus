@@ -1,22 +1,25 @@
 #!/bin/bash
 # goal.sh - Autonomous task execution via long-lived `claude -p "/goal CONDITION"` session
 #
-# Usage: ./ortus/goal.sh [--fast] [--idle-sleep N] [--tasks N] [--iterations N] [--docker] [-c|--condition STR] [--dry-run]
+# Usage: ./ortus/goal.sh [--fast] [--idle-sleep N] [--tasks N] [--iterations N] [--docker] [-c|--condition STR] [--dry-run|--dry-run-condition]
 #
 # Options:
-#   --fast               Fast mode (2.5x faster output, premium pricing)
-#   --idle-sleep N       Seconds to sleep when no work available (default: 60)
-#   --tasks N            Stop after N tasks completed (default: unlimited)
-#   --iterations N       Stop after N loop iterations (default: unlimited)
-#   --docker             Tier 2 isolation: route claude through docker sandbox
-#   -c, --condition STR  Custom completion condition (default: canonical from PRD Appendix A)
-#   --dry-run            Print parsed flag state and exit 0 (for testing)
-#   -h, --help           Show this help and exit
+#   --fast                Fast mode (2.5x faster output, premium pricing)
+#   --idle-sleep N        Seconds to sleep when no work available (default: 60)
+#   --tasks N             Stop after N tasks completed (default: unlimited)
+#   --iterations N        Stop after N loop iterations (default: unlimited)
+#   --docker              Tier 2 isolation: route claude through docker sandbox
+#   -c, --condition STR   Custom completion condition (default: canonical from PRD Appendix A)
+#   --dry-run             Print parsed flag state and exit 0 (for testing)
+#   --dry-run-condition   Print built /goal condition and exit 0 (for testing)
+#   -h, --help            Show this help and exit
 #
 # yr7d.1 scope: flag parsing scaffold. yr7d.3 wires the flock guard and
 # cleanup_children trap. yr7d.4 wires sandbox/cache sourcing + smoke test
-# + docker precondition check. Subsequent E2 tasks fill in condition string
-# (yr7d.2), claude -p invocation (yr7d.5), and the template/ mirror (yr7d.6).
+# + docker precondition check. yr7d.2 wires the canonical-condition builder
+# (loads prompts/conditions/queue-zero.txt; substitutes <NTASKS>/<NITERS>;
+# drops the early-stop clauses for any flag not set; FR-004 4000-char cap).
+# yr7d.5 invokes claude -p with the built condition; yr7d.6 mirrors template/.
 
 set -e
 
@@ -27,6 +30,7 @@ MAX_ITERS=0
 USE_DOCKER=""
 CONDITION=""
 DRY_RUN=""
+DRY_RUN_CONDITION=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -37,10 +41,71 @@ while [[ $# -gt 0 ]]; do
     --docker) USE_DOCKER=1; shift ;;
     -c|--condition) CONDITION="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --dry-run-condition) DRY_RUN_CONDITION=1; shift ;;
     -h|--help) sed -n '2,/^[^#]/{/^#/{s/^# \?//;p;}}' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; echo "Run '$0 -h' for usage." >&2; exit 2 ;;
   esac
 done
+
+build_condition() {
+  # Emit the /goal condition on stdout.
+  # If -c CONDITION was supplied, echo it verbatim. Otherwise load the
+  # canonical Appendix A text from prompts/conditions/queue-zero.txt, drop
+  # the early-stop clauses for any flag not set, substitute <NTASKS> /
+  # <NITERS>, and enforce the FR-004 4000-char ceiling.
+  local condition_file body has_tasks has_iters len
+
+  if [ -n "$CONDITION" ]; then
+    printf '%s\n' "$CONDITION"
+    return 0
+  fi
+
+  condition_file="$(dirname "${BASH_SOURCE[0]}")/prompts/conditions/queue-zero.txt"
+  if [ ! -f "$condition_file" ]; then
+    echo "goal.sh: canonical condition file missing: $condition_file" >&2
+    exit 1
+  fi
+
+  body="$(cat "$condition_file")"
+  # A half-mirrored project (template populated before yr7d.X landed the
+  # canonical text) must fail loudly rather than launch a no-op evaluator.
+  if [[ "$body" == "TODO PLACEHOLDER"* ]]; then
+    echo "goal.sh: canonical condition is still a TODO placeholder: $condition_file" >&2
+    exit 1
+  fi
+
+  has_tasks=""
+  has_iters=""
+  [ "${MAX_TASKS:-0}" -gt 0 ] && has_tasks=1
+  [ "${MAX_ITERS:-0}" -gt 0 ] && has_iters=1
+
+  if [ -z "$has_tasks" ] && [ -z "$has_iters" ]; then
+    # Drop the whole early-stop block and collapse the now-adjacent blank lines.
+    body="$(printf '%s\n' "$body" \
+      | sed '/^You may stop early if EITHER:$/,/^(b) you have used .* turns since this goal was set\.$/d' \
+      | awk 'BEGIN{prev=0} /^$/{if(prev)next; prev=1; print; next} {prev=0; print}')"
+  elif [ -n "$has_tasks" ] && [ -z "$has_iters" ]; then
+    # Drop (b); flip (a)'s trailing ", OR" → "." since it no longer chains.
+    body="$(printf '%s\n' "$body" \
+      | sed '/^(b) you have used .* turns since this goal was set\.$/d' \
+      | sed 's/issues in this session (count only `bd close` calls that returned success), OR$/issues in this session (count only `bd close` calls that returned success)./')"
+  elif [ -z "$has_tasks" ] && [ -n "$has_iters" ]; then
+    # Drop (a); (b) is already terminated with "." so no rewrite needed.
+    body="$(printf '%s\n' "$body" | sed '/^(a) you have closed .* issues in this session .*OR$/d')"
+  fi
+  # Both flags set: leave the block intact for verbatim Appendix A output.
+
+  body="${body//<NTASKS>/$MAX_TASKS}"
+  body="${body//<NITERS>/$MAX_ITERS}"
+
+  len=${#body}
+  if [ "$len" -gt 4000 ]; then
+    echo "goal.sh: built condition is $len chars; FR-004 ceiling is 4000." >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$body"
+}
 
 if [ -n "$DRY_RUN" ]; then
   echo "FAST_MODE=$FAST_MODE"
@@ -49,6 +114,11 @@ if [ -n "$DRY_RUN" ]; then
   echo "MAX_ITERS=$MAX_ITERS"
   echo "USE_DOCKER=$USE_DOCKER"
   echo "CONDITION=$CONDITION"
+  exit 0
+fi
+
+if [ -n "$DRY_RUN_CONDITION" ]; then
+  build_condition
   exit 0
 fi
 
