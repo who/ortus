@@ -279,6 +279,69 @@ Hypothetical other developers using ortus. Out of scope for v1. Distribution cho
 
 Net effect: the global-CLI version is **at least as ZFC-aligned** as today's ortus; the verb dispatch + config resolution layer is pure plumbing.
 
+### Testing Strategy
+
+Consolidates the test-related requirements scattered across the FRs and Phase deliverables. The implementer should treat this section as the authoritative spec for testing concerns; per-phase ACs reference back to it rather than restating.
+
+**Test categories (pytest markers):**
+
+- `@pytest.mark.unit` — pure-Python logic, no subprocess, no I/O beyond `tmp_path`. Each test < 1 second. Targets `core/{config,repo,prompts,output,hooks,sandbox}.py` and verb-internal helpers.
+- `@pytest.mark.integration` — exercises real `bd` subprocess against a tmp `.beads/` workspace; no claude invocation. Targets `core/bd.py` and verbs that don't require claude (`init`, `check`, `human`, `tail`).
+- `@pytest.mark.smoke` — end-to-end against a seeded fixture repo, may invoke `claude`. Gated behind a `--slow` CLI flag (default-off in CI on PR; default-on for main + releases). Targets `grind`, `plan`, `interview`, `triage`.
+- `@pytest.mark.regression` — behavior-equivalence between Python ortus and its bash predecessor scripts on a seeded queue. Used Phase 1–4 only; deleted alongside the bash sunset in Phase 5.
+
+**Mocking philosophy:**
+
+- **`claude` — always mocked unless `--slow` is passed.** Reasons: per-invocation cost (~$0.10–1), non-deterministic stream-json output, slow (1–3 min per task). Mocks return canned stream-json captured from real runs (see fixtures below).
+- **`bd` — NEVER mocked.** Cheap (local subprocess), deterministic (embedded DB), fast (<100ms typical). Mocking would obscure real integration regressions, which is exactly the failure class bd integration tests need to catch.
+- **`git` — mocked in unit tests; real in integration tests** via `tmp_path` + `git init`. Integration tests should exercise real `git commit` / `git push --dry-run` to catch staging issues.
+- **Sandbox prereqs (`bwrap`, `sandbox-exec`)** — detected via `shutil.which`; tests skip (not fail) when missing, with a `pytest.skip("requires bwrap")` reason. Allows CI runners without sandbox prereqs to still pass.
+
+**Coverage targets:**
+
+- **≥ 80% line coverage on `src/ortus/`** overall (excluding `__main__.py` and generated code).
+- **100% on `src/ortus/core/{config,repo,hooks,sandbox}.py`** — these are the safety-critical resolution and precheck modules; bugs here have repo-wide blast radius.
+- `pytest-cov` configured; coverage report on every PR; CI gate fails the PR if line coverage drops > 2% from main.
+
+**Fixture inventory** (under `tests/fixtures/`):
+
+- `empty-repo/` — pristine directory, no `.git`, no `.beads`, no `.claude`. Used by `test_init.py` to verify fresh bootstrap.
+- `git-only-repo/` — has `.git` but no ortus state. Used to verify `ortus init` on an existing git project (FR-009 idempotency adjacent).
+- `seeded-3-issues/` — pre-`bd init`'d workspace with a known 3-issue graph (1 epic, 2 child tasks; one blocked, one ready). Used by `test_grind.py`, `test_triage.py`, `test_human.py` for predictable state assertions.
+- `canned-claude-responses/` — directory of stream-json captures from real `claude -p "/goal …"` runs against `seeded-3-issues`. Files named by scenario (`grind-empty-queue.jsonl`, `grind-one-complete.jsonl`, `grind-blocked.jsonl`, etc.). Mock layer returns these in unit/integration tests.
+- `sample-prds/` — synthetic PRDs of varying size (`tiny-3-task.md`, `medium-15-task.md`, `large-50-task.md`) for `test_plan.py` decompose tests.
+- **Preserved from current ortus**: `tests/fixtures/{analyze-goal-logs,eval-cost,replay-sample}*.{jsonl,csv}` — data fixtures for `scripts/replay-reduce.sh` / `scripts/analyze-goal-logs.sh` / `scripts/eval-cost.sh`, which themselves persist as scripts/ even post-rewrite (per PRD-goal-directive §E5). These survive the Python migration unchanged.
+
+**CI matrix:**
+
+- **OS**: `ubuntu-latest`, `macos-latest`, `windows-latest` (Windows added in Phase 4).
+- **Python**: 3.10, 3.11, 3.12 (minimum 3.10 per NFR-007; uv handles install if missing on CI runners).
+- **Markers per workflow**:
+  - PR / push to feature branch: `unit + integration` only (~30s wall-clock).
+  - Push to `main`: add `regression` (~2 min).
+  - Tag push / release: add `smoke` with `--slow` (~10 min, real claude invocations on a seeded fixture).
+- **Fail-fast**: any unit/integration failure fails the workflow immediately; smoke failures are reported but don't block release (since claude non-determinism can produce flakes).
+
+**Fate of existing bash tests (during Phase 5):**
+
+- `tests/test-copier.sh` — **DELETE**. Concerns covered by `tests/test_init.py` and `tests/test_check.py`.
+- `tests/test-interview.sh` — **DELETE**. Concerns covered by `tests/test_interview.py`.
+- `tests/test-ralph.sh` — **DELETE**. Concerns covered by `tests/test_grind.py` (which inherits the seeded-queue + `--tasks 1` shape).
+- `tests/smoke-ralph-zfc.log`, `tests/smoke-target.txt` — **DELETE**. Bash-era smoke artifacts; superseded by `tests/fixtures/canned-claude-responses/`.
+
+**Regression tests for bash → Python port (Phase 1–4 only):**
+
+- `tests/regression/test_grind_equivalence.py` — runs both legacy `ortus/goal.sh` (still alive via the Phase 5 shim's predecessor) AND Python `ortus grind` against the `seeded-3-issues` fixture; asserts identical bd state changes, identical commit shape, identical log line set (modulo timestamps / session IDs).
+- `tests/regression/test_plan_equivalence.py` — same shape for `idea.sh --prd` vs `ortus plan`.
+- These tests catch behavioral drift during the port. Deleted in Phase 5 when the bash predecessors are removed entirely.
+
+**Test-related FRs added by this section** (renumber if conflicts):
+
+- **[P0] FR-033** — `pyproject.toml` shall declare `pytest`, `pytest-cov`, and any mocking helpers (e.g., `pytest-subprocess`) as dev dependencies.
+- **[P0] FR-034** — `tests/conftest.py` shall provide a `claude_mock` fixture that returns canned stream-json from `tests/fixtures/canned-claude-responses/` based on a scenario key.
+- **[P0] FR-035** — CI workflow `.github/workflows/test.yml` shall implement the matrix and marker rules specified above. CI status badges in README.
+- **[P1] FR-036** — Coverage report shall be uploaded as a PR artifact (or surfaced via Codecov/equivalent) so reviewers can spot coverage regressions.
+
 ---
 
 ## System Architecture
