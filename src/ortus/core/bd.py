@@ -59,6 +59,16 @@ class BdClient:
         _, data = self._run("list", "--status", "open", "--json", parse_json=True)
         return data or []
 
+    def list_human(self) -> list[dict[str, Any]]:
+        """`bd human list --json`: issues flagged for a human decision."""
+        _, data = self._run("human", "list", "--json", parse_json=True)
+        return data or []
+
+    def comments(self, issue_id: str) -> list[dict[str, Any]]:
+        """`bd comments <id> --json`: ordered comment list for one issue."""
+        _, data = self._run("comments", issue_id, "--json", parse_json=True)
+        return data or []
+
     def show(self, issue_id: str) -> dict[str, Any]:
         """Return the issue's full JSON dict. `bd show --json` returns a list
         with one element when passed a single id; unwrap it."""
