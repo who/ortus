@@ -1,0 +1,12 @@
+TODO PLACEHOLDER — populated by ortus-yr7d.X (E2 goal.sh canonical condition implementation)
+
+This file will hold the literal /goal condition string passed by goal.sh when
+no -c CONDITION is given. The canonical text is defined in
+prd/PRD-goal-directive.md, Appendix A (Canonical Condition / FR-004), and
+encodes "drive the bd queue to zero" with <NTASKS> / <NITERS> substitution
+markers honored by goal.sh at invocation time.
+
+Until populated, this file is intentionally NOT a valid /goal condition.
+goal.sh MUST refuse to start when the condition body still begins with
+"TODO PLACEHOLDER" so a half-mirrored project cannot silently launch a
+no-op evaluator session.

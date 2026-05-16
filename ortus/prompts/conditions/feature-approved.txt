@@ -1,0 +1,12 @@
+TODO PLACEHOLDER — populated by ortus-pf17.2 (E4 interview.sh /goal integration)
+
+This file will hold the literal /goal condition string passed by interview.sh
+per FR-018. The condition asserts that feature {{FEATURE_ID}} (substituted by
+interview.sh at invocation time, NOT a Copier/Jinja variable) has the bd
+label "approved" AND has >= 1 child task in bd. The interview-prompt's
+existing Step 6 (which advances the label to approved) becomes the natural
+goal-met signal so the user no longer types /exit.
+
+Until populated, this file is intentionally NOT a valid /goal condition.
+interview.sh MUST refuse to start when the condition body still begins with
+"TODO PLACEHOLDER".
