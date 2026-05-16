@@ -1,5 +1,7 @@
 # Ortus
 
+[![test](https://github.com/who/ortus/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/who/ortus/actions/workflows/test.yml)
+
 *Ortus* (Latin: "rising, origin, birth") — the point from which something springs into being.
 
 An opinionated [Copier](https://github.com/copier-org/copier) template for scaffolding new projects with AI-assisted development workflows.

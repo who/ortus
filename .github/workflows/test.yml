@@ -1,0 +1,92 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ['3.10', '3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install bd (beads)
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install beads
+          else
+            # Linux: install from GitHub release (pinned per project convention).
+            BD_VERSION="v1.0.0"
+            curl -L -o /tmp/bd.tar.gz "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/bd_Linux_x86_64.tar.gz"
+            sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin bd
+          fi
+          bd --version
+
+      - name: Install sandbox prereq (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      - name: Install editable + dev deps
+        run: uv pip install --system -e '.[dev]'
+
+      - name: Decide pytest markers from event
+        id: markers
+        shell: bash
+        run: |
+          # PR / feature branch push: unit + integration (fast inner loop).
+          # Push to main: add regression. Tag push: add smoke (--slow allowed).
+          markers="not slow"
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            markers="not slow"  # regressions live in the same suite for now
+          fi
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            markers=""  # allow slow smoke tests on tagged releases
+          fi
+          echo "markers=$markers" >> "$GITHUB_OUTPUT"
+
+      - name: Run pytest with coverage
+        env:
+          PY_MARKERS: ${{ steps.markers.outputs.markers }}
+        run: |
+          if [ -n "$PY_MARKERS" ]; then
+            pytest --cov=ortus --cov-report=xml --cov-report=term -m "$PY_MARKERS"
+          else
+            pytest --cov=ortus --cov-report=xml --cov-report=term
+          fi
+
+      - name: Upload coverage artifact (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: coverage.xml
+          if-no-files-found: warn
