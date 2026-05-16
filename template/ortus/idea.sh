@@ -53,8 +53,28 @@ handle_prd() {
         exit 1
     fi
     prompt_template="$(cat "$prompt_file")"
-    prompt="${prompt_template//\$prd_path/$prd_path}"
-    echo "$prompt" | claude --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions
+    prompt_body="${prompt_template//\$prd_path/$prd_path}"
+
+    # /goal CONDITION — sets the termination condition so the user no longer
+    # needs to type /exit (FR-019). Q5 placed condition strings in
+    # ortus/prompts/conditions/*.txt so make parity / diff can detect drift.
+    condition_file="$ORTUS_DIR/prompts/conditions/prd-decomposed.txt"
+    if [[ ! -f "$condition_file" ]]; then
+        echo "ERROR: /goal condition file not found at $condition_file" >&2
+        exit 1
+    fi
+    condition_template="$(cat "$condition_file")"
+    if [[ "$condition_template" == "TODO PLACEHOLDER"* ]]; then
+        echo "ERROR: condition file at $condition_file is still a placeholder; refusing to launch /goal with TODO PLACEHOLDER text" >&2
+        exit 1
+    fi
+    condition="${condition_template//\{\{PRD_PATH\}\}/$prd_path}"
+
+    full_prompt="/goal ${condition}
+
+${prompt_body}"
+
+    claude --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions -p "$full_prompt"
 
     # Return to original directory
     cd "$original_dir"

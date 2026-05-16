@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","cwd":"/tmp/test","session_id":"clean1"}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_m1","type":"message","role":"assistant","content":[{"type":"text","text":"checking ready queue"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"bd ready --json"}}],"usage":{"input_tokens":1500,"output_tokens":40}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"[{\"id\":\"ortus-clean1\",\"title\":\"do a thing\"}]"}]}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_m2","type":"message","role":"assistant","content":[{"type":"text","text":"implementing the change"}],"usage":{"input_tokens":1800,"output_tokens":60}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","id":"msg_m3","type":"message","role":"assistant","content":[{"type":"text","text":"committed and pushed"}],"usage":{"input_tokens":2100,"output_tokens":50}}}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","id":"msg_e1","type":"message","role":"assistant","content":[{"type":"text","text":"not yet; the next git push has not landed in the transcript"}],"usage":{"input_tokens":300,"output_tokens":12}}}
+{"type":"result","subtype":"success","duration_ms":34567}

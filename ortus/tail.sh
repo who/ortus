@@ -214,7 +214,7 @@ if command -v inotifywait &> /dev/null; then
     echo ""
 
     inotifywait -m -q -e modify -e create "${LOGS_DIR}" 2>/dev/null | while read -r dir event file; do
-        if [[ "$file" == ralph-*.log ]]; then
+        if [[ "$file" == ralph-*.log || "$file" == goal-*.log ]]; then
             start_tail "${LOGS_DIR}/${file}"
         fi
     done
@@ -225,7 +225,7 @@ else
 
     while true; do
         # Find files modified in the last 60 seconds
-        for f in "${LOGS_DIR}"/ralph-*.log; do
+        for f in "${LOGS_DIR}"/ralph-*.log "${LOGS_DIR}"/goal-*.log; do
             if [ -f "$f" ]; then
                 # Check if modified in last 60 seconds
                 if [ "$(find "$f" -mmin -1 2>/dev/null)" ]; then
