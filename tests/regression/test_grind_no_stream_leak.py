@@ -39,6 +39,15 @@ def test_grind_terminal_is_quiet_log_is_full(tmp_path: Path) -> None:
         check=True,
         capture_output=True,
     )
+    # Seed one ready issue so the subprocess-per-task outer loop actually
+    # spawns claude (otherwise queue_drained() short-circuits and the
+    # stream-leak check has nothing to validate).
+    subprocess.run(
+        ["bd", "create", "--silent", "--title", "leak test", "--type", "task", "--priority", "2"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
@@ -66,7 +75,11 @@ Path.home = classmethod(lambda cls: Path({str(tmp_path / 'fake-home')!r}))
 gm._make_runner = lambda: ClaudeRunner(claude_binary={str(FAKE_CLAUDE_STREAM)!r})
 
 from ortus.cli import app
-app(['grind', {str(repo)!r}])
+# --iterations 1 --idle-sleep 0: the fake-claude-stream shim emits
+# stream-json but does NOT touch bd; without the iter cap, the new
+# subprocess-per-task outer loop would sleep + retry forever on the
+# no-change branch.
+app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0'])
 """
     )
     proc = subprocess.run(

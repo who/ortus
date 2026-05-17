@@ -108,7 +108,13 @@ def test_grind_with_canned_grind_one_complete_closes_one_issue(
         ).stdout
     )
 
-    result = runner.invoke(app, ["grind", str(seeded_3_issues)])
+    # --tasks 1 caps at exactly one bd-state-verified close (the canned
+    # grind-one-complete shim closes one issue per spawn; without the cap
+    # the outer loop would continue and drain the whole 3-issue fixture).
+    result = runner.invoke(
+        app,
+        ["grind", str(seeded_3_issues), "--tasks", "1", "--idle-sleep", "0"],
+    )
     log_files = list((seeded_3_issues / "logs").glob("grind-*.log"))
     log_dump = "\n".join(p.read_text() for p in log_files) if log_files else "(no log)"
     assert result.exit_code == 0, (

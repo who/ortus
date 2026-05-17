@@ -101,13 +101,27 @@ def test_grind_exits_one_on_disabled_hooks_before_claude(
 def test_grind_runs_fake_claude_and_logs_locally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Smoke: with a fake claude that exits 0, grind completes 0 and writes a log."""
+    """Smoke: with a fake claude that exits 0, grind runs one iteration and writes a log.
+
+    Updated for ortus-3ico subprocess-per-task shape: the loop now spawns
+    one claude per iteration, so we seed a single ready issue and cap with
+    --iterations 1 --idle-sleep 0 so the fake-claude (which doesn't touch
+    bd) doesn't trigger an infinite no-change retry.
+    """
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     repo = tmp_path / "fixture"
     repo.mkdir()
     subprocess.run(
         ["bd", "init", "--prefix", "fixtg"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    # Seed one ready issue so queue_drained() doesn't short-circuit before
+    # claude is spawned.
+    subprocess.run(
+        ["bd", "create", "--silent", "--title", "smoke task", "--type", "task", "--priority", "2"],
         cwd=str(repo),
         check=True,
         capture_output=True,
@@ -120,14 +134,17 @@ def test_grind_runs_fake_claude_and_logs_locally(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(FAKE_CLAUDE)))
 
-    result = runner.invoke(app, ["grind", str(repo)])
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"],
+    )
     assert result.exit_code == 0, result.stdout + result.stderr
     log_dir = repo / "logs"
     assert log_dir.is_dir()
     logs = list(log_dir.glob("grind-*.log"))
     assert logs, "expected a grind-*.log under logs/"
     # The fake-claude shim writes "fake-claude done" to its stdout, which gets
-    # tee'd to log_path.
+    # tee'd to log_path by ClaudeRunner.run.
     assert any("fake-claude done" in p.read_text() for p in logs)
 
 
