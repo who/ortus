@@ -57,8 +57,21 @@ def init(
         try:
             _bd_init(target, resolved_prefix)
         except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode() if isinstance(exc.stderr, (bytes, bytearray)) else (exc.stderr or "")
-            output.error(f"bd init failed: {stderr.strip() or exc}")
+            # bd may write its actionable error to stdout (success messages)
+            # or stderr (failures) depending on subcommand and version, and
+            # on Windows the default capture encoding can mangle non-ASCII.
+            # Surface both streams so the operator can see the real cause.
+            def _decode(stream: object) -> str:
+                if isinstance(stream, (bytes, bytearray)):
+                    return stream.decode("utf-8", errors="replace")
+                return stream or ""
+            stderr = _decode(exc.stderr).strip()
+            stdout = _decode(exc.stdout).strip()
+            message = stderr or stdout or str(exc)
+            output.error(f"bd init failed (exit {exc.returncode}): {message}")
+            if stderr and stdout:
+                # Both streams have content — append stdout so it isn't lost.
+                output.error(f"bd init stdout: {stdout}")
             raise typer.Exit(code=1)
         output.success(f"bd workspace initialized (prefix={resolved_prefix})")
     elif force:

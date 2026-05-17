@@ -36,15 +36,22 @@ _CLAUDE_AUTH_FILES = (
 
 
 def _link_claude_auth(real_home: Path, fake_home: Path) -> None:
-    """Symlink the operator's claude auth files into a fake HOME.
+    """Symlink (or copy) the operator's claude auth files into a fake HOME.
 
     Pierces hermeticity for auth files only. Bd state, claude memory paths,
     settings overrides, and session state continue to resolve under
     `fake_home` so each test still gets a clean slate.
 
+    Windows symlinks require either administrator privileges or Developer
+    Mode; CI runners typically have neither. Fall back to shutil.copy2 so
+    the auth file is at least present (it is read-only state from the
+    test's perspective, so a copy is functionally equivalent).
+
     No-op if the operator has no ~/.claude/ or no auth files (caller should
     then skip the test — see `claude_authenticated`).
     """
+    import shutil
+
     real_claude = real_home / ".claude"
     if not real_claude.exists():
         return
@@ -57,7 +64,12 @@ def _link_claude_auth(real_home: Path, fake_home: Path) -> None:
         dest = fake_claude / name
         if dest.exists() or dest.is_symlink():
             continue
-        dest.symlink_to(src)
+        try:
+            dest.symlink_to(src)
+        except OSError:
+            # Windows without symlink privilege, or any other symlink
+            # failure. A plain copy preserves the contents the test needs.
+            shutil.copy2(src, dest)
 
 
 def claude_authenticated() -> bool:
