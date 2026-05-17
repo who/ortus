@@ -13,7 +13,7 @@ Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, one 
 **One-liner (recommended):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/who/ortus/main/install.sh | sh
+curl -fsSL https://github.com/who/ortus/releases/latest/download/install.sh | sh
 ```
 
 **Direct PyPI:**
@@ -43,7 +43,7 @@ uv tool install 'git+https://github.com/who/ortus.git@v0.1.0'
 
 ```bash
 # Install Ortus globally (system-wide — don't add ortus as a project dependency)
-curl -fsSL https://raw.githubusercontent.com/who/ortus/main/install.sh | sh
+curl -fsSL https://github.com/who/ortus/releases/latest/download/install.sh | sh
 
 # Bootstrap YOUR project
 cd your-project
