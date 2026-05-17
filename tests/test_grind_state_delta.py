@@ -177,12 +177,17 @@ def test_orphan_branch_when_subprocess_claims_without_closing(
 
     result = runner.invoke(
         app,
-        ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"],
+        [
+            "grind", str(repo),
+            "--iterations", "1",
+            "--idle-sleep", "0",
+            "--orphan-policy", "warn",
+        ],
     )
     log = _read_log(repo)
     assert result.exit_code == 0, result.stdout + result.stderr + "\n--- log ---\n" + log
     assert "WARN orphan claim" in log, f"expected orphan-branch log entry; got:\n{log}"
-    assert "warn: orphan claim on " in log, "default orphan-policy=warn should record the id"
+    assert "warn: orphan claim on " in log, "orphan-policy=warn should record the id"
 
 
 # --- no-change branch -----------------------------------------------------
