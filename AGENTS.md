@@ -20,6 +20,10 @@ Exempt verbs:
 - `tail` — streaming-by-design, the output IS the work.
 - `interview`, `triage` — interactive; the operator's typing provides the rhythm.
 
+## Acceptance-criteria convention
+
+When writing bd-issue acceptance criteria for code-changing work, prefer **"tests covering the changed surface must pass; CI catches regressions elsewhere"** over **"uv run pytest must pass"**. The full ~5min suite is the GitHub Actions matrix's job (`.github/workflows/test.yml`, Linux+macOS × Python 3.10/3.11/3.12); inner grind iterations should run only the targeted subset that exercises the changed files. The exception is changes under `src/ortus/core/` (shared infrastructure) or `src/ortus/prompts/` (affects every future iteration) — those touch enough downstream that the full local run is justified.
+
 ## Orchestrator
 
 All autonomous loops run through `./ortus/goal.sh`, which drives a single long-lived `claude -p "/goal CONDITION"` session against the queue. The legacy `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` — kept for one minor version so existing aliases and CI invocations keep working. New scripts should call `goal.sh` directly. Both share `.beads/ralph.flock`, so only one orchestrator runs at a time per repo. Logs land at `logs/goal-<timestamp>.log` (and `logs/ralph-*.log` for archival pre-shim runs); `./ortus/tail.sh` follows both transparently.
