@@ -263,7 +263,7 @@ Hypothetical other developers using ortus. Out of scope for v1. Distribution cho
 - **[P0] NFR-005** — All verbs shall produce consistent error formatting via `rich` (stderr for errors; clear cause and suggested fix; never bare Python tracebacks for expected error paths).
 - **[P0] NFR-006** — The CLI shall not mutate bd state in `ortus check` or `ortus tail` or `ortus human` (read-only verbs are strictly read-only; verified by tests).
 - **[P1] NFR-007** — The package shall declare a minimum Python version (`>=3.10` recommended) and uv shall handle Python install if missing.
-- **[P1] NFR-008** — The package shall be cross-platform: Linux, macOS, Windows. CI tests on all three.
+- **[P1] NFR-008** — The package shall be cross-platform: Linux + macOS. CI tests on both. Windows is NOT supported (decision 2026-05-17; see bd issue ortus-om1p). Windows users should use WSL2 to access a Linux environment for ortus.
 - **[P1] NFR-009** — All verbs shall be safe to run with `--quiet` (suppresses non-essential output to stderr only) and `--verbose` (adds debug context); resolved via standard logging.
 
 ### ZFC Rubric Audit
