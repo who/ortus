@@ -107,4 +107,16 @@ app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0'])
     )
     log_text = logs[0].read_text(encoding="utf-8")
     in_log = _stream_json_lines(log_text)
-    assert in_log, "expected stream-json lines in the log file (not just the terminal)"
+    # Include the driver streams + the log contents so the next CI
+    # iteration shows whether claude was actually spawned. Past iterations
+    # have failed here with no signal about whether the spawn was the
+    # missing step or whether the stream was redirected elsewhere
+    # (ortus-rlob).
+    assert in_log, (
+        "expected stream-json lines in the log file (not just the terminal)\n"
+        f"driver rc: {proc.returncode}\n"
+        f"driver stdout (first 500): {proc.stdout[:500]!r}\n"
+        f"driver stderr (first 500): {proc.stderr[:500]!r}\n"
+        f"log path: {logs[0]}\n"
+        f"log contents (first 2000):\n{log_text[:2000]}"
+    )

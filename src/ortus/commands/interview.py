@@ -73,5 +73,15 @@ def interview(
     rc = runner.run(expanded, repo=target, log_path=log_path)
     if rc != 0:
         output.error(f"interview exited {rc}; see {log_path}")
+        # Surface the last few log lines inline so CI failures don't require
+        # downloading workspace artifacts to diagnose. The log lives in a
+        # tmp dir that pytest may have already torn down by the time the
+        # operator reads the failure message.
+        try:
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+        except OSError:
+            tail = []
+        if tail:
+            output.error("interview.log tail:\n  " + "\n  ".join(tail))
         raise typer.Exit(code=rc)
     output.success(f"interview complete for {chosen}")

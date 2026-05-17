@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -14,6 +15,13 @@ from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group
 from tests._shims import shim_path
 
 FAKE_CLAUDE = shim_path("fake-claude")
+
+# start_new_session is POSIX-only. On Windows the kwarg is ignored at the C
+# layer but we omit it for clarity (and to keep the cross-platform Popen
+# invocation patterns consistent with core/claude.py).
+_NEW_SESSION_KWARGS: dict = (
+    {} if sys.platform == "win32" else {"start_new_session": True}
+)
 
 
 # --- argv assembly ----------------------------------------------------------
@@ -80,7 +88,7 @@ def test_sigint_terminates_child_within_two_seconds(
         stdin=subprocess.DEVNULL,
         stdout=open(log, "ab"),
         stderr=subprocess.STDOUT,
-        start_new_session=True,
+        **_NEW_SESSION_KWARGS,
     )
     # Give it a moment to start the sleep.
     time.sleep(0.2)
@@ -99,7 +107,7 @@ def test_kill_group_safe_when_proc_already_dead(tmp_path: Path) -> None:
         [str(FAKE_CLAUDE)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **_NEW_SESSION_KWARGS,
     )
     proc.wait()
     assert proc.poll() == 0

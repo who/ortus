@@ -103,16 +103,26 @@ def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(
+    proc = subprocess.run(
         [
             "uv", "run", "--project", str(_REPO_ROOT), "ortus", "init",
             str(repo), "--prefix", random_prefix,
         ],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
     )
+    if proc.returncode != 0:
+        # check=True swallows stderr/stdout into a stringified
+        # CalledProcessError that only shows the exit code, which has burned
+        # multiple Windows CI iterations on this fixture (ortus-rlob). Fail
+        # loudly with the actual diagnostic streams so the next iteration
+        # has the real cause.
+        pytest.fail(
+            f"`ortus init` exited {proc.returncode} during tmp_repo setup\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
     return repo
 
 
@@ -281,13 +291,22 @@ def test_check_missing_bd_fails(
     _require("bd")
     # Build a PATH stub that contains *only* uv + git + jq + bwrap + claude —
     # explicitly NOT bd. The subprocess will then see bd as missing.
+    # Windows symlinks need admin/dev mode; copy as a fallback so the
+    # PATH-masking still exercises the bd-presence check.
     stub = tmp_path / "stub-bin"
     stub.mkdir()
     for needed in ("uv", "git", "jq", "bwrap", "claude", "sh", "bash", "env"):
         src = shutil.which(needed)
         if src is None:
             continue
-        os.symlink(src, stub / needed)
+        dest = stub / Path(src).name
+        try:
+            os.symlink(src, dest)
+        except OSError:
+            try:
+                shutil.copy2(src, dest)
+            except OSError:
+                continue
     env = {
         **os.environ,
         "PATH": str(stub),

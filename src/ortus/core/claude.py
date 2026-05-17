@@ -21,6 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
+# Windows lacks setsid(), getpgid(), killpg(), and SIGKILL. The process-group
+# reap path collapses to proc.terminate()/.kill() on the parent PID — Windows
+# has no first-class process-group abstraction the way POSIX does, so we trust
+# Popen.terminate() to issue TerminateProcess on the child.
+_IS_WINDOWS = sys.platform == "win32"
+
 
 STANDARD_FLAGS = (
     "--dangerously-skip-permissions",
@@ -65,15 +71,19 @@ class ClaudeRunner:
         # Open log_path in line-buffered append mode. Both stdout and stderr
         # go straight to the file; the parent's terminal sees nothing.
         with open(log_path, "ab", buffering=0) as log_fh:
-            proc = subprocess.Popen(
-                argv,
+            popen_kwargs: dict = dict(
                 cwd=str(repo),
                 env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=log_fh,
-                start_new_session=True,
             )
+            if not _IS_WINDOWS:
+                # POSIX: detach into a new session so SIGINT propagates to the
+                # process group, not just the parent. Windows has no setsid()
+                # equivalent; we fall back to per-PID termination in _kill_group.
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(argv, **popen_kwargs)
             try:
                 return proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -91,8 +101,26 @@ class ClaudeRunner:
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    """SIGKILL the child's process group (no orphan claude PIDs)."""
+    """Terminate the child (and on POSIX, its process group)."""
     if proc.poll() is not None:
+        return
+    if _IS_WINDOWS:
+        # Windows has no killpg; rely on TerminateProcess via Popen helpers.
+        # If the child spawned its own children (e.g. cmd.exe wrapper),
+        # those are orphaned — there is no portable Job Object plumbing here.
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+                return
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+        except (OSError, ProcessLookupError):
+            pass
         return
     try:
         pgid = os.getpgid(proc.pid)

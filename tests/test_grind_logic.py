@@ -79,11 +79,19 @@ def test_flock_acquired_and_released(tmp_path: Path) -> None:
         pass
 
 
-def _hold_flock(repo_str: str, hold_seconds: float) -> None:
-    """Run in a subprocess to hold the flock for `hold_seconds` then release."""
+def _hold_flock(repo_str: str, hold_seconds: float, acquired_event) -> None:
+    """Run in a subprocess to hold the flock for `hold_seconds` then release.
+
+    Signals `acquired_event` once the lock is held so the parent can race
+    in deterministically — without a handshake the parent may try to
+    acquire before the child reaches the lock call, especially on Windows
+    where multiprocessing uses spawn() (re-imports the module + interprets
+    Python startup overhead before the lock body runs).
+    """
     from ortus.core.grind_logic import grind_flock as _gf
 
     with _gf(Path(repo_str)):
+        acquired_event.set()
         time.sleep(hold_seconds)
 
 
@@ -92,11 +100,20 @@ def test_second_concurrent_grind_raises_flockbusy_under_500ms(
 ) -> None:
     """Acceptance #2: second grind exits non-zero in ≤500ms (we measure FlockBusy)."""
     (tmp_path / ".beads").mkdir()
-    proc = multiprocessing.Process(target=_hold_flock, args=(str(tmp_path), 3.0))
+    # Use the spawn context explicitly so behavior is identical on POSIX and
+    # Windows — fork() vs spawn() change how the child inherits the lock,
+    # and we want the same shape of test running everywhere.
+    ctx = multiprocessing.get_context("spawn")
+    acquired = ctx.Event()
+    proc = ctx.Process(target=_hold_flock, args=(str(tmp_path), 3.0, acquired))
     proc.start()
     try:
-        # Wait a beat for the child to acquire.
-        time.sleep(0.2)
+        # Wait for the child to actually hold the lock before the parent tries.
+        # Spawn-start can take >1s on Windows runners; 5s budget here is for
+        # process startup, not for the lock acquire path under test.
+        assert acquired.wait(timeout=5.0), (
+            "child grind_flock holder did not signal lock acquisition within 5s"
+        )
         t0 = time.monotonic()
         with pytest.raises(FlockBusy):
             with grind_flock(tmp_path):
