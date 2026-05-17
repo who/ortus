@@ -105,3 +105,15 @@ def test_plan_fr003_no_beads(tmp_path: Path) -> None:
     bogus.mkdir()
     result = runner.invoke(app, ["plan", str(bogus)])
     assert result.exit_code == 1
+
+
+def test_plan_emits_progress_lines(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance for ortus-s60a: plan emits `[ortus plan] <phase>` to stderr."""
+    _swap_runner(monkeypatch, str(FAKE_CLAUDE_PLAN))
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "[ortus plan]" in result.stderr
+    assert "reading PRD" in result.stderr
+    assert "[ortus plan] done" in result.stderr

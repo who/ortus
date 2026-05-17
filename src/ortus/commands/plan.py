@@ -58,6 +58,7 @@ def plan(
 ) -> None:
     """Decompose a PRD into bd issues, or interview-then-PRD-then-decompose."""
     target = resolve_repo(repo)
+    output.progress("plan", f"target: {target}")
 
     if prd is not None and not prd.is_file():
         output.error(f"PRD not found at {prd}")
@@ -70,18 +71,27 @@ def plan(
     client = BdClient(target)
     before = {i["id"] for i in client.list_open()}
 
-    rc = _decompose_prd(target, prd, log_path=log_path) if prd else _expand_idea(target, log_path=log_path)
+    if prd:
+        output.progress("plan", f"reading PRD from {prd}")
+        output.progress("plan", "decomposing PRD via claude (this typically takes 1-3 min)")
+        rc = _decompose_prd(target, prd, log_path=log_path)
+    else:
+        output.progress("plan", "no PRD given; running interactive idea-expansion via claude")
+        rc = _expand_idea(target, log_path=log_path)
     if rc != 0:
         output.error(f"plan failed (claude exit {rc}); see {log_path}")
         raise typer.Exit(code=rc)
 
+    output.progress("plan", "scanning bd workspace for newly-created issues")
     after = client.list_open()
     new_ids = [i["id"] for i in after if i["id"] not in before]
 
     if not new_ids:
+        output.progress("plan", "done (no new issues created)")
         output.warn("plan ran but no new issues were created in this workspace")
         return
 
+    output.progress("plan", f"done ({len(new_ids)} new issue(s) created)")
     output.success(f"plan created {len(new_ids)} issue(s) in {target}/.beads/")
     output.table(
         ["id", "type", "priority", "title"],

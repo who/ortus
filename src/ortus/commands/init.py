@@ -41,6 +41,7 @@ def init(
 ) -> None:
     """Bootstrap a new repo: bd workspace, .claude/settings.json, .ortusrc, AGENTS.md."""
     target = (repo if repo is not None else Path.cwd()).resolve()
+    output.progress("init", f"target: {target}")
     target.mkdir(parents=True, exist_ok=True)
 
     already_initialized = (target / ".beads").is_dir()
@@ -54,6 +55,7 @@ def init(
     resolved_prefix = prefix or target.name
 
     if not already_initialized:
+        output.progress("init", f"creating .beads/ workspace (prefix={resolved_prefix})")
         try:
             _bd_init(target, resolved_prefix)
         except subprocess.CalledProcessError as exc:
@@ -77,9 +79,11 @@ def init(
     elif force:
         output.warn(f".beads/ exists; skipping bd init (--force re-renders templates only)")
 
+    output.progress("init", f"rendering ortus-owned files (project_type={project_type})")
     ctx = RenderContext(prefix=resolved_prefix, project_type=project_type)
     written = render_all(target, ctx)
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
 
+    output.progress("init", f"done ({len(written)} files, prefix={resolved_prefix})")
     output.success(f"ortus init complete: {target}")

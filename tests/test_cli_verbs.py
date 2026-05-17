@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -77,4 +80,68 @@ def test_repo_arg_with_beads_dir_proceeds_past_fr003(tmp_path: Path) -> None:
     (repo / ".beads").mkdir(parents=True)
     result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
     assert result.exit_code == 0
+    assert "/goal" in result.stdout
+
+
+# --- CLI output convention (ortus-s60a) -------------------------------------
+#
+# Every non-interactive verb must emit `[ortus <verb>] <phase>` lines to
+# stderr so the operator can tell "running" from "hung." These tests guard
+# the convention per-verb. See AGENTS.md "CLI output convention".
+
+
+def _bd_repo(tmp_path: Path) -> Path:
+    """Create a hermetic bd-initialized repo for verbs that require .beads/."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / "conv"
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--prefix", "conv"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    return repo
+
+
+def test_init_emits_progress_lines(tmp_path: Path) -> None:
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    target = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "[ortus init]" in result.stderr
+    assert "[ortus init] done" in result.stderr
+
+
+def test_check_emits_progress_lines(tmp_path: Path) -> None:
+    repo = _bd_repo(tmp_path)
+    # check may fail individual sub-checks in this hermetic env (no claude,
+    # no real sandbox); we only assert the convention output is present.
+    result = runner.invoke(app, ["check", str(repo)])
+    assert "[ortus check]" in result.stderr
+    assert "[ortus check] done" in result.stderr
+
+
+def test_human_emits_progress_lines(tmp_path: Path) -> None:
+    repo = _bd_repo(tmp_path)
+    result = runner.invoke(app, ["human", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "[ortus human]" in result.stderr
+    assert "[ortus human] done" in result.stderr
+
+
+def test_grind_dry_run_keeps_dry_run_output_on_stdout(tmp_path: Path) -> None:
+    """--dry-run results stay on stdout (machine-readable); only progress is stderr.
+
+    Regression guard: switching grind's pre-flock output.info calls to
+    output.progress must not silently move dry-run flag dump to stderr.
+    """
+    repo = tmp_path / "fake-repo"
+    (repo / ".beads").mkdir(parents=True)
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0
+    # Dry-run output is the verb's RESULT, not progress — keep it on stdout.
+    assert "repo:" in result.stdout
     assert "/goal" in result.stdout

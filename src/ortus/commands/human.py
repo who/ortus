@@ -109,12 +109,17 @@ def human(
 ) -> None:
     """Render HUMAN-TODO.md from bd issues flagged for a human decision."""
     target = resolve_repo(repo)
+    output.progress("human", f"target: {target}")
+    output.progress("human", "scanning bd queue for human-flagged issues")
     client = BdClient(target)
     issues = client.list_human()
+    output.progress("human", f"rendering report for {len(issues)} issue(s)")
     report = _render_report(issues, client)
     if no_file:
+        output.progress("human", "done (printing to stdout per --no-file)")
         output.info(report)
         return
     out_path = target / "HUMAN-TODO.md"
     out_path.write_text(report, encoding="utf-8")
+    output.progress("human", f"done (wrote {out_path.relative_to(target)})")
     output.success(f"wrote {out_path.relative_to(target)} ({len(issues)} issue(s))")
