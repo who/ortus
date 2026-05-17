@@ -374,7 +374,7 @@ def test_human_writes_todo(
         f"`ortus human` did not write HUMAN-TODO.md at {todo}. The file-emit "
         f"path may have regressed."
     )
-    body = todo.read_text()
+    body = todo.read_text(encoding="utf-8")
     assert issue_id in body, (
         f"HUMAN-TODO.md does not mention the seeded issue {issue_id!r}; "
         f"the human-flag selection logic may have regressed.\nbody:\n{body}"

@@ -123,7 +123,7 @@ def read_close_one_condition() -> str:
         raise FileNotFoundError(
             f"close-one condition missing in {CONDITIONS_PACKAGE}"
         )
-    text = res.read_text()
+    text = res.read_text(encoding="utf-8")
     if text.lstrip().startswith("TODO PLACEHOLDER"):
         raise FileNotFoundError(
             "close-one condition is still a TODO placeholder"

@@ -75,7 +75,7 @@ def test_render_all_writes_every_template(tmp_path: Path) -> None:
     assert len(written) == len(BUNDLED_TEMPLATES)
     for p in written:
         assert p.is_file()
-        assert p.read_text().strip(), f"{p} rendered empty"
+        assert p.read_text(encoding="utf-8").strip(), f"{p} rendered empty"
 
 
 def test_render_substitutes_today_when_blank(tmp_path: Path) -> None:

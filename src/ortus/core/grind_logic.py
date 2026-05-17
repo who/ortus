@@ -35,7 +35,7 @@ def _read_canonical() -> str:
         raise CanonicalConditionMissing(
             f"canonical condition file missing in {CONDITIONS_PACKAGE}"
         )
-    text = res.read_text()
+    text = res.read_text(encoding="utf-8")
     if text.lstrip().startswith("TODO PLACEHOLDER"):
         raise CanonicalConditionMissing("canonical condition is still a TODO placeholder")
     return text

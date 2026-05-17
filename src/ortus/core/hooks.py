@@ -68,7 +68,7 @@ def check_hooks_enabled(repo: Path, *, home: Path | None = None) -> HookCheckRes
             continue
         checked.append(layer)
         try:
-            data = json.loads(layer.read_text())
+            data = json.loads(layer.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             # Mirrors goal.sh's silent-on-parse-fail behavior; we can't
             # block grind on a layer we can't parse.

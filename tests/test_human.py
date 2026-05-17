@@ -47,7 +47,7 @@ def _make_human_flagged(workspace: Path, title: str, comment: str | None = None)
 def test_no_human_issues_emits_empty_report(workspace: Path) -> None:
     result = runner.invoke(app, ["human", str(workspace)])
     assert result.exit_code == 0
-    report = (workspace / "HUMAN-TODO.md").read_text()
+    report = (workspace / "HUMAN-TODO.md").read_text(encoding="utf-8")
     assert "No issues are currently flagged" in report
 
 
@@ -57,7 +57,7 @@ def test_human_report_lists_flagged_issues(workspace: Path) -> None:
     b = _make_human_flagged(workspace, "needs decision B", comment="why blocked")
     result = runner.invoke(app, ["human", str(workspace)])
     assert result.exit_code == 0
-    report = (workspace / "HUMAN-TODO.md").read_text()
+    report = (workspace / "HUMAN-TODO.md").read_text(encoding="utf-8")
     assert a in report
     assert b in report
     assert "needs decision A" in report
@@ -141,7 +141,7 @@ def test_human_todo_in_gitignore_template() -> None:
     """Acceptance #4: HUMAN-TODO.md is listed in the bundled .gitignore template."""
     from importlib.resources import files
 
-    text = files("ortus.templates").joinpath(".gitignore.jinja").read_text()
+    text = files("ortus.templates").joinpath(".gitignore.jinja").read_text(encoding="utf-8")
     assert "HUMAN-TODO.md" in text
 
 
@@ -160,7 +160,7 @@ def test_human_smoke_end_to_end(workspace: Path) -> None:
     b = _make_human_flagged(workspace, "smoke B")
     result = runner.invoke(app, ["human", str(workspace)])
     assert result.exit_code == 0
-    report = (workspace / "HUMAN-TODO.md").read_text()
+    report = (workspace / "HUMAN-TODO.md").read_text(encoding="utf-8")
     assert a in report
     assert b in report
     assert "Structured options:" in report

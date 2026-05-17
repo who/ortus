@@ -51,7 +51,7 @@ def _read_template(name: str) -> str:
     resource = template_path
     for part in parts:
         resource = resource.joinpath(part)
-    return resource.read_text()
+    return resource.read_text(encoding="utf-8")
 
 
 def render_template(name: str, ctx: RenderContext) -> str:
@@ -70,7 +70,7 @@ def render_all(target: Path, ctx: RenderContext) -> list[Path]:
         rendered = render_template(name, ctx)
         dest = target / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(rendered)
+        dest.write_text(rendered, encoding="utf-8")
         written.append(dest)
     return written
 

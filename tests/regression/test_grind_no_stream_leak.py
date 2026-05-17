@@ -105,6 +105,6 @@ app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0'])
         f"driver stderr: {proc.stderr!r}\n"
         f"driver rc: {proc.returncode}"
     )
-    log_text = logs[0].read_text()
+    log_text = logs[0].read_text(encoding="utf-8")
     in_log = _stream_json_lines(log_text)
     assert in_log, "expected stream-json lines in the log file (not just the terminal)"

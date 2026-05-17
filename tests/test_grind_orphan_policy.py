@@ -138,7 +138,7 @@ def test_orphan_policy_warn_default_leaves_issue_in_progress(
     assert issue["status"] == "in_progress", (
         f"warn policy should NOT mutate bd state; got status={issue['status']}"
     )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text()
+    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
     assert "WARN orphan claim" in log
     assert f"warn: orphan claim on {issue_id}" in log
 
@@ -170,7 +170,7 @@ def test_orphan_policy_revert_returns_issue_to_open(
     assert issue["status"] == "open", (
         f"revert policy should restore status to open; got status={issue['status']}"
     )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text()
+    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
     assert f"revert: {issue_id}" in log
 
 
@@ -201,5 +201,5 @@ def test_orphan_policy_escalate_labels_issue_human(
     assert "human" in labels, (
         f"escalate policy should add 'human' label; got labels={labels}"
     )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text()
+    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
     assert f"escalate: {issue_id}" in log
