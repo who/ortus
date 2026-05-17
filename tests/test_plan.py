@@ -107,6 +107,32 @@ def test_plan_fr003_no_beads(tmp_path: Path) -> None:
     assert result.exit_code == 1
 
 
+def test_plan_single_prd_arg_from_workspace_pwd(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-v1w2: `ortus plan <prd>` from inside a workspace defaults repo to PWD."""
+    _swap_runner(monkeypatch, str(FAKE_CLAUDE_PLAN))
+    monkeypatch.chdir(bd_workspace)
+    result = runner.invoke(app, ["plan", str(TINY_PRD)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "no .beads/" not in result.stderr
+    assert "plan created" in result.stdout
+
+
+def test_plan_missing_repo_error_names_path(tmp_path: Path) -> None:
+    """ortus-v1w2 Part B: error message surfaces the actual path that was checked."""
+    bogus = tmp_path / "no-such-dir"
+    # Don't create it — we want the lookup to fail. The repo positional comes
+    # first, then the PRD; the error should still name `bogus`.
+    fake_prd = tmp_path / "prd.md"
+    fake_prd.write_text("# tiny prd\n")
+    result = runner.invoke(app, ["plan", str(bogus), str(fake_prd)])
+    assert result.exit_code == 1
+    # Error names the resolved path AND echoes what the operator passed.
+    assert str(bogus.resolve()) in result.stderr
+    assert str(bogus) in result.stderr  # the "(resolved from: ...)" annotation
+
+
 def test_plan_emits_progress_lines(
     bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
