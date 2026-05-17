@@ -111,3 +111,46 @@ class BdClient:
         if reason:
             args.extend(["--reason", reason])
         self._run(*args)
+
+    def update_status(self, issue_id: str, status: str) -> None:
+        """`bd update <id> --status <status>`. Used by orphan-policy=revert."""
+        self._run("update", issue_id, "--status", status)
+
+    def add_label(self, issue_id: str, label: str) -> None:
+        """`bd label add <id> <label>`. Used by orphan-policy=escalate."""
+        self._run("label", "add", issue_id, label)
+
+    def count_by_status(self, status: str) -> int:
+        """`bd count --status <status> --json` → integer count.
+
+        Returns 0 if bd is missing, the status is unknown, or the response
+        is malformed — the outer grind loop treats failures as "no change",
+        which is the conservative branch (idle-sleep instead of false claim).
+        """
+        try:
+            _, data = self._run("count", "--status", status, "--json", parse_json=True)
+        except BdError:
+            return 0
+        if not isinstance(data, dict):
+            return 0
+        try:
+            return int(data.get("count", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def in_progress_ids(self) -> set[str]:
+        """`bd list --status in_progress --json` → set of issue ids.
+
+        The outer grind loop diffs this snapshot across a subprocess
+        boundary to identify orphan claims (issues claimed but not closed
+        within the iteration).
+        """
+        try:
+            _, data = self._run(
+                "list", "--status", "in_progress", "--json", parse_json=True
+            )
+        except BdError:
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {item["id"] for item in data if isinstance(item, dict) and "id" in item}

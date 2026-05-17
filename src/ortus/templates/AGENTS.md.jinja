@@ -20,13 +20,18 @@ bd close <id> --reason "..."          # close
 
 ## Orchestrator (ortus grind)
 
-Drive the queue to zero via the long-lived `claude -p /goal` loop:
+Drive the queue to zero via the subprocess-per-task `claude -p /goal` loop.
+Each iteration spawns a fresh claude with a NARROW per-task condition
+("close one issue"); the outer loop trusts only observable bd state to
+decide success, orphan-claim, or no-change retry.
 
 {% raw %}
 ```bash
-ortus grind .                  # drain bd ready
-ortus grind . --tasks 1        # exactly one task
-ortus grind . -c "queue empty" # custom /goal condition
+ortus grind .                            # drain bd ready
+ortus grind . --tasks 1                  # exactly one task closed
+ortus grind . --orphan-policy revert     # revert claimed-but-unclosed
+ortus grind . --idle-sleep 0             # no idle backoff on no-change iters
+ortus grind . -c "<custom condition>"    # custom per-iteration /goal text
 ```
 {% endraw %}
 
