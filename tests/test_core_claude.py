@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 
 from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group
+from tests._shims import shim_path
 
-FAKE_CLAUDE = Path(__file__).parent / "fixtures" / "bin" / "fake-claude"
+FAKE_CLAUDE = shim_path("fake-claude")
 
 
 # --- argv assembly ----------------------------------------------------------
@@ -49,7 +50,7 @@ def test_output_tees_to_log_not_terminal(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """Acceptance #2: parent terminal stdout/stderr is empty; log_path gets bytes."""
-    assert FAKE_CLAUDE.exists(), "shim missing — fix tests/fixtures/bin/fake-claude"
+    assert FAKE_CLAUDE.exists(), "shim missing — fix tests/fixtures/bin/fake-claude.py"
     log = tmp_path / "logs" / "grind.log"
     runner = ClaudeRunner(claude_binary=str(FAKE_CLAUDE))
     rc = runner.run("hello", repo=tmp_path, log_path=log)

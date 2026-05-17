@@ -1,8 +1,11 @@
 """Shared test fixtures.
 
 Per FR-034 (Testing Strategy): claude_mock fixture loads a canned scenario
-by key. Scenarios live in tests/fixtures/canned-claude-responses/<key>.sh
-and behave as drop-in replacements for the real claude binary.
+by key. Scenarios live in tests/fixtures/canned-claude-responses/<key>.py
+and behave as drop-in replacements for the real claude binary. Resolution
+goes through tests._shims.shim_path so each scenario returns a path the
+host OS can execute directly (POSIX: the .py file with +x; Windows: a
+generated .bat wrapper). See ortus-f4bu.
 """
 
 from __future__ import annotations
@@ -14,6 +17,8 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+
+from tests._shims import shim_path
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CANNED_DIR = _FIXTURES / "canned-claude-responses"
@@ -99,13 +104,13 @@ def claude_mock() -> Callable[[str], Path]:
     """
 
     def _resolve(scenario: str) -> Path:
-        path = _CANNED_DIR / f"{scenario}.sh"
-        if not path.is_file():
-            available = sorted(p.stem for p in _CANNED_DIR.glob("*.sh"))
+        source = _CANNED_DIR / f"{scenario}.py"
+        if not source.is_file():
+            available = sorted(p.stem for p in _CANNED_DIR.glob("*.py"))
             raise FileNotFoundError(
                 f"no canned claude scenario named {scenario!r}; available: {available}"
             )
-        return path
+        return shim_path(scenario)
 
     return _resolve
 
