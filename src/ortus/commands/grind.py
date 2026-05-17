@@ -130,7 +130,7 @@ def grind(
         help="Custom per-iteration /goal condition (overrides bundled close-one.txt).",
     ),
     orphan_policy: OrphanPolicy = typer.Option(
-        OrphanPolicy.WARN,
+        OrphanPolicy.REVERT,
         "--orphan-policy",
         help="How to handle claimed-but-unclosed issues: warn|revert|escalate.",
         case_sensitive=False,
@@ -212,6 +212,37 @@ def grind(
                 f"in_progress={initial_snapshot.in_progress} "
                 f"closed={initial_snapshot.closed}"
             )
+
+            # We hold the exclusive flock, so any in_progress issue at this
+            # point is a cross-restart orphan: a prior grind claimed it and
+            # was killed before closing. Per-iteration orphan detection
+            # (compute_delta on the before/after diff) can never see these
+            # because they sit in `before.in_progress_ids` and get subtracted
+            # out of every later delta.
+            if initial_snapshot.in_progress_ids:
+                orphan_ids = initial_snapshot.in_progress_ids
+                write_log(
+                    f"startup orphan sweep: {len(orphan_ids)} "
+                    f"orphan(s) from prior grind: {sorted(orphan_ids)}"
+                )
+                action = apply_orphan_policy(
+                    orphan_policy,
+                    orphan_ids,
+                    revert_fn=lambda i: bd.update_status(i, "open"),
+                    escalate_fn=lambda i: bd.add_label(i, "human"),
+                )
+                for line in action.actions_taken:
+                    write_log(f"  orphan-policy: {line}")
+                # Re-snapshot so the queue_drained check below — and the
+                # loop's first `before` — see post-sweep state (revert
+                # moves in_progress → open; escalate trims it from the
+                # human-excluded counts).
+                initial_snapshot = _snapshot(bd)
+                write_log(
+                    f"post-sweep state: open={initial_snapshot.open} "
+                    f"in_progress={initial_snapshot.in_progress} "
+                    f"closed={initial_snapshot.closed}"
+                )
 
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
