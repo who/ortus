@@ -46,9 +46,9 @@ jobs:
       - name: Install bd (beads) — Linux/macOS
         if: runner.os != 'Windows'
         run: |
-          # Pinned per project convention. The release tag is `v1.0.0` but the
-          # asset filenames embed the bare version `1.0.0` (no `v`).
-          BD_VERSION="1.0.0"
+          # Pinned per project convention. The release tag is `v1.0.4` but the
+          # asset filenames embed the bare version `1.0.4` (no `v`).
+          BD_VERSION="1.0.4"
           case "${{ runner.os }}" in
             Linux)
               ASSET="beads_${BD_VERSION}_linux_amd64.tar.gz"
@@ -73,7 +73,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $BD_VERSION = "1.0.0"
+          $BD_VERSION = "1.0.4"
           $ASSET = "beads_${BD_VERSION}_windows_amd64.zip"
           $URL = "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${ASSET}"
           Write-Host "Downloading $URL"
