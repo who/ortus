@@ -127,16 +127,19 @@ CHECKS: list[Callable[..., CheckResult]] = [
 
 
 def _run_all(repo: Path) -> list[CheckResult]:
-    results: list[CheckResult] = [c() for c in CHECKS]
-    results.extend(
-        [
-            check_beads_dir(repo),
-            check_claude_settings(repo),
-            check_hooks(repo),
-            check_ortusrc(repo),
-            check_prompt_overrides(repo),
-        ]
-    )
+    results: list[CheckResult] = []
+    for c in CHECKS:
+        output.progress("check", f"{c.__name__.removeprefix('check_')} ...")
+        results.append(c())
+    for fn, label in (
+        (check_beads_dir, ".beads/"),
+        (check_claude_settings, ".claude/settings.json"),
+        (check_hooks, "hooks"),
+        (check_ortusrc, ".ortusrc"),
+        (check_prompt_overrides, ".ortus/prompts/"),
+    ):
+        output.progress("check", f"{label} ...")
+        results.append(fn(repo))
     return results
 
 
@@ -147,6 +150,7 @@ def check(
 ) -> None:
     """Verify bd/claude/sandbox prereqs and hook-disable state."""
     target = (repo if repo is not None else Path.cwd()).resolve()
+    output.progress("check", f"target: {target}")
     results = _run_all(target)
     output.table(
         ["", "Check", "Status", "Details"],
@@ -155,5 +159,10 @@ def check(
             for r in results
         ],
     )
-    if any(not r.ok for r in results):
+    failed = sum(1 for r in results if not r.ok)
+    output.progress(
+        "check",
+        f"done ({len(results) - failed}/{len(results)} passed)",
+    )
+    if failed:
         raise typer.Exit(code=1)

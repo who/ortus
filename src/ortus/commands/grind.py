@@ -198,7 +198,7 @@ def grind(
             log = _log_path(target)
             write_log = _log_writer(log)
             write_log("=== ortus grind started (subprocess-per-task shape) ===")
-            output.info(f"grind starting; log → {log.relative_to(target)}")
+            output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
             initial_snapshot = _snapshot(bd)
@@ -207,10 +207,11 @@ def grind(
                 f"in_progress={initial_snapshot.in_progress} "
                 f"closed={initial_snapshot.closed}"
             )
-            output.info(
+            output.progress(
+                "grind",
                 f"initial state: open={initial_snapshot.open} "
                 f"in_progress={initial_snapshot.in_progress} "
-                f"closed={initial_snapshot.closed}"
+                f"closed={initial_snapshot.closed}",
             )
 
             # We hold the exclusive flock, so any in_progress issue at this
@@ -246,7 +247,7 @@ def grind(
 
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
-                output.info("queue already drained; nothing to do.")
+                output.progress("grind", "queue already drained; nothing to do.")
                 return
 
             # Phase 3 — cache env vars (relocate ~/.cache into project-local).
@@ -321,10 +322,11 @@ def grind(
                 f"in_progress: {final_snapshot.in_progress}, "
                 f"iters_run={iters_run}) ==="
             )
-            output.info(
-                f"session ended; closed {tasks_completed} via grind "
+            output.progress(
+                "grind",
+                f"done; closed {tasks_completed} this session "
                 f"(open: {initial_snapshot.open} → {final_snapshot.open}, "
-                f"in_progress: {final_snapshot.in_progress})"
+                f"in_progress: {final_snapshot.in_progress})",
             )
     except FlockBusy as exc:
         output.error(str(exc), hint="another `ortus grind` is already running here")

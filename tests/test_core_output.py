@@ -55,6 +55,22 @@ def test_error_without_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "solo error" in err.getvalue()
 
 
+def test_progress_writes_to_stderr_with_canonical_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, err = _patched_consoles(monkeypatch)
+    output.progress("init", "creating .beads/ workspace")
+    rendered = err.getvalue()
+    assert "[ortus init] creating .beads/ workspace" in rendered
+    assert out.getvalue() == ""
+
+
+def test_progress_does_not_apply_rich_markup_to_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A phase containing `[` must not be interpreted as a rich tag."""
+    out, err = _patched_consoles(monkeypatch)
+    output.progress("plan", "writing [1/3] of N issues")
+    rendered = err.getvalue()
+    assert "[ortus plan] writing [1/3] of N issues" in rendered
+
+
 def test_table_writes_to_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
     out, err = _patched_consoles(monkeypatch)
     output.table(["col1", "col2"], [["a", 1], ["b", 2]])

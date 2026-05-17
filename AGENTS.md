@@ -6,6 +6,20 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 
 Linux + macOS only. Windows was dropped 2026-05-17. Do not add Windows-specific code paths without explicit operator direction; Windows users should use WSL2.
 
+## CLI output convention
+
+Every non-interactive `ortus` verb emits per-phase progress lines so the operator can tell "running" from "hung." Convention:
+
+- Progress lines go to **stderr** so they don't pollute machine-readable stdout.
+- Format: `[ortus <verb>] <phase>` — e.g. `[ortus plan] reading PRD from <path>`.
+- One line per logical phase; close with a `[ortus <verb>] done (<short summary>)` line.
+- For phases that legitimately take >5s, include a coarse expectation in the message (`... (this typically takes 1-3 min)`) so silence doesn't get misread as hang.
+- Use `ortus.core.output.progress(verb, phase)` — do NOT roll your own `print(...)`.
+
+Exempt verbs:
+- `tail` — streaming-by-design, the output IS the work.
+- `interview`, `triage` — interactive; the operator's typing provides the rhythm.
+
 ## Orchestrator
 
 All autonomous loops run through `./ortus/goal.sh`, which drives a single long-lived `claude -p "/goal CONDITION"` session against the queue. The legacy `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` — kept for one minor version so existing aliases and CI invocations keep working. New scripts should call `goal.sh` directly. Both share `.beads/ralph.flock`, so only one orchestrator runs at a time per repo. Logs land at `logs/goal-<timestamp>.log` (and `logs/ralph-*.log` for archival pre-shim runs); `./ortus/tail.sh` follows both transparently.
