@@ -142,6 +142,49 @@ def test_init_surfaces_bd_failure_clearly(
     assert "bd init failed (exit 7)" in combined, combined
 
 
+def test_init_passes_non_interactive_to_bd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ortus-btt3: `bd init` must be invoked with `--non-interactive` so it
+    never blocks on hidden stdin prompts when ortus is run from a TTY.
+    """
+    import ortus.commands.init as init_mod
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(args, cwd, check):  # noqa: ARG001 — match subprocess.run signature
+        captured["args"] = list(args)
+        # Pretend bd init succeeded so the rest of init can proceed.
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(init_mod.subprocess, "run", fake_run)
+    target = tmp_path / "nonint"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert captured["args"][:3] == ["bd", "init", "--non-interactive"], captured["args"]
+
+
+def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
+    """ortus-btt3: end-to-end check that `ortus init` completes promptly when
+    invoked via a real subprocess with stdin=/dev/null (proxy for a terminal
+    operator who never types anything). Regression guard for the bd-init prompt
+    hang. Budget: 10s.
+    """
+    if shutil.which("ortus") is None:
+        pytest.skip("ortus binary not on PATH")
+    target = tmp_path / "closedstdin"
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        ["ortus", "init", str(target)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    elapsed = time.monotonic() - t0
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert elapsed < 10.0, f"ortus init took {elapsed:.2f}s with closed stdin (budget 10s)"
+    assert (target / ".beads").is_dir()
+
+
 def test_ortusrc_round_trips_as_toml(tmp_path: Path) -> None:
     import sys
     if sys.version_info >= (3, 11):

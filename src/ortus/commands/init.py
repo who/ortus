@@ -23,7 +23,7 @@ from ortus.core.init_render import (
 
 
 def _bd_init(repo: Path, prefix: str | None) -> None:
-    """Run `bd init --prefix <prefix>` inside `repo`.
+    """Run `bd init --non-interactive --prefix <prefix>` inside `repo`.
 
     Streams bd's output straight to the operator's stdout/stderr instead of
     capturing it. Capturing can deadlock on a pipe-buffer boundary if bd writes
@@ -31,8 +31,14 @@ def _bd_init(repo: Path, prefix: str | None) -> None:
     slower than its TTY one — both manifested as a multi-minute hang on a
     fresh dir. Streaming sidesteps both, and the operator gets to see bd's
     own progress lines during the init.
+
+    `--non-interactive` is required because bd's prompt-detection only checks
+    if stdin is a TTY. When ortus is invoked from a terminal, stdin is inherited
+    and IS a TTY even though the operator isn't watching for bd's prompts —
+    bd would otherwise block forever on hidden "Contributing to someone else's
+    repo? [y/N]" prompts. Ortus verbs default to non-interactive everywhere.
     """
-    args = ["bd", "init"]
+    args = ["bd", "init", "--non-interactive"]
     if prefix:
         args.extend(["--prefix", prefix])
     subprocess.run(args, cwd=str(repo), check=True)
