@@ -7,7 +7,7 @@
 #   --log PATH               One or more goal-*.log files to aggregate. Repeatable.
 #                            (default: most recent logs/goal-*.log)
 #   --threshold PCT          PASS threshold for evaluator/main token ratio, percent.
-#                            (default: 5; PRD §M5 / bn4a.4 design field cites "<5%
+#                            (default: 5; design threshold "<5%
 #                            of main spend" as the "negligible" threshold.)
 #   --report-format md|txt   Output format (default: md). md emits a headed Q3
 #                            section suitable for direct paste into
@@ -22,7 +22,7 @@
 #   one NDJSON event per line, each tagged with {type, subtype, message?, ...}.
 #   Assistant turns carry `.message.model` and `.message.usage.input_tokens`.
 #   Main model: `claude-opus-4-*` / `claude-sonnet-4-*` (anything not Haiku).
-#   Evaluator: `claude-haiku-4-*` — per the PRD §goal-evaluator design, the /goal
+#   Evaluator: `claude-haiku-4-*` — by design, the /goal
 #   subagent runs on Haiku to keep the post-turn judgment "negligible" in cost.
 #
 # Discriminator (documented per ortus-xkad design field):
@@ -41,7 +41,7 @@
 #   - Log file missing or empty: clear stderr error, exit 1.
 #
 # This script lives outside template/ on purpose: it is a measurement tool for
-# the ortus repo itself (PRD §Phase 3 / E5), not part of the generated project
+# the ortus repo itself, not part of the generated project
 # surface — same reasoning as scripts/replay-queue.sh and scripts/replay-reduce.sh.
 
 set -u
@@ -157,7 +157,7 @@ END {
   if (fmt == "md") {
     print "## Q3 — Haiku evaluator cost (evaluator/main input-token ratio)"
     print ""
-    printf "Threshold: evaluator/main <= %s%% (PRD \"negligible\")\n", threshold
+    printf "Threshold: evaluator/main <= %s%%\n", threshold
     print ""
     print "| Bucket | Turns | Input tokens |"
     print "|---|---|---|"
@@ -181,7 +181,7 @@ END {
   } else {
     # txt format: strip markdown, keep PASS/FAIL phrasing intact for AC regex.
     print "Q3 - Haiku evaluator cost (evaluator/main input-token ratio)"
-    printf "  Threshold: evaluator/main <= %s%% (PRD negligible)\n", threshold
+    printf "  Threshold: evaluator/main <= %s%%\n", threshold
     printf "  evaluator (haiku): turns=%d, input_tokens=%d\n", eval_count, eval_tokens
     printf "  main             : turns=%d, input_tokens=%d\n", main_count, main_tokens
     if (status == "PASS" && eval_count == 0 && main_count > 0) {

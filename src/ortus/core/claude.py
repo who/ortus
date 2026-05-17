@@ -1,6 +1,6 @@
 """Central wrapper for subprocess.run(['claude', '-p', ...]).
 
-Standard flag set per PRD (FR-013, ortus-6q8v non-regression):
+Standard flag set (ortus-6q8v non-regression):
   --dangerously-skip-permissions
   --output-format stream-json
   --verbose

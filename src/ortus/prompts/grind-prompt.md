@@ -185,10 +185,7 @@ Depends on: <closing-id>
        git push
 
    If `bd dolt push` fails, still run `git push` — the bd state is already in `.beads/issues.jsonl` which the commit included, so the work survives a sidecar-push failure.
-10. **Compact + reorient**: This iteration is complete. Before the next task begins:
-    1. Run `/compact` to summarize and discard the prior task's working memory while keeping the active /goal directive intact.
-    2. Re-read `AGENTS.md` to re-establish scheduler state.
-11. **Exit**: End the turn. Do not output any sentinel. The /goal evaluator will judge whether the queue is empty from this turn's bd ready output.
+10. **Exit**: End the turn. Do not output any sentinel. The /goal evaluator will judge whether the queue is empty from this turn's bd ready output.
 
 If you cannot complete the claimed issue (dependency, technical blocker, persistent test failure you cannot resolve), add a comment explaining the blocker via `bd comments add <id> "..."`, then output `<promise>BLOCKED</promise>` and stop.
 
