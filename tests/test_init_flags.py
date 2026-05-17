@@ -149,7 +149,12 @@ def test_render_context_carries_new_fields() -> None:
 
 
 def test_help_advertises_new_flags() -> None:
-    result = runner.invoke(app, ["init", "--help"])
+    # NO_COLOR + TERM=dumb stop Rich from interleaving SGR escape sequences
+    # through flag names in option tables, which otherwise break the literal
+    # substring assertions below in CI's terminal.
+    result = runner.invoke(
+        app, ["init", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
+    )
     assert result.exit_code == 0
     out = result.stdout
     assert "--package-manager" in out
