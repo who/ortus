@@ -123,4 +123,4 @@ def test_interview_smoke_with_canned_response(
     monkeypatch.setattr(iv, "_make_runner", lambda: ClaudeRunner(claude_binary=str(shim)))
     result = runner.invoke(app, ["interview", str(workspace)])
     assert result.exit_code == 0
-    assert "Interview started" in (workspace / "logs" / "interview.log").read_text()
+    assert "Interview started" in (workspace / "logs" / "interview.log").read_text(encoding="utf-8")

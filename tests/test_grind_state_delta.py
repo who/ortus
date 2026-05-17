@@ -93,7 +93,7 @@ def _force_fake_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def _read_log(repo: Path) -> str:
     logs = sorted((repo / "logs").glob("grind-*.log"))
-    return logs[-1].read_text() if logs else ""
+    return logs[-1].read_text(encoding="utf-8") if logs else ""
 
 
 # --- closed branch --------------------------------------------------------

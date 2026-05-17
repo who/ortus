@@ -58,7 +58,7 @@ def test_output_tees_to_log_not_terminal(
     out, err = capfd.readouterr()
     assert out == "", f"parent stdout should be empty, got: {out!r}"
     assert err == "", f"parent stderr should be empty, got: {err!r}"
-    log_text = log.read_text()
+    log_text = log.read_text(encoding="utf-8")
     assert "fake-claude argv:" in log_text
     assert "fake-claude done" in log_text
 

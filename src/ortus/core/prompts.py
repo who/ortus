@@ -67,13 +67,13 @@ def resolve_prompt(
         candidate = _repo_layer_path(repo, name)
         if candidate.is_file():
             return ResolvedPrompt(
-                name=name, source="repo", path=candidate, text=candidate.read_text()
+                name=name, source="repo", path=candidate, text=candidate.read_text(encoding="utf-8")
             )
 
     candidate = _user_layer_path(home, name)
     if candidate.is_file():
         return ResolvedPrompt(
-            name=name, source="user", path=candidate, text=candidate.read_text()
+            name=name, source="user", path=candidate, text=candidate.read_text(encoding="utf-8")
         )
 
     bundled = files(PROMPT_PACKAGE).joinpath(f"{name}.md")
@@ -86,7 +86,7 @@ def resolve_prompt(
         )
     # importlib.resources.Traversable: read_text() works on both
     # filesystem and zip-backed packages.
-    bundled_text = bundled.read_text()
+    bundled_text = bundled.read_text(encoding="utf-8")
     bundled_path: Path | None
     try:
         # When the package is unpacked on disk, Traversable resolves to a Path.

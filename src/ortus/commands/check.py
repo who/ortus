@@ -74,7 +74,7 @@ def check_claude_settings(repo: Path) -> CheckResult:
     if not settings.is_file():
         return CheckResult(".claude/settings.json", False, f"missing at {settings}")
     try:
-        data = json.loads(settings.read_text())
+        data = json.loads(settings.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return CheckResult(".claude/settings.json", False, f"unparseable: {exc}")
     excluded = data.get("sandbox", {}).get("excludedCommands") or []

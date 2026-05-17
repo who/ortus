@@ -195,7 +195,7 @@ def _follow(
         for stream in streams.values():
             if not stream.path.is_file():
                 continue
-            with stream.path.open("r") as fh:
+            with stream.path.open("r", encoding="utf-8") as fh:
                 fh.seek(stream.pos)
                 chunk = fh.read()
                 stream.pos = fh.tell()

@@ -127,7 +127,7 @@ def test_grind_with_canned_grind_one_complete_closes_one_issue(
         ["grind", str(seeded_3_issues), "--tasks", "1", "--idle-sleep", "0"],
     )
     log_files = list((seeded_3_issues / "logs").glob("grind-*.log"))
-    log_dump = "\n".join(p.read_text() for p in log_files) if log_files else "(no log)"
+    log_dump = "\n".join(p.read_text(encoding="utf-8") for p in log_files) if log_files else "(no log)"
     assert result.exit_code == 0, (
         f"rc={result.exit_code}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         f"\n---LOG---\n{log_dump}"

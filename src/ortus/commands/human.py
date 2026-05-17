@@ -116,5 +116,5 @@ def human(
         output.info(report)
         return
     out_path = target / "HUMAN-TODO.md"
-    out_path.write_text(report)
+    out_path.write_text(report, encoding="utf-8")
     output.success(f"wrote {out_path.relative_to(target)} ({len(issues)} issue(s))")
