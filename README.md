@@ -8,7 +8,7 @@ Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, one 
 
 ## Install
 
-**Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) on PATH.** Ortus is distributed via PyPI and installed by uv; we don't auto-install uv (see PRD §NFR-004).
+**Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) on PATH.** Ortus is distributed via PyPI and installed by uv; we don't auto-install uv.
 
 **One-liner (recommended):**
 
@@ -89,7 +89,7 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 | Linux (Ubuntu/WSL2) | full | requires `bubblewrap` for `ortus grind` |
 | macOS | full | Seatbelt (`sandbox-exec`) is built-in |
 
-**Windows is not supported** (decision 2026-05-17; see bd issue `ortus-om1p`). Windows users should run ortus inside **WSL2** (Windows Subsystem for Linux), where ortus runs as a normal Linux process.
+**Windows is not supported** (decision 2026-05-17). Windows users should run ortus inside **WSL2** (Windows Subsystem for Linux), where ortus runs as a normal Linux process.
 
 ## Prerequisites
 

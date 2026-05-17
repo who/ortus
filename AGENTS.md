@@ -4,7 +4,7 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 
 ## Supported platforms
 
-Linux + macOS only. Windows was dropped 2026-05-17 (see bd issue `ortus-om1p`). Do not add Windows-specific code paths without explicit operator direction; Windows users should use WSL2.
+Linux + macOS only. Windows was dropped 2026-05-17. Do not add Windows-specific code paths without explicit operator direction; Windows users should use WSL2.
 
 ## Orchestrator
 
