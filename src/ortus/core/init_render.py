@@ -28,10 +28,63 @@ BUNDLED_TEMPLATES: tuple[str, ...] = (
 )
 
 
+# Per-project-type choices for the three stack flags. Mirrors the historical
+# copier.yaml blocks for package_manager / framework / linter.
+PACKAGE_MANAGER_CHOICES: dict[str, tuple[str, ...]] = {
+    "python": ("uv", "pip", "none"),
+    "typescript": ("bun", "npm", "pnpm", "yarn", "none"),
+    "go": ("gomod", "none"),
+    "rust": ("cargo", "none"),
+    "polyglot": ("none",),
+}
+PACKAGE_MANAGER_DEFAULTS: dict[str, str] = {
+    "python": "uv",
+    "typescript": "npm",
+    "go": "gomod",
+    "rust": "cargo",
+    "polyglot": "none",
+}
+
+FRAMEWORK_CHOICES: dict[str, tuple[str, ...]] = {
+    "python": ("fastapi", "flask", "django", "none"),
+    "typescript": ("nextjs", "express", "none"),
+    "go": ("gin", "none"),
+    "rust": ("actix", "axum", "none"),
+    "polyglot": ("none",),
+}
+FRAMEWORK_DEFAULTS: dict[str, str] = {
+    "python": "none",
+    "typescript": "none",
+    "go": "none",
+    "rust": "none",
+    "polyglot": "none",
+}
+
+LINTER_CHOICES: dict[str, tuple[str, ...]] = {
+    "python": ("ruff", "none"),
+    "typescript": ("eslint", "none"),
+    "go": ("golangci", "none"),
+    "rust": ("clippy", "none"),
+    "polyglot": ("none",),
+}
+LINTER_DEFAULTS: dict[str, str] = {
+    "python": "ruff",
+    "typescript": "eslint",
+    "go": "golangci",
+    "rust": "clippy",
+    "polyglot": "none",
+}
+
+PROJECT_TYPES: tuple[str, ...] = tuple(PACKAGE_MANAGER_CHOICES.keys())
+
+
 @dataclass(frozen=True)
 class RenderContext:
     prefix: str
     project_type: str = "polyglot"
+    package_manager: str = "none"
+    framework: str = "none"
+    linter: str = "none"
     ortus_version: str = ORTUS_VERSION
     today: str = ""  # filled in if blank
 
@@ -39,6 +92,9 @@ class RenderContext:
         return {
             "prefix": self.prefix,
             "project_type": self.project_type,
+            "package_manager": self.package_manager,
+            "framework": self.framework,
+            "linter": self.linter,
             "ortus_version": self.ortus_version,
             "today": self.today or _dt.date.today().isoformat(),
         }
