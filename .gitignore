@@ -7,3 +7,23 @@ HUMAN-TODO.md
 .dolt/
 *.db
 .beads-credential-key
+
+# Python build / venv / cache artifacts
+.venv/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Node detritus that shouldn't be tracked at repo root
+node_modules/
+package-lock.json
+package.json
+

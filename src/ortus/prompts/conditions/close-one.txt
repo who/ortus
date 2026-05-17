@@ -1,0 +1,16 @@
+Close exactly one bd issue. You are done when the bd database shows one issue moving from `open` or `in_progress` to `closed` during this session.
+
+Procedure:
+(1) Run `bd ready --json | head` to pick one ready issue. Prefer the highest-priority (lowest number) issue; on ties, pick the first.
+(2) Claim it with `bd update <id> --status in_progress`.
+(3) Complete the work that the issue's description and acceptance criteria require. Run the tests and gates that the acceptance criteria call for; verify they pass before closing.
+(4) Close the issue with `bd close <id> --reason "<one-line summary of what shipped>"`.
+(5) If a git remote is configured, commit and push the code changes. Verify `git status` shows "up to date with origin".
+
+You are NOT driving the queue to zero. The outer ortus-grind shell handles queue exhaustion, retries, and orphan-claim recovery from observable bd state — not from your judgment. Your scope is one issue.
+
+When the bd close call returns success, end the session. Do not pick a second issue. Do not output a sentinel; the evaluator reads this transcript.
+
+You may stop early without closing if:
+(a) `bd ready --json` already returned `[]` at session start (queue was drained before you got here), OR
+(b) the issue you claimed cannot be completed because it requires a human decision; in that case run `bd human <id>` to flag it and exit without closing.

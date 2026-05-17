@@ -2,6 +2,10 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Supported platforms
+
+Linux + macOS only. Windows was dropped 2026-05-17 (see bd issue `ortus-om1p`). Do not add Windows-specific code paths without explicit operator direction; Windows users should use WSL2.
+
 ## Orchestrator
 
 All autonomous loops run through `./ortus/goal.sh`, which drives a single long-lived `claude -p "/goal CONDITION"` session against the queue. The legacy `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` — kept for one minor version so existing aliases and CI invocations keep working. New scripts should call `goal.sh` directly. Both share `.beads/ralph.flock`, so only one orchestrator runs at a time per repo. Logs land at `logs/goal-<timestamp>.log` (and `logs/ralph-*.log` for archival pre-shim runs); `./ortus/tail.sh` follows both transparently.

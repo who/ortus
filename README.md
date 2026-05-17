@@ -1,181 +1,145 @@
 # Ortus
 
+[![test](https://github.com/who/ortus/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/who/ortus/actions/workflows/test.yml)
+
 *Ortus* (Latin: "rising, origin, birth") — the point from which something springs into being.
 
-An opinionated [Copier](https://github.com/copier-org/copier) template for scaffolding new projects with AI-assisted development workflows.
+A global Python CLI for bd-driven Claude Code workflows. One install, one binary, eight verbs.
 
-## Quick Start
+## Install
 
-### Prerequisites
+**Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) on PATH.** Ortus is distributed via PyPI and installed by uv; we don't auto-install uv (see PRD §NFR-004).
 
-```bash
-# Install Copier
-uv tool install copier --with copier-template-extensions
-# or: pipx install copier
-```
-
-Copier is all you need to generate a project. To run any `ortus/*.sh` script — either inside this repo or a generated project — you also need the tools listed under [Requirements](#requirements) (notably `beads`, `dolt`, `claude`, `jq`, `rg`, `fd`).
-
-### Step 1: Generate Your Project
+**One-liner (recommended):**
 
 ```bash
-copier copy gh:who/ortus ./my-project
-cd my-project
+curl -fsSL https://github.com/who/ortus/releases/latest/download/install.sh | sh
 ```
 
-The generator will:
-- Ask you about your project (name, language, framework, etc.)
-- Scaffold the project structure
-- Initialize git and beads automatically
-
-You now have a blank slate ready for development.
-
-### Step 2: Kickstart Your Feature
-
-Run `./ortus/idea.sh` to start. You'll choose between two paths:
-
-**Path A: You have a PRD**
-```bash
-./ortus/idea.sh
-# Choose [1] "Yes, I have a PRD"
-# Provide the path to your PRD file
-```
-Your PRD gets decomposed into an epic with implementation tasks, ready for Ralph.
-
-**Path B: You have an idea**
-```bash
-./ortus/idea.sh "A CLI tool that converts markdown to PDF with custom themes"
-# Or run ./ortus/idea.sh and choose [2] "Nope, just an idea"
-```
-
-Claude will:
-1. Expand your idea into a feature description
-2. Run an interactive interview to clarify requirements
-3. Generate a PRD document at `prd/PRD-[project-name].md`
-4. Create implementation tasks from the approved PRD
-
-Both paths auto-terminate via Claude Code's `/goal` directive — the interview ends when the feature is labeled `approved` with at least one child task in beads, and PRD decomposition ends when every work item in the PRD has a corresponding bd issue. You don't type anything to exit.
-
-### Step 3: Run Goal
-
-Then start the task implementation loop:
+**Direct PyPI:**
 
 ```bash
-# Run until all ready work is drained (canonical /goal condition)
-./ortus/goal.sh
-
-# Complete exactly 1 task then exit
-./ortus/goal.sh --tasks 1
-
-# Run in background
-./ortus/goal.sh &
+uv tool install ortus
+ortus --version
 ```
 
-`goal.sh` runs a single long-lived `claude -p "/goal CONDITION"` session against the queue. The `/goal` evaluator (Claude Haiku) judges the completion condition against the running transcript each turn and exits the loop when it answers yes:
-1. Find the next ready task (`bd ready`)
-2. Claim and implement it
-3. Run verification (tests, linting)
-4. Commit and push changes
-5. Mark the task complete
-
-#### Legacy: `ralph.sh` (deprecation shim)
-
-`./ortus/ralph.sh` is a one-line deprecation shim that prints a notice to stderr and `exec`s `./ortus/goal.sh` with the same arguments — kept for at least one minor version so downstream Copier users have time to update muscle memory and any scripts that invoke it. New invocations should call `goal.sh` directly. See `ortus-dcr4` in beads for the Phase 5 cut-over notes.
-
-##### Scoped runs
-
-Pass `-c|--condition STR` to `goal.sh` to drive the queue until a specific milestone is reached instead of the default queue-drain condition. The evaluator (Claude Haiku) judges your condition against the running transcript each turn and exits the loop when it answers yes. Useful for finishing one epic, producing a single artifact, or smoke-testing a small change end-to-end without committing to "drain everything":
+**From source / pinned commit:**
 
 ```bash
-# Finish one epic and stop:
-./ortus/goal.sh -c 'all children of bd-auth-epic are closed'
-
-# Run until a specific report has been produced:
-./ortus/goal.sh -c 'reports/goal-vs-ralph-2026-05-16.md exists and contains M1 PASS and M3 PASS'
-
-# Combine with --tasks as a hard upper bound on work attempted:
-./ortus/goal.sh --tasks 5 -c 'the auth middleware migration ships cleanly'
+uv tool install git+https://github.com/who/ortus.git
+# Pin a specific tag/branch:
+uv tool install 'git+https://github.com/who/ortus.git@v0.1.0'
 ```
 
-The condition is a free-form natural-language sentence; phrase it so a third party reading the transcript can decide pass/fail unambiguously. Keep it under the FR-004 4000-character ceiling.
+**Troubleshooting:**
 
-## What You Get
+| Symptom | Fix |
+|---|---|
+| `uv: command not found` | Install uv: `curl -LsSf https://astral.sh/uv/install.sh \| sh` (see [uv docs](https://docs.astral.sh/uv/getting-started/installation/)) |
+| `ortus: command not found` after install | `uv tool update-shell` then open a new shell |
+| `bd: command not found` | `brew install beads` (mac) or grab a release from https://github.com/gastownhall/beads/releases |
 
-```
-my-project/
-├── .beads/                 # Issue tracking database
-├── .claude/                # Claude Code permissions
-├── .github/workflows/      # CI pipeline
-├── prd/
-│   └── PRD-PROMPT.md       # PRD generation template
-├── ortus/                  # Ortus automation scripts
-│   ├── idea.sh             # PRD intake or idea → interview → tasks
-│   ├── interview.sh        # Interactive interview → PRD → task creation
-│   ├── goal.sh             # /goal-directive orchestrator (primary)
-│   ├── ralph.sh            # Deprecation shim — execs goal.sh
-│   └── tail.sh             # Log file watcher (ralph-*.log + goal-*.log)
-├── src/                    # Your code goes here
-├── CLAUDE.md               # AI guidance
-└── prompt.md               # Ralph loop instructions
-```
+## Quick start
 
-## Work Execution Policy
+```bash
+# Bootstrap a fresh repo (creates .beads/, .claude/settings.json, AGENTS.md, .gitignore, .ortusrc)
+ortus init ~/code/myproj
 
-> **All implementation work MUST go through a Goal loop** (`./ortus/goal.sh`). `ralph.sh` is a deprecation shim that execs `goal.sh`.
+# Verify prereqs in that repo
+ortus check ~/code/myproj
 
-- Direct coding is not allowed in interactive Claude sessions
-- Create beads issues instead of implementing directly
-- A Goal loop executes the actual work
-- Research and planning are allowed without an orchestrator
+# Decompose a PRD into bd issues
+ortus plan ~/code/myproj path/to/feature.md
 
-## Requirements
+# Or run the idea→interview→PRD→tasks flow with no PRD path
+ortus plan ~/code/myproj
 
-Install these tools before using generated projects:
+# Drive the bd queue to zero (long-lived /goal session)
+ortus grind ~/code/myproj
 
-| Tool | Purpose |
-|------|---------|
-| [copier](https://github.com/copier-org/copier) | Project generator |
-| [beads](https://github.com/steveyegge/beads) **v1.0.0+** | Issue tracking |
-| [dolt](https://docs.dolthub.com/introduction/installation) | SQL server backing beads |
-| [claude](https://github.com/anthropics/claude-code) | Claude CLI |
-| [jq](https://jqlang.github.io/jq/) | JSON processing |
-| [rg](https://github.com/BurntSushi/ripgrep) | Fast search (ripgrep) |
-| [fd](https://github.com/sharkdp/fd) | Fast file finder |
-
-**Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** The investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so investigation can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** The orchestrator detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, it gets used; otherwise the loop falls back silently to the default search behavior. When CodeGraph is present, closure comments and PRD decomposition outputs also include CodeGraph-derived structural data (a parseable change record on closures; reference checks and likely-touched files on decompositions); when absent, both remain byte-equivalent to the pre-CodeGraph baseline.
-
-### beads v1.0.0+ required
-
-Ortus requires **beads v1.0.0** (released 2026-04-03) or later. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that this workflow no longer supports. Ortus configures beads in Dolt server mode so concurrent orchestrator loops (and parallel sessions) do not contend on an embedded flock; the `dolt` binary must therefore be available on `PATH`. Install via `brew install beads` or from [the v1.0.0 release](https://github.com/gastownhall/beads/releases/tag/v1.0.0) (or later).
-
-Remote sync uses `bd dolt push` / `bd dolt pull`. The v0.55-era `bd sync` command was removed in v1.0.0. See [AGENTS.md](AGENTS.md) for the full session-close workflow.
-
-### Sandbox + bd setup
-
-Generated projects run the orchestrator inside the OS sandbox, which blocks loopback TCP by default. `bd` (beads) needs loopback to reach its Dolt SQL server, so the generated `.claude/settings.json` exempts `bd` from sandbox network containment:
-
-```json
-{
-  "sandbox": {
-    "excludedCommands": ["bd", "bd *"]
-  }
-}
+# Bounded variants
+ortus grind ~/code/myproj --tasks 5
+ortus grind ~/code/myproj -c "auth migration ships cleanly"
 ```
 
-Both entries are required: `bd` matches bare invocations, `bd *` matches subcommands. If you customize `.claude/settings.json`, preserve both `bd` and `bd *` entries in `sandbox.excludedCommands`.
+## The eight verbs
 
-**Never pipe bd into other commands or use `xargs bd`.** The exemption only applies when `bd` is directly invoked. Inside `bd list | jq ... | xargs bd show`, the inner `bd` is a child of `xargs` and inherits the sandboxed network namespace, where it hangs on the Dolt connection. Use multi-id `bd show <id1> <id2> ...` (accepts space-separated ids natively) instead of piping. Full context lives in the generated project's README under "Sandbox + bd setup".
+| Verb | Purpose |
+|---|---|
+| `ortus init <repo>` | Bootstrap a fresh repo with bd + .claude/settings.json + AGENTS.md + .ortusrc + .gitignore |
+| `ortus check <repo>` | Verify bd/claude/jq + sandbox prereq + hook-enabled + settings shape; strictly read-only |
+| `ortus plan <repo> [<PRD>]` | Decompose a PRD into bd issues, or interview-then-PRD-then-decompose if no PRD path |
+| `ortus grind <repo>` | Drive the bd queue via a long-lived `claude -p '/goal CONDITION'` session |
+| `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
+| `ortus tail <repo>` | Follow `logs/{grind,goal,ralph}-*.log` with stream-json filtering |
+| `ortus triage <repo>` | Walk the human-flagged bd queue interactively |
+| `ortus human <repo>` | Render `HUMAN-TODO.md` from bd issues flagged for a human decision |
 
-### Development
+Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed version.
 
-Run `make parity` before committing changes to `ortus/` or `template/ortus/`. It detects drift between the canonical tree and the Jinja mirror shipped in the template.
+### Supported platforms
 
-### Language-Specific Tools
+| Platform | Status | Notes |
+|---|---|---|
+| Linux (Ubuntu/WSL2) | full | requires `bubblewrap` for `ortus grind` |
+| macOS | full | Seatbelt (`sandbox-exec`) is built-in |
 
-- **Python:** [uv](https://github.com/astral-sh/uv), [ruff](https://github.com/astral-sh/ruff)
-- **TypeScript:** Node.js 20+, npm/pnpm/yarn/bun
-- **Go:** Go 1.22+, [golangci-lint](https://github.com/golangci/golangci-lint)
-- **Rust:** [rustup](https://rustup.rs/), clippy, rustfmt
+**Windows is not supported** (decision 2026-05-17; see bd issue `ortus-om1p`). Windows users should run ortus inside **WSL2** (Windows Subsystem for Linux), where ortus runs as a normal Linux process.
+
+## Prerequisites
+
+| Tool | Why | Install |
+|---|---|---|
+| **uv** | install + run ortus | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
+| **bd** (beads) v1.0.0+ | issue tracking (backed by embedded Dolt) | `brew install beads` or [GH release](https://github.com/gastownhall/beads/releases) |
+| **claude** | the model running inside `ortus grind` | [Claude Code](https://github.com/anthropics/claude-code) |
+| **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
+| **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
+
+Optional: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. If `.codegraph/` exists in a project, `ortus grind`'s prompts use it for faster symbol/caller/callee lookups; otherwise the loop falls back to grep + Read.
+
+## Why ortus
+
+- **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No more `copier update` chasing N repos.
+- **`bd ready` IS the queue.** No README task lists, no TodoWrite scratchpads. The queue is data.
+- **`/goal` IS the loop.** Termination is a hook decision based on observable bd state, not a sentinel grep.
+- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; cache directories are project-local; network is allowlist-only via `.claude/settings.json`.
+
+## Configuration
+
+Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
+
+```toml
+prefix = "myproj"       # bd issue-id prefix
+project_type = "python" # python | typescript | go | rust | polyglot
+```
+
+Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md` or `~/.ortus/prompts/<name>.md`; the bundled defaults under `src/ortus/prompts/` are the fallback (FR-025).
+
+## Session-close protocol
+
+When ending a work session, push your work:
+
+```bash
+bd close <id> --reason "..."
+git add -A && git commit -m "..."
+bd dolt push
+git push
+```
+
+Work is not done until pushed. The generated `AGENTS.md` repeats this in every project.
+
+## Development
+
+```bash
+# Local editable install
+uv pip install -e '.[dev]'
+
+# Tests
+pytest                              # unit + integration (fast)
+pytest -m smoke                     # end-to-end smoke
+pytest --slow                       # everything, including real-claude smoke
+```
 
 ## License
 
