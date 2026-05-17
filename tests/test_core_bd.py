@@ -88,6 +88,48 @@ def test_list_open_returns_open_issues(bd_workspace: Path) -> None:
     assert b not in ids
 
 
+def test_count_by_status_honors_exclude_labels(bd_workspace: Path) -> None:
+    """Issues bearing any excluded label drop out of the count (ortus-9db5).
+
+    Without the filter the orchestrator would spin on a queue of only
+    human-flagged issues; with it, the count goes to zero and queue_drained()
+    returns True.
+    """
+    client = BdClient(bd_workspace)
+    plain = client.create(title="plain open", issue_type="task", priority=2)
+    human = client.create(
+        title="needs human", issue_type="task", priority=2, labels=["human"]
+    )
+    # Sanity: both visible without filter.
+    assert client.count_by_status("open") == 2
+    # With the filter the human-flagged one disappears.
+    assert client.count_by_status("open", exclude_labels=("human",)) == 1
+    # Sanity: the remaining id is the plain one (not the human-flagged one).
+    opens = client.list_open()
+    assert plain in {i["id"] for i in opens}
+    assert human in {i["id"] for i in opens}
+
+
+def test_in_progress_ids_honors_exclude_labels(bd_workspace: Path) -> None:
+    """in_progress issues with the excluded label drop out of the id set.
+
+    Mirrors the count-side filter so the grind orphan-detection diff
+    doesn't keep re-flagging human-escalated claims.
+    """
+    client = BdClient(bd_workspace)
+    plain = client.create(title="plain in progress", issue_type="task", priority=2)
+    escalated = client.create(
+        title="escalated to human", issue_type="task", priority=2
+    )
+    client.update_status(plain, "in_progress")
+    client.update_status(escalated, "in_progress")
+    client.add_label(escalated, "human")
+    # Without the filter both ids appear.
+    assert client.in_progress_ids() == {plain, escalated}
+    # With the filter the escalated one disappears.
+    assert client.in_progress_ids(exclude_labels=("human",)) == {plain}
+
+
 def test_create_with_all_optional_fields(bd_workspace: Path) -> None:
     """Exercise design/acceptance/notes/labels code paths."""
     client = BdClient(bd_workspace)

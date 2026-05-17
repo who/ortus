@@ -120,35 +120,72 @@ class BdClient:
         """`bd label add <id> <label>`. Used by orphan-policy=escalate."""
         self._run("label", "add", issue_id, label)
 
-    def count_by_status(self, status: str) -> int:
-        """`bd count --status <status> --json` → integer count.
+    def count_by_status(
+        self, status: str, *, exclude_labels: tuple[str, ...] = ()
+    ) -> int:
+        """Count issues in `status`, optionally dropping ones with excluded labels.
+
+        Routing:
+
+        - ``exclude_labels=()`` → `bd count --status <status> --json`,
+          which is the cheap path.
+        - ``exclude_labels=(...)`` → `bd list --status <status>
+          --exclude-label <l> ... --limit 0 --json` and take the response
+          length. `bd count` does not (yet) accept ``--exclude-label``;
+          falling through to `bd list` is the workaround.
+
+        The grind orchestrator passes ``("human",)`` so human-escalated
+        claims don't keep the queue artificially non-empty.
 
         Returns 0 if bd is missing, the status is unknown, or the response
         is malformed — the outer grind loop treats failures as "no change",
         which is the conservative branch (idle-sleep instead of false claim).
         """
+        if not exclude_labels:
+            try:
+                _, data = self._run(
+                    "count", "--status", status, "--json", parse_json=True
+                )
+            except BdError:
+                return 0
+            if not isinstance(data, dict):
+                return 0
+            try:
+                return int(data.get("count", 0))
+            except (TypeError, ValueError):
+                return 0
+
+        args = ["list", "--status", status]
+        for label in exclude_labels:
+            args.extend(["--exclude-label", label])
+        # --limit 0 = unlimited; without it bd list caps at 50 and we'd undercount.
+        args.extend(["--limit", "0", "--json"])
         try:
-            _, data = self._run("count", "--status", status, "--json", parse_json=True)
+            _, data = self._run(*args, parse_json=True)
         except BdError:
             return 0
-        if not isinstance(data, dict):
+        if not isinstance(data, list):
             return 0
-        try:
-            return int(data.get("count", 0))
-        except (TypeError, ValueError):
-            return 0
+        return len(data)
 
-    def in_progress_ids(self) -> set[str]:
+    def in_progress_ids(self, *, exclude_labels: tuple[str, ...] = ()) -> set[str]:
         """`bd list --status in_progress --json` → set of issue ids.
+
+        Mirrors :meth:`count_by_status` w.r.t. ``exclude_labels``: passing
+        ``("human",)`` drops issues that have been escalated for human
+        action so the grind orchestrator's orphan-detection diff doesn't
+        keep flagging them across iterations.
 
         The outer grind loop diffs this snapshot across a subprocess
         boundary to identify orphan claims (issues claimed but not closed
         within the iteration).
         """
+        args = ["list", "--status", "in_progress"]
+        for label in exclude_labels:
+            args.extend(["--exclude-label", label])
+        args.extend(["--json"])
         try:
-            _, data = self._run(
-                "list", "--status", "in_progress", "--json", parse_json=True
-            )
+            _, data = self._run(*args, parse_json=True)
         except BdError:
             return set()
         if not isinstance(data, list):
