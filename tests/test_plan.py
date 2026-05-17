@@ -143,3 +143,20 @@ def test_plan_emits_progress_lines(
     assert "[ortus plan]" in result.stderr
     assert "reading PRD" in result.stderr
     assert "[ortus plan] done" in result.stderr
+
+
+def test_plan_writes_timestamped_log(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-emxo: plan writes plan-<ts>.log so tail picks it up and history is preserved."""
+    _swap_runner(monkeypatch, str(FAKE_CLAUDE_PLAN))
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    matches = sorted((bd_workspace / "logs").glob("plan-*.log"))
+    assert len(matches) == 1, f"expected one plan-*.log, got {matches}"
+    # Filename shape: plan-YYYYMMDD-HHMMSS.log (8 digits, dash, 6 digits).
+    import re
+    assert re.fullmatch(r"plan-\d{8}-\d{6}\.log", matches[0].name), matches[0].name
+    # Old fixed-name file must not be created.
+    assert not (bd_workspace / "logs" / "plan.log").exists()

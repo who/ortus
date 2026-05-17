@@ -12,7 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ortus.cli import app
-from ortus.commands.tail import _follow, _format_line
+from ortus.commands.tail import PREFIXES, _follow, _format_line
 
 runner = CliRunner()
 
@@ -31,6 +31,23 @@ def test_follow_picks_up_existing_grind_and_ralph_logs(tmp_path: Path) -> None:
     out = buf.getvalue()
     assert "from grind" in out
     assert "from ralph" in out
+
+
+def test_prefixes_include_plan(tmp_path: Path) -> None:
+    """ortus-emxo: plan-*.log files must be followed alongside grind/goal/ralph."""
+    assert "plan-" in PREFIXES
+
+
+def test_follow_picks_up_plan_log(tmp_path: Path) -> None:
+    """ortus-emxo: plan-<ts>.log written by `ortus plan` is surfaced by tail."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    plan_log = logs / "plan-20260517-120000.log"
+    plan_log.write_text('{"type":"assistant","message":{"content":"from plan"}}\n')
+
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    assert "from plan" in buf.getvalue()
 
 
 def test_default_filter_drops_system_and_tools(tmp_path: Path) -> None:
