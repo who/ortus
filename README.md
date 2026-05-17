@@ -77,13 +77,14 @@ ortus grind ~/code/myproj -c "auth migration ships cleanly"
 
 Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed version.
 
-### Platform support
+### Supported platforms
 
 | Platform | Status | Notes |
 |---|---|---|
 | Linux (Ubuntu/WSL2) | full | requires `bubblewrap` for `ortus grind` |
 | macOS | full | Seatbelt (`sandbox-exec`) is built-in |
-| Windows | partial | `init`, `check`, `tail`, `human` work; `grind` requires bwrap/sandbox-exec and is currently Linux/Mac-only |
+
+**Windows is not supported** (decision 2026-05-17; see bd issue `ortus-om1p`). Windows users should run ortus inside **WSL2** (Windows Subsystem for Linux), where ortus runs as a normal Linux process.
 
 ## Prerequisites
 
