@@ -43,18 +43,44 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install bd (beads) — Linux/Mac only
+      - name: Install bd (beads) — Linux/macOS
         if: runner.os != 'Windows'
         run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            brew install beads
-          else
-            # Linux: install from GitHub release (pinned per project convention).
-            BD_VERSION="v1.0.0"
-            curl -L -o /tmp/bd.tar.gz "https://github.com/gastownhall/beads/releases/download/${BD_VERSION}/bd_Linux_x86_64.tar.gz"
-            sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin bd
-          fi
+          # Pinned per project convention. The release tag is `v1.0.0` but the
+          # asset filenames embed the bare version `1.0.0` (no `v`).
+          BD_VERSION="1.0.0"
+          case "${{ runner.os }}" in
+            Linux)
+              ASSET="beads_${BD_VERSION}_linux_amd64.tar.gz"
+              ;;
+            macOS)
+              if [ "$(uname -m)" = "arm64" ]; then
+                ASSET="beads_${BD_VERSION}_darwin_arm64.tar.gz"
+              else
+                ASSET="beads_${BD_VERSION}_darwin_amd64.tar.gz"
+              fi
+              ;;
+          esac
+          URL="https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${ASSET}"
+          echo "Downloading $URL"
+          # --fail so a 404 exits non-zero instead of silently writing an HTML
+          # error page that tar later chokes on with a cryptic message.
+          curl --fail -L -o /tmp/bd.tar.gz "$URL"
+          sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
           bd --version
+
+      - name: Install bd (beads) — Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $BD_VERSION = "1.0.0"
+          $ASSET = "beads_${BD_VERSION}_windows_amd64.zip"
+          $URL = "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${ASSET}"
+          Write-Host "Downloading $URL"
+          Invoke-WebRequest -Uri $URL -OutFile bd.zip
+          Expand-Archive bd.zip -DestinationPath C:\bd
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\bd"
+          & C:\bd\bd.exe --version
 
       - name: Install sandbox prereq (Linux only)
         if: runner.os == 'Linux'
