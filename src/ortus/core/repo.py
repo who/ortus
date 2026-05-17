@@ -11,11 +11,10 @@ from pathlib import Path
 
 import typer
 
-FR003_NO_BEADS_ERROR = (
-    "no .beads/ in current directory; "
-    "cd to your project root or pass <repo> explicitly "
-    "(e.g., ortus grind ~/code/myproj)"
-)
+# Stable substring downstream tooling (and tests) can grep for. Kept short
+# and unique; the full multi-line error wraps this prefix with the actual
+# path that failed the lookup and how it was resolved.
+FR003_NO_BEADS_ERROR = "no .beads/ workspace at"
 
 
 def resolve_repo(repo: Path | None) -> Path:
@@ -23,11 +22,18 @@ def resolve_repo(repo: Path | None) -> Path:
 
     If `repo` is None, default to $PWD. Either way, the resulting path is
     used as-is — no walk-up. If the resulting path does not contain a
-    `.beads/` directory, exit 1 with the PRD-mandated error string verbatim
-    (single line, no rich wrapping — downstream tooling may grep for it).
+    `.beads/` directory, exit 1 with an error naming the actual path that
+    was checked plus the arg it was resolved from.
     """
     target = (repo if repo is not None else Path.cwd()).resolve()
     if not (target / ".beads").is_dir():
-        print(f"error: {FR003_NO_BEADS_ERROR}", file=sys.stderr)
+        origin = "(defaulted to PWD)" if repo is None else f"(resolved from: {repo})"
+        msg = (
+            f"{FR003_NO_BEADS_ERROR} {target}\n"
+            f"       {origin}\n"
+            f"       cd to your project root, or pass <repo> explicitly: "
+            f"ortus <verb> <repo> [<args>...]"
+        )
+        print(f"error: {msg}", file=sys.stderr)
         raise typer.Exit(code=1)
     return target

@@ -50,13 +50,25 @@ def _expand_idea(repo: Path, *, log_path: Path) -> int:
 
 def plan(
     repo: Optional[Path] = typer.Argument(
-        None, help="Target repo directory. Defaults to $PWD; no walk-up."
+        None,
+        help=(
+            "Target repo directory. Defaults to $PWD; no walk-up. "
+            "If a single positional file is given instead, it is treated as <PRD>."
+        ),
     ),
     prd: Optional[Path] = typer.Argument(
         None, help="Optional PRD path. If omitted, runs the idea-interview flow."
     ),
 ) -> None:
     """Decompose a PRD into bd issues, or interview-then-PRD-then-decompose."""
+    # Disambiguate: if the operator passed a single positional that points at
+    # a file (e.g. `ortus plan ~/prd.md` from inside a workspace), treat it
+    # as the PRD and default the repo to $PWD. Mirrors `ortus check`'s
+    # PWD-default convention while preserving `ortus plan <repo> <prd>`.
+    if repo is not None and prd is None and repo.is_file():
+        prd = repo
+        repo = None
+
     target = resolve_repo(repo)
     output.progress("plan", f"target: {target}")
 
