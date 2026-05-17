@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "ortus"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Global Python CLI for ortus: bd-driven Claude Code workflows"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,6 +49,9 @@ ortus = "ortus.__main__:main"
 Homepage = "https://github.com/who/ortus"
 Repository = "https://github.com/who/ortus"
 Issues = "https://github.com/who/ortus/issues"
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.sdist]
 include = [

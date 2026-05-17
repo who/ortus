@@ -160,17 +160,69 @@ def _isolate_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
 # ---------------------------------------------------------------------------
 
 
-def test_local_ortus_version_matches_pyproject(local_ortus: OrtusCallable) -> None:
-    proc = local_ortus("--version", check=True)
-    pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
-    # Cheap and stable: scan for `version = "X"` in [project] block.
-    version_line = next(
-        line for line in pyproject.splitlines() if line.strip().startswith("version =")
+@pytest.mark.slow
+def test_uv_build_produces_dynamic_version(tmp_path: Path) -> None:
+    # Regression guard for ortus-qyjf: pyproject.toml used to hardcode
+    # `version = "0.1.0"`, so every tag built a 0.1.0 wheel and PyPI rejected
+    # subsequent uploads with "file already exists". After moving to hatch-vcs,
+    # `uv build` must derive the version from the git state.
+    _require("uv", "git")
+    proc = subprocess.run(
+        ["uv", "build", "--out-dir", str(tmp_path)],
+        cwd=str(_REPO_ROOT),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120.0,
     )
-    expected = version_line.split("=", 1)[1].strip().strip('"').strip("'")
+    if proc.returncode != 0:
+        pytest.fail(
+            f"`uv build` exited {proc.returncode}\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        )
+    wheels = sorted(tmp_path.glob("ortus-*.whl"))
+    assert wheels, f"no wheel produced; dist contents: {list(tmp_path.iterdir())}"
+    # Wheel filename: ortus-<version>-py3-none-any.whl. Parse out <version>.
+    wheel_version = wheels[0].name.removeprefix("ortus-").split("-", 1)[0]
+
+    # Compare against what hatch-vcs should derive from git. On a tagged HEAD
+    # this is the tag (minus the leading `v`); otherwise hatch-vcs emits a
+    # `<next>.devN+g<sha>` form. Either way: it must not be the stale 0.1.0.
+    describe = subprocess.run(
+        ["git", "describe", "--tags", "--always"],
+        cwd=str(_REPO_ROOT),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if describe.startswith("v") and "-" not in describe:
+        # Clean tagged commit: wheel version must match the tag exactly.
+        assert wheel_version == describe[1:], (
+            f"wheel reports version {wheel_version!r}; expected {describe[1:]!r} "
+            f"from `git describe`"
+        )
+    else:
+        # Untagged or post-tag commit: hatch-vcs emits a dev marker.
+        assert ".dev" in wheel_version, (
+            f"wheel version {wheel_version!r} lacks `.dev` marker on an untagged "
+            f"commit (git describe: {describe!r}) — dynamic versioning is wired wrong"
+        )
+
+
+def test_local_ortus_version_matches_installed(local_ortus: OrtusCallable) -> None:
+    # Version is dynamic (hatch-vcs sets it from the git tag at build time), so
+    # we can't read a static string out of pyproject.toml. The local-dev build
+    # invoked via `uv run` should report the same version that this interpreter
+    # sees via `importlib.metadata`. If they diverge, the harness is hitting a
+    # stale install.
+    from importlib.metadata import version as _pkg_version
+
+    proc = local_ortus("--version", check=True)
+    expected = _pkg_version("ortus")
     assert expected in proc.stdout, (
         f"local ortus reports {proc.stdout!r}; expected version {expected!r} "
-        f"from pyproject.toml — harness may be hitting a stale binary"
+        f"from the test interpreter's installed ortus package — harness may be "
+        f"hitting a stale binary"
     )
 
 
