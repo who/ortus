@@ -12,6 +12,6 @@ def not_implemented(verb: str, phase: str) -> None:
     """Print a clear unimplemented-stub message and exit 2."""
     _err.print(
         f"[yellow]ortus {verb}:[/yellow] not implemented in this phase "
-        f"(lands in {phase}). See prd/PRD-ortus-global-cli.md."
+        f"(lands in {phase})."
     )
     raise typer.Exit(code=2)

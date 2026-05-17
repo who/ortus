@@ -13,7 +13,7 @@
 #                                    reports/goal-vs-ralph-<date>.md; txt strips
 #                                    markdown but preserves PASS/FAIL wording.
 #   --include-ralph-baseline         Re-tally any logs/ralph-*.log alongside for the
-#                                    >=1/100 PRD M2 comparison (default: on).
+#                                    >=1/100 ratio comparison (default: on).
 #   --no-include-ralph-baseline      Suppress the ralph baseline section regardless
 #                                    of whether ralph-*.log files exist.
 #   -h, --help                       Show this help and exit.
@@ -66,7 +66,7 @@
 #   - jq missing on $PATH: clear stderr error, exit 1.
 #
 # This script lives outside template/ on purpose: it is a measurement tool for
-# the ortus repo itself (PRD §Phase 3 / E5), not part of the generated project
+# the ortus repo itself, not part of the generated project
 # surface — same reasoning as scripts/replay-queue.sh, scripts/replay-reduce.sh,
 # and scripts/eval-cost.sh.
 
@@ -292,7 +292,7 @@ logs_csv=$(IFS=, ; echo "${LOGS[*]}")
 emit_md() {
   echo "## M2 — Sentinel-class regressions (missed_termination + spurious_sleep)"
   echo ""
-  echo "Threshold: both counts == 0 across all goal-*.log (PRD M2)"
+  echo "Threshold: both counts == 0 across all goal-*.log"
   echo ""
   echo "| Sentinel | Goal count |"
   echo "|---|---|"
@@ -309,7 +309,7 @@ emit_md() {
   fi
   echo ""
   if [ "$INCLUDE_RALPH_BASELINE" -eq 1 ]; then
-    echo "### Ralph baseline (re-tallied for the >=1/100 PRD M2 ratio)"
+    echo "### Ralph baseline (re-tallied for the >=1/100 missed-termination ratio)"
     echo ""
     case "$ralph_state" in
       no_logs)
@@ -336,7 +336,7 @@ emit_md() {
 
 emit_txt() {
   echo "M2 - Sentinel-class regressions (missed_termination + spurious_sleep)"
-  echo "  Threshold: both counts == 0 across all goal-*.log (PRD M2)"
+  echo "  Threshold: both counts == 0 across all goal-*.log"
   echo "  missed_termination: $goal_mt"
   echo "  spurious_sleep: $goal_ss"
   if [ "$STATUS" = "PASS" ]; then
@@ -349,7 +349,7 @@ emit_txt() {
   fi
   if [ "$INCLUDE_RALPH_BASELINE" -eq 1 ]; then
     echo ""
-    echo "Ralph baseline (re-tallied for >=1/100 PRD M2 ratio):"
+    echo "Ralph baseline (re-tallied for >=1/100 missed-termination ratio):"
     case "$ralph_state" in
       no_logs)
         echo "  ralph baseline: N/A - no historical ralph-*.log files in logs/"
