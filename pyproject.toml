@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ortus"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Global Python CLI for ortus: bd-driven Claude Code workflows"
 readme = "README.md"
 requires-python = ">=3.10"
