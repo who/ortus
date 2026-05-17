@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from tests._shims import shim_path
+
 pytestmark = pytest.mark.regression
 
-FAKE_CLAUDE_STREAM = (
-    Path(__file__).parent.parent / "fixtures" / "bin" / "fake-claude-stream"
-)
+FAKE_CLAUDE_STREAM = shim_path("fake-claude-stream")
 
 
 def _stream_json_lines(text: str) -> list[str]:

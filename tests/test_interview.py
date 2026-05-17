@@ -13,11 +13,12 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import interview as iv
 from ortus.core.claude import ClaudeRunner
+from tests._shims import shim_path
 
 pytestmark = pytest.mark.integration
 runner = CliRunner()
 
-FAKE = Path(__file__).parent / "fixtures" / "bin" / "fake-claude-interview"
+FAKE = shim_path("fake-claude-interview")
 
 
 @pytest.fixture()
@@ -46,7 +47,7 @@ def test_interview_jumps_to_supplied_feature_id(
     _swap_runner(monkeypatch)
     result = runner.invoke(app, ["interview", str(workspace), feature_id])
     assert result.exit_code == 0, result.stdout + result.stderr
-    log = (workspace / "logs" / "interview.log").read_text()
+    log = (workspace / "logs" / "interview.log").read_text(encoding="utf-8")
     assert feature_id in log, "feature_id should be substituted into the prompt"
 
 
@@ -70,7 +71,7 @@ def test_interview_picks_first_open_feature_when_no_id(
     _swap_runner(monkeypatch)
     result = runner.invoke(app, ["interview", str(workspace)])
     assert result.exit_code == 0, result.stdout + result.stderr
-    log = (workspace / "logs" / "interview.log").read_text()
+    log = (workspace / "logs" / "interview.log").read_text(encoding="utf-8")
     assert f1 in log
 
 

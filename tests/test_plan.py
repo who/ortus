@@ -12,11 +12,12 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import plan as plan_mod
 from ortus.core.claude import ClaudeRunner
+from tests._shims import shim_path
 
 pytestmark = pytest.mark.integration
 runner = CliRunner()
 
-FAKE_CLAUDE_PLAN = Path(__file__).parent / "fixtures" / "bin" / "fake-claude-plan"
+FAKE_CLAUDE_PLAN = shim_path("fake-claude-plan")
 TINY_PRD = Path(__file__).parent / "fixtures" / "sample-prds" / "tiny-3-task.md"
 
 

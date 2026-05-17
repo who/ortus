@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import stat
 import subprocess
 import textwrap
 from pathlib import Path
@@ -22,6 +21,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
+from tests._shims import make_inline_python_shim
 
 
 pytestmark = pytest.mark.integration
@@ -65,28 +65,26 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _claim_only_shim(tmp_path: Path) -> Path:
-    shim = tmp_path / "claude-orphans.sh"
-    shim.write_text(
+    return make_inline_python_shim(
+        tmp_path,
+        "claude-orphans",
         textwrap.dedent(
             """\
-            #!/usr/bin/env bash
-            set -e
-            first=$(bd ready --json | python3 -c "
-            import json, sys
-            d = json.load(sys.stdin)
-            for i in d:
-                if i.get('issue_type') != 'epic':
-                    print(i['id'])
-                    break
-            ")
-            bd update "$first" --status in_progress >/dev/null
-            echo "claude (orphan-test) claimed $first and bailed"
-            exit 0
+            import json
+            import subprocess
+            ready = json.loads(subprocess.run(
+                ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+            ).stdout)
+            first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+            if first:
+                subprocess.run(
+                    ["bd", "update", first, "--status", "in_progress"],
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+                print(f"claude (orphan-test) claimed {first} and bailed", flush=True)
             """
-        )
+        ),
     )
-    shim.chmod(shim.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return shim
 
 
 def _install_shim(monkeypatch: pytest.MonkeyPatch, shim: Path) -> None:

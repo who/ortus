@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# Fake claude shim that emits stream-json-shaped lines (one per line, prefixed
-# with '{"type":') so the terminal-leak regression test can verify they end
-# up in the log file and NOT in the parent stdout.
-set -e
-echo '{"type":"system","subtype":"start"}'
-echo '{"type":"assistant","message":{"content":"working"}}'
-echo '{"type":"system","subtype":"end"}'
-exit 0

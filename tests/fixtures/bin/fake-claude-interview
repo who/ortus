@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# Fake claude shim used by tests/test_interview.py.
-# Echoes its argv (so the test can inspect that $feature_id was substituted)
-# then exits 0 without making any bd changes.
-echo "fake-claude-interview prompt-tail: ${*: -1: 1}"
-echo "$@"
-exit 0

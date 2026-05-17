@@ -7,7 +7,9 @@ together, replaying canned stream-json captures.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -70,7 +72,16 @@ def test_claude_mock_resolves_all_three_scenarios(
     for scenario in ("grind-empty-queue", "grind-one-complete", "grind-blocked"):
         path = claude_mock(scenario)
         assert path.is_file()
-        assert path.stat().st_mode & 0o111, f"{scenario} should be executable"
+        if sys.platform == "win32":
+            # Windows: shim_path() returns a generated .bat wrapper that
+            # CreateProcess can execute by extension; POSIX +x bit is
+            # meaningless here. Validate via the extension and os.access.
+            assert path.suffix.lower() == ".bat", (
+                f"{scenario} should resolve to a .bat wrapper on Windows; got {path}"
+            )
+            assert os.access(path, os.X_OK), f"{scenario} bat should be readable/executable"
+        else:
+            assert path.stat().st_mode & 0o111, f"{scenario} should be executable"
 
 
 def test_claude_mock_missing_scenario_raises(

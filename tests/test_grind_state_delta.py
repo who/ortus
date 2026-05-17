@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import stat
 import subprocess
 import textwrap
 from pathlib import Path
@@ -29,6 +28,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
+from tests._shims import make_inline_python_shim
 
 
 pytestmark = pytest.mark.integration
@@ -72,14 +72,13 @@ def _seed_repo(tmp_path: Path, n_issues: int = 1) -> Path:
 
 
 def _write_shim(tmp_path: Path, name: str, body: str) -> Path:
-    """Create an executable bash script that acts as a claude stand-in.
+    """Create an executable Python script that acts as a claude stand-in.
 
     Each shim is given the repo it should mutate via the cwd ClaudeRunner sets.
+    Returns an OS-appropriate executable path (POSIX: the .py with +x;
+    Windows: a generated .bat wrapper). See ortus-f4bu.
     """
-    shim = tmp_path / name
-    shim.write_text(body)
-    shim.chmod(shim.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return shim
+    return make_inline_python_shim(tmp_path, name, body)
 
 
 def _install_shim(monkeypatch: pytest.MonkeyPatch, shim: Path) -> None:
@@ -110,24 +109,23 @@ def test_closed_branch_when_subprocess_closes_an_issue(
 
     shim = _write_shim(
         tmp_path,
-        "claude-closes-one.sh",
+        "claude-closes-one",
         textwrap.dedent(
             """\
-            #!/usr/bin/env bash
-            set -e
-            # Close the first ready issue — mirrors what a real claude session
-            # would do at the end of a successful close-one /goal turn.
-            first=$(bd ready --json | python3 -c "
-            import json, sys
-            d = json.load(sys.stdin)
-            for i in d:
-                if i.get('issue_type') != 'epic':
-                    print(i['id'])
-                    break
-            ")
-            bd close "$first" --reason "delta-test closed branch" >/dev/null
-            echo "fake-claude (closed-branch) done"
-            exit 0
+            import json
+            import subprocess
+            # Close the first ready non-epic issue — mirrors what a real
+            # claude session would do at the end of a /goal close-one turn.
+            ready = json.loads(subprocess.run(
+                ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+            ).stdout)
+            first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+            if first:
+                subprocess.run(
+                    ["bd", "close", first, "--reason", "delta-test closed branch"],
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+            print("fake-claude (closed-branch) done", flush=True)
             """
         ),
     )
@@ -157,22 +155,21 @@ def test_orphan_branch_when_subprocess_claims_without_closing(
 
     shim = _write_shim(
         tmp_path,
-        "claude-claims-only.sh",
+        "claude-claims-only",
         textwrap.dedent(
             """\
-            #!/usr/bin/env bash
-            set -e
-            first=$(bd ready --json | python3 -c "
-            import json, sys
-            d = json.load(sys.stdin)
-            for i in d:
-                if i.get('issue_type') != 'epic':
-                    print(i['id'])
-                    break
-            ")
-            bd update "$first" --status in_progress >/dev/null
-            echo "fake-claude (orphan-branch) bailed without closing"
-            exit 0
+            import json
+            import subprocess
+            ready = json.loads(subprocess.run(
+                ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+            ).stdout)
+            first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+            if first:
+                subprocess.run(
+                    ["bd", "update", first, "--status", "in_progress"],
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+            print("fake-claude (orphan-branch) bailed without closing", flush=True)
             """
         ),
     )
@@ -201,12 +198,10 @@ def test_no_change_branch_when_subprocess_touches_nothing(
 
     shim = _write_shim(
         tmp_path,
-        "claude-no-op.sh",
+        "claude-no-op",
         textwrap.dedent(
             """\
-            #!/usr/bin/env bash
-            echo "fake-claude (no-op) did nothing"
-            exit 0
+            print("fake-claude (no-op) did nothing", flush=True)
             """
         ),
     )
@@ -277,22 +272,21 @@ def test_tasks_cap_stops_outer_loop_after_n_closes(
 
     shim = _write_shim(
         tmp_path,
-        "claude-closes-one-each.sh",
+        "claude-closes-one-each",
         textwrap.dedent(
             """\
-            #!/usr/bin/env bash
-            set -e
-            first=$(bd ready --json | python3 -c "
-            import json, sys
-            d = json.load(sys.stdin)
-            for i in d:
-                if i.get('issue_type') != 'epic':
-                    print(i['id'])
-                    break
-            ")
-            bd close "$first" --reason "tasks-cap test" >/dev/null
-            echo "closed $first"
-            exit 0
+            import json
+            import subprocess
+            ready = json.loads(subprocess.run(
+                ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+            ).stdout)
+            first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+            if first:
+                subprocess.run(
+                    ["bd", "close", first, "--reason", "tasks-cap test"],
+                    check=True, stdout=subprocess.DEVNULL,
+                )
+                print(f"closed {first}", flush=True)
             """
         ),
     )

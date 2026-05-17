@@ -12,11 +12,12 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import triage as triage_mod
 from ortus.core.claude import ClaudeRunner
+from tests._shims import shim_path
 
 pytestmark = pytest.mark.integration
 runner = CliRunner()
 
-FAKE = Path(__file__).parent / "fixtures" / "bin" / "fake-claude-interview"
+FAKE = shim_path("fake-claude-interview")
 
 
 @pytest.fixture()
@@ -62,7 +63,7 @@ def test_triage_invokes_claude_when_flagged_issues_present(
     _swap_runner(monkeypatch)
     result = runner.invoke(app, ["triage", str(workspace)])
     assert result.exit_code == 0, result.stdout + result.stderr
-    log = (workspace / "logs" / "triage.log").read_text()
+    log = (workspace / "logs" / "triage.log").read_text(encoding="utf-8")
     assert "fake-claude-interview" in log
     # Prompt header should appear in the log echo
     assert "Triage Prompt" in log or len(log) > 0
@@ -96,5 +97,5 @@ def test_triage_smoke_with_canned_response(
     monkeypatch.setattr(triage_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(shim)))
     result = runner.invoke(app, ["triage", str(workspace)])
     assert result.exit_code == 0
-    log = (workspace / "logs" / "triage.log").read_text()
+    log = (workspace / "logs" / "triage.log").read_text(encoding="utf-8")
     assert "Reviewing first human-flagged" in log

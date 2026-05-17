@@ -16,10 +16,11 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
+from tests._shims import shim_path
 
 runner = CliRunner()
 
-FAKE_CLAUDE = Path(__file__).parent / "fixtures" / "bin" / "fake-claude"
+FAKE_CLAUDE = shim_path("fake-claude")
 
 
 def _fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,7 +146,7 @@ def test_grind_runs_fake_claude_and_logs_locally(
     assert logs, "expected a grind-*.log under logs/"
     # The fake-claude shim writes "fake-claude done" to its stdout, which gets
     # tee'd to log_path by ClaudeRunner.run.
-    assert any("fake-claude done" in p.read_text() for p in logs)
+    assert any("fake-claude done" in p.read_text(encoding="utf-8") for p in logs)
 
 
 def test_grind_fr003_no_beads(tmp_path: Path) -> None:
