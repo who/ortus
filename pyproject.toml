@@ -31,6 +31,7 @@ dependencies = [
     "rich>=13.7.0",
     "jinja2>=3.1.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    "portalocker>=2.0.0",
 ]
 
 [project.optional-dependencies]
