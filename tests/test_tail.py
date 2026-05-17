@@ -136,6 +136,97 @@ def test_tail_fr003_no_beads(tmp_path: Path) -> None:
     assert result.exit_code == 1
 
 
+def test_verbose_renders_tool_use_inside_assistant_content(tmp_path: Path) -> None:
+    """ortus-tshw: assistant.content[].type=tool_use must surface under --verbose.
+
+    Before the parity fix, Python tail only extracted ``.text`` from each part
+    of an assistant message's content list, silently discarding tool_use
+    entries — so operators watching --verbose missed every tool call.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "grind-1.log"
+    log.write_text(
+        '{"type":"assistant","message":{"content":['
+        '{"type":"text","text":"calling Bash now"},'
+        '{"type":"tool_use","name":"Bash","input":{"command":"ls"}}'
+        "]}}\n"
+    )
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=True, show_system=True, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "calling Bash now" in out
+    assert "Bash" in out and "ls" in out, f"expected tool_use rendered; saw:\n{out}"
+
+
+def test_verbose_renders_user_tool_result(tmp_path: Path) -> None:
+    """ortus-tshw: user.content[].type=tool_result must surface under --verbose."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "grind-1.log"
+    log.write_text(
+        '{"type":"user","message":{"content":['
+        '{"type":"tool_result","tool_use_id":"abc","content":"file contents here"}'
+        "]}}\n"
+    )
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=True, show_system=False, iterations=1, out=buf)
+    assert "file contents here" in buf.getvalue()
+
+
+def test_user_text_messages_are_always_shown(tmp_path: Path) -> None:
+    """ortus-tshw: user text content was silently dropped by the original port."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "grind-1.log"
+    log.write_text(
+        '{"type":"user","message":{"content":"hi from operator"}}\n'
+    )
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    assert "hi from operator" in buf.getvalue()
+
+
+def test_system_init_renders_as_banner_at_any_verbosity(tmp_path: Path) -> None:
+    """ortus-tshw: system:init was bash's NEW SESSION banner; must be shown always."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "grind-1.log"
+    log.write_text(
+        '{"type":"system","subtype":"init","session_id":"sess-xyz"}\n'
+    )
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "NEW SESSION" in out
+    assert "sess-xyz" in out
+
+
+def test_verbose_renders_every_real_stream_json_category(tmp_path: Path) -> None:
+    """ortus-tshw parity acceptance: --verbose must include every category bash showed.
+
+    Fixture mirrors real claude stream-json shapes captured from logs/goal-*.log:
+    system:hook_started/hook_response/init plus assistant text/thinking/tool_use
+    plus user tool_result. None of these should be silently dropped at --verbose.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "grind-fixture.log"
+    log.write_text(
+        '{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}\n'
+        '{"type":"system","subtype":"init","session_id":"S1"}\n'
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"plan-text"}]}}\n'
+        '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"plan-think"}]}}\n'
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"true"}}]}}\n'
+        '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"plan-result"}]}}\n'
+    )
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=True, show_system=True, iterations=1, out=buf)
+    out = buf.getvalue()
+    for needle in ("hook_started", "NEW SESSION", "S1", "plan-text", "plan-think", "Bash", "plan-result"):
+        assert needle in out, f"--verbose dropped {needle!r}; saw:\n{out}"
+
+
 @pytest.mark.smoke
 def test_tail_smoke_picks_up_new_grind_log(tmp_path: Path) -> None:
     """Smoke: realistic flow — start tailing, then a grind log appears."""
