@@ -25,6 +25,8 @@ from typing import Callable
 
 import pytest
 
+from .conftest import _link_claude_auth, requires_claude_auth
+
 pytestmark = pytest.mark.smoke
 
 # ---------------------------------------------------------------------------
@@ -129,9 +131,17 @@ def _require(*binaries: str) -> None:
 @pytest.fixture(autouse=True)
 def _isolate_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Reroute $HOME so the user's real ~/.claude/settings.json can't influence
-    the test outcome — `ortus check`'s hook-precheck reads it."""
+    the test outcome — `ortus check`'s hook-precheck reads it.
+
+    Auth files are symlinked back in via `_link_claude_auth` so slow tests
+    that shell out to claude don't fail with "Not logged in" (ortus-v0uw).
+    Capture `real_home` BEFORE the monkeypatch so the symlink resolves to
+    the operator's actual ~/.claude/.
+    """
+    real_home = Path.home()
     fake_home = tmp_path_factory.mktemp("fake-home")
     monkeypatch.setenv("HOME", str(fake_home))
+    _link_claude_auth(real_home, fake_home)
     return fake_home
 
 
@@ -394,6 +404,7 @@ def test_triage_skipped_interactive() -> None:
 
 
 @pytest.mark.slow
+@requires_claude_auth
 def test_plan_decompose_tiny_prd(
     local_ortus: OrtusCallable, tmp_repo: Path, random_prefix: str
 ) -> None:
@@ -437,6 +448,7 @@ def test_plan_decompose_tiny_prd(
 
 
 @pytest.mark.slow
+@requires_claude_auth
 def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     """AC #7: grind --tasks 1 against a seeded fixture closes one issue."""
     _require("bd", "claude")
