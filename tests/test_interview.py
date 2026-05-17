@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,11 @@ def test_interview_picks_first_open_feature_when_no_id(
         ["bd", "create", "--silent", "--title", "first", "--type", "feature", "--priority", "2"],
         cwd=str(workspace), check=True, capture_output=True, text=True,
     ).stdout.strip()
+    # bd stores `created_at` at second resolution. Without this sleep, both
+    # creates land in the same second on fast CI runners; _pick_feature's
+    # sort by created_at then ties and either feature may be returned,
+    # making the "first" assertion non-deterministic.
+    time.sleep(1.1)
     subprocess.run(
         ["bd", "create", "--silent", "--title", "second", "--type", "feature", "--priority", "2"],
         cwd=str(workspace), check=True, capture_output=True,

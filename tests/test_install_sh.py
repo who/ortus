@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -35,18 +34,15 @@ def test_install_sh_help_exits_zero() -> None:
     assert "Usage" in proc.stdout
 
 
-def test_install_sh_errors_when_uv_missing(tmp_path: Path) -> None:
+def test_install_sh_errors_when_uv_missing() -> None:
     """Acceptance #3: with uv absent, exit 1 + docs URL + astral hint."""
-    # Build a stripped PATH that excludes uv.
-    stripped = tmp_path / "bin"
-    stripped.mkdir()
-    # Provide essential basics so /bin/sh still works.
-    for tool in ("sh", "command", "printf", "cat"):
-        src = shutil.which(tool)
-        if src and src != f"/usr/bin/{tool}":
-            shutil.copy2(src, stripped / tool)
-
-    env = {**os.environ, "PATH": str(stripped) + ":/usr/bin:/bin"}
+    # Use a minimal PATH that excludes the directories where uv typically
+    # lives (~/.cargo/bin, ~/.local/bin, /usr/local/bin, /opt/homebrew/bin).
+    # /bin and /usr/bin still provide sh and the basic POSIX tools install.sh
+    # needs. We deliberately do NOT shutil.copy() /bin/sh into a tmpdir to
+    # simulate isolation: macOS SIP forbids copying protected system binaries
+    # and the test fails with PermissionError before it can run.
+    env = {**os.environ, "PATH": "/usr/bin:/bin"}
     # Verify uv is genuinely unreachable.
     probe = subprocess.run(
         ["sh", "-c", "command -v uv || echo NOPE"],
