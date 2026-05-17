@@ -6,8 +6,6 @@
 
 Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, one fresh subprocess per task. Inspired by the Ralph Loop concept: fresh window per task, drive the queue to zero, no context drift.
 
-Ortus uses Claude Code's `/goal` directive as the per-task completion signal: each bd-tracked task runs in a fresh `claude -p` subprocess, and `/goal`'s managed Stop hook judges when the task is done from the conversation itself rather than from sentinel strings. The loop shape is inspired by the Ralph Loop concept — one task, one fresh window, drive the queue to zero.
-
 ## Install
 
 **Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) on PATH.** Ortus is distributed via PyPI and installed by uv; we don't auto-install uv (see PRD §NFR-004).
@@ -44,25 +42,30 @@ uv tool install 'git+https://github.com/who/ortus.git@v0.1.0'
 ## Quick start
 
 ```bash
-# Bootstrap a fresh repo (creates .beads/, .claude/settings.json, AGENTS.md, .gitignore, .ortusrc)
-ortus init ~/code/myproj
+# Install Ortus globally (system-wide — don't add ortus as a project dependency)
+curl -fsSL https://github.com/who/ortus/releases/latest/download/install.sh | sh
 
-# Verify prereqs in that repo
-ortus check ~/code/myproj
+# Bootstrap YOUR project
+cd your-project
+ortus init .
+
+# Verify prereqs (bd, claude, jq, hooks, sandbox)
+ortus check .
 
 # Decompose a PRD into bd issues
-ortus plan ~/code/myproj path/to/feature.md
+ortus plan . path/to/feature.md
 
 # Or run the idea→interview→PRD→tasks flow with no PRD path
-ortus plan ~/code/myproj
+ortus plan .
 
-# Drive the bd queue to zero (one task per fresh /goal subprocess)
-ortus grind ~/code/myproj
+# Drive the bd queue to zero — one task per fresh /goal subprocess
+ortus grind .
 
-# Bounded variants
-ortus grind ~/code/myproj --tasks 5
-ortus grind ~/code/myproj -c "auth migration ships cleanly"
+# Bounded: stop after N tasks
+ortus grind . --tasks 5
 ```
+
+**Note:** Ortus is a global CLI you install once and use everywhere. You don't clone this repository into your project — `ortus init` only adds a small set of per-project files (`.beads/`, `.claude/settings.json`, `AGENTS.md`, `.ortusrc`, `.gitignore`) to an existing directory. It is not a Python dependency.
 
 ## The eight verbs
 
