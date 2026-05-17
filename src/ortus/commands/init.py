@@ -23,11 +23,19 @@ from ortus.core.init_render import (
 
 
 def _bd_init(repo: Path, prefix: str | None) -> None:
-    """Run `bd init --prefix <prefix>` inside `repo`."""
+    """Run `bd init --prefix <prefix>` inside `repo`.
+
+    Streams bd's output straight to the operator's stdout/stderr instead of
+    capturing it. Capturing can deadlock on a pipe-buffer boundary if bd writes
+    more than ~64 KB before exiting, and bd's non-TTY code path can be much
+    slower than its TTY one — both manifested as a multi-minute hang on a
+    fresh dir. Streaming sidesteps both, and the operator gets to see bd's
+    own progress lines during the init.
+    """
     args = ["bd", "init"]
     if prefix:
         args.extend(["--prefix", prefix])
-    subprocess.run(args, cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(args, cwd=str(repo), check=True)
 
 
 def _resolve_choice(
@@ -128,21 +136,10 @@ def init(
         try:
             _bd_init(target, resolved_prefix)
         except subprocess.CalledProcessError as exc:
-            # bd may write its actionable error to stdout (success messages)
-            # or stderr (failures) depending on subcommand and version, and
-            # on Windows the default capture encoding can mangle non-ASCII.
-            # Surface both streams so the operator can see the real cause.
-            def _decode(stream: object) -> str:
-                if isinstance(stream, (bytes, bytearray)):
-                    return stream.decode("utf-8", errors="replace")
-                return stream or ""
-            stderr = _decode(exc.stderr).strip()
-            stdout = _decode(exc.stdout).strip()
-            message = stderr or stdout or str(exc)
-            output.error(f"bd init failed (exit {exc.returncode}): {message}")
-            if stderr and stdout:
-                # Both streams have content — append stdout so it isn't lost.
-                output.error(f"bd init stdout: {stdout}")
+            # bd's output streamed directly to the operator's terminal, so the
+            # error message is already on screen above this line. Just signal
+            # the failure and exit.
+            output.error(f"bd init failed (exit {exc.returncode})")
             raise typer.Exit(code=1)
         output.success(f"bd workspace initialized (prefix={resolved_prefix})")
     elif force:
