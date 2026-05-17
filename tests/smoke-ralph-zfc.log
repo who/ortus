@@ -38,7 +38,7 @@ and diffing against this log.
   "has_enough_info": true,
   "missing": [],
   "implementation_steps": [
-    "Create file /home/ortus/code/ortus/tests/smoke-target.txt with exactly one line: 'zfc smoke ok' followed by a trailing newline"
+    "Create file tests/smoke-target.txt with exactly one line: 'zfc smoke ok' followed by a trailing newline"
   ],
   "verification_steps": [
     "Run `cat tests/smoke-target.txt` and confirm output is exactly `zfc smoke ok`",
