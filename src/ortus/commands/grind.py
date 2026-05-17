@@ -45,6 +45,7 @@ from ortus.core.grind_logic import (
     grind_flock,
 )
 from ortus.core.grind_loop import (
+    EXCLUDED_LABELS,
     OrphanPolicy,
     StateSnapshot,
     apply_orphan_policy,
@@ -73,12 +74,17 @@ def _log_path(repo: Path) -> Path:
 
 
 def _snapshot(bd: BdClient) -> StateSnapshot:
-    """Read all four bd state values needed by the outer loop in one shot."""
+    """Read all four bd state values needed by the outer loop in one shot.
+
+    `open` and `in_progress` are counted with EXCLUDED_LABELS applied so
+    human-flagged issues don't keep the queue artificially non-empty;
+    `closed` is reported verbatim (historical, never gates loop control).
+    """
     return StateSnapshot.from_counts(
         closed=bd.count_by_status("closed"),
-        in_progress=bd.count_by_status("in_progress"),
-        open=bd.count_by_status("open"),
-        in_progress_ids=bd.in_progress_ids(),
+        in_progress=bd.count_by_status("in_progress", exclude_labels=EXCLUDED_LABELS),
+        open=bd.count_by_status("open", exclude_labels=EXCLUDED_LABELS),
+        in_progress_ids=bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS),
     )
 
 

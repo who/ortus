@@ -24,6 +24,12 @@ from typing import Iterable, Optional
 CLOSE_ONE_CONDITION_FILE = "close-one.txt"
 CONDITIONS_PACKAGE = "ortus.prompts.conditions"
 
+# Labels whose presence on an issue makes it un-claimable by the agent loop.
+# Applied to both the queue-drained check and the orphan-detection diff so
+# escalated issues don't make the orchestrator spin (ortus-9db5). The
+# close-one prompt mirrors this filter on its own `bd ready` call.
+EXCLUDED_LABELS: tuple[str, ...] = ("human",)
+
 
 class OrphanPolicy(str, enum.Enum):
     """How the outer loop reacts when an iteration leaves an issue claimed

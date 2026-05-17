@@ -11,6 +11,7 @@ import pytest
 
 from ortus.core.grind_loop import (
     CLOSE_ONE_CONDITION_FILE,
+    EXCLUDED_LABELS,
     OrphanPolicy,
     StateSnapshot,
     apply_orphan_policy,
@@ -128,6 +129,32 @@ def test_close_one_condition_is_packaged() -> None:
 
 def test_close_one_condition_file_constant_matches_filename() -> None:
     assert CLOSE_ONE_CONDITION_FILE == "close-one.txt"
+
+
+def test_excluded_labels_includes_human() -> None:
+    """The orchestrator's snapshot filter must skip human-flagged issues
+    so escalations stop the spin loop (ortus-9db5)."""
+    assert "human" in EXCLUDED_LABELS
+
+
+def test_close_one_condition_excludes_human_label_from_bd_ready() -> None:
+    """Issues labeled 'human' must be filtered out of the ready queue (ortus-9db5).
+
+    Orphan-policy ESCALATE adds the 'human' label to claims the agent couldn't
+    complete. Without --exclude-label=human, grind sessions keep re-picking
+    those issues, re-verifying, and exiting without progress.
+    """
+    body = read_close_one_condition()
+    # Every `bd ready` invocation in the condition must carry the filter.
+    import re
+
+    invocations = re.findall(r"bd ready[^\n`]*", body)
+    assert invocations, "close-one.txt should reference `bd ready`"
+    for inv in invocations:
+        assert "--exclude-label=human" in inv, (
+            f"`bd ready` invocation in close-one.txt is missing "
+            f"--exclude-label=human: {inv!r}"
+        )
 
 
 # --- apply_orphan_policy --------------------------------------------------

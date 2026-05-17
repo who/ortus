@@ -219,6 +219,64 @@ def test_no_change_branch_when_subprocess_touches_nothing(
 # --- queue exhaustion (acceptance #6) ------------------------------------
 
 
+def test_human_only_queue_treated_as_drained_without_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-9db5: when every remaining issue is labeled `human`, the
+    orchestrator must treat the queue as drained instead of spinning."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / "human-only"
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--prefix", "hu"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    # Seed two issues, label both `human` so nothing is agent-claimable.
+    for i in range(2):
+        new_id = subprocess.run(
+            [
+                "bd", "create", "--silent",
+                "--title", f"human-only-{i}",
+                "--type", "task",
+                "--priority", "2",
+                "--labels", "human",
+            ],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert new_id  # sanity
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+
+    spawn_count = {"n": 0}
+
+    class _SpyRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(self, *args, **kwargs) -> int:
+            spawn_count["n"] += 1
+            return 0
+
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _SpyRunner())
+
+    result = runner.invoke(app, ["grind", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert spawn_count["n"] == 0, (
+        "expected zero claude spawns when every issue is human-flagged"
+    )
+    log = _read_log(repo)
+    assert "queue already drained" in log
+
+
 def test_queue_drained_exits_outer_loop_without_spawn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
