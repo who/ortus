@@ -6,6 +6,8 @@
 
 A global Python CLI for bd-driven Claude Code workflows. One install, one binary, eight verbs.
 
+Ortus uses Claude Code's `/goal` directive as the per-task completion signal: each bd-tracked task runs in a fresh `claude -p` subprocess, and `/goal`'s managed Stop hook judges when the task is done from the conversation itself rather than from sentinel strings. The loop shape is inspired by the Ralph Loop concept — one task, one fresh window, drive the queue to zero.
+
 ## Install
 
 **Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) on PATH.** Ortus is distributed via PyPI and installed by uv; we don't auto-install uv (see PRD §NFR-004).
@@ -54,7 +56,7 @@ ortus plan ~/code/myproj path/to/feature.md
 # Or run the idea→interview→PRD→tasks flow with no PRD path
 ortus plan ~/code/myproj
 
-# Drive the bd queue to zero (long-lived /goal session)
+# Drive the bd queue to zero (one task per fresh /goal subprocess)
 ortus grind ~/code/myproj
 
 # Bounded variants
@@ -69,7 +71,7 @@ ortus grind ~/code/myproj -c "auth migration ships cleanly"
 | `ortus init <repo>` | Bootstrap a fresh repo with bd + .claude/settings.json + AGENTS.md + .ortusrc + .gitignore |
 | `ortus check <repo>` | Verify bd/claude/jq + sandbox prereq + hook-enabled + settings shape; strictly read-only |
 | `ortus plan <repo> [<PRD>]` | Decompose a PRD into bd issues, or interview-then-PRD-then-decompose if no PRD path |
-| `ortus grind <repo>` | Drive the bd queue via a long-lived `claude -p '/goal CONDITION'` session |
+| `ortus grind <repo>` | Drive the bd queue, one task per fresh `claude -p '/goal …'` subprocess |
 | `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
 | `ortus tail <repo>` | Follow `logs/{grind,goal,ralph}-*.log` with stream-json filtering |
 | `ortus triage <repo>` | Walk the human-flagged bd queue interactively |
