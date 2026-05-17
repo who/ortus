@@ -37,7 +37,7 @@
 # keep CPU/memory contention out of the wall-clock measurement.
 #
 # This script lives outside template/ on purpose: it is a measurement tool
-# for the ortus repo itself (PRD §Phase 3 / E5), not part of the generated
+# for the ortus repo itself, not part of the generated
 # project surface. See scripts/check-ortus-parity.sh for why measurement
 # tooling does not need a template mirror.
 
