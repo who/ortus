@@ -121,6 +121,27 @@ def test_init_under_five_seconds(tmp_path: Path) -> None:
     assert elapsed < 5.0, f"ortus init took {elapsed:.2f}s (NFR-001 budget: 5s)"
 
 
+def test_init_surfaces_bd_failure_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-btt3: when bd init exits non-zero its output streams straight to
+    the operator, and ortus exits 1 with a clear `bd init failed (exit N)` line.
+    """
+    import ortus.commands.init as init_mod
+
+    def fake_run(args, cwd, check):  # noqa: ARG001 — match subprocess.run signature
+        # bd's own stderr would normally print here; the wrapper trusts that
+        # the operator already saw it and just signals the failure.
+        raise subprocess.CalledProcessError(returncode=7, cmd=args)
+
+    monkeypatch.setattr(init_mod.subprocess, "run", fake_run)
+    target = tmp_path / "doomed"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 1
+    combined = result.stdout + result.stderr
+    assert "bd init failed (exit 7)" in combined, combined
+
+
 def test_ortusrc_round_trips_as_toml(tmp_path: Path) -> None:
     import sys
     if sys.version_info >= (3, 11):
