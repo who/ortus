@@ -4,7 +4,7 @@
 
 *Ortus* (Latin: "rising, origin, birth") — the point from which something springs into being.
 
-A global Python CLI for bd-driven Claude Code workflows. One install, one binary, eight verbs.
+Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, one fresh subprocess per task. Inspired by the Ralph Loop concept: fresh window per task, drive the queue to zero, no context drift.
 
 Ortus uses Claude Code's `/goal` directive as the per-task completion signal: each bd-tracked task runs in a fresh `claude -p` subprocess, and `/goal`'s managed Stop hook judges when the task is done from the conversation itself rather than from sentinel strings. The loop shape is inspired by the Ralph Loop concept — one task, one fresh window, drive the queue to zero.
 
