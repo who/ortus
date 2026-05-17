@@ -6,6 +6,7 @@ arg eliminates the cd-to-PRD-dir bug from idea.sh (FR-014).
 
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 from typing import Optional
 
@@ -78,7 +79,8 @@ def plan(
 
     log_dir = target / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "plan.log"
+    ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = log_dir / f"plan-{ts}.log"
 
     client = BdClient(target)
     before = {i["id"] for i in client.list_open()}

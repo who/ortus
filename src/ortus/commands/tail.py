@@ -1,4 +1,4 @@
-"""ortus tail <repo> — follow logs/{grind,goal,ralph}-*.log (idzn.4).
+"""ortus tail <repo> — follow logs/{grind,goal,ralph,plan}-*.log (idzn.4).
 
 Strictly read-only (NFR-006). Default formatting filters claude stream-json
 into human-readable turn boundaries; --raw emits lines verbatim. Polls the
@@ -55,7 +55,7 @@ import typer
 
 from ortus.core.repo import resolve_repo
 
-PREFIXES = ("grind-", "goal-", "ralph-")
+PREFIXES = ("grind-", "goal-", "ralph-", "plan-")
 POLL_SECONDS = 1.0
 
 
@@ -460,7 +460,7 @@ def tail(
         help="Show assistant messages only (suppress USER blocks; mirrors tail.sh -a).",
     ),
 ) -> None:
-    """Tail orchestrator log files (grind-*, goal-*, ralph-*).
+    """Tail orchestrator log files (grind-*, goal-*, ralph-*, plan-*).
 
     Always shown: assistant/user text, system:init banners, top-level results,
     plain-text banners. Use -t to add tool calls/results, -s to add other
