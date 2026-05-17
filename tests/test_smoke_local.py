@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import stat
 import subprocess
@@ -77,10 +78,39 @@ def local_ortus() -> OrtusCallable:
 
 
 @pytest.fixture()
-def tmp_repo(tmp_path: Path) -> Path:
-    """Hermetic project root for `ortus init`. Auto-cleaned by tmp_path."""
+def random_prefix() -> str:
+    """Per-test random bd workspace prefix.
+
+    The `smoke` base makes test-created bd issues visually distinguishable
+    from real ones if state ever leaks; the hex suffix ensures uniqueness
+    across runs and parallel pytest workers.
+
+    Randomizing surfaces any code path (in prompts, scripts, or helpers)
+    that assumes a default `bd-` prefix shape. See ortus-vidr / ortus-5w6r.
+    """
+    return "smoke" + secrets.token_hex(3)
+
+
+@pytest.fixture()
+def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
+    """Hermetic project root, pre-`ortus init`-ed with a random bd prefix.
+
+    Tests that need a bare directory (i.e. that want to exercise `ortus init`
+    themselves on an empty dir) should use `tmp_path` directly and pass an
+    explicit `--prefix`.
+    """
     repo = tmp_path / "repo"
     repo.mkdir()
+    subprocess.run(
+        [
+            "uv", "run", "--project", str(_REPO_ROOT), "ortus", "init",
+            str(repo), "--prefix", random_prefix,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
     return repo
 
 
@@ -129,13 +159,13 @@ def test_local_ortus_version_matches_pyproject(local_ortus: OrtusCallable) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_init_creates_expected_files(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
-    """AC #6: init creates .beads/, .claude/settings.json, .ortusrc, AGENTS.md."""
+def test_init_creates_expected_files(tmp_repo: Path) -> None:
+    """AC #6: init creates .beads/, .claude/settings.json, .ortusrc, AGENTS.md.
+
+    The `tmp_repo` fixture has already invoked `ortus init` with a random
+    prefix; verifying the post-init state is what this test cares about.
+    """
     _require("bd")
-    proc = local_ortus("init", str(tmp_repo))
-    assert proc.returncode == 0, (
-        f"ortus init exited {proc.returncode}.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-    )
     expected = [
         tmp_repo / ".beads",
         tmp_repo / ".claude" / "settings.json",
@@ -149,11 +179,10 @@ def test_init_creates_expected_files(local_ortus: OrtusCallable, tmp_repo: Path)
     )
 
 
-def test_init_settings_shape(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
+def test_init_settings_shape(tmp_repo: Path) -> None:
     """AC #6: settings.json declares bd in sandbox.excludedCommands and does
     not silently turn off hooks."""
     _require("bd")
-    local_ortus("init", str(tmp_repo), check=True)
     data = json.loads((tmp_repo / ".claude" / "settings.json").read_text())
     excluded = data.get("sandbox", {}).get("excludedCommands", [])
     assert "bd" in excluded, (
@@ -171,9 +200,12 @@ def test_init_settings_shape(local_ortus: OrtusCallable, tmp_repo: Path) -> None
 
 
 def test_init_idempotency_force(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
-    """AC #6: re-running init without --force is refused; --force succeeds."""
+    """AC #6: re-running init without --force is refused; --force succeeds.
+
+    The `tmp_repo` fixture has already invoked init once; this test verifies
+    that a second init refuses and a third init with --force succeeds.
+    """
     _require("bd")
-    local_ortus("init", str(tmp_repo), check=True)
     again = local_ortus("init", str(tmp_repo))
     assert again.returncode != 0, (
         "second `ortus init` without --force exited 0; expected refusal "
@@ -198,7 +230,6 @@ def test_check_green_path(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     own external prereqs and their absence is not a smoke-harness failure.
     """
     _require("bd", "claude", "jq", "bwrap")
-    local_ortus("init", str(tmp_repo), check=True)
     proc = local_ortus("check", str(tmp_repo))
     assert proc.returncode == 0, (
         f"`ortus check` exited {proc.returncode} on a fresh init'd repo with "
@@ -216,7 +247,6 @@ def test_check_disabled_hooks_fails(
 ) -> None:
     """AC #6: disableAllHooks=true → check exits 1 with hook-precheck error."""
     _require("bd")
-    local_ortus("init", str(tmp_repo), check=True)
     settings = tmp_repo / ".claude" / "settings.json"
     data = json.loads(settings.read_text())
     data["disableAllHooks"] = True
@@ -239,7 +269,6 @@ def test_check_missing_bd_fails(
 ) -> None:
     """AC #6: with bd masked from PATH, check exits non-zero and flags bd."""
     _require("bd")
-    local_ortus("init", str(tmp_repo), check=True)
     # Build a PATH stub that contains *only* uv + git + jq + bwrap + claude —
     # explicitly NOT bd. The subprocess will then see bd as missing.
     stub = tmp_path / "stub-bin"
@@ -281,12 +310,7 @@ def test_tail_runs_against_seeded_log(tmp_repo: Path) -> None:
     output survives the kill.
     """
     _require("bd")
-    # init in-process via the same subprocess pattern as local_ortus.
-    init_proc = subprocess.run(
-        ["uv", "run", "--project", str(_REPO_ROOT), "ortus", "init", str(tmp_repo)],
-        check=True, capture_output=True, text=True,
-    )
-    assert init_proc.returncode == 0
+    # tmp_repo is already inited by the fixture.
     logs = tmp_repo / "logs"
     logs.mkdir(exist_ok=True)
     (logs / "grind-smoke.log").write_text(
@@ -322,7 +346,6 @@ def test_human_writes_todo(
 ) -> None:
     """AC #6: human emits HUMAN-TODO.md listing each flagged issue."""
     _require("bd")
-    local_ortus("init", str(tmp_repo), check=True)
     issue_id = subprocess.run(
         [
             "bd", "create", "--silent",
@@ -372,11 +395,14 @@ def test_triage_skipped_interactive() -> None:
 
 @pytest.mark.slow
 def test_plan_decompose_tiny_prd(
-    local_ortus: OrtusCallable, tmp_repo: Path
+    local_ortus: OrtusCallable, tmp_repo: Path, random_prefix: str
 ) -> None:
-    """AC #7: plan decomposes a synthetic 3-task PRD into bd issues."""
+    """AC #7: plan decomposes a synthetic 3-task PRD into bd issues.
+
+    Also asserts every created issue uses the workspace's actual (random)
+    prefix — regression guard for ortus-5w6r (plan-prompt hardcoding `bd-`).
+    """
     _require("bd", "claude")
-    local_ortus("init", str(tmp_repo), check=True)
     prd = tmp_repo / "tiny.prd.md"
     prd.write_text(
         "# Tiny PRD\n\n"
@@ -400,13 +426,20 @@ def test_plan_decompose_tiny_prd(
         f"`ortus plan` produced {len(issues)} issues; expected ≥ 3 from a "
         f"3-task PRD. Decomposition logic may have regressed."
     )
+    wrong_prefix = [
+        i["id"] for i in issues if not i["id"].startswith(f"{random_prefix}-")
+    ]
+    assert not wrong_prefix, (
+        f"`ortus plan` created issues whose IDs do not match the workspace's "
+        f"prefix {random_prefix!r}: {wrong_prefix}. The plan-prompt likely "
+        f"hardcoded `bd-` (or another prefix) — see ortus-5w6r."
+    )
 
 
 @pytest.mark.slow
 def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     """AC #7: grind --tasks 1 against a seeded fixture closes one issue."""
     _require("bd", "claude")
-    local_ortus("init", str(tmp_repo), check=True)
     subprocess.run(
         [
             "bd", "create", "--silent",
