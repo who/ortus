@@ -7,12 +7,14 @@ the unit tests pin behavior on.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import re
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Iterator, Optional
+
+import portalocker
+from portalocker.exceptions import LockException
 
 
 CONDITION_CEILING = 4000
@@ -152,20 +154,22 @@ def grind_flock(repo: Path) -> Iterator[Path]:
     """Acquire an exclusive non-blocking flock at <repo>/.beads/ortus.flock.
 
     Raises FlockBusy immediately if another process holds it (mirrors
-    goal.sh's --nb behavior). Releases on context exit.
+    goal.sh's --nb behavior). Releases on context exit. Cross-platform
+    via portalocker (fcntl on POSIX, msvcrt on Windows).
     """
     lockfile = repo / ".beads" / "ortus.flock"
     lockfile.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lockfile, "a+")
+    lock = portalocker.Lock(
+        str(lockfile),
+        mode="a+",
+        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+        fail_when_locked=True,
+    )
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        fh.close()
+        lock.acquire()
+    except LockException as exc:
         raise FlockBusy(f"another grind holds {lockfile}") from exc
     try:
         yield lockfile
     finally:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        finally:
-            fh.close()
+        lock.release()
