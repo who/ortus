@@ -92,6 +92,38 @@ def test_allowed_domains_includes_registries_for_project_type(
     assert domains - BASE_DOMAINS == expected_registries
 
 
+# ortus-oxp9 — allowedDomains also reflects the selected --package-manager's
+# registry, on top of the project_type defaults. yarn pulls from
+# registry.yarnpkg.com (classic mirror) plus the npm registry; bun/npm/pnpm
+# use registry.npmjs.org. The npm registry is contributed by both the
+# typescript project_type and these managers, so the rendered list must dedupe.
+@pytest.mark.parametrize(
+    ("package_manager", "expected_registries"),
+    [
+        ("npm", {"registry.npmjs.org"}),
+        ("pnpm", {"registry.npmjs.org"}),
+        ("yarn", {"registry.yarnpkg.com", "registry.npmjs.org"}),
+        ("bun", {"registry.npmjs.org"}),
+    ],
+)
+def test_allowed_domains_reflects_typescript_package_manager(
+    package_manager: str, expected_registries: set[str]
+) -> None:
+    ctx = RenderContext(
+        prefix="p", project_type="typescript", package_manager=package_manager
+    )
+    listed = json.loads(render_template(".claude/settings.json", ctx))[
+        "sandbox"
+    ]["network"]["allowedDomains"]
+    domains = set(listed)
+    assert BASE_DOMAINS <= domains
+    # Exactly the registries for this manager appear beyond the base set.
+    assert domains - BASE_DOMAINS == expected_registries
+    # No duplicate entries even though typescript + the manager both
+    # contribute registry.npmjs.org.
+    assert len(listed) == len(domains)
+
+
 # Acceptance #3 — rendered .ortusrc validates as TOML.
 def test_rendered_ortusrc_validates_as_toml() -> None:
     ctx = RenderContext(prefix="acme", project_type="go", today="2026-05-16")
