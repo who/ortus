@@ -44,7 +44,9 @@
         + (["pypi.org", "files.pythonhosted.org"] if project_type in ["python", "polyglot"] else [])
         + (["crates.io", "static.crates.io"] if project_type in ["rust", "polyglot"] else [])
         + (["proxy.golang.org", "sum.golang.org"] if project_type in ["go", "polyglot"] else [])
-      ) | tojson }}
+        + (["registry.yarnpkg.com", "registry.npmjs.org"] if package_manager == "yarn" else [])
+        + (["registry.npmjs.org"] if package_manager in ["bun", "npm", "pnpm"] else [])
+      ) | unique | list | tojson }}
     }
   },
   "hooks": {
