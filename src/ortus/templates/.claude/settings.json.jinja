@@ -31,14 +31,20 @@
     "network": {
       "allowLocalBinding": true,
       "allowManagedDomainsOnly": true,
-      "allowedDomains": [
-        "api.anthropic.com",
-        "github.com",
-        "api.github.com",
-        "codeload.github.com",
-        "raw.githubusercontent.com",
-        "objects.githubusercontent.com"
-      ]
+      "allowedDomains": {{ (
+        [
+          "api.anthropic.com",
+          "github.com",
+          "api.github.com",
+          "codeload.github.com",
+          "raw.githubusercontent.com",
+          "objects.githubusercontent.com"
+        ]
+        + (["registry.npmjs.org"] if project_type in ["typescript", "polyglot"] else [])
+        + (["pypi.org", "files.pythonhosted.org"] if project_type in ["python", "polyglot"] else [])
+        + (["crates.io", "static.crates.io"] if project_type in ["rust", "polyglot"] else [])
+        + (["proxy.golang.org", "sum.golang.org"] if project_type in ["go", "polyglot"] else [])
+      ) | tojson }}
     }
   },
   "hooks": {

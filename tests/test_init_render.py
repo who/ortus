@@ -48,6 +48,50 @@ def test_rendered_settings_json_validates_and_has_excluded_commands() -> None:
     assert data["sandbox"]["excludedCommands"] == ["bd", "bd *"]
 
 
+# Regression (ortus-5gja) — allowedDomains must include the package registries
+# for the selected project_type. The bundled template originally shipped only the
+# 6 base domains, so init'd projects couldn't install packages in the sandbox.
+BASE_DOMAINS = {
+    "api.anthropic.com",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+}
+REGISTRY_DOMAINS = {
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org",
+}
+
+
+@pytest.mark.parametrize(
+    ("project_type", "expected_registries"),
+    [
+        ("typescript", {"registry.npmjs.org"}),
+        ("python", {"pypi.org", "files.pythonhosted.org"}),
+        ("rust", {"crates.io", "static.crates.io"}),
+        ("go", {"proxy.golang.org", "sum.golang.org"}),
+        ("polyglot", REGISTRY_DOMAINS),
+    ],
+)
+def test_allowed_domains_includes_registries_for_project_type(
+    project_type: str, expected_registries: set[str]
+) -> None:
+    ctx = RenderContext(prefix="p", project_type=project_type)
+    data = json.loads(render_template(".claude/settings.json", ctx))
+    domains = set(data["sandbox"]["network"]["allowedDomains"])
+    # Base domains are always present.
+    assert BASE_DOMAINS <= domains
+    # Exactly the registries for this ecosystem appear (no extras, none missing).
+    assert domains - BASE_DOMAINS == expected_registries
+
+
 # Acceptance #3 — rendered .ortusrc validates as TOML.
 def test_rendered_ortusrc_validates_as_toml() -> None:
     ctx = RenderContext(prefix="acme", project_type="go", today="2026-05-16")
