@@ -18,7 +18,7 @@ from typing import Callable
 
 import pytest
 
-from tests._shims import shim_path
+from tests._shims import normalize_git_branch, shim_path
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CANNED_DIR = _FIXTURES / "canned-claude-responses"
@@ -143,6 +143,9 @@ def seeded_3_issues(tmp_path: Path) -> Path:
         check=True,
         capture_output=True,
     )
+    # `bd init` lands the incidental git repo on `master`; grind's branch guard
+    # (ortus-6fu6) pins to the `main` integration branch, so align the fixture.
+    normalize_git_branch(repo)
     # Epic
     epic = subprocess.run(
         ["bd", "create", "--silent", "--title", "Test epic", "--type", "epic", "--priority", "1"],

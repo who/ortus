@@ -31,7 +31,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim
+from tests._shims import make_inline_python_shim, normalize_git_branch
 
 
 # These tests spawn a real subprocess that hangs until the watchdog kills it;
@@ -59,6 +59,7 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
         check=True,
         capture_output=True,
     )
+    normalize_git_branch(repo)
     issue_id = subprocess.run(
         [
             "bd", "create", "--silent",
@@ -127,18 +128,18 @@ _CLAIM_THEN_HANG = textwrap.dedent(
 )
 
 # A worker that CLOSES its issue, then hangs (case 2: hung-after-close).
+# The harness already claimed the issue (in_progress) and injected its id; a
+# real worker closes that claimed issue, so we look it up via `bd list
+# --status in_progress` rather than re-running `bd ready` (now empty).
 _CLOSE_THEN_HANG = textwrap.dedent(
     """\
     import json, subprocess, time
-    ready = json.loads(subprocess.run(
-        ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+    inprog = json.loads(subprocess.run(
+        ["bd", "list", "--status", "in_progress", "--json"],
+        check=True, capture_output=True, text=True,
     ).stdout)
-    first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+    first = next((i["id"] for i in inprog if i.get("issue_type") != "epic"), None)
     if first:
-        subprocess.run(
-            ["bd", "update", first, "--status", "in_progress"],
-            check=True, stdout=subprocess.DEVNULL,
-        )
         subprocess.run(
             ["bd", "close", first, "--reason", "shipped before hanging"],
             check=True, stdout=subprocess.DEVNULL,

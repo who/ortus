@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,6 +81,35 @@ def shim_path(stem: str) -> Path:
             return _wrap_for_os(py)
     raise FileNotFoundError(
         f"no shim named {stem!r} under {_BIN_DIR} or {_CANNED_DIR}"
+    )
+
+
+def normalize_git_branch(repo: Path, branch: str = "main") -> None:
+    """Rename the current git branch of `repo` to `branch` (default "main").
+
+    `bd init` incidentally `git init`s the workspace and lands it on the git
+    default branch — `master` on most installs. grind's branch-discipline guard
+    (ortus-6fu6) pins the working tree to its integration branch (`main` by
+    default) and halts if it can't, so integration fixtures that drive grind
+    must sit on that branch. Production ortus repos already do; this aligns the
+    bd-init'd test repos so the guard sees a clean on-integration-branch state
+    instead of tripping on the incidental `master`. No-op if already on
+    `branch`.
+    """
+    proc = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or proc.stdout.strip() == branch:
+        return
+    subprocess.run(
+        ["git", "branch", "-m", branch],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
     )
 
 

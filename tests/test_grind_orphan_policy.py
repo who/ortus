@@ -21,7 +21,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim
+from tests._shims import make_inline_python_shim, normalize_git_branch
 
 
 pytestmark = pytest.mark.integration
@@ -46,6 +46,9 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
         check=True,
         capture_output=True,
     )
+    # `bd init` lands the incidental git repo on `master`; grind's branch guard
+    # (ortus-6fu6) pins to the `main` integration branch, so align the fixture.
+    normalize_git_branch(repo)
     issue_id = subprocess.run(
         [
             "bd", "create", "--silent",

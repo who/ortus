@@ -58,6 +58,22 @@ def test_list_ready_includes_new_issue(bd_workspace: Path) -> None:
     assert any(i["id"] == issue_id for i in ready)
 
 
+def test_list_ready_exclude_labels_filters_human(bd_workspace: Path) -> None:
+    """The grind harness selects from `bd ready --exclude-label human`; a
+    human-flagged issue must be dropped from the result."""
+    client = BdClient(bd_workspace)
+    plain = client.create(title="plain work", issue_type="task", priority=2)
+    flagged = client.create(
+        title="needs a human", issue_type="task", priority=2, labels=["human"]
+    )
+    filtered = client.list_ready(exclude_labels=("human",))
+    ids = {i["id"] for i in filtered}
+    assert plain in ids
+    assert flagged not in ids
+    # Without the filter the flagged issue is still ready.
+    assert flagged in {i["id"] for i in client.list_ready()}
+
+
 def test_close_marks_issue_closed(bd_workspace: Path) -> None:
     client = BdClient(bd_workspace)
     issue_id = client.create(title="to be closed", issue_type="task", priority=2)

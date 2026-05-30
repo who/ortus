@@ -28,7 +28,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim
+from tests._shims import make_inline_python_shim, normalize_git_branch
 
 
 pytestmark = pytest.mark.integration
@@ -53,6 +53,7 @@ def _seed_repo(tmp_path: Path, n_issues: int = 1) -> Path:
         check=True,
         capture_output=True,
     )
+    normalize_git_branch(repo)
     for i in range(n_issues):
         subprocess.run(
             [
@@ -114,12 +115,15 @@ def test_closed_branch_when_subprocess_closes_an_issue(
             """\
             import json
             import subprocess
-            # Close the first ready non-epic issue — mirrors what a real
-            # claude session would do at the end of a /goal close-one turn.
-            ready = json.loads(subprocess.run(
-                ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+            # The harness already selected + claimed the issue (status
+            # in_progress) and injected its id into the prompt. A real /goal
+            # worker closes that claimed issue; we mirror it by closing the
+            # one in_progress issue rather than re-running `bd ready`.
+            inprog = json.loads(subprocess.run(
+                ["bd", "list", "--status", "in_progress", "--json"],
+                check=True, capture_output=True, text=True,
             ).stdout)
-            first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+            first = next((i["id"] for i in inprog if i.get("issue_type") != "epic"), None)
             if first:
                 subprocess.run(
                     ["bd", "close", first, "--reason", "delta-test closed branch"],
@@ -196,7 +200,15 @@ def test_orphan_branch_when_subprocess_claims_without_closing(
 def test_no_change_branch_when_subprocess_touches_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance #5: bd-unchanged subprocess logs WARN no bd-state change."""
+    """Acceptance #5: bd-unchanged subprocess logs WARN no bd-state change.
+
+    A true no-change (open→open) iteration only arises when the worker — not
+    the harness — owns selection: the default path now claims an issue
+    in-harness every iteration, so a no-op worker there yields an orphan, not
+    a no-change. We exercise the no-change branch via the legacy `--condition`
+    path (`-c`), where the harness does NOT pre-claim and a no-op worker leaves
+    bd state untouched.
+    """
     repo = _seed_repo(tmp_path, n_issues=1)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
@@ -214,7 +226,7 @@ def test_no_change_branch_when_subprocess_touches_nothing(
 
     result = runner.invoke(
         app,
-        ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"],
+        ["grind", str(repo), "-c", "do nothing", "--iterations", "1", "--idle-sleep", "0"],
     )
     log = _read_log(repo)
     assert result.exit_code == 0, result.stdout + result.stderr + "\n--- log ---\n" + log
@@ -239,6 +251,7 @@ def test_human_only_queue_treated_as_drained_without_spawn(
         check=True,
         capture_output=True,
     )
+    normalize_git_branch(repo)
     # Seed two issues, label both `human` so nothing is agent-claimable.
     for i in range(2):
         new_id = subprocess.run(
@@ -297,6 +310,7 @@ def test_queue_drained_exits_outer_loop_without_spawn(
         check=True,
         capture_output=True,
     )
+    normalize_git_branch(repo)
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
@@ -340,10 +354,17 @@ def test_tasks_cap_stops_outer_loop_after_n_closes(
             """\
             import json
             import subprocess
-            ready = json.loads(subprocess.run(
-                ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+            # The harness selected + claimed an issue (status in_progress) and
+            # injected its id; a real worker closes THAT claimed issue. Closing
+            # a `bd ready` issue instead would leave the harness's claim an
+            # orphan and (under the default revert policy) spin the loop
+            # re-claiming it forever, so mirror the harness-select contract and
+            # close the in_progress issue.
+            inprog = json.loads(subprocess.run(
+                ["bd", "list", "--status", "in_progress", "--json"],
+                check=True, capture_output=True, text=True,
             ).stdout)
-            first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
+            first = next((i["id"] for i in inprog if i.get("issue_type") != "epic"), None)
             if first:
                 subprocess.run(
                     ["bd", "close", first, "--reason", "tasks-cap test"],

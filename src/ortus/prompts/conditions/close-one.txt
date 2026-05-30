@@ -5,7 +5,7 @@ Procedure:
 (2) Claim it with `bd update <id> --status in_progress`.
 (3) Complete the work that the issue's description and acceptance criteria require. Run the tests and gates that the acceptance criteria call for; verify they pass before closing.
 (4) Close the issue with `bd close <id> --reason "<one-line summary of what shipped>"`.
-(5) If a git remote is configured, commit and push the code changes. Verify `git status` shows "up to date with origin".
+(5) If a git remote is configured, commit and push the code changes. Verify `git status` shows "up to date with origin". Do NOT create or switch git branches — stay on the current branch (the integration branch, normally `main`) and commit + push there. Work committed to a side branch is stranded off the deploy path.
 
 You are NOT driving the queue to zero. The outer ortus-grind shell handles queue exhaustion, retries, and orphan-claim recovery from observable bd state — not from your judgment. Your scope is one issue.
 

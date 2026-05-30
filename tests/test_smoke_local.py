@@ -26,6 +26,7 @@ from typing import Callable
 import pytest
 
 from .conftest import _link_claude_auth, requires_claude_auth
+from ._shims import normalize_git_branch
 
 pytestmark = pytest.mark.smoke
 
@@ -123,6 +124,12 @@ def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
             f"`ortus init` exited {proc.returncode} during tmp_repo setup\n"
             f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
         )
+    # `ortus init` git-inits on the git default branch (`master` on most
+    # installs); align the fixture with grind's default integration branch so
+    # the branch-discipline guard (ortus-6fu6) sees an on-`main` state after a
+    # worker commits, instead of halting on a stray `master`. Production ortus
+    # repos already live on `main`.
+    normalize_git_branch(repo)
     return repo
 
 
