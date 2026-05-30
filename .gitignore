@@ -27,3 +27,9 @@ node_modules/
 package-lock.json
 package.json
 
+
+# bd runtime artifacts (locks, embedded dolt cache, backups) — not source
+.beads/*.flock
+.beads/*.duckdb
+.beads/*.bak
+.beads/*.pre-embedded-*
