@@ -30,6 +30,7 @@ New behavior:
 from __future__ import annotations
 
 import datetime as _dt
+import subprocess
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -140,6 +141,17 @@ def grind(
         "--idle-sleep",
         help="Seconds to sleep after a no-change iteration (suspected evaluator false-positive).",
     ),
+    worker_timeout: int = typer.Option(
+        1800,
+        "--worker-timeout",
+        help=(
+            "Hard cap (secs) on a single iteration's worker subprocess. On exceed, "
+            "SIGTERM then SIGKILL the worker's whole process group (killing any child "
+            "bd/dolt/build processes and releasing their locks), then run the normal "
+            "post-iteration recovery (bd-state delta + orphan-policy). 0 disables the "
+            "watchdog (workers may then hang the loop indefinitely)."
+        ),
+    ),
     fast: bool = typer.Option(False, "--fast", help="Use claude --fast (premium output)."),
     docker: bool = typer.Option(
         False, "--docker", help="Run claude inside docker sandbox instead of bwrap."
@@ -169,6 +181,9 @@ def grind(
         output.info(f"iterations:     {iterations}")
         output.info(f"orphan-policy:  {orphan_policy.value}")
         output.info(f"idle-sleep:     {idle_sleep}s")
+        output.info(
+            f"worker-timeout: {worker_timeout}s" if worker_timeout > 0 else "worker-timeout: off"
+        )
         output.info(f"fast:           {fast}")
         output.info(f"docker:         {docker}")
         output.info("--- per-iteration prompt ---")
@@ -269,7 +284,28 @@ def grind(
 
                 iters_run += 1
                 write_log(f"iter {iters_run}: spawning claude (close-one /goal)")
-                rc = runner.run(iteration_prompt, repo=target, log_path=log, fast=fast)
+                # A stuck-but-alive worker would otherwise block the entire
+                # loop forever (only a human kill recovers it). --worker-timeout
+                # hard-caps the iteration: on exceed the runner SIGTERM/SIGKILLs
+                # the worker's process group, we log it distinctly, and fall
+                # through to the SAME post-iteration recovery as a clean exit —
+                # bd state is ground truth, so a worker that closed its issue
+                # then hung still counts, and a claimed-but-unclosed issue still
+                # gets the orphan-policy treatment.
+                try:
+                    rc = runner.run(
+                        iteration_prompt,
+                        repo=target,
+                        log_path=log,
+                        fast=fast,
+                        timeout=(worker_timeout if worker_timeout > 0 else None),
+                    )
+                except subprocess.TimeoutExpired:
+                    rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
+                    write_log(
+                        f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
+                        f"killed (rc={rc})"
+                    )
 
                 after = _snapshot(bd)
                 delta = compute_delta(before, after)
