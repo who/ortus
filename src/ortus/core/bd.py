@@ -51,8 +51,21 @@ class BdClient:
 
     # --- typed surface --------------------------------------------------
 
-    def list_ready(self) -> list[dict[str, Any]]:
-        _, data = self._run("ready", "--json", parse_json=True)
+    def list_ready(
+        self, *, exclude_labels: tuple[str, ...] = ()
+    ) -> list[dict[str, Any]]:
+        """`bd ready --json` → ready issues, ordered by priority.
+
+        ``exclude_labels`` maps to repeated ``--exclude-label`` flags so the
+        grind harness can drop human-escalated issues (mirrors
+        :meth:`count_by_status`/:meth:`in_progress_ids`) before selecting the
+        next issue to claim.
+        """
+        args = ["ready"]
+        for label in exclude_labels:
+            args.extend(["--exclude-label", label])
+        args.append("--json")
+        _, data = self._run(*args, parse_json=True)
         return data or []
 
     def list_open(self) -> list[dict[str, Any]]:

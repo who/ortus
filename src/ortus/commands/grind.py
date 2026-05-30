@@ -40,19 +40,25 @@ import typer
 from ortus.core import cache, hooks, output, sandbox
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
+from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
     build_condition,
     grind_flock,
 )
 from ortus.core.grind_loop import (
+    DEFAULT_INTEGRATION_BRANCH,
     EXCLUDED_LABELS,
+    BranchDisposition,
     OrphanPolicy,
     StateSnapshot,
     apply_orphan_policy,
+    classify_branch_state,
     compute_delta,
+    inject_issue,
     queue_drained,
-    read_close_one_condition,
+    read_work_issue_condition,
+    select_ready_issue,
 )
 from ortus.core.repo import resolve_repo
 
@@ -65,6 +71,93 @@ def _make_runner() -> ClaudeRunner:
 def _make_bd(repo: Path) -> BdClient:
     """Indirection so tests can swap in a stub bd client."""
     return BdClient(repo=repo)
+
+
+def _make_git(repo: Path) -> GitClient:
+    """Indirection so tests can swap in a stub git client."""
+    return GitClient(repo=repo)
+
+
+def _enforce_branch_discipline(
+    git: GitClient,
+    integration_branch: str,
+    write_log: Callable[[str], None],
+    *,
+    phase: str,
+) -> None:
+    """Pin the working tree to the integration branch and keep origin current.
+
+    Called at the top of every iteration AND after each close so a closed
+    issue's commit always lands on origin/<integration> (deployable), never
+    stranded on a feature branch (ortus-6fu6). No-op when the repo isn't
+    git-backed. Raises typer.Exit(1) on a stranded-work HALT so the loop stops
+    loudly instead of silently piling work onto an off-deploy-path branch.
+
+    `phase` is a short tag ('startup' / 'pre-iter' / 'post-close') for the log.
+    """
+    if not git.is_git_repo():
+        return
+
+    # A repo with no commits yet (unborn branch, e.g. right after `ortus init`)
+    # has nothing stranded and no commit to push; branch discipline is moot.
+    # Skipping here also avoids misreading the unborn branch — where
+    # `git rev-parse --abbrev-ref HEAD` fails and current_branch() is "" — as a
+    # detached HEAD and halting the loop before any work has been done.
+    if not git.has_commits():
+        write_log(f"branch-guard [{phase}]: repo has no commits yet; skipping")
+        return
+
+    decision = classify_branch_state(git.branch_state(integration_branch))
+    disp = decision.disposition
+
+    if disp is BranchDisposition.OK:
+        write_log(f"branch-guard [{phase}]: {decision.reason}")
+        return
+
+    if disp is BranchDisposition.PUSH:
+        if not git.has_remote():
+            write_log(
+                f"branch-guard [{phase}]: {decision.reason} "
+                "(no remote configured; nothing to push)"
+            )
+            return
+        pushed = git.push(integration_branch)
+        write_log(
+            f"branch-guard [{phase}]: {decision.reason} "
+            f"({'pushed' if pushed else 'PUSH FAILED'})"
+        )
+        if not pushed:
+            output.error(
+                f"grind: push of {integration_branch} to origin failed; the "
+                "closed work is NOT on origin yet",
+                hint="pull --rebase and push manually, then re-run grind",
+            )
+        return
+
+    if disp is BranchDisposition.REASSERT:
+        ok = git.checkout(integration_branch)
+        write_log(
+            f"branch-guard [{phase}]: {decision.reason} "
+            f"({'re-checked out' if ok else 'CHECKOUT FAILED'})"
+        )
+        if not ok:
+            output.error(
+                f"grind: could not re-checkout {integration_branch}",
+                hint="resolve the working tree state manually, then re-run grind",
+            )
+            raise typer.Exit(code=1)
+        return
+
+    # HALT — stranded work or detached HEAD. Surface loudly and stop.
+    write_log(f"branch-guard [{phase}]: HALT — {decision.reason}")
+    output.error(
+        f"grind halted (branch discipline): {decision.reason}",
+        hint=(
+            f"a closed issue must land on origin/{integration_branch} to be "
+            "deployable; grind will not continue while work is stranded"
+        ),
+    )
+    raise typer.Exit(code=1)
 
 
 def _log_path(repo: Path) -> Path:
@@ -89,18 +182,23 @@ def _snapshot(bd: BdClient) -> StateSnapshot:
     )
 
 
-def _resolve_prompt(custom_condition: Optional[str]) -> str:
-    """The per-subprocess /goal prompt body.
+def _legacy_prompt(custom_condition: str) -> str:
+    """The per-subprocess /goal prompt for the legacy `--condition` path.
 
-    --condition overrides the canonical close-one text verbatim; otherwise
-    load the bundled close-one.txt. The outer-loop CONDITION is NARROW
-    (close one issue), not the queue-zero condition — acceptance #2.
+    When the operator pins a custom condition we leave SELECTION to the worker
+    (verbatim, every iteration) for backwards compatibility. The default path
+    instead has the harness select+claim and inject the issue per iteration
+    (see `_compose_work_prompt`), which is composed live inside the loop.
     """
-    if custom_condition:
-        body = custom_condition
-    else:
-        body = read_close_one_condition()
-    return f"/goal {body}"
+    return f"/goal {custom_condition}"
+
+
+def _compose_work_prompt(template: str, issue: dict) -> str:
+    """Fill the work-issue template with the harness-claimed issue's id +
+    details and prefix the /goal directive. The worker is TOLD which issue to
+    work rather than choosing/transcribing it — eliminating the hallucinated-id
+    failure mode at the source."""
+    return f"/goal {inject_issue(template, issue)}"
 
 
 def _log_writer(log_path: Path) -> Callable[[str], None]:
@@ -152,6 +250,16 @@ def grind(
             "watchdog (workers may then hang the loop indefinitely)."
         ),
     ),
+    integration_branch: str = typer.Option(
+        DEFAULT_INTEGRATION_BRANCH,
+        "--integration-branch",
+        help=(
+            "Branch grind pins the working tree to. A closed issue's commit must "
+            "land on origin/<branch> to be deployable; grind re-asserts this branch "
+            "each iteration and halts loudly if a worker strands work on a side "
+            "branch instead of silently leaving origin stale."
+        ),
+    ),
     fast: bool = typer.Option(False, "--fast", help="Use claude --fast (premium output)."),
     docker: bool = typer.Option(
         False, "--docker", help="Run claude inside docker sandbox instead of bwrap."
@@ -165,29 +273,44 @@ def grind(
     """Drive the bd queue via a subprocess-per-task /goal loop (ortus-3ico)."""
     target = resolve_repo(repo)
 
-    # Compose the per-iteration prompt up front so --dry-run can short-circuit.
-    # NB: --condition can still be used to pin a custom condition, but the
-    # built-in default is the bundled close-one.txt (NOT queue-zero.txt).
+    # Two per-iteration prompt shapes:
+    #   - default (no --condition): the harness selects + claims the next ready
+    #     issue itself and injects its exact id + details into the work-issue
+    #     template per iteration, so the worker is TOLD which issue to work and
+    #     never runs `bd ready` or transcribes a hash-like id (the
+    #     id-hallucination wedge this loop exists to prevent).
+    #   - legacy (--condition set): the worker self-selects, verbatim every
+    #     iteration, for one-off operator invocations / queue-zero conditions.
     # build_condition() is preserved for the legacy queue-zero shape so that
-    # `-c "$(cat queue-zero.txt)"` continues to work for one-off operator
-    # invocations; the outer loop never calls it.
+    # `-c "$(cat queue-zero.txt)"` continues to work; the outer loop never
+    # calls it.
     _ = build_condition  # re-export retained for downstream tooling/tests
 
-    iteration_prompt = _resolve_prompt(condition)
+    harness_select = condition is None
+    work_template = read_work_issue_condition() if harness_select else ""
 
     if dry_run:
         output.info(f"repo:           {target}")
         output.info(f"tasks:          {tasks}")
         output.info(f"iterations:     {iterations}")
         output.info(f"orphan-policy:  {orphan_policy.value}")
+        output.info(f"integration:    {integration_branch}")
         output.info(f"idle-sleep:     {idle_sleep}s")
         output.info(
             f"worker-timeout: {worker_timeout}s" if worker_timeout > 0 else "worker-timeout: off"
         )
         output.info(f"fast:           {fast}")
         output.info(f"docker:         {docker}")
+        output.info(f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}")
         output.info("--- per-iteration prompt ---")
-        output.info(iteration_prompt)
+        if harness_select:
+            output.info(
+                "/goal " + work_template.rstrip()
+                + "\n(the harness fills <ISSUE_ID>/<ISSUE_DETAILS> per iteration "
+                "from the next ready issue it claims.)"
+            )
+        else:
+            output.info(_legacy_prompt(condition))
         return
 
     # Phase 0 — sandbox precondition (Tier 1 native vs Tier 2 docker).
@@ -216,6 +339,14 @@ def grind(
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
+            git = _make_git(target)
+            # Re-assert branch discipline before anything else: a stray branch
+            # left by a prior crashed grind (or a manual checkout) is caught
+            # here and either re-checked-out or halted on, so we never start
+            # spawning workers on top of stranded work (ortus-6fu6).
+            _enforce_branch_discipline(
+                git, integration_branch, write_log, phase="startup"
+            )
             initial_snapshot = _snapshot(bd)
             write_log(
                 f"initial state: open={initial_snapshot.open} "
@@ -282,8 +413,60 @@ def grind(
                     )
                     break
 
+                # Re-assert the working tree onto the integration branch before
+                # spawning the worker, so it commits onto main (not whatever a
+                # previous worker drifted onto). Halts loudly on stranded work
+                # (ortus-6fu6).
+                _enforce_branch_discipline(
+                    git, integration_branch, write_log, phase="pre-iter"
+                )
+
+                # Default path: select + claim the next ready issue IN-HARNESS,
+                # then inject its exact id + details into the per-iteration
+                # prompt. The claim happens AFTER the `before` snapshot above so
+                # the existing orphan detection (after.in_progress_ids -
+                # before.in_progress_ids) still sees this iteration's claim as
+                # fresh — a worker that fails to close it lands in the orphan
+                # branch and gets the orphan-policy treatment, unchanged.
+                if harness_select:
+                    try:
+                        ready = bd.list_ready(exclude_labels=EXCLUDED_LABELS)
+                    except Exception as exc:  # bd hiccup: don't crash the loop
+                        write_log(f"iter prep: bd ready failed ({exc}); idle-sleeping")
+                        if idle_sleep > 0:
+                            time.sleep(idle_sleep)
+                        continue
+                    target_issue = select_ready_issue(ready)
+                    if target_issue is None:
+                        # Queue is non-empty (not drained) but nothing is ready —
+                        # everything left is blocked or human-flagged. We hold the
+                        # flock, so no other actor will unblock it; stop rather
+                        # than spin spawning workers that have nothing to do.
+                        write_log(
+                            "no ready issue to claim (queue blocked or human-only); "
+                            f"exiting outer loop. tasks_completed={tasks_completed}"
+                        )
+                        break
+                    issue_id = target_issue["id"]
+                    try:
+                        bd.update_status(issue_id, "in_progress")
+                    except Exception as exc:
+                        write_log(
+                            f"iter prep: claim of {issue_id} failed ({exc}); idle-sleeping"
+                        )
+                        if idle_sleep > 0:
+                            time.sleep(idle_sleep)
+                        continue
+                    iteration_prompt = _compose_work_prompt(work_template, target_issue)
+                    write_log(
+                        f"iter {iters_run + 1}: harness selected+claimed {issue_id}; "
+                        "injected into /goal prompt"
+                    )
+                else:
+                    iteration_prompt = _legacy_prompt(condition)
+
                 iters_run += 1
-                write_log(f"iter {iters_run}: spawning claude (close-one /goal)")
+                write_log(f"iter {iters_run}: spawning claude (work-issue /goal)")
                 # A stuck-but-alive worker would otherwise block the entire
                 # loop forever (only a human kill recovers it). --worker-timeout
                 # hard-caps the iteration: on exceed the runner SIGTERM/SIGKILLs
@@ -315,6 +498,14 @@ def grind(
                     write_log(
                         f"iter {iters_run}: closed +{delta.closed_delta} "
                         f"(tasks_completed={tasks_completed}, rc={rc})"
+                    )
+                    # Verify the close actually reached origin/<integration>.
+                    # If the worker committed onto main but didn't push, push
+                    # it; if it drifted onto a side branch and committed the
+                    # close there, halt loudly — a "closed" issue that isn't on
+                    # origin/<integration> is not deployable (ortus-6fu6).
+                    _enforce_branch_discipline(
+                        git, integration_branch, write_log, phase="post-close"
                     )
                 elif delta.is_orphan:
                     write_log(

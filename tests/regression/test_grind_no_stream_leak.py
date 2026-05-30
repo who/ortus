@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._shims import shim_path
+from tests._shims import normalize_git_branch, shim_path
 
 pytestmark = pytest.mark.regression
 
@@ -39,6 +39,10 @@ def test_grind_terminal_is_quiet_log_is_full(tmp_path: Path) -> None:
         check=True,
         capture_output=True,
     )
+    # `bd init` commits on the git default branch (`master`); align it with
+    # grind's default integration branch so the branch-discipline guard
+    # (ortus-6fu6) doesn't trip trying to re-checkout a non-existent `main`.
+    normalize_git_branch(repo)
     # Seed one ready issue so the subprocess-per-task outer loop actually
     # spawns claude (otherwise queue_drained() short-circuits and the
     # stream-leak check has nothing to validate).

@@ -16,7 +16,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import shim_path
+from tests._shims import normalize_git_branch, shim_path
 
 runner = CliRunner()
 
@@ -119,6 +119,7 @@ def test_grind_runs_fake_claude_and_logs_locally(
         check=True,
         capture_output=True,
     )
+    normalize_git_branch(repo)
     # Seed one ready issue so queue_drained() doesn't short-circuit before
     # claude is spawned.
     subprocess.run(
@@ -147,6 +148,71 @@ def test_grind_runs_fake_claude_and_logs_locally(
     # The fake-claude shim writes "fake-claude done" to its stdout, which gets
     # tee'd to log_path by ClaudeRunner.run.
     assert any("fake-claude done" in p.read_text(encoding="utf-8") for p in logs)
+
+
+def test_grind_harness_selects_claims_and_injects_issue_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-xo1u: the harness (not the worker) selects + claims the next ready
+    issue and injects its EXACT id into the per-iteration /goal prompt.
+
+    With a fake claude that echoes its argv but never touches bd, we can assert
+    the worker was handed the specific id the harness claimed — proving the
+    worker is TOLD which issue to work rather than choosing/transcribing it.
+    """
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / "fixture"
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--prefix", "fixth"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    normalize_git_branch(repo)
+    create = subprocess.run(
+        ["bd", "create", "--silent", "--title", "inject me", "--type", "task", "--priority", "1"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    issue_id = create.stdout.strip()
+    assert issue_id, "expected bd create to print the new id"
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(FAKE_CLAUDE))
+    )
+
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    logs = list((repo / "logs").glob("grind-*.log"))
+    assert logs
+    log_text = "\n".join(p.read_text(encoding="utf-8") for p in logs)
+    # The harness logged the in-harness select+claim of the EXACT id...
+    assert f"harness selected+claimed {issue_id}" in log_text
+    # ...and the worker's prompt (echoed by fake-claude's argv) carried that id.
+    assert f"Work bd issue {issue_id}" in log_text
+
+
+def test_grind_dry_run_default_shows_harness_select(tmp_path: Path) -> None:
+    """Default (no --condition) dry-run advertises harness-side selection and
+    the work-issue template with its placeholders intact."""
+    repo = _fixture_repo(tmp_path)
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0
+    assert "select:" in result.stdout
+    assert "harness" in result.stdout
+    assert "<ISSUE_ID>" in result.stdout
 
 
 def test_grind_fr003_no_beads(tmp_path: Path) -> None:
