@@ -165,6 +165,44 @@ def test_backend_preflight_names_the_missing_cli() -> None:
     assert "claude" in proc.stderr
 
 
+# FR-005 — CODEX_HOME must be project-local so a codex run reads the generated
+# .codex/config.toml and never the operator's global ~/.codex.
+def test_backend_env_points_codex_home_at_the_project() -> None:
+    proc = run_bash(
+        'cd /tmp && backend_env && echo "$CODEX_HOME"',
+        env={"ORTUS_BACKEND": "codex"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "/tmp/.codex"
+
+
+def test_backend_env_is_a_no_op_for_claude() -> None:
+    """Claude discovers .claude/ in cwd on its own; exporting CODEX_HOME for it
+    would be noise, and must not happen (NFR-001 zero-change default)."""
+    proc = run_bash('backend_env && echo "[${CODEX_HOME:-unset}]"')
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[unset]"
+
+
+def test_backend_env_respects_an_explicit_codex_home() -> None:
+    proc = run_bash(
+        'backend_env && echo "$CODEX_HOME"',
+        env={"ORTUS_BACKEND": "codex", "CODEX_HOME": "/elsewhere/.codex"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "/elsewhere/.codex"
+
+
+def test_backend_argv_sets_codex_home_before_refusing_an_unimplemented_backend() -> None:
+    """backend_argv calls backend_env first, so the codex argv branch (FR-004)
+    inherits the project-local config directory without extra wiring."""
+    proc = run_bash(
+        'cd /tmp && { backend_argv goal P || true; }; echo "$CODEX_HOME"',
+        env={"ORTUS_BACKEND": "codex"},
+    )
+    assert proc.stdout.strip() == "/tmp/.codex"
+
+
 def test_template_mirror_is_byte_identical() -> None:
     """Parity: the distributable mirror must not drift from the working copy."""
     assert TEMPLATE_BACKEND_SH.is_file()

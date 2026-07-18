@@ -1,0 +1,44 @@
+# .codex/config.toml — Codex CLI configuration for {{ project_name }}.
+#
+# The project-local peer of .claude/settings.json. Ortus exports
+# CODEX_HOME=$PWD/.codex before every `codex` invocation (ortus/lib/backend.sh,
+# backend_env), so Codex reads THIS file and never the operator's global
+# ~/.codex/config.toml. Keeping the posture in-repo means it is reviewed and
+# versioned like the rest of the project.
+
+# Non-interactive loops have no operator to answer a prompt; an approval
+# request would hang the run instead of failing it. The sandbox below, plus
+# whatever outer sandbox the launcher wraps around it, is what bounds the
+# agent — not an approval dialog.
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+# The agent needs the network for package installs and API calls; the outer
+# sandbox is what narrows that to the allowlist below.
+network_access = true
+# Builds and test runs scratch in $TMPDIR and /tmp — keep both writable.
+exclude_tmpdir_env_var = false
+exclude_slash_tmp = false
+
+[ortus]
+# Codex's own sandbox has no per-domain filter: [sandbox_workspace_write]
+# accepts writable_roots / network_access / exclude_* and nothing else, so
+# network_access is all-or-nothing (verified against codex-cli 0.144.6). This
+# allowlist is therefore advisory to Codex and authoritative for the outer
+# sandbox, which enforces it identically for both backends. Codex ignores
+# unknown top-level tables, so shipping it here is inert to the CLI.
+#
+# Derived from the same language_profile logic that fills allowedDomains in
+# .claude/settings.json — both read the computed `network_allowlist` answer.
+network_allowlist = [
+{%- for domain in network_allowlist %}
+  "{{ domain }}",
+{%- endfor %}
+]
+
+# MCP servers, if any. Codex spawns each as a stdio subprocess:
+#
+# [mcp_servers.example]
+# command = "npx"
+# args = ["-y", "@example/mcp-server"]

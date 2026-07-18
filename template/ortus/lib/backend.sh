@@ -9,6 +9,9 @@
 #   backend_argv <role> [prompt] [prd_path]
 #       Fills the global array BACKEND_ARGV with the full command line.
 #       Roles: goal, prd-decompose, idea-expand.
+#   backend_env
+#       Exports the env a backend needs before it is invoked. For codex that
+#       is CODEX_HOME=$PWD/.codex; for claude it is a no-op. Always returns 0.
 #   backend_stream_flags
 #       Fills the global array BACKEND_STREAM_FLAGS with the flags that make
 #       the backend emit a machine-readable event stream (what tail.sh decodes).
@@ -49,12 +52,30 @@ _backend_require_claude() {
     fi
 }
 
+# Point Codex at the project's own config directory. Codex reads
+# $CODEX_HOME/config.toml and defaults to ~/.codex — without this export a run
+# would silently pick up the operator's global posture instead of the
+# generated .codex/config.toml, which is exactly the drift the in-repo config
+# exists to prevent (FR-005).
+#
+# Respects an explicit CODEX_HOME so an operator can point a one-off run
+# elsewhere; the default is project-local.
+backend_env() {
+    [ "$(backend_name)" = "codex" ] || return 0
+    CODEX_HOME="${CODEX_HOME:-$PWD/.codex}"
+    export CODEX_HOME
+    return 0
+}
+
 backend_stream_flags() {
     _backend_require_claude || return 1
     BACKEND_STREAM_FLAGS=(--output-format stream-json --verbose)
 }
 
 backend_argv() {
+    # Before the guard: when the codex branch lands (FR-004) it inherits the
+    # project-local CODEX_HOME without having to remember to ask for it.
+    backend_env
     _backend_require_claude || return 1
 
     local role="${1:-}"
