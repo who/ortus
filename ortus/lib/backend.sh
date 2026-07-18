@@ -1,0 +1,120 @@
+# ortus/lib/backend.sh — sourceable backend adapter (claude only)
+#
+# One place that knows how to turn a role ("what we want the agent to do")
+# into a concrete CLI argv. Launchers call these functions instead of
+# hard-coding `claude ...` inline, so adding a second backend later is a
+# change to this file rather than a change to every launcher.
+#
+# Public API:
+#   backend_argv <role> [prompt] [prd_path]
+#       Fills the global array BACKEND_ARGV with the full command line.
+#       Roles: goal, prd-decompose, idea-expand.
+#   backend_stream_flags
+#       Fills the global array BACKEND_STREAM_FLAGS with the flags that make
+#       the backend emit a machine-readable event stream (what tail.sh decodes).
+#   backend_available
+#       0 if the backend CLI is on PATH, 1 otherwise. Silent.
+#   backend_preflight
+#       0 if the backend can actually be invoked; otherwise prints a
+#       diagnostic to stderr and returns 1.
+#
+# Arrays, not strings: every function publishes a named global array. A
+# string would have to be re-split by the caller, and prompts contain
+# spaces, quotes and newlines — re-splitting them silently corrupts the
+# invocation.
+#
+# Env inputs:
+#   ORTUS_BACKEND  backend name; only "claude" is implemented here.
+#   FAST_MODE      optional extra flag appended to the goal argv.
+#   CLAUDE_CMD     optional array; the launcher's command prefix (e.g. the
+#                  docker sandbox wrapper). Defaults to (claude).
+#
+# No dependency on log() — this module emits no diagnostics of its own.
+
+# Resolve the backend name. Full precedence (flag > env > generated default)
+# lands with resolve_backend; until then the env var is the only input and
+# claude is the only implementation.
+backend_name() {
+    printf '%s\n' "${ORTUS_BACKEND:-claude}"
+}
+
+# Guard: fail loudly rather than silently emitting a Claude argv for a
+# backend we do not implement yet.
+_backend_require_claude() {
+    local name
+    name=$(backend_name)
+    if [ "$name" != "claude" ]; then
+        echo "ERROR: backend '$name' is not implemented (valid: claude)" >&2
+        return 1
+    fi
+}
+
+backend_stream_flags() {
+    _backend_require_claude || return 1
+    BACKEND_STREAM_FLAGS=(--output-format stream-json --verbose)
+}
+
+backend_argv() {
+    _backend_require_claude || return 1
+
+    local role="${1:-}"
+    local prompt="${2:-}"
+    local prd_path="${3:-${ORTUS_PRD_PATH:-}}"
+
+    # The launcher may wrap the CLI (e.g. `docker sandbox run claude --name
+    # ortus-goal --`). Honour an already-set CLAUDE_CMD array; otherwise the
+    # bare binary.
+    local -a cmd
+    # ${CLAUDE_CMD[*]:-} rather than ${#CLAUDE_CMD[@]} so an unset CLAUDE_CMD
+    # is not a fatal unbound-variable error under the launchers' `set -u`.
+    if [ -n "${CLAUDE_CMD[*]:-}" ]; then
+        cmd=("${CLAUDE_CMD[@]}")
+    else
+        cmd=(claude)
+    fi
+
+    case "$role" in
+        goal)
+            backend_stream_flags
+            BACKEND_ARGV=("${cmd[@]}" -p "$prompt" "${BACKEND_STREAM_FLAGS[@]}" --dangerously-skip-permissions)
+            # FAST_MODE is a single opt-in flag, empty when unset — appending
+            # it unquoted would inject an empty argv element.
+            [ -n "${FAST_MODE:-}" ] && BACKEND_ARGV+=("$FAST_MODE")
+            ;;
+        prd-decompose)
+            # The tool allowlist is scoped to the one PRD being decomposed
+            # plus bd, so a decompose run cannot wander the filesystem.
+            BACKEND_ARGV=("${cmd[@]}" --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions -p "$prompt")
+            ;;
+        idea-expand)
+            # One-shot completion whose stdout the caller captures; no loop,
+            # no stream decoding.
+            BACKEND_ARGV=("${cmd[@]}" --print "$prompt")
+            ;;
+        *)
+            echo "ERROR: unknown backend role '$role' (valid: goal, prd-decompose, idea-expand)" >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+backend_available() {
+    _backend_require_claude 2>/dev/null || return 1
+    command -v claude >/dev/null 2>&1
+}
+
+backend_preflight() {
+    local name
+    name=$(backend_name)
+    if [ "$name" != "claude" ]; then
+        echo "ERROR: backend '$name' is not implemented (valid: claude)" >&2
+        return 1
+    fi
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "ERROR: 'claude' CLI not found on PATH." >&2
+        echo "  Install it: https://code.claude.com/docs/en/quickstart" >&2
+        return 1
+    fi
+    return 0
+}
