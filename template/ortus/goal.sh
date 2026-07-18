@@ -342,7 +342,16 @@ export ORTUS_OUTER_SANDBOX="${ORTUS_OUTER_SANDBOX:-enforced}"
 # before any claude spawn. /goal is implemented as a managed Stop hook; if
 # disableAllHooks=true is set anywhere in the settings layer stack, the
 # directive silently degrades. Refuse to launch in that case.
-check_hooks_enabled
+#
+# Claude-only (FR-008). Under codex, /goal is native to the CLI rather than a
+# managed Stop hook, so Claude's disableAllHooks setting says nothing about
+# whether the directive will fire — running the gate there could only produce a
+# false refusal on a settings file the codex run never reads.
+if [ "$ORTUS_BACKEND" = "claude" ]; then
+  check_hooks_enabled
+else
+  log "Hook precheck: skipped (backend=$ORTUS_BACKEND; /goal is native, not a managed Stop hook)"
+fi
 
 # bd exemption preflight (FR-006). The single most likely source of a silently
 # broken loop is a sandbox that lets bd read the queue but not write it: the
