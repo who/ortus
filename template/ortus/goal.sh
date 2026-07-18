@@ -278,6 +278,11 @@ fi
 # ralph.sh:95 so tail.sh's glob picks up both prefixes once yr7d.8 widens it.
 mkdir -p logs
 LOG_FILE="logs/goal-$(date '+%Y%m%d-%H%M%S').log"
+# ortus-36w3: stamp the backend as the log's first line so tail.sh picks its
+# decoder from the log itself rather than from out-of-band state that may have
+# changed since the run. Written straight to the file, not through log(), so
+# the marker stays machine-readable and off the operator's stream.
+printf '# ortus-backend: %s\n' "$ORTUS_BACKEND" > "$LOG_FILE"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
 log "=== goal.sh Started ==="

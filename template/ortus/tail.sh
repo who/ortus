@@ -12,10 +12,15 @@ SHOW_TOOLS="${SHOW_TOOLS:-false}"
 SHOW_SYSTEM="${SHOW_SYSTEM:-false}"
 ASSISTANT_ONLY="${ASSISTANT_ONLY:-false}"
 # FR-007: which decoder to run. Codex emits `codex exec --json` JSON Lines;
-# claude emits stream-json. Selected explicitly here (--codex / ORTUS_BACKEND);
-# automatic per-log detection is a separate concern.
+# claude emits stream-json. Normally resolved per log file from the
+# `# ortus-backend:` marker goal.sh stamps at log creation (ortus-36w3);
+# --codex / ORTUS_BACKEND force one decoder and skip detection entirely.
 CODEX_MODE=false
-[ "${ORTUS_BACKEND:-}" = "codex" ] && CODEX_MODE=true
+BACKEND_EXPLICIT=false
+case "${ORTUS_BACKEND:-}" in
+    codex) CODEX_MODE=true; BACKEND_EXPLICIT=true ;;
+    claude) BACKEND_EXPLICIT=true ;;
+esac
 DECODE_FILE=""
 CODEX_DECODE_FAILED=false
 
@@ -42,6 +47,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --codex)
             CODEX_MODE=true
+            BACKEND_EXPLICIT=true
             shift
             ;;
         --decode)
@@ -119,14 +125,57 @@ mark_tailed() {
     echo "$1" >> "$TAILED_LIST"
 }
 
+# --- Decoder selection (ortus-36w3) ----------------------------------------
+# Logs are self-describing: goal.sh writes `# ortus-backend: <name>` as the
+# first line of every log it creates. Detection reads that marker and nothing
+# else — sniffing the JSON payload would guess, and a wrong guess renders
+# garbage. A markerless or unknown-backend log is a hard error, not a
+# best-effort render; --codex / ORTUS_BACKEND remain the manual override for
+# raw logs captured outside goal.sh.
+read_backend_marker() {
+    head -n 20 "$1" 2>/dev/null \
+        | sed -n 's/^# ortus-backend: \([a-z][a-z0-9_-]*\)$/\1/p' \
+        | head -n 1
+}
+
+# Echoes "true"/"false" for CODEX_MODE, or fails with a diagnostic on stderr.
+resolve_codex_mode() {
+    local file="$1" backend
+    if [ "$BACKEND_EXPLICIT" = "true" ]; then
+        echo "$CODEX_MODE"
+        return 0
+    fi
+    backend="$(read_backend_marker "$file")"
+    case "$backend" in
+        codex)  echo "true" ;;
+        claude) echo "false" ;;
+        "")
+            echo "$(basename "$file"): no '# ortus-backend:' marker — cannot pick a decoder." >&2
+            echo "  Logs created by goal.sh carry one. For a raw log, pass --codex or set ORTUS_BACKEND=claude|codex." >&2
+            return 1
+            ;;
+        *)
+            echo "$(basename "$file"): unknown backend marker '$backend' — cannot pick a decoder." >&2
+            echo "  Pass --codex or set ORTUS_BACKEND=claude|codex to decode it anyway." >&2
+            return 1
+            ;;
+    esac
+}
+
 start_tail() {
-    local file="$1"
+    local file="$1" mode
     if ! is_tailed "$file"; then
         mark_tailed "$file"
+        if ! mode="$(resolve_codex_mode "$file")"; then
+            return 1
+        fi
         echo -e "${BOLD}${MAGENTA}=== TAILING: $(basename "$file") ===${RESET}"
-        tail -f "$file" 2>/dev/null | while IFS= read -r line; do
-            decode_line "$line"
-        done &
+        (
+            CODEX_MODE="$mode"
+            tail -f "$file" 2>/dev/null | while IFS= read -r line; do
+                decode_line "$line"
+            done
+        ) &
     fi
 }
 
@@ -327,6 +376,10 @@ format_line() {
 # the Codex branch renders plain lines identically to the Claude branch.
 format_plain_line() {
     local line="$1"
+    # The decoder-selection marker (ortus-36w3) is plumbing, not run output.
+    if [[ "$line" == "# ortus-backend: "* ]]; then
+        return 0
+    fi
     if [[ "$line" == "==="* ]]; then
         echo -e "\n${BOLD}${CYAN}$line${RESET}"
     elif [[ "$line" == "Processing:"* ]] || [[ "$line" == "Found"* ]]; then
@@ -350,6 +403,7 @@ if [ -n "$DECODE_FILE" ]; then
         echo "No such file: $DECODE_FILE" >&2
         exit 1
     fi
+    CODEX_MODE="$(resolve_codex_mode "$DECODE_FILE")" || exit 1
     while IFS= read -r line || [ -n "$line" ]; do
         decode_line "$line"
     done < "$DECODE_FILE"
