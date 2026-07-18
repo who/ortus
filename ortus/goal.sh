@@ -193,15 +193,14 @@ fi
 # on .beads/ralph.flock (mirrors the --dry-run / --dry-run-condition
 # isolation pattern). Deliberately omitted from -h (per yr7d.5 design).
 if [ -n "$PRINT_CMD" ]; then
-  if [ -n "$USE_DOCKER" ]; then
-    PRINT_CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
-  else
-    PRINT_CLAUDE_CMD=(claude)
+  # Built by the adapter, not inline, so what this prints cannot drift from
+  # what a real launch would run — and so `--backend codex --print-cmd`
+  # shows the Codex argv (FR-004) rather than a Claude one.
+  if [ -n "$USE_DOCKER" ] && [ "$ORTUS_BACKEND" = "claude" ]; then
+    CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
   fi
-  PRINT_PROMPT="/goal $(build_condition)"
-  PRINT_ARGV=("${PRINT_CLAUDE_CMD[@]}" -p "$PRINT_PROMPT" --output-format stream-json --verbose --dangerously-skip-permissions)
-  [ -n "$FAST_MODE" ] && PRINT_ARGV+=("$FAST_MODE")
-  printf '%q ' "${PRINT_ARGV[@]}"
+  backend_argv goal "/goal $(build_condition)" || exit 1
+  printf '%q ' "${BACKEND_ARGV[@]}"
   printf '\n'
   exit 0
 fi
@@ -278,7 +277,14 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
 log "=== goal.sh Started ==="
 if [ -n "$FAST_MODE" ]; then
-  log "Fast mode: enabled (2.5x faster output, premium pricing)"
+  # Codex has no fast-output tier; --fast is a documented no-op there
+  # (FR-004). Say so at launch rather than letting the operator believe a
+  # flag they passed took effect.
+  if [ "$ORTUS_BACKEND" = "codex" ]; then
+    log "Fast mode: ignored ($FAST_MODE is Claude-only; no-op under the codex backend)"
+  else
+    log "Fast mode: enabled (2.5x faster output, premium pricing)"
+  fi
 fi
 log "Log file: $LOG_FILE"
 log "Watch live:"

@@ -1,4 +1,4 @@
-"""Tests for ortus/lib/backend.sh — the claude-only backend adapter.
+"""Tests for ortus/lib/backend.sh — the claude + codex backend adapter.
 
 Each case sources the lib in a fresh bash, calls a function, and prints the
 resulting array one element per line so the assertions compare argv elements
@@ -140,10 +140,91 @@ def test_unknown_role_exits_non_zero_naming_valid_roles() -> None:
     assert "goal, prd-decompose, idea-expand" in proc.stderr
 
 
-def test_unimplemented_backend_is_refused() -> None:
-    proc = run_bash("backend_argv goal P || echo rc=$?", env={"ORTUS_BACKEND": "codex"})
+# FR-004 — the codex goal argv is the Codex row of the Appendix A contract.
+CODEX = {"ORTUS_BACKEND": "codex"}
+
+
+def test_codex_goal_role_matches_reference_argv() -> None:
+    assert argv_with_args("goal", "/goal DO THING", env=CODEX) == [
+        "codex",
+        "exec",
+        "/goal DO THING",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
+
+
+def test_codex_and_claude_goal_argv_carry_a_byte_identical_prompt() -> None:
+    """Acceptance #2: the /goal string is the same across backends — only the
+    flags around it differ."""
+    # printf %q, not a raw print: the prompt carries newlines and quotes, and
+    # a raw print would let the comparison pass on a re-split fragment.
+    body = 'backend_argv goal "$1"; printf "%q\\n" "${BACKEND_ARGV[2]}"'
+    prompt = "/goal close one issue\nline two \"quoted\""
+
+    def quoted_prompt(env):
+        script = f'set -euo pipefail\nsource "{BACKEND_SH}"\n{body}\n'
+        proc = subprocess.run(
+            [BASH, "-c", script, "bash", prompt],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": "/usr/bin:/bin", **env},
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    assert quoted_prompt({}) == quoted_prompt(CODEX)
+
+
+def test_codex_goal_role_falls_back_to_a_real_inner_sandbox() -> None:
+    """FR-010 posture is a variable, not a literal: opting out of the outer
+    sandbox swaps the bypass for a real inner sandbox."""
+    argv = argv_with_args("goal", "P", env={**CODEX, "ORTUS_CODEX_POSTURE": "inner"})
+    assert argv[-3:] == ["workspace-write", "--ask-for-approval", "never"]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+
+
+def test_codex_goal_role_rejects_an_unknown_posture() -> None:
+    proc = run_bash("backend_argv goal P || echo rc=$?", env={**CODEX, "ORTUS_CODEX_POSTURE": "bogus"})
     assert "rc=1" in proc.stdout
-    assert "not implemented" in proc.stderr
+    assert "unknown codex sandbox posture 'bogus'" in proc.stderr
+
+
+def test_codex_goal_role_appends_the_model_only_when_set() -> None:
+    with_model = argv_with_args("goal", "P", env={**CODEX, "ORTUS_CODEX_MODEL": "gpt-5"})
+    assert with_model[-2:] == ["-m", "gpt-5"]
+    assert "-m" not in argv_with_args("goal", "P", env=CODEX)
+
+
+def test_fast_mode_is_a_documented_no_op_under_codex() -> None:
+    """Acceptance #3: --fast notices, does not appear in argv, does not error."""
+    proc = run_bash(
+        'backend_argv goal P; printf "%s\\n" "${BACKEND_ARGV[@]}"',
+        env={**CODEX, "FAST_MODE": "--fast"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--fast" not in proc.stdout.splitlines()
+    assert "no-op under the codex backend" in proc.stderr
+
+
+def test_codex_stream_flag_is_json() -> None:
+    proc = run_bash('backend_stream_flags; printf "%s\\n" "${BACKEND_STREAM_FLAGS[@]}"', env=CODEX)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == ["--json"]
+
+
+def test_codex_refuses_the_roles_it_does_not_implement_yet() -> None:
+    for role in ("prd-decompose", "idea-expand"):
+        proc = run_bash(f"backend_argv {role} P || echo rc=$?", env=CODEX)
+        assert "rc=1" in proc.stdout
+        assert "does not implement role" in proc.stderr
+
+
+def test_unknown_role_fails_identically_under_codex() -> None:
+    proc = run_bash("backend_argv bogus P || echo rc=$?", env=CODEX)
+    assert "rc=1" in proc.stdout
+    assert "goal, prd-decompose, idea-expand" in proc.stderr
 
 
 def test_backend_available_is_silent_and_reflects_path() -> None:
@@ -195,11 +276,11 @@ def test_backend_env_respects_an_explicit_codex_home() -> None:
     assert proc.stdout.strip() == "/elsewhere/.codex"
 
 
-def test_backend_argv_sets_codex_home_before_refusing_an_unimplemented_backend() -> None:
+def test_backend_argv_sets_codex_home_for_the_codex_branch() -> None:
     """backend_argv calls backend_env first, so the codex argv branch (FR-004)
     inherits the project-local config directory without extra wiring."""
     proc = run_bash(
-        'cd /tmp && { backend_argv goal P || true; }; echo "$CODEX_HOME"',
+        'cd /tmp && backend_argv goal P; echo "$CODEX_HOME"',
         env={"ORTUS_BACKEND": "codex"},
     )
     assert proc.stdout.strip() == "/tmp/.codex"

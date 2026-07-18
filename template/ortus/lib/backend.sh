@@ -1,4 +1,4 @@
-# ortus/lib/backend.sh — sourceable backend adapter (claude only)
+# ortus/lib/backend.sh — sourceable backend adapter (claude, codex)
 #
 # One place that knows how to turn a role ("what we want the agent to do")
 # into a concrete CLI argv. Launchers call these functions instead of
@@ -27,14 +27,22 @@
 # invocation.
 #
 # Env inputs:
-#   ORTUS_BACKEND  backend name; only "claude" is implemented here.
+#   ORTUS_BACKEND  backend name; "claude" (all roles) or "codex" (goal role).
 #   ORTUS_BACKEND_DEFAULT
 #                  the copier-generated default; final fallback (FR-002).
-#   FAST_MODE      optional extra flag appended to the goal argv.
-#   CLAUDE_CMD     optional array; the launcher's command prefix (e.g. the
-#                  docker sandbox wrapper). Defaults to (claude).
+#   FAST_MODE      optional extra flag appended to the goal argv. Claude-only;
+#                  a documented no-op under codex (FR-004).
+#   ORTUS_CODEX_POSTURE
+#                  sandbox posture for codex roles: "bypass" (default) or
+#                  "inner". See _backend_codex_posture.
+#   ORTUS_CODEX_MODEL
+#                  optional model name; appended as `-m <model>` to codex argv.
+#   CLAUDE_CMD     optional array; the launcher's command prefix including the
+#                  binary (e.g. the docker sandbox wrapper). Defaults to the
+#                  bare backend binary.
 #
-# No dependency on log() — this module emits no diagnostics of its own.
+# No dependency on log() — the only thing this module writes is a diagnostic
+# on stderr when it refuses, or when it ignores a flag the backend cannot use.
 
 # The backends the CLI surface accepts. Kept as one list so the validator and
 # the error message can never disagree about what is spellable.
@@ -104,31 +112,54 @@ backend_env() {
 }
 
 backend_stream_flags() {
-    _backend_require_claude || return 1
-    BACKEND_STREAM_FLAGS=(--output-format stream-json --verbose)
+    local name
+    name=$(backend_name) || return 1
+    case "$name" in
+        claude) BACKEND_STREAM_FLAGS=(--output-format stream-json --verbose) ;;
+        codex)  BACKEND_STREAM_FLAGS=(--json) ;;
+    esac
 }
 
-backend_argv() {
-    # Before the guard: when the codex branch lands (FR-004) it inherits the
-    # project-local CODEX_HOME without having to remember to ask for it.
-    backend_env
-    _backend_require_claude || return 1
-
-    local role="${1:-}"
-    local prompt="${2:-}"
-    local prd_path="${3:-${ORTUS_PRD_PATH:-}}"
-
-    # The launcher may wrap the CLI (e.g. `docker sandbox run claude --name
-    # ortus-goal --`). Honour an already-set CLAUDE_CMD array; otherwise the
-    # bare binary.
-    local -a cmd
+# The launcher may wrap the CLI (e.g. `docker sandbox run claude --name
+# ortus-goal --`). Honour an already-set CLAUDE_CMD array — it carries the
+# wrapper AND the binary — otherwise the bare binary for this backend.
+_backend_cmd() {
+    local default_bin="$1"
     # ${CLAUDE_CMD[*]:-} rather than ${#CLAUDE_CMD[@]} so an unset CLAUDE_CMD
     # is not a fatal unbound-variable error under the launchers' `set -u`.
     if [ -n "${CLAUDE_CMD[*]:-}" ]; then
-        cmd=("${CLAUDE_CMD[@]}")
+        BACKEND_CMD=("${CLAUDE_CMD[@]}")
     else
-        cmd=(claude)
+        BACKEND_CMD=("$default_bin")
     fi
+}
+
+# Sandbox posture for codex roles, published as CODEX_POSTURE_ARGV.
+#
+# "bypass" is the default and mirrors today's Claude posture
+# (--dangerously-skip-permissions inside an enforced outer bwrap/Seatbelt
+# sandbox): the inner sandbox is relaxed *because* the outer one is enforced
+# and smoke-tested. "inner" is the fallback for an operator who opted out of
+# the outer sandbox — a real inner sandbox instead of a full bypass.
+#
+# Wired as a variable rather than a literal because FR-010 (ortus-mcqc) owns
+# the rule that *picks* the posture; this function only renders it.
+_backend_codex_posture() {
+    case "${ORTUS_CODEX_POSTURE:-bypass}" in
+        bypass) CODEX_POSTURE_ARGV=(--sandbox workspace-write --dangerously-bypass-approvals-and-sandbox) ;;
+        inner)  CODEX_POSTURE_ARGV=(--sandbox workspace-write --ask-for-approval never) ;;
+        *)
+            echo "ERROR: unknown codex sandbox posture '${ORTUS_CODEX_POSTURE}' (valid: bypass, inner)" >&2
+            return 1
+            ;;
+    esac
+}
+
+_backend_argv_claude() {
+    local role="$1" prompt="$2" prd_path="$3"
+    local -a cmd
+    _backend_cmd claude
+    cmd=("${BACKEND_CMD[@]}")
 
     case "$role" in
         goal)
@@ -148,12 +179,69 @@ backend_argv() {
             # no stream decoding.
             BACKEND_ARGV=("${cmd[@]}" --print "$prompt")
             ;;
+    esac
+    return 0
+}
+
+_backend_argv_codex() {
+    local role="$1" prompt="$2"
+    local -a cmd
+
+    if [ "$role" != "goal" ]; then
+        echo "ERROR: backend 'codex' does not implement role '$role' yet (implemented: goal)" >&2
+        return 1
+    fi
+
+    _backend_cmd codex
+    cmd=("${BACKEND_CMD[@]}")
+    backend_stream_flags
+    _backend_codex_posture || return 1
+
+    # The prompt is positional under `codex exec`, not behind -p, but it is
+    # the SAME string the claude branch passes: the /goal directive text is
+    # built once by the launcher and is byte-identical across backends.
+    BACKEND_ARGV=("${cmd[@]}" exec "$prompt" "${BACKEND_STREAM_FLAGS[@]}" "${CODEX_POSTURE_ARGV[@]}")
+
+    # Model selection is provisional pending Q5 (ortus-z5tj); until then it is
+    # an opt-in env var and the flag is omitted entirely when unset, so the
+    # Codex CLI's own default applies.
+    [ -n "${ORTUS_CODEX_MODEL:-}" ] && BACKEND_ARGV+=(-m "$ORTUS_CODEX_MODEL")
+
+    # Codex has no fast-output tier. Say so rather than silently dropping a
+    # flag the operator explicitly asked for — but do not fail: --fast is a
+    # documented no-op here, not an error (FR-004).
+    if [ -n "${FAST_MODE:-}" ]; then
+        echo "NOTE: $FAST_MODE is a Claude-only flag and is a no-op under the codex backend; ignoring." >&2
+    fi
+    return 0
+}
+
+backend_argv() {
+    # Before anything else, so the codex branch inherits the project-local
+    # CODEX_HOME without having to remember to ask for it.
+    backend_env
+
+    local name
+    name=$(backend_name) || return 1
+
+    local role="${1:-}"
+    local prompt="${2:-}"
+    local prd_path="${3:-${ORTUS_PRD_PATH:-}}"
+
+    # Role validation is shared: an unknown role fails identically whichever
+    # backend is active, so the error can never disagree with itself.
+    case "$role" in
+        goal|prd-decompose|idea-expand) ;;
         *)
             echo "ERROR: unknown backend role '$role' (valid: goal, prd-decompose, idea-expand)" >&2
             return 1
             ;;
     esac
-    return 0
+
+    case "$name" in
+        claude) _backend_argv_claude "$role" "$prompt" "$prd_path" ;;
+        codex)  _backend_argv_codex "$role" "$prompt" ;;
+    esac
 }
 
 backend_available() {
