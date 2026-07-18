@@ -102,6 +102,72 @@ requires_claude_auth = pytest.mark.skipif(
 )
 
 
+# ---------------------------------------------------------------------------
+# Nested-sandbox guard (ortus-fjkr).
+#
+# When the @slow live-claude tests run from inside an already-sandboxed claude
+# session (an ortus grind/goal loop), the *inner* `claude -p` session's Bash
+# tool dies with:
+#
+#   Sandbox is required but failed to initialize: EPERM: operation not
+#   permitted, listen /tmp/claude-<uid>/srt-mux-<n>.sock
+#
+# The failure is intermittent — the inner session may complete zero, some, or
+# all of its bd writes — so a run that reaches the assertions reports "plan
+# produced 0 issues", which reads as a decomposition regression when the real
+# cause is the sandbox. Two guards keep that from happening:
+#
+#   1. `requires_no_nested_sandbox` skips up front when we can see we are a
+#      child claude session, so the outcome is consistent rather than flaky.
+#   2. `skip_if_srt_mux_eperm` inspects the session log after the fact and
+#      converts a sandbox-caused failure into a skip naming the EPERM, for any
+#      nesting shape the env-var check does not catch.
+# ---------------------------------------------------------------------------
+
+_SRT_MUX_EPERM_MARKERS = ("srt-mux", "Sandbox is required but failed to initialize")
+
+
+def nested_claude_sandbox() -> bool:
+    """Return True when this process is itself inside a claude session.
+
+    `CLAUDE_CODE_CHILD_SESSION` is exported by claude into the environment of
+    processes it spawns, so its presence means any `claude -p` we launch would
+    be doubly nested — the srt-mux EPERM condition. `ORTUS_ALLOW_NESTED_SANDBOX=1`
+    forces the tests to run anyway (e.g. to reproduce the bug on purpose).
+    """
+    if os.environ.get("ORTUS_ALLOW_NESTED_SANDBOX") == "1":
+        return False
+    return bool(os.environ.get("CLAUDE_CODE_CHILD_SESSION"))
+
+
+requires_no_nested_sandbox = pytest.mark.skipif(
+    nested_claude_sandbox(),
+    reason=(
+        "nested claude sandbox: this pytest run is itself inside a claude "
+        "session (CLAUDE_CODE_CHILD_SESSION is set), where the inner `claude -p` "
+        "Bash tool intermittently dies on 'Sandbox is required but failed to "
+        "initialize: EPERM ... listen /tmp/claude-<uid>/srt-mux-<n>.sock' "
+        "(ortus-fjkr). Run these tests from a plain shell, or set "
+        "ORTUS_ALLOW_NESTED_SANDBOX=1 to override."
+    ),
+)
+
+
+def skip_if_srt_mux_eperm(log_text: str, *, what: str) -> None:
+    """Skip instead of failing when `log_text` shows the srt-mux EPERM.
+
+    Called from the assertion path of the live tests so a sandbox-caused
+    failure is never reported as a decomposition/loop regression (ortus-fjkr).
+    """
+    if any(marker in log_text for marker in _SRT_MUX_EPERM_MARKERS):
+        pytest.skip(
+            f"{what} failed because the inner claude session's Bash tool hit the "
+            f"srt-mux sandbox EPERM ('Sandbox is required but failed to "
+            f"initialize', ortus-fjkr), not because the logic regressed. "
+            f"Session log tail:\n{log_text}"
+        )
+
+
 @pytest.fixture()
 def claude_mock() -> Callable[[str], Path]:
     """Return a callable that resolves a canned scenario name → shim path.
