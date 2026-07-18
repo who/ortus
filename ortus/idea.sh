@@ -93,7 +93,8 @@ handle_prd() {
 
 ${prompt_body}"
 
-    claude --allowedTools "Read($prd_path),Bash(bd:*)" --dangerously-skip-permissions -p "$full_prompt"
+    backend_argv prd-decompose "$full_prompt" "$prd_path" || exit 1
+    "${BACKEND_ARGV[@]}"
 
     # Return to original directory
     cd "$original_dir"
@@ -123,9 +124,12 @@ handle_idea() {
         exit 1
     fi
     prompt_template="$(cat "$prompt_file")"
-    description=$(claude --print "$prompt_template
+    # stdout is the product here, so the adapter's idea-expand role deliberately
+    # carries no stream flags — anything it printed would land in $description.
+    backend_argv idea-expand "$prompt_template
 
-Idea: $idea")
+Idea: $idea" || exit 1
+    description=$("${BACKEND_ARGV[@]}")
 
     local feature_id
     if [[ -z "$description" ]]; then
