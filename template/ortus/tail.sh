@@ -11,6 +11,13 @@ LOGS_DIR="$PROJECT_ROOT/logs"
 SHOW_TOOLS="${SHOW_TOOLS:-false}"
 SHOW_SYSTEM="${SHOW_SYSTEM:-false}"
 ASSISTANT_ONLY="${ASSISTANT_ONLY:-false}"
+# FR-007: which decoder to run. Codex emits `codex exec --json` JSON Lines;
+# claude emits stream-json. Selected explicitly here (--codex / ORTUS_BACKEND);
+# automatic per-log detection is a separate concern.
+CODEX_MODE=false
+[ "${ORTUS_BACKEND:-}" = "codex" ] && CODEX_MODE=true
+DECODE_FILE=""
+CODEX_DECODE_FAILED=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -33,6 +40,14 @@ while [[ $# -gt 0 ]]; do
             SHOW_SYSTEM=true
             shift
             ;;
+        --codex)
+            CODEX_MODE=true
+            shift
+            ;;
+        --decode)
+            DECODE_FILE="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: tail.sh [OPTIONS] [LOGS_DIR]"
             echo ""
@@ -41,6 +56,8 @@ while [[ $# -gt 0 ]]; do
             echo "  -v, --verbose    Show all output (tools + system)"
             echo "  -t, --tools      Show tool calls"
             echo "  -s, --system     Show system messages"
+            echo "      --codex      Decode codex exec --json events (default: claude stream-json)"
+            echo "      --decode F   Format file F to stdout and exit (no follow)"
             echo "  -h, --help       Show this help"
             exit 0
             ;;
@@ -108,9 +125,124 @@ start_tail() {
         mark_tailed "$file"
         echo -e "${BOLD}${MAGENTA}=== TAILING: $(basename "$file") ===${RESET}"
         tail -f "$file" 2>/dev/null | while IFS= read -r line; do
-            format_line "$line"
+            decode_line "$line"
         done &
     fi
+}
+
+decode_line() {
+    if [ "$CODEX_MODE" = "true" ]; then
+        format_codex_line "$1"
+    else
+        format_line "$1"
+    fi
+}
+
+# --- Codex `codex exec --json` decoder (FR-007) ----------------------------
+#
+# Event vocabulary pinned by the Q2 spike (ortus-l75g); fixtures live at
+# tests/fixtures/codex-exec-events*.jsonl. Every field is read by typed path
+# (.type, .item.type, .usage.*) — never by grepping free text — and the render
+# is byte-identical to the Python decoder in src/ortus/commands/tail.py, which
+# the golden-render test in tests/test_codex_tail_decoder.py enforces.
+CODEX_JQ='
+def trunc($n): tostring | if length <= $n then . else .[0:$n] + "..." end;
+def w($codes; $text): ($codes | join("")) as $c |
+    if $c == "" then $text else $c + $text + $reset end;
+def item_lines($item; $started):
+    ($item.type) as $t |
+    if $t == "agent_message" then
+        if $started or (($item.text // "") == "") then []
+        else ["", w([$bold,$green]; "<<< ASSISTANT"), w([$green]; $item.text)] end
+    elif $t == "reasoning" then
+        if $started or $show_system != "true" or (($item.text // "") == "") then []
+        else [w([$dim]; "  (thinking) " + ($item.text | trunc(200)))] end
+    elif $t == "command_execution" then
+        if $show_tools != "true" then []
+        elif $started then
+            [w([$yellow]; "  [TOOL] command_execution"),
+             w([$dim]; "  " + (($item.command // "") | trunc(200)))]
+        else
+            (($item.aggregated_output // "") | sub("\n+$"; "")) as $body |
+            (if ($item.status == "failed")
+                 or (($item.exit_code != null) and ($item.exit_code != 0))
+             then w([$red]; "  [RESULT] command_execution: ERROR (exit "
+                            + ($item.exit_code | tostring) + ")")
+             else w([$cyan]; "  [RESULT] command_execution: "
+                             + ($item.status // "?")) end) as $header |
+            if $body == "" then [$header]
+            else [$header, w([$dim]; "  " + ($body | trunc(200)))] end
+        end
+    elif $t == "todo_list" then
+        if $show_system != "true" then []
+        else
+            ($item.items // []) as $entries |
+            [w([$dim]; "  [TODO] "
+                       + ([$entries[] | select(.completed)] | length | tostring)
+                       + "/" + ($entries | length | tostring))]
+            + [$entries[] | w([$dim]; "    ["
+                              + (if .completed then "x" else " " end) + "] "
+                              + (.text // ""))]
+        end
+    elif $t == "error" then
+        if $started then [] else [w([$red]; "  [ERROR] " + ($item.message // ""))] end
+    elif $show_system == "true" then [w([$dim]; "[SYS] item." + ($t | tostring))]
+    else [] end;
+if type != "object" then error("event is not a JSON object")
+elif ((.type // "") == "") then error("event has no `type` field")
+else
+    (.type) as $k |
+    if $k == "thread.started" then
+        ["", w([$bold,$magenta]; "=== NEW SESSION ==="),
+         w([$magenta]; (.thread_id // "?" | tostring))]
+    elif $k == "turn.completed" then
+        (.usage // {}) as $u |
+        [w([$cyan]; "  [USAGE] input=" + (($u.input_tokens // 0) | tostring)
+                    + " cached=" + (($u.cached_input_tokens // 0) | tostring)
+                    + " output=" + (($u.output_tokens // 0) | tostring)
+                    + " reasoning=" + (($u.reasoning_output_tokens // 0) | tostring))]
+    elif $k == "turn.failed" then
+        [w([$red]; "  [TURN FAILED] " + ((.error // {}).message // ""))]
+    elif $k == "error" then [w([$red]; "  [ERROR] " + (.message // ""))]
+    elif ($k == "item.started" or $k == "item.completed") then
+        (if (.item | type) == "object"
+         then item_lines(.item; $k == "item.started") else [] end)
+    elif $show_system == "true" then [w([$dim]; "[SYS] " + ($k | tostring))]
+    else [] end
+end | .[]
+'
+
+format_codex_line() {
+    local line="$1"
+    [ -z "$line" ] && return 0
+
+    if [[ "$line" != "{"* ]]; then
+        format_plain_line "$line"
+        return 0
+    fi
+
+    # jq is silent on stderr for a successful decode, so folding stderr into
+    # the capture is safe and keeps this allocation-free per line.
+    local rendered
+    if rendered=$(printf '%s' "$line" | jq -r \
+            --arg bold "$BOLD" --arg dim "$DIM" --arg reset "$RESET" \
+            --arg red "$RED" --arg green "$GREEN" --arg yellow "$YELLOW" \
+            --arg magenta "$MAGENTA" --arg cyan "$CYAN" \
+            --arg show_tools "$SHOW_TOOLS" --arg show_system "$SHOW_SYSTEM" \
+            "$CODEX_JQ" 2>&1); then
+        [ -n "$rendered" ] && printf '%s\n' "$rendered"
+        return 0
+    fi
+
+    # Loud, non-silent failure: a truncated write or a schema change must be
+    # visible to the operator, not swallowed into an eerily quiet log.
+    local reason
+    reason=$(printf '%s' "$rendered" | tr '\n' ' ')
+    CODEX_DECODE_FAILED=true
+    local diagnostic="${BOLD}${RED}!!! CODEX DECODE ERROR: ${reason%% }: ${line:0:200}${RESET}"
+    printf '%s\n' "$diagnostic"
+    printf '%s\n' "$diagnostic" >&2
+    return 0
 }
 
 format_line() {
@@ -187,20 +319,43 @@ format_line() {
                 ;;
         esac
     else
-        # Non-JSON line (plain text from ralph.sh)
-        if [[ "$line" == "==="* ]]; then
-            echo -e "\n${BOLD}${CYAN}$line${RESET}"
-        elif [[ "$line" == "Processing:"* ]] || [[ "$line" == "Found"* ]]; then
-            echo -e "${CYAN}$line${RESET}"
-        elif [[ "$line" == *"error"* ]] || [[ "$line" == *"Error"* ]] || [[ "$line" == *"ERROR"* ]]; then
-            echo -e "${RED}$line${RESET}"
-        elif [[ "$line" == *"success"* ]] || [[ "$line" == *"Success"* ]] || [[ "$line" == *"completed"* ]]; then
-            echo -e "${GREEN}$line${RESET}"
-        elif [ -n "$line" ]; then
-            echo -e "${DIM}$line${RESET}"
-        fi
+        format_plain_line "$line"
     fi
 }
+
+# Non-JSON line (plain text banners from goal.sh). Shared by both decoders —
+# the Codex branch renders plain lines identically to the Claude branch.
+format_plain_line() {
+    local line="$1"
+    if [[ "$line" == "==="* ]]; then
+        echo -e "\n${BOLD}${CYAN}$line${RESET}"
+    elif [[ "$line" == "Processing:"* ]] || [[ "$line" == "Found"* ]]; then
+        echo -e "${CYAN}$line${RESET}"
+    elif [[ "$line" == *"error"* ]] || [[ "$line" == *"Error"* ]] || [[ "$line" == *"ERROR"* ]]; then
+        echo -e "${RED}$line${RESET}"
+    elif [[ "$line" == *"success"* ]] || [[ "$line" == *"Success"* ]] || [[ "$line" == *"completed"* ]]; then
+        echo -e "${GREEN}$line${RESET}"
+    elif [ -n "$line" ]; then
+        echo -e "${DIM}$line${RESET}"
+    fi
+}
+
+# One-shot decode of a single file (no follow). Used by the golden-render
+# tests and handy for post-mortem reading of a finished run's log.
+if [ -n "$DECODE_FILE" ]; then
+    # Decode mode never backgrounds a tail, so drop the watcher's
+    # kill-the-process-group trap — it would mask the real exit status.
+    trap 'rm -f "$TAILED_LIST"' EXIT INT TERM
+    if [ ! -f "$DECODE_FILE" ]; then
+        echo "No such file: $DECODE_FILE" >&2
+        exit 1
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        decode_line "$line"
+    done < "$DECODE_FILE"
+    [ "$CODEX_DECODE_FAILED" = "true" ] && exit 65
+    exit 0
+fi
 
 echo -e "${BOLD}Watching logs in: ${LOGS_DIR}${RESET}"
 echo -e "${DIM}Set SHOW_TOOLS=true to see tool calls${RESET}"

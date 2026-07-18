@@ -299,6 +299,230 @@ def _render_object(
 
 
 # ---------------------------------------------------------------------------
+# Codex `codex exec --json` decoder (FR-007)
+# ---------------------------------------------------------------------------
+#
+# Codex emits JSON Lines with a flat typed envelope rather than claude's
+# nested message shape. The event vocabulary is pinned by the Q2 spike
+# (ortus-l75g) and its fixtures live at tests/fixtures/codex-exec-events*.jsonl:
+#
+#   {"type":"thread.started","thread_id":...}
+#   {"type":"turn.started"}
+#   {"type":"turn.completed","usage":{input_tokens,cached_input_tokens,
+#                                     output_tokens,reasoning_output_tokens}}
+#   {"type":"turn.failed","error":{"message":...}}
+#   {"type":"error","message":...}
+#   {"type":"item.started"|"item.completed","item":{"id","type",...}}
+#
+# item.type is one of: agent_message (assistant text), reasoning (thinking),
+# command_execution (command/aggregated_output/exit_code/status), todo_list,
+# error. Every field below is read by typed path — never by grepping free
+# text — so a schema change surfaces as a missing render, not a wrong one.
+
+CODEX_DECODE_ERROR_PREFIX = "!!! CODEX DECODE ERROR"
+
+
+def _codex_decode_error(reason: str, line: str, palette: _Palette) -> str:
+    """Loud, non-silent diagnostic for an event the decoder cannot read."""
+    excerpt = line if len(line) <= 200 else line[:200] + "..."
+    return _wrap(
+        f"{CODEX_DECODE_ERROR_PREFIX}: {reason}: {excerpt}",
+        palette.bold,
+        palette.red,
+        reset=palette.reset,
+    )
+
+
+def _render_codex_item(
+    item: dict,
+    *,
+    started: bool,
+    show_tools: bool,
+    show_system: bool,
+    palette: _Palette,
+) -> list[str]:
+    """Render one `item.started` / `item.completed` payload.
+
+    command_execution is rendered twice by design: the `started` event is the
+    tool *call* (mirrors claude's assistant tool_use) and the `completed`
+    event is the tool *result* (mirrors claude's user tool_result).
+    """
+    itype = item.get("type")
+
+    if itype == "agent_message":
+        if started:
+            return []  # text only lands on completion
+        text = item.get("text", "")
+        if not text:
+            return []
+        return [
+            "",
+            _wrap("<<< ASSISTANT", palette.bold, palette.green, reset=palette.reset),
+            _wrap(text, palette.green, reset=palette.reset),
+        ]
+
+    if itype == "reasoning":
+        if started or not show_system:
+            return []
+        text = item.get("text", "")
+        if not text:
+            return []
+        return [
+            _wrap(f"  (thinking) {_truncate(text, 200)}", palette.dim, reset=palette.reset)
+        ]
+
+    if itype == "command_execution":
+        if not show_tools:
+            return []
+        if started:
+            return [
+                _wrap("  [TOOL] command_execution", palette.yellow, reset=palette.reset),
+                _wrap(
+                    f"  {_truncate(item.get('command', ''), 200)}",
+                    palette.dim,
+                    reset=palette.reset,
+                ),
+            ]
+        status = item.get("status", "?")
+        exit_code = item.get("exit_code")
+        body = str(item.get("aggregated_output", "")).rstrip("\n")
+        if status == "failed" or (exit_code is not None and exit_code != 0):
+            header = _wrap(
+                f"  [RESULT] command_execution: ERROR (exit {exit_code})",
+                palette.red,
+                reset=palette.reset,
+            )
+        else:
+            header = _wrap(
+                f"  [RESULT] command_execution: {status}", palette.cyan, reset=palette.reset
+            )
+        if not body:
+            return [header]
+        return [header, _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset)]
+
+    if itype == "todo_list":
+        if not show_system:
+            return []
+        entries = item.get("items", [])
+        done = sum(1 for e in entries if isinstance(e, dict) and e.get("completed"))
+        out = [
+            _wrap(f"  [TODO] {done}/{len(entries)}", palette.dim, reset=palette.reset)
+        ]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            mark = "x" if entry.get("completed") else " "
+            out.append(
+                _wrap(
+                    f"    [{mark}] {entry.get('text', '')}", palette.dim, reset=palette.reset
+                )
+            )
+        return out
+
+    if itype == "error":
+        if started:
+            return []
+        return [
+            _wrap(
+                f"  [ERROR] {item.get('message', '')}", palette.red, reset=palette.reset
+            )
+        ]
+
+    if show_system:
+        return [_wrap(f"[SYS] item.{itype}", palette.dim, reset=palette.reset)]
+    return []
+
+
+def _render_codex_object(
+    obj: dict,
+    *,
+    show_tools: bool,
+    show_system: bool,
+    palette: _Palette,
+) -> list[str]:
+    kind = obj.get("type")
+
+    if kind == "thread.started":
+        return [
+            "",
+            _wrap("=== NEW SESSION ===", palette.bold, palette.magenta, reset=palette.reset),
+            _wrap(str(obj.get("thread_id", "?")), palette.magenta, reset=palette.reset),
+        ]
+
+    if kind == "turn.completed":
+        usage = obj.get("usage") or {}
+        return [
+            _wrap(
+                "  [USAGE] input={} cached={} output={} reasoning={}".format(
+                    usage.get("input_tokens", 0),
+                    usage.get("cached_input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                    usage.get("reasoning_output_tokens", 0),
+                ),
+                palette.cyan,
+                reset=palette.reset,
+            )
+        ]
+
+    if kind == "turn.failed":
+        message = (obj.get("error") or {}).get("message", "")
+        return [_wrap(f"  [TURN FAILED] {message}", palette.red, reset=palette.reset)]
+
+    if kind == "error":
+        return [_wrap(f"  [ERROR] {obj.get('message', '')}", palette.red, reset=palette.reset)]
+
+    if kind in ("item.started", "item.completed"):
+        item = obj.get("item")
+        if not isinstance(item, dict):
+            return []
+        return _render_codex_item(
+            item,
+            started=kind == "item.started",
+            show_tools=show_tools,
+            show_system=show_system,
+            palette=palette,
+        )
+
+    if show_system:
+        return [_wrap(f"[SYS] {kind}", palette.dim, reset=palette.reset)]
+    return []
+
+
+def _format_codex_line(
+    line: str,
+    *,
+    show_tools: bool,
+    show_system: bool,
+    palette: _Palette = _NO_COLOR_PALETTE,
+) -> str | None:
+    """Render one `codex exec --json` line; returns None when filtered out.
+
+    A line that looks like an event but cannot be decoded (truncated write,
+    schema drift) is reported loudly rather than dropped — silent skipping is
+    how a broken decoder masquerades as a quiet run.
+    """
+    line = line.rstrip("\n")
+    if not line:
+        return None
+    if not line.startswith("{"):
+        return _render_plain(line, palette)
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return _codex_decode_error(str(exc), line, palette)
+    if not isinstance(obj, dict):
+        return _codex_decode_error("event is not a JSON object", line, palette)
+    if not obj.get("type"):
+        return _codex_decode_error("event has no `type` field", line, palette)
+    pieces = _render_codex_object(
+        obj, show_tools=show_tools, show_system=show_system, palette=palette
+    )
+    if not pieces:
+        return None
+    return "\n".join(pieces)
+
+
+# ---------------------------------------------------------------------------
 # Non-JSON line colouring (mirrors bash format_line non-JSON branch)
 # ---------------------------------------------------------------------------
 
@@ -374,9 +598,12 @@ def _follow(
     initial_files: Optional[Iterable[Path]] = None,
     assistant_only: bool = False,
     palette: Optional[_Palette] = None,
+    codex: bool = False,
+    err: IO[str] | None = None,
 ) -> None:
     """Polling tail. `iterations<0` runs forever; finite values for tests."""
     out = out or sys.stdout
+    err = err or sys.stderr
     if palette is None:
         palette = _resolve_palette(out)
     streams: dict[Path, _LogStream] = {}
@@ -413,6 +640,17 @@ def _follow(
             for line in chunk.splitlines():
                 if raw:
                     out.write(line + "\n")
+                    continue
+                if codex:
+                    rendered = _format_codex_line(
+                        line,
+                        show_tools=show_tools,
+                        show_system=show_system,
+                        palette=palette,
+                    )
+                    if rendered is not None and CODEX_DECODE_ERROR_PREFIX in rendered:
+                        err.write(rendered + "\n")
+                        err.flush()
                 else:
                     rendered = _format_line(
                         line,
@@ -421,8 +659,8 @@ def _follow(
                         assistant_only=assistant_only,
                         palette=palette,
                     )
-                    if rendered is not None:
-                        out.write(rendered + "\n")
+                if rendered is not None:
+                    out.write(rendered + "\n")
             out.flush()
         if iterations < 0 or i + 1 < iterations:
             time.sleep(POLL_SECONDS)
@@ -459,6 +697,10 @@ def tail(
         False, "--assistant", "-a",
         help="Show assistant messages only (suppress USER blocks; mirrors tail.sh -a).",
     ),
+    codex: bool = typer.Option(
+        False, "--codex",
+        help="Decode logs as `codex exec --json` events instead of claude stream-json.",
+    ),
 ) -> None:
     """Tail orchestrator log files (grind-*, goal-*, ralph-*, plan-*).
 
@@ -482,4 +724,5 @@ def tail(
         show_tools=tools,
         show_system=system,
         assistant_only=assistant,
+        codex=codex,
     )
