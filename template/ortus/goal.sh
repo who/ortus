@@ -205,6 +205,11 @@ if [ -n "$PRINT_CMD" ]; then
   exit 0
 fi
 
+# Backend preflight (FR-013). Deliberately ahead of the flock guard: a launch
+# that dies on a missing or logged-out CLI must not leave a lock file behind
+# for the next run to trip over. Silent on success.
+backend_preflight || exit 1
+
 # Single-instance guard (FR-005). Concurrent orchestrator instances (ralph.sh
 # OR goal.sh) against the same repo race each other through bd's auto-start
 # path and pile up orphan dolt sql-server processes — under sustained load

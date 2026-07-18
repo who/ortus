@@ -451,6 +451,99 @@ def test_goal_sh_publishes_the_outer_state_only_after_the_gate() -> None:
     assert gate < export
 
 
+# ortus-3gox — backend_preflight: name the backend AND the fix, and refuse
+# before the flock guard so a failed launch leaves no stale lock.
+def preflight(*, path: str, home: Path, env: dict[str, str] | None = None):
+    script = f'source "{BACKEND_SH}"\nbackend_preflight || echo rc=$?\n'
+    return subprocess.run(
+        [BASH, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": path, "HOME": str(home), **(env or {})},
+    )
+
+
+def cli_stub(tmp_path: Path, name: str) -> Path:
+    """A PATH dir holding a fake backend CLI that always succeeds."""
+    bin_dir = tmp_path / f"bin-{name}"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    return bin_dir
+
+
+@pytest.mark.parametrize(
+    ("backend", "binary", "install"),
+    [("claude", "claude", "@anthropic-ai/claude-code"), ("codex", "codex", "@openai/codex")],
+)
+def test_preflight_missing_binary_names_backend_and_install(
+    tmp_path: Path, backend: str, binary: str, install: str
+) -> None:
+    """Acceptance #1: a missing binary exits non-zero naming both."""
+    proc = preflight(path="/nonexistent", home=tmp_path, env={"ORTUS_BACKEND": backend})
+    assert "rc=1" in proc.stdout
+    assert f"'{backend}'" in proc.stderr
+    assert binary in proc.stderr
+    assert install in proc.stderr
+
+
+def test_preflight_unauthenticated_claude_names_the_login_command(tmp_path: Path) -> None:
+    """Acceptance #2: the CLI is present but carries no credentials."""
+    proc = preflight(path=str(cli_stub(tmp_path, "claude")), home=tmp_path)
+    assert "rc=1" in proc.stdout
+    assert "not authenticated" in proc.stderr
+    assert "/login" in proc.stderr
+
+
+def test_preflight_accepts_an_api_key_as_credentials(tmp_path: Path) -> None:
+    """An API key in the environment is a login; refusing it would block a
+    perfectly working CI run."""
+    proc = preflight(
+        path=str(cli_stub(tmp_path, "claude")),
+        home=tmp_path,
+        env={"ANTHROPIC_API_KEY": "sk-test"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == ""
+
+
+def test_preflight_accepts_a_credentials_file(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / ".credentials.json").write_text("{}")
+    proc = preflight(path=str(cli_stub(tmp_path, "claude")), home=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_goal_sh_preflights_before_taking_the_flock(tmp_path: Path) -> None:
+    """Acceptance #3: a refused launch creates no lock file. The check has to
+    sit above the flock block for that to hold, so assert the ordering too."""
+    body = (REPO_ROOT / "ortus" / "goal.sh").read_text(encoding="utf-8")
+    assert body.index("backend_preflight") < body.index("flock -n -x .beads/ralph.flock")
+
+    # A PATH with the shell utilities goal.sh needs to reach the preflight,
+    # but no backend CLI.
+    bin_dir = tmp_path / "bin-nobackend"
+    bin_dir.mkdir()
+    for tool in ("dirname", "sed", "date"):
+        real = shutil.which(tool)
+        if real:
+            (bin_dir / tool).symlink_to(real)
+
+    proc = subprocess.run(
+        [BASH, str(REPO_ROOT / "ortus" / "goal.sh")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=tmp_path,
+        env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+    )
+    assert proc.returncode != 0
+    assert "not on PATH" in proc.stderr
+    assert not (tmp_path / ".beads").exists()
+
+
 def test_template_mirror_is_byte_identical() -> None:
     """Parity: the distributable mirror must not drift from the working copy."""
     assert TEMPLATE_BACKEND_SH.is_file()

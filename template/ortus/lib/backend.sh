@@ -88,19 +88,6 @@ backend_name() {
     resolve_backend ""
 }
 
-# Guard: fail loudly rather than silently emitting a Claude argv for a
-# backend we do not implement yet.
-_backend_require_claude() {
-    local name
-    # An unresolvable backend has already printed its own diagnostic; don't
-    # follow it with a second, vaguer one about the empty string.
-    name=$(backend_name) || return 1
-    if [ "$name" != "claude" ]; then
-        echo "ERROR: backend '$name' is not implemented (valid: claude)" >&2
-        return 1
-    fi
-}
-
 # Point Codex at the project's own config directory. Codex reads
 # $CODEX_HOME/config.toml and defaults to ~/.codex — without this export a run
 # would silently pick up the operator's global posture instead of the
@@ -271,21 +258,91 @@ backend_argv() {
     esac
 }
 
-backend_available() {
-    _backend_require_claude 2>/dev/null || return 1
-    command -v claude >/dev/null 2>&1
+# The binary each backend name spells. Kept beside the install/login hints so
+# a diagnostic can never name one backend's binary and another's fix.
+_backend_binary() {
+    case "$1" in
+        claude) printf 'claude\n' ;;
+        codex)  printf 'codex\n' ;;
+    esac
 }
 
+_backend_install_hint() {
+    case "$1" in
+        claude) printf 'npm install -g @anthropic-ai/claude-code  (docs: https://code.claude.com/docs/en/quickstart)\n' ;;
+        codex)  printf 'npm install -g @openai/codex  (docs: https://developers.openai.com/codex/cli)\n' ;;
+    esac
+}
+
+_backend_login_hint() {
+    case "$1" in
+        claude) printf 'claude  # then run /login  (or export ANTHROPIC_API_KEY)\n' ;;
+        codex)  printf 'codex login  (or export OPENAI_API_KEY)\n' ;;
+    esac
+}
+
+backend_available() {
+    local name bin
+    name=$(backend_name 2>/dev/null) || return 1
+    bin=$(_backend_binary "$name")
+    command -v "$bin" >/dev/null 2>&1
+}
+
+# Is the selected CLI carrying credentials? Neither CLI offers a cheap
+# non-interactive "am I logged in" call for every auth mode, so this probes
+# for the EVIDENCE of a login rather than performing one. Being wrong in the
+# permissive direction is the safe failure: a false pass costs one clear
+# error from the CLI itself, while a false fail would refuse to launch a
+# perfectly working loop.
+_backend_authenticated() {
+    local name="$1"
+
+    case "$name" in
+        claude)
+            # Either auth mode counts: an API key / OAuth token in the
+            # environment, or a credentials store written by /login.
+            [ -n "${ANTHROPIC_API_KEY:-}" ] && return 0
+            [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && return 0
+            [ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" ] && return 0
+            # macOS keeps the same credentials in the Keychain, where there is
+            # no file to stat.
+            if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+                security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 && return 0
+            fi
+            return 1
+            ;;
+        codex)
+            [ -n "${OPENAI_API_KEY:-}" ] && return 0
+            # `codex login status` is non-interactive and exits non-zero when
+            # logged out. It reads CODEX_HOME, which backend_preflight has
+            # already pointed at the project (backend_env).
+            codex login status >/dev/null 2>&1 && return 0
+            [ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ] && return 0
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# Fail fast, naming BOTH the backend and the command that fixes it — the
+# operator should never have to guess which of two CLIs the message is about.
+# Launchers call this before acquiring the flock so a refused launch cannot
+# leave a stale lock behind (ortus-3gox).
 backend_preflight() {
-    local name
+    local name bin
     name=$(backend_name) || return 1
-    if [ "$name" != "claude" ]; then
-        echo "ERROR: backend '$name' is not implemented (valid: claude)" >&2
+    backend_env
+
+    bin=$(_backend_binary "$name")
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        echo "ERROR: backend '$name' selected but its CLI '$bin' is not on PATH." >&2
+        echo "  Install it: $(_backend_install_hint "$name")" >&2
         return 1
     fi
-    if ! command -v claude >/dev/null 2>&1; then
-        echo "ERROR: 'claude' CLI not found on PATH." >&2
-        echo "  Install it: https://code.claude.com/docs/en/quickstart" >&2
+
+    if ! _backend_authenticated "$name"; then
+        echo "ERROR: backend '$name' CLI '$bin' is not authenticated." >&2
+        echo "  Log in: $(_backend_login_hint "$name")" >&2
         return 1
     fi
     return 0
