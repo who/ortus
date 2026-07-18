@@ -357,34 +357,41 @@ bd_preflight || {
 # is structural rather than copy-paste. No log() dependency.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/cache.sh"
 
-# Claude invocation routing — when --docker is set, route the inner claude
+# Invocation routing — when --docker is set, route the inner claude
 # session through `docker sandbox run claude --name ortus-goal --` so it
 # runs inside Docker's bundled-image sandbox. No Dockerfile; bind-mount
 # defaults map host cwd -> /workspace; logs remain tee'd to the host
 # LOG_FILE so tail.sh works in both modes. The --name is ortus-goal
 # (not ortus-ralph) so docker can tell the two orchestrators apart.
-if [ -n "$USE_DOCKER" ]; then
+# The wrapper is claude-specific, so it is only applied under that backend —
+# same guard the --print-cmd path uses, so the printed argv and the executed
+# one cannot disagree.
+if [ -n "$USE_DOCKER" ] && [ "$ORTUS_BACKEND" = "claude" ]; then
   CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
-else
-  CLAUDE_CMD=(claude)
 fi
 
 # Build the /goal prompt: the literal directive name followed by the
 # canonical (or -c-supplied) condition body from build_condition.
 prompt="/goal $(build_condition)"
 
-log "Invoking claude -p '/goal ...' (long-lived session; /goal evaluator owns termination)"
+# The argv itself comes from the adapter (FR-003): goal.sh no longer knows
+# which binary or which flags implement "run a /goal session", only that it
+# wants the `goal` role. Stream flags, the permission posture and the
+# --fast pass-through all live in lib/backend.sh.
+backend_argv goal "$prompt" || exit 1
+
+log "Invoking ${BACKEND_ARGV[0]} '/goal ...' (long-lived session; /goal evaluator owns termination)"
 log "Press Ctrl+C to abort"
 
-# pipefail ensures claude's exit code propagates through the tee pipe
+# pipefail ensures the agent's exit code propagates through the tee pipe
 # (tee normally only fails if its output file is unwritable, which the
 # mkdir + log() warm-up above would have already surfaced). The `||
 # exit_code=$?` clause absorbs the non-zero exit so `set -e` doesn't kill
 # the script before we log the end banner — we want goal.sh's own exit
-# code to mirror claude's, not abort silently mid-pipeline.
+# code to mirror the agent's, not abort silently mid-pipeline.
 set -o pipefail
 exit_code=0
-"${CLAUDE_CMD[@]}" -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE" >/dev/null || exit_code=$?
+"${BACKEND_ARGV[@]}" 2>&1 | tee -a "$LOG_FILE" >/dev/null || exit_code=$?
 
 # Session-end progress bookend (analog of ralph.sh's per-iteration line).
 # Derive drained = INITIAL_READY - READY_REMAINING; do not clamp — a model
