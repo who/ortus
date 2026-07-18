@@ -9,6 +9,8 @@
 #   --tasks N             Stop after N tasks completed (default: unlimited)
 #   --iterations N        Stop after N loop iterations (default: unlimited)
 #   --docker              Tier 2 isolation: route claude through docker sandbox
+#   --backend NAME        Agent backend: claude|codex. Overrides $ORTUS_BACKEND,
+#                         which in turn overrides the generated default.
 #   -c, --condition STR   Custom completion condition (default: canonical from PRD Appendix A)
 #                         Scoped-run examples (drive the queue until a specific milestone):
 #                           -c 'all children of bd-auth-epic are closed'
@@ -34,6 +36,7 @@ FAST_MODE=""
 MAX_TASKS=0
 MAX_ITERS=0
 USE_DOCKER=""
+BACKEND_FLAG=""
 CONDITION=""
 DRY_RUN=""
 DRY_RUN_CONDITION=""
@@ -46,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --tasks) MAX_TASKS="$2"; shift 2 ;;
     --iterations) MAX_ITERS="$2"; shift 2 ;;
     --docker) USE_DOCKER=1; shift ;;
+    --backend) BACKEND_FLAG="$2"; shift 2 ;;
     -c|--condition) CONDITION="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --dry-run-condition) DRY_RUN_CONDITION=1; shift ;;
@@ -54,6 +58,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; echo "Run '$0 -h' for usage." >&2; exit 2 ;;
   esac
 done
+
+# Resolve the backend once, here, and export it so every later consumer
+# (backend.sh's own functions, the sourced libs, any child process) reads one
+# already-decided value instead of re-running the precedence rules (NFR-002).
+# Sourced before the dry-run exits so --dry-run reports the resolved backend.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/backend.sh"
+ORTUS_BACKEND="$(resolve_backend "$BACKEND_FLAG")" || exit 1
+export ORTUS_BACKEND
 
 build_condition() {
   # Emit the /goal condition on stdout.
@@ -164,6 +176,7 @@ if [ -n "$DRY_RUN" ]; then
   echo "MAX_TASKS=$MAX_TASKS"
   echo "MAX_ITERS=$MAX_ITERS"
   echo "USE_DOCKER=$USE_DOCKER"
+  echo "ORTUS_BACKEND=$ORTUS_BACKEND"
   echo "CONDITION=$CONDITION"
   exit 0
 fi

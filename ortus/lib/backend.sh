@@ -28,24 +28,60 @@
 #
 # Env inputs:
 #   ORTUS_BACKEND  backend name; only "claude" is implemented here.
+#   ORTUS_BACKEND_DEFAULT
+#                  the copier-generated default; final fallback (FR-002).
 #   FAST_MODE      optional extra flag appended to the goal argv.
 #   CLAUDE_CMD     optional array; the launcher's command prefix (e.g. the
 #                  docker sandbox wrapper). Defaults to (claude).
 #
 # No dependency on log() — this module emits no diagnostics of its own.
 
-# Resolve the backend name. Full precedence (flag > env > generated default)
-# lands with resolve_backend; until then the env var is the only input and
-# claude is the only implementation.
+# The backends the CLI surface accepts. Kept as one list so the validator and
+# the error message can never disagree about what is spellable.
+BACKEND_CHOICES="claude codex"
+
+# The copier-generated default — the final fallback in FR-002's precedence
+# chain. The template renders this from the `agent_cli` answer (ortus-1xvv);
+# until that question lands the rendered value is "claude" either way. An
+# already-exported value wins so a generated project can carry its own
+# default without editing this file.
+ORTUS_BACKEND_DEFAULT="${ORTUS_BACKEND_DEFAULT:-claude}"
+
+# Resolve the backend name and echo it. Precedence: flag > ORTUS_BACKEND >
+# generated default (FR-002). This is the ONLY implementation of that
+# precedence — launchers pass their --backend value in and use what comes
+# back, they never re-derive it (NFR-002).
+#
+# Validation lives here rather than in each launcher's flag parser so an
+# invalid value fails identically whether it arrived by flag or by env.
+resolve_backend() {
+    local flag="${1:-}"
+    local name="${flag:-${ORTUS_BACKEND:-$ORTUS_BACKEND_DEFAULT}}"
+
+    case " $BACKEND_CHOICES " in
+        *" $name "*) ;;
+        *)
+            echo "ERROR: unknown backend '$name' (valid: ${BACKEND_CHOICES// /, })" >&2
+            return 1
+            ;;
+    esac
+
+    printf '%s\n' "$name"
+}
+
+# The backend for the current process. Launchers export ORTUS_BACKEND after
+# resolving their flag, so everything downstream of that export agrees.
 backend_name() {
-    printf '%s\n' "${ORTUS_BACKEND:-claude}"
+    resolve_backend ""
 }
 
 # Guard: fail loudly rather than silently emitting a Claude argv for a
 # backend we do not implement yet.
 _backend_require_claude() {
     local name
-    name=$(backend_name)
+    # An unresolvable backend has already printed its own diagnostic; don't
+    # follow it with a second, vaguer one about the empty string.
+    name=$(backend_name) || return 1
     if [ "$name" != "claude" ]; then
         echo "ERROR: backend '$name' is not implemented (valid: claude)" >&2
         return 1
@@ -127,7 +163,7 @@ backend_available() {
 
 backend_preflight() {
     local name
-    name=$(backend_name)
+    name=$(backend_name) || return 1
     if [ "$name" != "claude" ]; then
         echo "ERROR: backend '$name' is not implemented (valid: claude)" >&2
         return 1

@@ -4,6 +4,7 @@
 # Usage: ./ortus/idea.sh                           # Interactive menu
 #        ./ortus/idea.sh "Your idea description"   # Create from idea
 #        ./ortus/idea.sh --prd <path>              # Process existing PRD
+#        ./ortus/idea.sh --backend claude|codex    # Override the agent backend
 #
 # Creates a feature bead. After creating the idea:
 #   ./ortus/interview.sh   # Interactive interview → PRD → task creation
@@ -13,6 +14,24 @@ set -euo pipefail
 
 # Resolve ortus directory for prompt file access (must be done before cd)
 ORTUS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Backend resolution (FR-002). Stripped off the front of the argv before the
+# positional handling below, so `--backend codex --prd foo.md` and the bare
+# `--prd foo.md` reach the same code path. resolve_backend in lib/backend.sh
+# owns the flag > env > generated-default precedence; idea.sh only supplies
+# the flag value and exports the answer (NFR-002).
+source "$ORTUS_DIR/lib/backend.sh"
+BACKEND_FLAG=""
+if [[ "${1:-}" == "--backend" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "Error: --backend requires a value (claude|codex)" >&2
+        exit 1
+    fi
+    BACKEND_FLAG="$2"
+    shift 2
+fi
+ORTUS_BACKEND="$(resolve_backend "$BACKEND_FLAG")" || exit 1
+export ORTUS_BACKEND
 
 # Handle PRD intake flow
 handle_prd() {
@@ -129,7 +148,7 @@ Idea: $idea")
 # Handle help flag
 case "${1:-}" in
     -h|--help)
-        head -n 10 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+        head -n 11 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
         exit 0
         ;;
 esac

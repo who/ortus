@@ -11,6 +11,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests._platform import skip_on_windows_bash_shim
 
 pytestmark = skip_on_windows_bash_shim
@@ -201,6 +203,94 @@ def test_backend_argv_sets_codex_home_before_refusing_an_unimplemented_backend()
         env={"ORTUS_BACKEND": "codex"},
     )
     assert proc.stdout.strip() == "/tmp/.codex"
+
+
+# FR-002 — precedence is flag > ORTUS_BACKEND > copier-generated default.
+# The table is every reachable combination of the three inputs; `None` means
+# "input absent at this layer", which is what makes the next layer win.
+RESOLUTION_CASES = [
+    # (flag, ORTUS_BACKEND, ORTUS_BACKEND_DEFAULT, expected)
+    ("codex", "claude", "claude", "codex"),  # flag beats env
+    ("codex", None, "claude", "codex"),  # flag beats generated default
+    ("claude", "codex", "codex", "claude"),  # flag wins in both directions
+    (None, "codex", "claude", "codex"),  # env beats generated default
+    (None, "claude", "codex", "claude"),
+    (None, None, "codex", "codex"),  # generated default is the last resort
+    (None, None, "claude", "claude"),
+    (None, None, None, "claude"),  # unrendered template still resolves
+]
+
+
+@pytest.mark.parametrize("flag,env_backend,generated,expected", RESOLUTION_CASES)
+def test_resolve_backend_precedence(flag, env_backend, generated, expected) -> None:
+    env = {}
+    if env_backend is not None:
+        env["ORTUS_BACKEND"] = env_backend
+    if generated is not None:
+        env["ORTUS_BACKEND_DEFAULT"] = generated
+    proc = run_bash(f'resolve_backend "{flag or ""}"', env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("layer", ["flag", "env", "generated"])
+def test_resolve_backend_rejects_a_bogus_value_at_any_layer(layer) -> None:
+    """An invalid backend fails identically however it arrived — validation
+    lives in resolve_backend, not in each launcher's flag parser."""
+    flag = "bogus" if layer == "flag" else ""
+    env = {}
+    if layer == "env":
+        env["ORTUS_BACKEND"] = "bogus"
+    if layer == "generated":
+        env["ORTUS_BACKEND_DEFAULT"] = "bogus"
+    proc = run_bash(f'resolve_backend "{flag}" || echo rc=$?', env=env)
+    assert "rc=1" in proc.stdout
+    assert "unknown backend 'bogus'" in proc.stderr
+    assert "claude, codex" in proc.stderr, "error must name the valid choices"
+
+
+def _run_launcher(script: str, *args: str, env=None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [BASH, str(REPO_ROOT / "ortus" / script), *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=REPO_ROOT,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", **(env or {})},
+    )
+
+
+def test_goal_sh_backend_flag_beats_env() -> None:
+    proc = _run_launcher("goal.sh", "--backend", "codex", "--dry-run", env={"ORTUS_BACKEND": "claude"})
+    assert proc.returncode == 0, proc.stderr
+    assert "ORTUS_BACKEND=codex" in proc.stdout
+
+
+def test_goal_sh_falls_back_to_env_then_generated_default() -> None:
+    proc = _run_launcher("goal.sh", "--dry-run", env={"ORTUS_BACKEND": "codex"})
+    assert "ORTUS_BACKEND=codex" in proc.stdout
+    proc = _run_launcher("goal.sh", "--dry-run")
+    assert "ORTUS_BACKEND=claude" in proc.stdout
+
+
+def test_goal_sh_rejects_a_bogus_backend() -> None:
+    proc = _run_launcher("goal.sh", "--backend", "bogus", "--dry-run")
+    assert proc.returncode == 1
+    assert "unknown backend 'bogus'" in proc.stderr
+    assert "claude, codex" in proc.stderr
+
+
+def test_idea_sh_resolves_identically() -> None:
+    """Acceptance #3: idea.sh shares goal.sh's resolution, including the
+    failure mode — it does not reimplement precedence or validation."""
+    proc = _run_launcher("idea.sh", "--backend", "bogus", "--prd", "prd/nope.md")
+    assert proc.returncode == 1
+    assert "unknown backend 'bogus'" in proc.stderr
+    assert "claude, codex" in proc.stderr
+
+    proc = _run_launcher("idea.sh", "--backend")
+    assert proc.returncode == 1
+    assert "--backend requires a value" in proc.stderr
 
 
 def test_template_mirror_is_byte_identical() -> None:
