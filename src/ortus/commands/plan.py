@@ -101,9 +101,16 @@ def plan(
     new_ids = [i["id"] for i in after if i["id"] not in before]
 
     if not new_ids:
-        output.progress("plan", "done (no new issues created)")
-        output.warn("plan ran but no new issues were created in this workspace")
-        return
+        # claude can exit 0 while its own tool calls failed (e.g. a sandbox
+        # that cannot initialize, so every `bd create` in the generated script
+        # errors out). Exiting 0 here made that look like a successful plan and
+        # sent operators hunting a phantom decomposition regression — see
+        # ortus-jke7. A plan that creates nothing is a failed plan.
+        output.error(
+            "plan produced no issues; the decomposition session exited 0 but "
+            f"created nothing. Inspect {log_path} for failed tool calls."
+        )
+        raise typer.Exit(code=1)
 
     output.progress("plan", f"done ({len(new_ids)} new issue(s) created)")
     output.success(f"plan created {len(new_ids)} issue(s) in {target}/.beads/")

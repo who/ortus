@@ -145,6 +145,24 @@ def _require(*binaries: str) -> None:
         pytest.skip(f"required binaries not on PATH: {', '.join(missing)}")
 
 
+def _plan_log_tail(repo: Path, *, lines: int = 40) -> str:
+    """Tail of the most recent plan-*.log, for assertion messages.
+
+    A zero-issue `ortus plan` says nothing about *why* on stdout — the cause
+    lives in the session log (e.g. every Bash tool call failing on a sandbox
+    EPERM, ortus-jke7). Inlining the tail makes the failure self-diagnosing
+    instead of sending the next reader digging through pytest tmpdirs.
+    """
+    logs = sorted((repo / "logs").glob("plan-*.log"))
+    if not logs:
+        return f"(no plan-*.log under {repo / 'logs'})"
+    try:
+        text = logs[-1].read_text(errors="replace")
+    except OSError as exc:  # pragma: no cover - diagnostics only
+        return f"({logs[-1]}: {exc})"
+    return f"{logs[-1]}:\n" + "\n".join(text.splitlines()[-lines:])
+
+
 @pytest.fixture(autouse=True)
 def _isolate_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Reroute $HOME so the user's real ~/.claude/settings.json can't influence
@@ -503,7 +521,8 @@ def test_plan_decompose_tiny_prd(
     proc = local_ortus("plan", str(tmp_repo), str(prd), timeout=300.0)
     assert proc.returncode == 0, (
         f"`ortus plan` exited {proc.returncode} on tiny PRD.\n"
-        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}\n"
+        f"--- plan session log tail ---\n{_plan_log_tail(tmp_repo)}"
     )
     issues = json.loads(
         subprocess.run(
@@ -513,7 +532,8 @@ def test_plan_decompose_tiny_prd(
     )
     assert len(issues) >= 3, (
         f"`ortus plan` produced {len(issues)} issues; expected ≥ 3 from a "
-        f"3-task PRD. Decomposition logic may have regressed."
+        f"3-task PRD. Decomposition logic may have regressed.\n"
+        f"--- plan session log tail ---\n{_plan_log_tail(tmp_repo)}"
     )
     wrong_prefix = [
         i["id"] for i in issues if not i["id"].startswith(f"{random_prefix}-")
