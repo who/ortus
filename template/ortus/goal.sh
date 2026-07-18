@@ -324,6 +324,15 @@ else
   sandbox_smoke_test
 fi
 
+# Past this point the outer sandbox is enforced AND verified — neither branch
+# above returns on failure, they exit. Publish that fact so the backend
+# adapter can pick the codex inner posture from it (FR-010): a relaxed inner
+# sandbox is only defensible behind an enforced outer one. An operator whose
+# wrapper provides no outer sandbox sets ORTUS_OUTER_SANDBOX=off in the
+# environment and the adapter falls back to a real inner sandbox — that
+# opt-out changes the inner posture only; it never skips the gate above.
+export ORTUS_OUTER_SANDBOX="${ORTUS_OUTER_SANDBOX:-enforced}"
+
 # Hook-disabled precheck (ortus-sooj). Runs after sandbox/docker checks and
 # before any claude spawn. /goal is implemented as a managed Stop hook; if
 # disableAllHooks=true is set anywhere in the settings layer stack, the

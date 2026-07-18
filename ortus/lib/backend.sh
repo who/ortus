@@ -32,9 +32,14 @@
 #                  the copier-generated default; final fallback (FR-002).
 #   FAST_MODE      optional extra flag appended to the goal argv. Claude-only;
 #                  a documented no-op under codex (FR-004).
+#   ORTUS_OUTER_SANDBOX
+#                  whether the enforced outer OS sandbox (bwrap/Seatbelt, or
+#                  --docker) is in play: "enforced" (default) or "off". This
+#                  is what PICKS the codex inner posture (FR-010).
 #   ORTUS_CODEX_POSTURE
-#                  sandbox posture for codex roles: "bypass" (default) or
-#                  "inner". See _backend_codex_posture.
+#                  explicit override of the picked posture: "bypass" or
+#                  "inner". Unset (the norm) means "derive it from
+#                  ORTUS_OUTER_SANDBOX". See _backend_codex_posture.
 #   ORTUS_CODEX_MODEL
 #                  optional model name; appended as `-m <model>` to codex argv.
 #   CLAUDE_CMD     optional array; the launcher's command prefix including the
@@ -136,16 +141,38 @@ _backend_cmd() {
 
 # Sandbox posture for codex roles, published as CODEX_POSTURE_ARGV.
 #
-# "bypass" is the default and mirrors today's Claude posture
-# (--dangerously-skip-permissions inside an enforced outer bwrap/Seatbelt
-# sandbox): the inner sandbox is relaxed *because* the outer one is enforced
-# and smoke-tested. "inner" is the fallback for an operator who opted out of
-# the outer sandbox — a real inner sandbox instead of a full bypass.
+# "bypass" mirrors today's Claude posture (--dangerously-skip-permissions
+# inside an enforced outer bwrap/Seatbelt sandbox). Say the safety argument
+# plainly: relaxing the INNER sandbox is safe ONLY because the OUTER one is
+# enforced and smoke-tested by lib/sandbox.sh before anything launches. Take
+# the outer layer away and the bypass is a full-privilege agent on the host.
 #
-# Wired as a variable rather than a literal because FR-010 (ortus-mcqc) owns
-# the rule that *picks* the posture; this function only renders it.
+# So the outer layer is what picks the posture (FR-010), not a standalone
+# preference: outer enforced -> bypass; operator opted out of the outer
+# sandbox -> a REAL inner sandbox (--sandbox workspace-write
+# --ask-for-approval never) instead of a bypass. Defaulting
+# ORTUS_OUTER_SANDBOX to "enforced" is safe because goal.sh's smoke test is
+# unconditional and not skippable — an unset value means "goal.sh ran it".
+#
+# ORTUS_CODEX_POSTURE still overrides the derived value, for the operator who
+# knows their wrapper's isolation better than we do. It is deliberately the
+# override rather than the primary knob: the common path should require
+# stating what the OUTER world looks like, not which flag to emit.
 _backend_codex_posture() {
-    case "${ORTUS_CODEX_POSTURE:-bypass}" in
+    local posture="${ORTUS_CODEX_POSTURE:-}"
+
+    if [ -z "$posture" ]; then
+        case "${ORTUS_OUTER_SANDBOX:-enforced}" in
+            enforced) posture="bypass" ;;
+            off)      posture="inner" ;;
+            *)
+                echo "ERROR: unknown outer sandbox state '${ORTUS_OUTER_SANDBOX}' (valid: enforced, off)" >&2
+                return 1
+                ;;
+        esac
+    fi
+
+    case "$posture" in
         bypass) CODEX_POSTURE_ARGV=(--sandbox workspace-write --dangerously-bypass-approvals-and-sandbox) ;;
         inner)  CODEX_POSTURE_ARGV=(--sandbox workspace-write --ask-for-approval never) ;;
         *)

@@ -185,6 +185,40 @@ def test_codex_goal_role_falls_back_to_a_real_inner_sandbox() -> None:
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
 
 
+def test_codex_posture_is_derived_from_the_outer_sandbox_state() -> None:
+    """FR-010: the outer sandbox picks the inner posture. Enforced (the
+    default, and what goal.sh's unconditional smoke test guarantees) buys the
+    bypass; opting out of the outer layer buys a real inner sandbox."""
+    enforced = argv_with_args("goal", "P", env={**CODEX, "ORTUS_OUTER_SANDBOX": "enforced"})
+    assert enforced[-1] == "--dangerously-bypass-approvals-and-sandbox"
+    # Unset must behave as "enforced" — goal.sh exits rather than launching
+    # with a failed smoke test, so reaching the adapter implies the gate passed.
+    assert argv_with_args("goal", "P", env=CODEX) == enforced
+
+    opted_out = argv_with_args("goal", "P", env={**CODEX, "ORTUS_OUTER_SANDBOX": "off"})
+    assert opted_out[-3:] == ["workspace-write", "--ask-for-approval", "never"]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in opted_out
+
+
+def test_codex_posture_override_wins_over_the_outer_sandbox_state() -> None:
+    """The explicit override is for the operator whose wrapper's isolation we
+    cannot see; it beats the derived value in both directions."""
+    argv = argv_with_args(
+        "goal", "P", env={**CODEX, "ORTUS_OUTER_SANDBOX": "off", "ORTUS_CODEX_POSTURE": "bypass"}
+    )
+    assert argv[-1] == "--dangerously-bypass-approvals-and-sandbox"
+
+
+def test_codex_rejects_an_unknown_outer_sandbox_state() -> None:
+    """NFR-005: a typo'd ORTUS_OUTER_SANDBOX must not silently fall through to
+    the bypass — that would be the exact silent degradation FR-010 forbids."""
+    proc = run_bash(
+        "backend_argv goal P || echo rc=$?", env={**CODEX, "ORTUS_OUTER_SANDBOX": "bogus"}
+    )
+    assert "rc=1" in proc.stdout
+    assert "unknown outer sandbox state 'bogus'" in proc.stderr
+
+
 def test_codex_goal_role_rejects_an_unknown_posture() -> None:
     proc = run_bash("backend_argv goal P || echo rc=$?", env={**CODEX, "ORTUS_CODEX_POSTURE": "bogus"})
     assert "rc=1" in proc.stdout
@@ -372,6 +406,49 @@ def test_idea_sh_resolves_identically() -> None:
     proc = _run_launcher("idea.sh", "--backend")
     assert proc.returncode == 1
     assert "--backend requires a value" in proc.stderr
+
+
+# FR-010, third condition — the outer gate that makes the bypass defensible is
+# still the gate. These sit here rather than in test_core_sandbox.py because
+# what they protect is the posture contract, not lib/sandbox.sh's internals.
+
+
+def test_outer_smoke_test_still_blocks_launch_when_the_sandbox_is_broken(tmp_path) -> None:
+    """A deliberately broken outer sandbox (no bwrap/sandbox-exec on PATH)
+    must abort, not degrade — otherwise the codex bypass would run bare."""
+    # A PATH carrying uname (so the platform still resolves) but neither
+    # sandbox binary: the sandbox is broken, not the shell.
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    uname = shutil.which("uname")
+    assert uname, "uname is required to detect the platform"
+    (stub_bin / "uname").symlink_to(uname)
+
+    script = (
+        "log() { echo \"$*\"; }\n"
+        f'source "{REPO_ROOT / "ortus" / "lib" / "sandbox.sh"}"\n'
+        "sandbox_smoke_test\n"
+        "echo REACHED_LAUNCH\n"
+    )
+    proc = subprocess.run(
+        [BASH, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": str(stub_bin)},
+    )
+    assert proc.returncode != 0
+    assert "REACHED_LAUNCH" not in proc.stdout
+    assert "Sandbox prerequisite missing" in proc.stdout
+
+
+def test_goal_sh_publishes_the_outer_state_only_after_the_gate() -> None:
+    """The export means 'the smoke test passed'. If it moved above the gate it
+    would still be there after a failed check — a lie the adapter would trust."""
+    body = (REPO_ROOT / "ortus" / "goal.sh").read_text(encoding="utf-8")
+    gate = body.index("sandbox_smoke_test\n")
+    export = body.index('export ORTUS_OUTER_SANDBOX=')
+    assert gate < export
 
 
 def test_template_mirror_is_byte_identical() -> None:
