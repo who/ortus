@@ -339,6 +339,19 @@ export ORTUS_OUTER_SANDBOX="${ORTUS_OUTER_SANDBOX:-enforced}"
 # directive silently degrades. Refuse to launch in that case.
 check_hooks_enabled
 
+# bd exemption preflight (FR-006). The single most likely source of a silently
+# broken loop is a sandbox that lets bd read the queue but not write it: the
+# session then burns a full run and closes nothing. Runs after the posture is
+# settled above (bd_preflight reads ORTUS_BACKEND and, under codex, the config
+# CODEX_HOME points at) and before any agent spawn. Not skippable via env var,
+# for the same reason the sandbox smoke test isn't — a skippable gate is just a
+# slower way to reach the failure it was added to prevent.
+backend_env
+bd_preflight || {
+  log "ERROR: refusing to start — see the bd preflight diagnostic above."
+  exit 1
+}
+
 # Cache helpers (project-local .cache/ subdirs + XDG/per-tool cache env
 # exports) live in ortus/lib/cache.sh so canonical/template parity (FR-022)
 # is structural rather than copy-paste. No log() dependency.

@@ -11,11 +11,28 @@
 # whatever outer sandbox the launcher wraps around it, is what bounds the
 # agent — not an approval dialog.
 approval_policy = "never"
+# workspace-write is also the `bd` exemption (FR-006). bd keeps its issue
+# database in an embedded Dolt store under .beads/, inside the workspace, so
+# writable workspace + nothing else is exactly enough: measured under
+# `bwrap --unshare-net` with everything outside the repo read-only, both
+# `bd ready --json` and `bd create` succeed. Widening writable_roots for bd
+# would be over-granting. ortus/goal.sh refuses to start if this is narrowed
+# (see bd_preflight in ortus/lib/sandbox.sh).
+#
+# The same caveat applies here as under Claude Code's
+# sandbox.excludedCommands: host-level allowances are matched against the
+# command as invoked, so wrapping bd defeats them. Run bd as its own command
+# with `bd` as the first token — never in pipes (`bd ... | jq`), never under
+# `xargs bd`, never as `bash -c "bd ..."`. A wrapped bd runs as a sandboxed
+# child of the wrapper and hangs on dolt.
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
 # The agent needs the network for package installs and API calls; the outer
-# sandbox is what narrows that to the allowlist below.
+# sandbox is what narrows that to the allowlist below. bd itself does not need
+# it — its Dolt store is local — but `bd dolt push` does, so turning this off
+# in a project with a git remote makes the loop close issues and strand them
+# locally. bd_preflight fails loudly on exactly that combination.
 network_access = true
 # Builds and test runs scratch in $TMPDIR and /tmp — keep both writable.
 exclude_tmpdir_env_var = false
