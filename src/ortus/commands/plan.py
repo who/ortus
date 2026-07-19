@@ -13,33 +13,36 @@ from typing import Optional
 import typer
 
 from ortus.core import output
+from ortus.core.agent import BackendError, make_runner, resolve_backend
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.prompts import resolve_prompt
 from ortus.core.repo import resolve_repo
 
 
-def _make_runner() -> ClaudeRunner:
-    """Indirection so tests can swap in a fake claude binary."""
-    return ClaudeRunner()
+def _make_runner(backend: str = "claude") -> ClaudeRunner:
+    """Indirection so tests can swap in a fake backend binary."""
+    return make_runner(backend)  # type: ignore[arg-type]
 
 
-def _decompose_prd(repo: Path, prd: Path, *, log_path: Path) -> int:
+def _decompose_prd(
+    repo: Path, prd: Path, *, log_path: Path, backend: str = "claude"
+) -> int:
     """Run claude with the plan prompt, expanded to reference the PRD path."""
     prompt = resolve_prompt("plan-prompt", repo=repo).text
     # The plan-prompt uses literal "$prd_path" as a placeholder for the absolute
     # PRD path; substitute it before handing to claude.
     expanded = prompt.replace("$prd_path", str(prd.resolve()))
-    runner = _make_runner()
+    runner = _make_runner() if backend == "claude" else _make_runner("codex")
     return runner.run(expanded, repo=repo, log_path=log_path)
 
 
-def _expand_idea(repo: Path, *, log_path: Path) -> int:
+def _expand_idea(repo: Path, *, log_path: Path, backend: str = "claude") -> int:
     """Run the interactive idea-expansion flow (interview→PRD→tasks)."""
     # Use the grind prompt's interview entry-point indirectly; for now we
     # just hand claude a freeform "interview the user about their idea"
     # instruction. Phase 3 idzn.1 fleshes out the full interview prompt.
-    runner = _make_runner()
+    runner = _make_runner() if backend == "claude" else _make_runner("codex")
     prompt = (
         "The user invoked `ortus plan <repo>` without a PRD. Run an interactive "
         "idea-expansion interview: ask 3-7 questions to clarify the goal, then "
@@ -60,6 +63,11 @@ def plan(
     prd: Optional[Path] = typer.Argument(
         None, help="Optional PRD path. If omitted, runs the idea-interview flow."
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Agent backend (claude|codex); defaults from .ortusrc.",
+    ),
 ) -> None:
     """Decompose a PRD into bd issues, or interview-then-PRD-then-decompose."""
     # Disambiguate: if the operator passed a single positional that points at
@@ -71,6 +79,11 @@ def plan(
         repo = None
 
     target = resolve_repo(repo)
+    try:
+        resolved_backend = resolve_backend(backend, repo=target)
+    except BackendError as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
     output.progress("plan", f"target: {target}")
 
     if prd is not None and not prd.is_file():
@@ -87,13 +100,21 @@ def plan(
 
     if prd:
         output.progress("plan", f"reading PRD from {prd}")
-        output.progress("plan", "decomposing PRD via claude (this typically takes 1-3 min)")
-        rc = _decompose_prd(target, prd, log_path=log_path)
+        output.progress(
+            "plan",
+            f"decomposing PRD via {resolved_backend} (this typically takes 1-3 min)",
+        )
+        rc = _decompose_prd(
+            target, prd, log_path=log_path, backend=resolved_backend
+        )
     else:
-        output.progress("plan", "no PRD given; running interactive idea-expansion via claude")
-        rc = _expand_idea(target, log_path=log_path)
+        output.progress(
+            "plan",
+            f"no PRD given; running idea-expansion via {resolved_backend}",
+        )
+        rc = _expand_idea(target, log_path=log_path, backend=resolved_backend)
     if rc != 0:
-        output.error(f"plan failed (claude exit {rc}); see {log_path}")
+        output.error(f"plan failed ({resolved_backend} exit {rc}); see {log_path}")
         raise typer.Exit(code=rc)
 
     output.progress("plan", "scanning bd workspace for newly-created issues")

@@ -13,10 +13,10 @@ gathering followed by writing one JSON envelope per `human`-flagged
 issue to `logs/triage-envelopes.jsonl`. The Python wrapper reads that
 file after you exit and walks the operator through the decisions.
 
-This split exists because `AskUserQuestion` only works inside an
-interactive Claude Code session, not under `claude -p` (the headless
-mode that hosts this prompt). Calling it here would silently fail and
-the operator would never see a question. Do not use it.
+This split keeps the agent phase non-interactive and backend-neutral.
+The Python wrapper owns the real TTY and operator questions; calling an
+agent-specific question tool here would either fail or be invisible. Do not
+use one.
 
 ## Available tools
 

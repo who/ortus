@@ -4,7 +4,7 @@
 
 *Ortus* (Latin: "rising, origin, birth") — the point from which something springs into being.
 
-Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, one fresh subprocess per task. Inspired by the Ralph Loop concept: fresh window per task, drive the queue to zero, no context drift.
+Ortus autonomously closes a backlog of bd-tracked issues using Claude Code or Codex, one fresh subprocess per task. Inspired by the Ralph Loop concept: fresh window per task, drive the queue to zero, no context drift.
 
 ## Install
 
@@ -49,7 +49,7 @@ curl -fsSL https://github.com/who/ortus/releases/latest/download/install.sh | sh
 cd your-project
 ortus init .
 
-# Verify prereqs (bd, claude, jq, hooks, sandbox)
+# Verify prereqs for the configured backend
 ortus check .
 
 # Decompose a PRD into bd issues
@@ -58,23 +58,26 @@ ortus plan . path/to/feature.md
 # Or run the idea→interview→PRD→tasks flow with no PRD path
 ortus plan .
 
-# Drive the bd queue to zero — one task per fresh /goal subprocess
+# Drive the bd queue to zero — one task per fresh agent subprocess
 ortus grind .
+
+# Override the project backend for one run
+ortus grind . --backend codex
 
 # Bounded: stop after N tasks
 ortus grind . --tasks 5
 ```
 
-**Note:** Ortus is a global CLI you install once and use everywhere. You don't clone this repository into your project — `ortus init` only adds a small set of per-project files (`.beads/`, `.claude/settings.json`, `AGENTS.md`, `.ortusrc`, `.gitignore`) to an existing directory. It is not a Python dependency.
+**Note:** Ortus is a global CLI you install once and use everywhere. You don't clone this repository into your project — `ortus init` only adds a small set of per-project files (`.beads/`, `AGENTS.md`, `.ortusrc`, `.gitignore`, and the selected backend's config directory) to an existing directory. It is not a Python dependency.
 
 ## The eight verbs
 
 | Verb | Purpose |
 |---|---|
-| `ortus init <repo>` | Bootstrap a fresh repo with bd + .claude/settings.json + AGENTS.md + .ortusrc + .gitignore |
-| `ortus check <repo>` | Verify bd/claude/jq + sandbox prereq + hook-enabled + settings shape; strictly read-only |
+| `ortus init <repo>` | Bootstrap a fresh repo; `--backend claude|codex` selects its default agent |
+| `ortus check <repo>` | Verify bd, selected agent, sandbox, and backend config; strictly read-only |
 | `ortus plan <repo> [<PRD>]` | Decompose a PRD into bd issues, or interview-then-PRD-then-decompose if no PRD path |
-| `ortus grind <repo>` | Drive the bd queue, one task per fresh `claude -p '/goal …'` subprocess |
+| `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude or Codex subprocess |
 | `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
 | `ortus tail <repo>` | Follow `logs/{grind,goal,ralph}-*.log` with stream-json filtering |
 | `ortus triage <repo>` | Walk the human-flagged bd queue interactively |
@@ -97,7 +100,7 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 |---|---|---|
 | **uv** | install + run ortus | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
 | **bd** (beads) v1.0.0+ | issue tracking (backed by embedded Dolt) | `brew install beads` or [GH release](https://github.com/gastownhall/beads/releases) |
-| **claude** | the model running inside `ortus grind` (the CLI is Claude-only — see [Agent backends](#agent-backends)) | [Claude Code](https://github.com/anthropics/claude-code) |
+| **claude** or **codex** | agent running inside `ortus grind`; Claude is the default | [Claude Code](https://github.com/anthropics/claude-code) / [Codex CLI](https://github.com/openai/codex) |
 | **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
 | **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
 
@@ -105,16 +108,16 @@ Optional: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. If `.codeg
 
 ## Agent backends
 
-The `ortus` CLI drives **Claude Code** (`claude`); it has no `--backend` flag today, so `claude` is a hard prerequisite for `ortus grind`.
+Claude remains the default. Select Codex at project creation with `ortus init . --backend codex`, per run with `--backend codex`, or through `ORTUS_BACKEND=codex`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default.
 
-The older Copier-vendored bash workflow (`copier copy gh:who/ortus`, which generates `ortus/goal.sh` into your project) runs on **either** Claude Code or the **ChatGPT Codex CLI**. There the backend is picked by the `agent_cli` copier question at generation time and overridden per run with `--backend claude|codex` or `ORTUS_BACKEND`. Install/auth is `claude` + `/login` (or `ANTHROPIC_API_KEY`) for Claude, and `npm install -g @openai/codex` + `codex login` (or `OPENAI_API_KEY`) for Codex; `interview.sh` and `triage.sh` are Claude-only. See [`template/docs/choosing-a-backend.md`](template/docs/choosing-a-backend.md) for the full comparison. That workflow is being archived — see [`docs/sunset-notes.md`](docs/sunset-notes.md).
+Claude workers run a narrow `claude -p '/goal …'` session. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`. In both cases the outer `ortus grind` scheduler trusts only observable bd state and starts a fresh process for the next issue.
 
 ## Why ortus
 
 - **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No more `copier update` chasing N repos.
 - **`bd ready` IS the queue.** No README task lists, no TodoWrite scratchpads. The queue is data.
-- **`/goal` IS the loop.** Termination is a hook decision based on observable bd state, not a sentinel grep.
-- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; cache directories are project-local; network is allowlist-only via `.claude/settings.json`.
+- **The scheduler is the loop.** Backend output is advisory; observable bd state decides whether an iteration succeeded, orphaned a claim, or made no change.
+- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; Codex workers retain `workspace-write`, while Claude uses its generated sandbox policy.
 
 ## Configuration
 
@@ -123,6 +126,7 @@ Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 ```toml
 prefix = "myproj"       # bd issue-id prefix
 project_type = "python" # python | typescript | go | rust | polyglot
+backend = "claude"      # claude | codex
 ```
 
 Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md` or `~/.ortus/prompts/<name>.md`; the bundled defaults under `src/ortus/prompts/` are the fallback (FR-025).

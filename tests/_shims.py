@@ -103,7 +103,17 @@ def normalize_git_branch(repo: Path, branch: str = "main") -> None:
         text=True,
         check=False,
     )
-    if proc.returncode != 0 or proc.stdout.strip() == branch:
+    if proc.returncode != 0:
+        # An unborn repository has no resolvable HEAD yet, but its symbolic
+        # ref still chooses the branch that the first worker commit creates.
+        subprocess.run(
+            ["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+        )
+        return
+    if proc.stdout.strip() == branch:
         return
     subprocess.run(
         ["git", "branch", "-m", branch],

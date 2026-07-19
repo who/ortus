@@ -1,6 +1,6 @@
 """ortus interview <repo> [<feature-id>] — interactive PRD-building interview (idzn.1).
 
-Launches a claude session with the bundled interview prompt. If a feature
+Launches the configured agent with the bundled interview prompt. If a feature
 id is supplied, the prompt jumps directly to that feature; otherwise the
 verb picks the first open feature (or errors if none exist).
 """
@@ -13,14 +13,15 @@ from typing import Optional
 import typer
 
 from ortus.core import output
+from ortus.core.agent import BackendError, make_runner, resolve_backend
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.prompts import resolve_prompt
 from ortus.core.repo import resolve_repo
 
 
-def _make_runner() -> ClaudeRunner:
-    return ClaudeRunner()
+def _make_runner(backend: str = "claude") -> ClaudeRunner:
+    return make_runner(backend)  # type: ignore[arg-type]
 
 
 def _pick_feature(client: BdClient) -> Optional[str]:
@@ -45,9 +46,19 @@ def interview(
     feature_id: Optional[str] = typer.Argument(
         None, help="Optional feature bd id. Defaults to the first open feature."
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Agent backend (claude|codex); defaults from .ortusrc.",
+    ),
 ) -> None:
     """Run an interactive interview to draft a PRD for an open feature."""
     target = resolve_repo(repo)
+    try:
+        resolved_backend = resolve_backend(backend, repo=target)
+    except BackendError as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
 
     client = BdClient(target)
     chosen = feature_id or _pick_feature(client)
@@ -74,8 +85,11 @@ def interview(
     log_path = target / "logs" / "interview.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    runner = _make_runner()
-    output.info(f"interview starting for {chosen}; log → {log_path.relative_to(target)}")
+    runner = _make_runner() if resolved_backend == "claude" else _make_runner("codex")
+    output.info(
+        f"interview starting for {chosen} via {resolved_backend}; "
+        f"log → {log_path.relative_to(target)}"
+    )
     rc = runner.run(expanded, repo=target, log_path=log_path)
     if rc != 0:
         output.error(f"interview exited {rc}; see {log_path}")
