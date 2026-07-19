@@ -7,7 +7,7 @@
 - **Created**: 2026-07-18
 - **Author**: Claude (cross-reading `~/code/ortus`, the OpenAI Codex [`using_goals_in_codex` cookbook](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex), and the Codex non-interactive / security / config references at learn.chatgpt.com)
 - **Interview Confidence**: Medium. Codebase audited end-to-end; Codex CLI surface grounded in official docs. Two facts still need pinning at implementation time (Codex JSON event schema exact fields; whether `bd setup codex` exists) — tracked as Open Questions.
-- **Status**: Draft for review — NOT decomposed into bd issues yet.
+- **Status**: Implemented in the supported Python CLI. Bash/Copier-specific sections are retained only as migration history; the Python requirements and resolved Q1 govern current behavior.
 
 ---
 
@@ -19,7 +19,7 @@ Ortus is hard-wired to a single autonomous-execution backend: Anthropic's `claud
 
 Some operators want to run the same Ortus workflow on OpenAI's Codex CLI with its latest models instead — for cost, for model diversity, or because they already have a ChatGPT/Codex subscription rather than an Anthropic one. Today that is impossible without forking the tooling.
 
-The good news, established during analysis: **the load-bearing abstraction survives the swap.** Codex ships a native `/goal` command suite (`/goal`, `/goal pause`, `/goal resume`, `/goal clear`) that is functionally equivalent to Claude Code's managed goal loop — after each turn Codex evaluates the objective against concrete evidence (test results, diffs, artifacts) and self-continues until success is confirmed, the budget is exhausted, or a blocker emerges. Ortus's entire design already speaks `/goal <condition>`; the condition strings in `prompts/conditions/*.txt` are provider-neutral English. So this is **not** a rewrite of the loop contract — it is a **backend seam**: a way to route the same `/goal <condition>` directive to either `claude` or `codex`, translate the flags, translate the config, and branch the log parser.
+The load-bearing abstraction is the **outer Ortus scheduler**, not the `/goal` spelling. The supported Python `ortus grind` loop selects and claims one issue, launches one fresh worker subprocess, and judges the result from observable bd state. Claude workers retain the managed `/goal` contract. Codex workers receive the same logical single-issue instructions as a plain `codex exec` prompt because slash commands are not expanded by that non-interactive surface.
 
 ### Proposed Solution
 
@@ -35,17 +35,17 @@ The adapter maps Ortus's existing intent onto each CLI:
 |---|---|---|
 | Non-interactive run of a prompt | `claude -p "$prompt"` | `codex exec "$prompt"` |
 | Streaming machine-readable output | `--output-format stream-json --verbose` | `--json` (JSON Lines events) |
-| Autonomous, no approval prompts | `--dangerously-skip-permissions` | `--sandbox workspace-write --ask-for-approval never` (or `--dangerously-bypass-approvals-and-sandbox` when already inside Ortus's outer sandbox) |
+| Autonomous worker | `--dangerously-skip-permissions` behind Claude's configured sandbox | `--sandbox workspace-write` |
 | Select model | `--model <m>` | `-m <model>` |
 | Working directory | `cd` (implicit) | `--cd/-C <dir>` (or `cd`) |
 | Config source | `.claude/settings.json` (+ `.mcp.json`) auto-discovered in cwd | `$CODEX_HOME/config.toml` — Ortus sets `CODEX_HOME=$PWD/.codex` so config is project-local |
 | Agent instructions | `CLAUDE.md` (auto-loaded) + `AGENTS.md` | `AGENTS.md` (native, hierarchical) |
 
-Config and instruction files are generated per backend. For Codex, Ortus ships `.codex/config.toml` (sandbox mode, approval policy, network allowlist, `bd` exemption, MCP servers) as the peer of `.claude/settings.json`, and ensures the operational content Codex needs lives in `AGENTS.md` (which Codex reads natively) rather than only in `CLAUDE.md` (which Codex ignores).
+Config and instruction files are generated per backend. For Codex, Ortus ships a minimal `.codex/config.toml` with sandbox and approval defaults as the peer of `.claude/settings.json`, and ensures shared operational content lives in `AGENTS.md`. Codex has no per-domain sandbox network allowlist, so Ortus does not claim to enforce one through Codex config.
 
-The `/goal` termination contract, the condition files, the flock single-instance guard, the outer OS sandbox smoke test, the `--docker` tier, and the cache relocation are **backend-agnostic and preserved unchanged**. Only the leaf that spawns the agent and the leaf that reads its output become backend-aware.
+The condition content, flock single-instance guard, bd-state delta, sandbox gate, worker watchdog, orphan policy, and cache relocation remain backend-neutral. Prompt wrapping, runner argv, configuration validation, hook checks, and log decoding are backend-aware.
 
-Scope boundary: **`goal.sh` (the autonomous loop) is the priority and the acceptance gate.** The interactive flows (`interview.sh`, `triage.sh`) depend on `AskUserQuestion`, a Claude-Code tool with no Codex equivalent, and are addressed as a lower-priority phase (see Out of Scope / Phase 4).
+Scope boundary: **the supported Python `ortus grind` loop is the priority and acceptance gate.** The Copier-vendored bash implementation is an archived design record and is not the target of new backend work.
 
 ### Success Metrics
 
@@ -63,7 +63,7 @@ Scope boundary: **`goal.sh` (the autonomous loop) is the priority and the accept
 
 Two independent developments make this tractable and worthwhile:
 
-1. **Codex reached feature parity on the one primitive Ortus is built around.** Ortus's 2026-05 migration (`prd/PRD-goal-directive.md`) bet the whole orchestration on the `/goal` declarative-condition contract. At the time that was Claude-Code-only. Codex now ships the same primitive — a stateful continuation loop that evaluates a declarative objective against evidence after each turn and self-terminates. Because Ortus already expresses everything as `/goal <condition>`, the port is a seam, not a redesign.
+1. **Codex fits Ortus's subprocess-per-task scheduler.** A single `codex exec` can complete one well-scoped issue. The Python scheduler supplies freshness, queue repetition, retry policy, and bd-state verification; it does not depend on native Codex Goal mode.
 2. **AGENTS.md is the cross-agent convention Ortus already honors.** Ortus ships `AGENTS.md` (copied verbatim, not templated) and both Claude Code and Codex read it. The instruction surface is already 90% portable; only the Claude-specific slices (`CLAUDE.md`, the Sonnet/Opus subagent table, `/compact`) need backend gating.
 
 ### How Codex `/goal` and non-interactive mode actually work (from docs)
@@ -74,7 +74,7 @@ Two independent developments make this tractable and worthwhile:
 - **Non-interactive entry point**: `codex exec "<prompt>"`. **`/goal` does NOT work here** — see the Q1 finding under Open Questions. `codex exec` forwards the prompt string to the model verbatim; slash commands are a TUI-only affordance. The Codex backend therefore uses the plain-prompt termination model: the objective goes in the prompt body (and `AGENTS.md`), and Codex's own turn loop runs to evidence-based completion.
 - **Flags (verbatim from the Codex non-interactive reference)**:
   - `--sandbox read-only | workspace-write | danger-full-access`
-  - `--ask-for-approval <policy>` with policies `untrusted | on-failure | on-request | never`; `--full-auto` is the workspace-write + low-friction convenience mode; `--dangerously-bypass-approvals-and-sandbox` skips both.
+  - `--sandbox workspace-write` gives the worker the repository write scope it needs. Ortus does not use the dangerous bypass in the Python backend.
   - `--json` — JSON Lines event stream. Event types include `thread.started`, `turn.started` / `turn.completed` / `turn.failed`, `item.started` / `item.completed`, and `usage` (token counts).
   - `-o` / `--output-last-message <path>` — write the final assistant message to a file.
   - `--output-schema <path>` — enforce a JSON Schema on the response.
@@ -99,7 +99,7 @@ Backend-agnostic and reused as-is: the flock guard (`goal.sh:196-256`), `build_c
 Ortus runs the agent inside an OS-level sandbox (bwrap on Linux/WSL2, Seatbelt on macOS) and relies on the agent's own in-CLI sandbox policy for the fine-grained allow/deny + the critical `bd` exemption. Claude Code enforces that policy from `.claude/settings.json` (`sandbox.excludedCommands: ["bd","bd *"]`, `network.allowedDomains`). Codex has its **own** sandbox (`sandbox_mode` + `approval_policy` + `[sandbox_workspace_write].network_access`). The two models differ, and the `bd` exemption is the trickiest to port:
 
 - `bd` talks to a local (embedded) Dolt store and needs writes outside a naive read-only scope and loopback where applicable. Under Claude Code this is the `excludedCommands` exemption. Under Codex, `workspace-write` already permits writes within the workspace; the risk is network/loopback and any `bd` write path outside the workspace root. The Codex config must set `sandbox_mode = "workspace-write"` and enable the network access `bd` needs (`[sandbox_workspace_write].network_access`), or run `bd`-touching turns under a scope that does not block it.
-- Because Ortus already provides an **outer** OS sandbox, the Codex inner sandbox can be relaxed (`--dangerously-bypass-approvals-and-sandbox`) as defense-in-depth-by-outer-layer — mirroring how `goal.sh` already passes `--dangerously-skip-permissions` to Claude while relying on bwrap. This is the recommended default for the autonomous loop and must be documented as "safe only because the outer sandbox is enforced (smoke test gates the run)."
+- The supported Python CLI currently verifies that the platform sandbox prerequisite exists but does not wrap the worker process in that binary. Therefore Codex MUST retain its real `workspace-write` sandbox and MUST NOT use `--dangerously-bypass-approvals-and-sandbox`.
 
 ---
 
@@ -136,13 +136,13 @@ Ortus runs the agent inside an OS-level sandbox (bwrap on Linux/WSL2, Seatbelt o
   - `backend_stream_flags` — the machine-readable-output flags for the current backend.
   - `backend_available` / `backend_preflight` — verify the selected CLI is on PATH and authenticated; fail fast with a targeted message otherwise.
   - The adapter is the *only* place a backend binary name or backend-specific flag appears. Scripts never name `claude`/`codex` directly.
-- **FR-004 — Codex argv for the autonomous loop.** For `agent_cli=codex`, the `goal` role expands to `codex exec "<prompt>" --json --sandbox workspace-write --dangerously-bypass-approvals-and-sandbox [-m <model>]` (exact bypass-vs-approval posture per FR-010). The prompt is the same `"/goal $(build_condition)"` string used today. `$FAST_MODE`/`--fast` has no Codex analog and is a no-op under Codex (documented, not errored).
-- **FR-005 — Codex config generation.** For `agent_cli=codex`, generate `.codex/config.toml` (peer of `.claude/settings.json`) with `sandbox_mode`, `approval_policy`, `[sandbox_workspace_write].network_access`, the language-profile-derived network allowlist (reusing the same `language_profile` logic that drives `allowedDomains` today), and any MCP servers. Scripts set `CODEX_HOME=$PWD/.codex` before invoking `codex` so config is project-local, not the user's global `~/.codex`.
+- **FR-004 — Codex argv for the autonomous loop.** For the Codex backend, each Python grind iteration expands to `codex exec "<single-issue prompt>" --json --sandbox workspace-write --color never`. The prompt MUST NOT begin with `/goal` and MUST NOT tell the worker to invoke an Ortus orchestrator. Claude retains `claude -p "/goal <single-issue prompt>"`. Claude remains the default.
+- **FR-005 — Codex config generation.** For a Codex project, generate `.codex/config.toml` as the peer of `.claude/settings.json`, with `workspace-write` and non-interactive approval defaults. Do not redirect `CODEX_HOME`: authentication, sessions, skills, and user state remain in the operator's normal Codex home.
 - **FR-006 — `bd` exemption under Codex.** The generated Codex config MUST let `bd` run with the write + network access its embedded Dolt store needs, verified by a preflight that runs `bd ready --json` through the loop's sandbox posture and asserts success. Document that wrapping `bd` (pipes, `xargs`, `bash -c`) can defeat host-level allowances, consistent with the existing Claude guidance.
 - **FR-007 — Log parser branch.** `tail.sh` gains a Codex `--json` decoder (`thread.started`, `turn.*`, `item.*`, `usage`) alongside the existing Claude stream-json decoder, selected by backend. Output rendering (assistant text, command/tool calls, token counts) is at parity.
-- **FR-008 — Hook-gate is Claude-only.** `check_hooks_enabled` (which enforces Claude's managed-Stop-hook requirement) MUST be skipped when the backend is Codex; Codex's `/goal` is native and does not depend on Claude's `disableAllHooks` setting.
-- **FR-009 — Instruction files per backend.** When `agent_cli=codex`, ensure the operational content Codex needs is reachable via `AGENTS.md` (Codex does not read `CLAUDE.md`). The Orchestrator section of `AGENTS.md` MUST describe the active backend's invocation (`codex exec "/goal …"` vs `claude -p "/goal …"`). Shared content stays in one place; only the backend-variant lines are templated.
-- **FR-010 — Sandbox posture is explicit and gated.** The default Codex posture for the autonomous loop is "relaxed inner sandbox behind the enforced outer OS sandbox." The outer sandbox smoke test (`lib/sandbox.sh`) MUST still pass before launch, exactly as today. If the operator opts out of the outer sandbox, the adapter MUST fall back to a real Codex inner sandbox (`--sandbox workspace-write --ask-for-approval never`) rather than a full bypass.
+- **FR-008 — Hook-gate is Claude-only.** `check_hooks_enabled` enforces Claude's managed-Stop-hook requirement and MUST be skipped for Codex. Codex uses plain `exec` completion and has no dependency on Claude settings.
+- **FR-009 — Instruction files per backend.** Ensure the operational content Codex needs is reachable via `AGENTS.md`. It MUST describe `codex exec "<task>"` versus `claude -p "/goal <task>"` and explicitly prevent workers from recursively invoking an Ortus orchestrator.
+- **FR-010 — Sandbox posture is explicit and gated.** Codex always receives `--sandbox workspace-write`. The dangerous bypass is forbidden unless a future implementation actually wraps and verifies the worker inside an outer sandbox.
 - **FR-011 — Copier post-copy task per backend.** The `_tasks` step currently runs `bd setup claude`. Make it backend-conditional (`bd setup codex` if such a profile exists — Q3; otherwise a documented manual/no-op path). Do not run the Claude profile setup for a Codex project.
 - **FR-012 — README prerequisites per backend.** The generated README's Requirements / Sandboxing / Auth sections reflect the chosen backend (install `codex`, `codex login` / `CODEX_API_KEY`; or install `claude`, OAuth / `ANTHROPIC_API_KEY`).
 - **FR-013 — Preflight and error messages.** If the selected backend CLI is missing or unauthenticated, every launcher fails fast with a message naming the backend and the fix (install/login command), before touching the flock or sandbox.
@@ -191,7 +191,7 @@ copier.yaml (agent_cli) ──► generated project:
       ├─ build_condition()       (unchanged) ─► "/goal <condition>"
       ├─ CMD=( backend_argv goal "$prompt" )
       │       claude ─► claude -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions
-      │       codex  ─► CODEX_HOME=$PWD/.codex codex exec "$prompt" --json --sandbox workspace-write --dangerously-bypass-approvals-and-sandbox
+      │       codex  ─► codex exec "$plain_prompt" --json --sandbox workspace-write --color never
       └─ "${CMD[@]}" | tee logs/goal-*.log
                               │
                      ./ortus/tail.sh ─► decode(backend, event stream)
@@ -200,10 +200,10 @@ copier.yaml (agent_cli) ──► generated project:
 ### Technical Decisions
 
 - **Adapter in shell, not a new language.** Keeps the toolchain unchanged; the launchers are already bash.
-- **Project-local `CODEX_HOME`.** Mirrors how Claude Code auto-discovers `.claude/` in cwd; keeps config in-repo and version-controlled, avoids polluting the user's global `~/.codex`.
-- **Relaxed inner sandbox behind enforced outer sandbox (default).** Symmetric with the existing Claude posture (`--dangerously-skip-permissions` + bwrap). The outer smoke test is the real gate; FR-010 defines the fallback when the outer layer is absent.
+- **Normal `CODEX_HOME`.** Project configuration is version-controlled under `.codex/`, while authentication, session history, skills, and other user state stay in the operator's normal Codex home.
+- **Real Codex sandbox.** The Python runner uses `workspace-write`; it does not claim an outer wrapper that it has not actually applied.
 - **Do not port `--allowedTools` semantics 1:1.** Codex has no equivalent per-call tool allowlist; scoping is expressed through sandbox mode + approval policy + (optionally) execpolicy rules. Accept the coarser grain for the headless roles; keep the tightest posture the role allows.
-- **`/goal` string is unchanged across backends.** Both CLIs own a native `/goal`; Ortus keeps emitting the same directive and lets each backend's evaluator run it.
+- **The logical task is shared; its transport wrapper is not.** Claude receives `/goal <task>`. Codex receives `<task>` without a slash-command prefix. The outer scheduler, not either transcript, decides whether to continue.
 
 ### Data Model
 
@@ -291,8 +291,8 @@ README backend sections (FR-012), AGENTS.md orchestrator variants (FR-009), exte
 
 | Role | Claude argv | Codex argv |
 |---|---|---|
-| `goal` | `claude -p "$P" --output-format stream-json --verbose --dangerously-skip-permissions [$FAST_MODE]` | `codex exec "$P" --json --sandbox workspace-write --dangerously-bypass-approvals-and-sandbox [-m $MODEL]` (FAST_MODE → no-op) |
-| `prd-decompose` | `claude --allowedTools "Read($prd),Bash(bd:*)" --dangerously-skip-permissions -p "$P"` | `codex exec "$P" --sandbox workspace-write --ask-for-approval never [-m $MODEL]` (no per-tool allowlist) |
+| `grind worker` | `claude -p "/goal $P" --output-format stream-json --verbose --dangerously-skip-permissions [$FAST_MODE]` | `codex exec "$P" --json --sandbox workspace-write --color never` |
+| `prd-decompose` | `claude -p "$P"` through the shared runner | `codex exec "$P" --json --sandbox workspace-write --color never` |
 | `idea-expand` | `claude --print "$P"` (capture stdout) | `codex exec "$P" -o <tmp>` then read tmp, or capture stdout (no goal loop) |
 
 Env prefix for Codex roles: `CODEX_HOME=$PWD/.codex`. Outer sandbox (bwrap/Seatbelt/`--docker`) wraps both backends identically.
@@ -325,4 +325,4 @@ Env prefix for Codex roles: `CODEX_HOME=$PWD/.codex`. Outer sandbox (bwrap/Seatb
 1. **Q1 resolved (risk realized)** — `codex exec` does not run `/goal`; Phase 2 must build on the plain-prompt termination model. Retired as an unknown; the remaining exposure is that the two backends now have genuinely different termination paths, so the adapter cannot share one.
 2. **`bd` under Codex sandbox** — the exemption is the single most likely source of a silently broken loop; FR-006 preflight is mandatory before declaring Phase 2 done.
 3. **Interactive-flow gap** — `AskUserQuestion` has no Codex peer; scoped out to Phase 4 so it doesn't block the core win.
-4. **Two config schemas to maintain** — mitigated by generating only the active backend's config and keeping shared logic (network allowlist from `language_profile`) in one templating path.
+4. **Two config schemas to maintain** — mitigated by generating only the active backend's config and keeping the Codex file intentionally minimal. Claude's domain allowlist has no direct Codex equivalent.

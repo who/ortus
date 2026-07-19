@@ -66,6 +66,10 @@ def _render_sh(path: Path, *, tail_sh: Path = TAIL_SH) -> subprocess.CompletedPr
 
 
 requires_jq = pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+requires_bash_tail = pytest.mark.skipif(
+    not (REPO_ROOT / "ortus" / "tail.sh").is_file(),
+    reason="bash-era tail.sh has been archived; Python decoder is canonical",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +136,7 @@ def test_tool_and_thinking_events_respect_verbosity_gates() -> None:
 
 
 @requires_jq
+@requires_bash_tail
 def test_bash_decoder_matches_the_same_golden() -> None:
     """ortus/tail.sh --decode must render byte-identically to the Python decoder."""
     proc = _render_sh(HAPPY_FIXTURE)
@@ -202,6 +207,7 @@ def test_non_object_event_fails_loudly() -> None:
 
 
 @requires_jq
+@requires_bash_tail
 def test_bash_decoder_fails_loudly_and_nonzero_on_truncated_event(tmp_path: Path) -> None:
     bad = tmp_path / "codex-truncated.jsonl"
     bad.write_text('{"type":"item.completed","item":{"id":"i","type":"agent_\n', encoding="utf-8")

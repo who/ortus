@@ -20,6 +20,28 @@ import pytest
 
 from tests._shims import normalize_git_branch, shim_path
 
+# The canonical bash/Copier implementation is archived. Keep its historical
+# tests in-tree with the final-bash sources, but do not collect them once the
+# canonical ``ortus/*.sh`` launchers have been removed. The Python CLI suites
+# below are now the release gate.
+if not (Path(__file__).parent.parent / "ortus" / "goal.sh").is_file():
+    collect_ignore = [
+        "test_agent_cli_question.py",
+        "test_argv_parity.py",
+        "test_backend_sh.py",
+        "test_bd_preflight_sh.py",
+        "test_codex_config_template.py",
+        "test_copier_setup_task.py",
+        "test_hook_gate_backend_sh.py",
+        "test_instruction_files_per_backend.py",
+        "test_interview_sh.py",
+        "test_m5_backend_acceptance.py",
+        "test_tail_backend_detection.py",
+        "test_tail_parity.py",
+        "test_tail_render_parity.py",
+        "test_triage_sh.py",
+    ]
+
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CANNED_DIR = _FIXTURES / "canned-claude-responses"
 

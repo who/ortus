@@ -35,13 +35,14 @@ When writing bd-issue acceptance criteria for code-changing work, prefer **"test
 
 ## Orchestrator
 
-All autonomous loops run through `./ortus/goal.sh`, which drives a single long-lived `claude -p "/goal CONDITION"` session against the queue. The legacy `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` — kept for one minor version so existing aliases and CI invocations keep working. New scripts should call `goal.sh` directly. Both share `.beads/ralph.flock`, so only one orchestrator runs at a time per repo. Logs land at `logs/goal-<timestamp>.log` (and `logs/ralph-*.log` for archival pre-shim runs); `./ortus/tail.sh` follows both transparently.
+All autonomous loops run through `ortus grind`, the supported Python CLI. It selects and claims one bd issue, launches one fresh backend worker, and trusts observable bd state to decide whether the iteration succeeded, orphaned a claim, or made no change. Claude remains the default and uses a narrow `/goal` worker; Codex is optional and uses a plain `codex exec` task because slash commands are not expanded by that non-interactive surface.
 
 ## Quick Reference
 
 ```bash
-./ortus/goal.sh       # Drive the queue to zero (primary orchestrator)
-./ortus/goal.sh --tasks 1   # One task and out
+ortus grind .         # Drive the queue to zero
+ortus grind . --tasks 1     # One task and out
+ortus grind . --backend codex  # Override the configured backend
 bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --status in_progress  # Claim work

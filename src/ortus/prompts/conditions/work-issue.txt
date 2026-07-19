@@ -1,5 +1,7 @@
 Work bd issue <ISSUE_ID>. The grind harness has ALREADY selected and claimed this issue for you — its status is `in_progress`. Do NOT run `bd ready`, do NOT pick a different issue, and do NOT invent, guess, or re-derive any issue id. Operate ONLY on the id <ISSUE_ID>, exactly as written above; the only bd issue id that should appear in any of your bd commands is <ISSUE_ID>.
 
+You ARE the worker for this issue. Do NOT invoke `ortus grind`, `goal.sh`, `ralph.sh`, or any other queue orchestrator from inside this session.
+
 The issue you are working (already claimed for you):
 
 <ISSUE_DETAILS>
@@ -9,8 +11,8 @@ Procedure:
 (2) Close the issue with `bd close <ISSUE_ID> --reason "<one-line summary of what shipped>"`.
 (3) If a git remote is configured, commit and push the code changes. Verify `git status` shows "up to date with origin". Do NOT create or switch git branches — stay on whatever branch grind handed you (the integration branch, normally `main`) and commit + push there. Work committed to a side branch is stranded off the deploy path and will be rejected by the harness.
 
-You are done when `bd close <ISSUE_ID>` returns success — exactly one issue moving to `closed`. You are NOT driving the queue to zero; the outer ortus-grind shell handles queue exhaustion, retries, and orphan-claim recovery from observable bd state. Your scope is this one issue: <ISSUE_ID>.
+You are done when the procedure above is complete, with exactly one issue moving to `closed`. You are NOT driving the queue to zero; the outer Ortus process handles queue exhaustion, retries, and orphan-claim recovery from observable bd state. Your scope is this one issue: <ISSUE_ID>.
 
-When the bd close call returns success, end the session. Do not pick a second issue. Do not output a sentinel; the evaluator reads this transcript.
+When the procedure is complete, end the session. Do not pick a second issue. Do not output a sentinel; the evaluator reads this transcript.
 
 You may stop early without closing if <ISSUE_ID> cannot be completed because it requires a human decision; in that case run `bd human <ISSUE_ID>` to flag it and exit without closing. The harness will revert the claim and move on.

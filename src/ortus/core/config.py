@@ -25,6 +25,7 @@ DEFAULTS: dict[str, Any] = {
     "owner": None,
     "prefix": None,
     "condition": None,
+    "backend": "claude",
 }
 
 

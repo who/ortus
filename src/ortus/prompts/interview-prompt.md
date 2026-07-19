@@ -340,7 +340,7 @@ If PRD is approved:
 
 5. **Close the feature** with a summary:
    ```bash
-   bd close {{FEATURE_ID}} --reason="PRD complete. Created N implementation tasks for ralph."
+   bd close {{FEATURE_ID}} --reason="PRD complete. Created N implementation tasks for ortus grind."
    ```
 
 ### Step 7: Complete the Session
@@ -351,7 +351,7 @@ After tasks are created, tell the user:
 
 **Next step**: Exit this session and run:
 ```
-./ortus/ralph.sh
+ortus grind .
 ```
 
 (Type /exit or Ctrl+C to leave)"

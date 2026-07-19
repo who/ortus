@@ -53,6 +53,8 @@ from typing import IO, Iterable, Optional
 
 import typer
 
+from ortus.core import output
+from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.repo import resolve_repo
 
 PREFIXES = ("grind-", "goal-", "ralph-", "plan-")
@@ -722,7 +724,12 @@ def tail(
     ),
     codex: bool = typer.Option(
         False, "--codex",
-        help="Decode logs as `codex exec --json` events instead of claude stream-json.",
+        help="Compatibility shorthand for --backend codex.",
+    ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Log backend (claude|codex); defaults from .ortusrc.",
     ),
 ) -> None:
     """Tail orchestrator log files (grind-*, goal-*, ralph-*, plan-*).
@@ -737,6 +744,14 @@ def tail(
     to a non-tty to disable.
     """
     target = resolve_repo(repo)
+    try:
+        resolved_backend = resolve_backend(
+            "codex" if codex else backend,
+            repo=target,
+        )
+    except BackendError as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
     logs_dir = target / "logs"
     if verbose:
         tools = True
@@ -747,5 +762,5 @@ def tail(
         show_tools=tools,
         show_system=system,
         assistant_only=assistant,
-        codex=codex,
+        codex=resolved_backend == "codex",
     )
