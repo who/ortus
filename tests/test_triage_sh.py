@@ -86,6 +86,52 @@ def test_triage_sh_help_exits_zero_without_delegating() -> None:
     assert "deprecation shim" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("args", "env"),
+    [
+        (("--backend", "codex"), {}),
+        (("--backend=codex",), {}),
+        ((), {"ORTUS_BACKEND": "codex"}),
+    ],
+    ids=["flag", "flag-equals", "env"],
+)
+def test_triage_sh_refuses_under_codex(
+    fake_ortus: Path, args: tuple[str, ...], env: dict[str, str]
+) -> None:
+    """ortus-nyd9: the context phase is still `claude -p`, so codex refuses.
+
+    The stub `ortus` is on PATH, so reaching the delegation would show up as
+    "ortus triage" on stdout — its absence is the evidence the gate fired
+    first rather than quietly running Claude under a codex project (NFR-005).
+    """
+    result = subprocess.run(
+        [BASH, str(TRIAGE_SH), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": f"{fake_ortus}:/usr/bin:/bin", **env},
+    )
+    assert result.returncode == 3
+    assert "not available under the 'codex' backend" in result.stderr
+    assert "ortus triage" not in result.stdout
+
+
+def test_triage_sh_backend_flag_is_not_forwarded(fake_ortus: Path) -> None:
+    """--backend is consumed here; the verb never sees a flag it doesn't take."""
+    result = run_triage(
+        "--backend", "claude", "/some/repo", path=f"{fake_ortus}:/usr/bin:/bin"
+    )
+    assert "ortus triage /some/repo" in result.stdout
+    assert "--backend" not in result.stdout
+
+
+def test_triage_sh_help_documents_the_backend_flag() -> None:
+    result = run_triage("--help", path="/usr/bin:/bin")
+    assert result.returncode == 0
+    assert "--backend" in result.stdout
+    assert "3   Selected backend cannot run this flow" in result.stdout
+
+
 def test_triage_sh_mirrored_to_template() -> None:
     assert TRIAGE_SH.read_text(encoding="utf-8") == TEMPLATE_TRIAGE_SH.read_text(
         encoding="utf-8"

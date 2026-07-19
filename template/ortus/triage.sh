@@ -14,21 +14,64 @@
 # deletes wholesale (docs/sunset-notes.md), this script retires in favour of
 # the verb, mirroring the ralph.sh -> goal.sh shim.
 #
-# Usage: ./ortus/triage.sh [args...]   # forwarded verbatim to `ortus triage`
+# Backend support: the operator loop is backend-agnostic by construction, but
+# the context phase is still a `claude -p` session (src/ortus/core/claude.py),
+# so under --backend codex this shim refuses up front instead of silently
+# running Claude behind a codex-selected project (NFR-005). Refusing costs one
+# message and never blocks (NFR-004).
+#
+# Usage: ./ortus/triage.sh [--backend claude|codex] [args...]
+#        Remaining args are forwarded verbatim to `ortus triage`
 #        ./ortus/triage.sh -h | --help
 #
 # Exit codes:
 #   *   Whatever `ortus triage` exits with, forwarded verbatim
 #   1   `ortus` CLI not installed
+#   3   Selected backend cannot run this flow
 
 set -uo pipefail
 
-case "${1:-}" in
-    -h|--help)
-        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
-        exit 0
-        ;;
-esac
+BACKEND_FLAG=""
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        --backend)
+            BACKEND_FLAG="${2:-}"
+            shift 2
+            ;;
+        --backend=*)
+            BACKEND_FLAG="${1#--backend=}"
+            shift
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# shellcheck source=lib/backend.sh
+. "$(dirname "$0")/lib/backend.sh"
+BACKEND=$(resolve_backend "$BACKEND_FLAG") || exit 1
+export ORTUS_BACKEND="$BACKEND"
+
+if [ "$BACKEND" != "claude" ]; then
+    cat >&2 <<EOF
+triage.sh: triage is not available under the '$BACKEND' backend.
+
+The operator prompt loop is backend-agnostic, but the context-gathering phase
+still runs as a \`claude -p\` session. Running it under a codex-selected
+project would quietly use a different agent than the one you asked for, so
+this script stops here instead.
+
+Run it on Claude:  ./ortus/triage.sh --backend claude
+EOF
+    exit 3
+fi
 
 echo '[triage.sh] deprecated; delegating to `ortus triage`. See README.' >&2
 
@@ -47,4 +90,4 @@ EOF
     exit 1
 fi
 
-exec ortus triage "$@"
+exec ortus triage ${ARGS[@]+"${ARGS[@]}"}
