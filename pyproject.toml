@@ -40,6 +40,13 @@ dev = [
     "pytest-cov>=5.0.0",
     "pytest-subprocess>=1.5.0",
     "build>=1.2.0",
+    # The M5 backend-acceptance test generates a project per backend, so CI
+    # needs the template engine itself, not just the rendering library.
+    "copier>=9.0.0",
+    # copier.yaml loads its context/validator extensions through this loader;
+    # without it the template refuses to render (and the extension unit tests
+    # error at import).
+    "copier-templates-extensions>=0.3.0",
 ]
 
 [project.scripts]

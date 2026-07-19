@@ -42,9 +42,13 @@ def validator():
     """AnswersValidator, or skip — copier is a CLI tool, not a test dependency."""
     pytest.importorskip("copier", reason="copier is installed as a uv tool, not a lib")
     sys.path.insert(0, str(REPO_ROOT))
+    from jinja2 import Environment
+
     from extensions.validators import AnswersValidator
 
-    return AnswersValidator()
+    # ContextHook is a Jinja extension: copier constructs it with the render
+    # environment. Nothing in hook() touches it, so a bare one is enough.
+    return AnswersValidator(Environment())
 
 
 @pytest.fixture(scope="module")
