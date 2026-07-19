@@ -297,6 +297,21 @@ format_codex_line() {
 format_line() {
     local line="$1"
 
+    # Token usage on the session-end result event. The Codex branch renders
+    # this class from turn.completed; the M3 parity check (ortus-iwac) is what
+    # surfaced its absence here. Read by typed path, and emitted unconditionally
+    # so the class survives without -t, exactly as the Codex [USAGE] line does.
+    if [[ "$line" == "{"* ]]; then
+        local usage
+        usage=$(printf '%s' "$line" | jq -r '
+            select(.type == "result" and (.usage | type) == "object")
+            | "  [USAGE] input=\(.usage.input_tokens // 0)"
+              + " cached=\(.usage.cache_read_input_tokens // 0)"
+              + " output=\(.usage.output_tokens // 0)"
+        ' 2>/dev/null)
+        [ -n "$usage" ] && echo -e "${CYAN}${usage}${RESET}"
+    fi
+
     # Try to parse as JSON
     parsed=$(echo "$line" | jq -r '
         if .type == "user" then

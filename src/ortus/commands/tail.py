@@ -282,19 +282,42 @@ def _render_object(
         tool = obj.get("tool")
         subtype = obj.get("subtype")
         body = obj.get("result", obj.get("error", ""))
+        # Token usage: the same information class the Codex branch renders from
+        # turn.completed, in claude's field names (ortus-iwac / M3). Emitted
+        # unconditionally so it survives without --tools, as [USAGE] does there.
+        usage = obj.get("usage")
+        head: list[str] = []
+        if isinstance(usage, dict):
+            head.append(
+                _wrap(
+                    "  [USAGE] input={} cached={} output={}".format(
+                        usage.get("input_tokens", 0),
+                        usage.get("cache_read_input_tokens", 0),
+                        usage.get("output_tokens", 0),
+                    ),
+                    palette.cyan,
+                    reset=palette.reset,
+                )
+            )
         if subtype == "error":
             header = _wrap(
                 f"  [RESULT] {tool or 'result'}: ERROR", palette.red, reset=palette.reset
             )
-            return [header, _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset)]
+            return head + [
+                header,
+                _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset),
+            ]
         if tool or subtype:
             header = _wrap(
                 f"  [RESULT] {tool or 'result'}: {subtype or 'ok'}",
                 palette.cyan,
                 reset=palette.reset,
             )
-            return [header, _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset)]
-        return [_wrap(f"[result] {body}", palette.cyan, reset=palette.reset)]
+            return head + [
+                header,
+                _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset),
+            ]
+        return head + [_wrap(f"[result] {body}", palette.cyan, reset=palette.reset)]
     return []
 
 
