@@ -2,6 +2,19 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Session Start
+
+**Run `bd prime` as the first action of every session** (and again after a compaction).
+It reloads the beads workflow context — command reference, ready-queue conventions,
+and the session close protocol — that the rest of this file assumes you have.
+
+Do not rely on the harness to do this for you. Under the Claude Code backend a
+`SessionStart`/`PreCompact` hook (installed by `bd setup claude`) usually fires it
+automatically, so the explicit call is a cheap no-op. Under the Codex backend it is
+the only thing that primes you: Codex does have a hook system with a `SessionStart`
+event, but hooks there must be explicitly trusted before they run, so Ortus does not
+depend on one. Running `bd prime` yourself works on both backends regardless.
+
 ## CLI output convention
 
 Every non-interactive `ortus` verb emits per-phase progress lines so the operator can tell "running" from "hung." Convention:

@@ -2,6 +2,15 @@
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
+## Session Start
+
+**Run `bd prime` as the first action of every session** (and again after a compaction).
+Under the Claude Code backend a `SessionStart`/`PreCompact` hook usually fires it for
+you, so the explicit call is a cheap no-op. Under the Codex backend nothing fires it:
+Codex 0.144.x does have a hook system with a `SessionStart` event, but hooks must be
+explicitly trusted before they run, so Ortus does not depend on one. Running
+`bd prime` yourself works on both backends regardless.
+
 ## Supported platforms
 
 Linux + macOS only. Windows was dropped 2026-05-17. Do not add Windows-specific code paths without explicit operator direction; Windows users should use WSL2.
