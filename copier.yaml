@@ -1,7 +1,7 @@
 _min_copier_version: "9.0.0"
 
 _jinja_extensions:
-  - copier_templates_extensions.TemplateExtensionLoader
+  - copier_template_extensions.TemplateExtensionLoader
   - extensions/context.py:GitConfigContext
   - extensions/validators.py:AnswersValidator
   - extensions/prerequisites.py:PrerequisiteChecker

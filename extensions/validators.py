@@ -9,7 +9,7 @@ rendered.
 from __future__ import annotations
 
 from copier.errors import UserMessageError
-from copier_templates_extensions import ContextHook
+from copier_template_extensions import ContextHook
 
 
 class AnswersValidator(ContextHook):
