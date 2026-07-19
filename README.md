@@ -104,7 +104,7 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 | **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
 | **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
 
-Optional: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. If `.codegraph/` exists in a project, `ortus grind`'s prompts use it for faster symbol/caller/callee lookups; otherwise the loop falls back to grep + Read.
+Optional: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. Ortus probes the project index and CLI, then reconciles those outer signals with CodeGraph MCP calls observed in each agent phase. It never assumes that an index alone means the agent can use the tools.
 
 ## Agent backends
 
@@ -127,7 +127,41 @@ Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 prefix = "myproj"       # bd issue-id prefix
 project_type = "python" # python | typescript | go | rust | polyglot
 backend = "claude"      # claude | codex
+codegraph = "auto"      # off | auto | required
+codegraph_refresh_blocking = false
 ```
+
+### CodeGraph lifecycle
+
+`auto` is the default. Planning and each grind issue transaction emit a clear
+activation or fallback decision; missing or unhealthy CodeGraph falls back to
+grep/Read without making ordinary no-CodeGraph projects fail. `off` performs no
+CodeGraph calls and reports that it is disabled. `required` fails before agent
+launch when `.codegraph/` or the `codegraph` CLI is missing, fails when a phase
+transcript contains no CodeGraph MCP capability handshake, and blocks
+verification if the post-edit `codegraph sync` fails.
+
+Initialize and sync the index with the CodeGraph CLI and register its MCP server
+for the selected Claude or Codex backend. Planning validates issue packets,
+implementation confirms references and runs impact analysis, the parent refreshes
+the index after candidate edits, and a fresh verifier independently checks changed
+symbols and callers.
+
+```text
+[ortus grind] CodeGraph probe (mode=auto)
+[ortus grind] CodeGraph fallback: project index .codegraph/ is missing
+```
+
+Logs retain bounded `ortus.codegraph` JSON records rendered by `ortus tail` as
+`[CODEGRAPH]` lines. Plan-created issues and verifier comments retain a
+`CodeGraph engagement v1` block with availability, freshness, tool/query totals,
+reviewed symbols, impacted and out-of-scope callers, misses, fallbacks, and caps.
+Full query payloads and source text are excluded.
+
+Troubleshooting: a missing index means run `codegraph init` and `codegraph sync`;
+a missing CLI means install it; a missing handshake means the selected backend
+has not registered the CodeGraph MCP server. Auto mode records the fallback and
+continues. Required mode stops with an actionable diagnostic.
 
 Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md` or `~/.ortus/prompts/<name>.md`; the bundled defaults under `src/ortus/prompts/` are the fallback (FR-025).
 

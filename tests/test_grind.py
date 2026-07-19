@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 import time
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import normalize_git_branch, shim_path
+from tests._shims import make_inline_python_shim, normalize_git_branch, shim_path
 
 runner = CliRunner()
 
@@ -61,6 +62,42 @@ def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
     assert "Work bd issue" in prompt
     assert "/goal" not in prompt
+
+
+def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
+    issue = {
+        "id": "demo-large",
+        "title": "Thoroughly planned change",
+        "description": "implementation detail " * 600,
+        "design": "design detail " * 600,
+        "acceptance_criteria": "acceptance detail " * 600,
+    }
+    template = grind_mod.read_work_issue_condition()
+
+    claude_prompt = grind_mod._compose_work_prompt(template, issue, "claude")
+    assert claude_prompt.startswith("/goal Work bd issue demo-large")
+    assert "bd show demo-large --json" in claude_prompt
+    assert len(claude_prompt.removeprefix("/goal ")) <= 4_000
+    assert issue["description"] not in claude_prompt
+
+    codex_prompt = grind_mod._compose_work_prompt(template, issue, "codex")
+    assert not codex_prompt.startswith("/goal")
+    assert issue["description"].strip() in codex_prompt
+    assert issue["acceptance_criteria"].strip() in codex_prompt
+
+
+def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "grind.log"
+    log.write_text('{"type":"result","num_turns":1,"result":"ok"}\n')
+    offset = log.stat().st_size
+    rejection = "Goal condition is limited to 4000 characters (got 7523)"
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "result", "num_turns": 0, "result": rejection}) + "\n")
+
+    assert grind_mod._claude_goal_rejection(log, start_offset=offset) == rejection
+    assert grind_mod._claude_goal_rejection(log, start_offset=log.stat().st_size) is None
 
 
 def test_codex_outer_loop_drives_three_issues_to_zero(
@@ -310,6 +347,89 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
     assert f"harness selected+claimed {issue_id}" in log_text
     # ...and the worker's prompt (echoed by fake-claude's argv) carried that id.
     assert f"Work bd issue {issue_id}" in log_text
+
+
+def test_claude_goal_rejection_restores_claim_and_halts_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / "goal-rejection"
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--prefix", "goalrej"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    normalize_git_branch(repo)
+    issue_id = subprocess.run(
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "oversized planned issue",
+            "--description",
+            "thorough implementation packet " * 300,
+            "--type",
+            "task",
+            "--priority",
+            "1",
+        ],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+
+    rejection = "Goal condition is limited to 4000 characters (got 7523)"
+    shim = make_inline_python_shim(
+        tmp_path,
+        "claude-goal-rejection",
+        textwrap.dedent(
+            f"""\
+            import json
+            print(json.dumps({{
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "num_turns": 0,
+                "result": {rejection!r},
+            }}), flush=True)
+            """
+        ),
+    )
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(shim))
+    )
+
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--iterations", "5", "--idle-sleep", "0"],
+    )
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    assert "rejected the /goal condition" in result.stderr
+    issue = json.loads(
+        subprocess.run(
+            ["bd", "show", issue_id, "--json"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )[0]
+    assert issue["status"] == "open"
+    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
+    assert log.count("spawning claude") == 1
+    assert "HALT — Claude rejected /goal before running a worker turn" in log
+    assert "WARN orphan claim" not in log
 
 
 def test_grind_dry_run_default_shows_harness_select(tmp_path: Path) -> None:

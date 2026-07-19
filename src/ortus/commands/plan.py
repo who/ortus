@@ -16,6 +16,17 @@ from ortus.core import output
 from ortus.core.agent import BackendError, make_runner, resolve_backend
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
+from ortus.core.codegraph import (
+    CodeGraphAdapter,
+    CodeGraphMode,
+    CodeGraphPhase,
+    CodeGraphUnavailable,
+    append_normalized,
+    parse_transcript,
+    phase_contract,
+    require_handshake,
+)
+from ortus.core.config import load_config
 from ortus.core.prompts import resolve_prompt
 from ortus.core.repo import resolve_repo
 
@@ -25,19 +36,26 @@ def _make_runner(backend: str = "claude") -> ClaudeRunner:
     return make_runner(backend)  # type: ignore[arg-type]
 
 
+def _make_codegraph() -> CodeGraphAdapter:
+    """Indirection for end-to-end tests with a fake adapter."""
+    return CodeGraphAdapter()
+
+
 def _decompose_prd(
-    repo: Path, prd: Path, *, log_path: Path, backend: str = "claude"
+    repo: Path, prd: Path, *, log_path: Path, backend: str = "claude", contract: str = ""
 ) -> int:
     """Run claude with the plan prompt, expanded to reference the PRD path."""
     prompt = resolve_prompt("plan-prompt", repo=repo).text
     # The plan-prompt uses literal "$prd_path" as a placeholder for the absolute
     # PRD path; substitute it before handing to claude.
-    expanded = prompt.replace("$prd_path", str(prd.resolve()))
+    expanded = prompt.replace("$prd_path", str(prd.resolve())) + contract
     runner = _make_runner() if backend == "claude" else _make_runner("codex")
     return runner.run(expanded, repo=repo, log_path=log_path)
 
 
-def _expand_idea(repo: Path, *, log_path: Path, backend: str = "claude") -> int:
+def _expand_idea(
+    repo: Path, *, log_path: Path, backend: str = "claude", contract: str = ""
+) -> int:
     """Run the interactive idea-expansion flow (interview→PRD→tasks)."""
     # Use the grind prompt's interview entry-point indirectly; for now we
     # just hand claude a freeform "interview the user about their idea"
@@ -49,7 +67,7 @@ def _expand_idea(repo: Path, *, log_path: Path, backend: str = "claude") -> int:
         "draft a brief PRD inline, then call `bd create` for each work item. "
         "End the turn when bd ready shows the new issues."
     )
-    return runner.run(prompt, repo=repo, log_path=log_path)
+    return runner.run(prompt + contract, repo=repo, log_path=log_path)
 
 
 def plan(
@@ -68,6 +86,12 @@ def plan(
         "--backend",
         help="Agent backend (claude|codex); defaults from .ortusrc.",
     ),
+    codegraph: Optional[CodeGraphMode] = typer.Option(
+        None,
+        "--codegraph",
+        help="CodeGraph policy: off|auto|required (defaults from .ortusrc).",
+        case_sensitive=False,
+    ),
 ) -> None:
     """Decompose a PRD into bd issues, or interview-then-PRD-then-decompose."""
     # Disambiguate: if the operator passed a single positional that points at
@@ -85,6 +109,28 @@ def plan(
         output.error(str(exc))
         raise typer.Exit(code=1)
     output.progress("plan", f"target: {target}")
+
+    configured_mode = load_config(repo=target).get("codegraph", "auto")
+    try:
+        mode = codegraph or CodeGraphMode(configured_mode)
+    except ValueError:
+        output.error(
+            f"invalid CodeGraph mode {configured_mode!r}; expected off, auto, or required"
+        )
+        raise typer.Exit(code=1)
+    adapter = _make_codegraph()
+    output.progress("plan", f"CodeGraph probe (mode={mode.value})")
+    try:
+        probe = adapter.probe(target, mode)
+    except CodeGraphUnavailable as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
+    if mode is CodeGraphMode.OFF:
+        output.progress("plan", "CodeGraph disabled by policy")
+    elif probe.available:
+        output.progress("plan", "CodeGraph activated for planning")
+    else:
+        output.progress("plan", f"CodeGraph fallback: {probe.reason}")
 
     if prd is not None and not prd.is_file():
         output.error(f"PRD not found at {prd}")
@@ -105,17 +151,41 @@ def plan(
             f"decomposing PRD via {resolved_backend} (this typically takes 1-3 min)",
         )
         rc = _decompose_prd(
-            target, prd, log_path=log_path, backend=resolved_backend
+            target,
+            prd,
+            log_path=log_path,
+            backend=resolved_backend,
+            contract=phase_contract(CodeGraphPhase.PLANNING, probe),
         )
     else:
         output.progress(
             "plan",
             f"no PRD given; running idea-expansion via {resolved_backend}",
         )
-        rc = _expand_idea(target, log_path=log_path, backend=resolved_backend)
+        rc = _expand_idea(
+            target,
+            log_path=log_path,
+            backend=resolved_backend,
+            contract=phase_contract(CodeGraphPhase.PLANNING, probe),
+        )
     if rc != 0:
         output.error(f"plan failed ({resolved_backend} exit {rc}); see {log_path}")
         raise typer.Exit(code=rc)
+
+    summary = parse_transcript(
+        log_path, phase=CodeGraphPhase.PLANNING, probe=probe
+    )
+    append_normalized(log_path, summary)
+    try:
+        require_handshake(summary)
+    except CodeGraphUnavailable as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
+    output.progress(
+        "plan",
+        f"CodeGraph query summary: {len(summary.events)} queries, "
+        f"{sum(not event.success for event in summary.events)} failures",
+    )
 
     output.progress("plan", "scanning bd workspace for newly-created issues")
     after = client.list_open()
@@ -132,6 +202,11 @@ def plan(
             f"created nothing. Inspect {log_path} for failed tool calls."
         )
         raise typer.Exit(code=1)
+
+    # Plan metadata travels with every implementation packet. This remains
+    # useful in auto/off mode because an explicit fallback is durable evidence.
+    for issue_id in new_ids:
+        client.add_comment(issue_id, summary.report())
 
     output.progress("plan", f"done ({len(new_ids)} new issue(s) created)")
     output.success(f"plan created {len(new_ids)} issue(s) in {target}/.beads/")

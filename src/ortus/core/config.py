@@ -26,6 +26,8 @@ DEFAULTS: dict[str, Any] = {
     "prefix": None,
     "condition": None,
     "backend": "claude",
+    "codegraph": "auto",
+    "codegraph_refresh_blocking": False,
 }
 
 

@@ -241,6 +241,8 @@ def _render_object(
     palette: _Palette,
 ) -> list[str]:
     kind = obj.get("type")
+    if kind == "ortus.codegraph":
+        return [_render_codegraph_event(obj, palette)]
     if kind == "system":
         subtype = obj.get("subtype", "?")
         if subtype == "init":
@@ -467,6 +469,9 @@ def _render_codex_object(
 ) -> list[str]:
     kind = obj.get("type")
 
+    if kind == "ortus.codegraph":
+        return [_render_codegraph_event(obj, palette)]
+
     if kind == "thread.started":
         return [
             "",
@@ -511,6 +516,28 @@ def _render_codex_object(
     if show_system:
         return [_wrap(f"[SYS] {kind}", palette.dim, reset=palette.reset)]
     return []
+
+
+def _render_codegraph_event(obj: dict, palette: _Palette) -> str:
+    """Render normalized lifecycle records at every verbosity level."""
+    phase = obj.get("phase", "?")
+    if obj.get("kind") == "query":
+        state = "ok" if obj.get("success") else "error"
+        hit = obj.get("hit")
+        hit_label = "hit" if hit is True else "miss" if hit is False else "unknown"
+        line = (
+            f"[CODEGRAPH] {phase} {obj.get('tool', '?')} "
+            f"{obj.get('query', 'query')} — {state}/{hit_label}"
+        )
+    else:
+        line = (
+            f"[CODEGRAPH] {phase} summary: available={obj.get('available', False)} "
+            f"queries={obj.get('query_count', 0)} freshness={obj.get('freshness', 'unknown')}"
+        )
+        fallbacks = obj.get("fallbacks") or []
+        if fallbacks:
+            line += f" fallback={'; '.join(str(value) for value in fallbacks[:3])}"
+    return _wrap(line, palette.cyan, reset=palette.reset)
 
 
 def _format_codex_line(

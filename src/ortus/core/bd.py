@@ -82,6 +82,10 @@ class BdClient:
         _, data = self._run("comments", issue_id, "--json", parse_json=True)
         return data or []
 
+    def add_comment(self, issue_id: str, body: str) -> None:
+        """Append a durable comment without interpreting its Markdown."""
+        self._run("comments", "add", issue_id, body)
+
     def show(self, issue_id: str) -> dict[str, Any]:
         """Return the issue's full JSON dict. `bd show --json` returns a list
         with one element when passed a single id; unwrap it."""

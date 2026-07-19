@@ -6,7 +6,12 @@ Prompt resolution precedence (loaded by core/prompts.py, FR-025):
 The first existing file wins; the others are ignored.
 -->
 
-# Grind Loop Prompt
+# Grind Loop Prompt (legacy reference)
+
+> The active Python plan/grind lifecycle is canonical and injects its typed
+> CodeGraph phase contract from `ortus.core.codegraph`. This file remains for
+> legacy shell compatibility; its historical CodeGraph prose is not the active
+> availability probe or enforcement mechanism.
 
 Read @AGENTS.md for session rules and landing-the-plane protocol.
 
