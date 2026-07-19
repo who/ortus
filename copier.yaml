@@ -256,7 +256,10 @@ _tasks:
   - "git init"
   - "bd init --server"
   - "chmod 700 .beads"
-  - "bd setup claude"
+  # Backend-matched recipe: bd ships both a `claude` and a `codex` recipe, and
+  # `bd setup claude` would write a .claude/settings.json into a project that
+  # deliberately ships none (M4).
+  - "bd setup {{ agent_cli }}"
   - "{{ 'cp \"' + prd_path + '\" prd/intake.md' if has_prd else 'true' }}"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
   - "./ortus/idea.sh{{ ' --prd prd/intake.md' if has_prd else '' }}"

@@ -246,7 +246,9 @@ def test_preflight_never_wraps_bd() -> None:
 )
 def test_codex_config_documents_the_wrapping_caveat(needle: str) -> None:
     """FR-006 acceptance #3: the generated Codex config carries the caveat."""
-    config = (REPO_ROOT / "template" / ".codex" / "config.toml.jinja").read_text(encoding="utf-8")
+    # The .codex dir is conditionally named (M4) — glob rather than hardcode.
+    template = next((REPO_ROOT / "template").glob("*.codex*/config.toml.jinja"))
+    config = template.read_text(encoding="utf-8")
     assert needle in config
 
 

@@ -75,8 +75,13 @@ require_file "$MIRROR/lib/backend.sh" "backend adapter — template mirror"
 # logic — the exact regression NFR-003 exists to catch. Rendered-value equality
 # is covered by tests/test_codex_config_template.py; this is the cheap,
 # dependency-free structural half that runs in CI via `make parity`.
-CODEX_CONFIG="template/.codex/config.toml.jinja"
-CLAUDE_SETTINGS="template/.claude/settings.json.jinja"
+#
+# Both live under a conditionally-named directory (M4): the dir renders to
+# `.codex` / `.claude` for the matching agent_cli and to the empty string
+# otherwise, which is how copier skips it. Glob rather than hardcode, so the
+# condition can be reworded without silently turning these checks into no-ops.
+CODEX_CONFIG="$(echo template/*.codex*/config.toml.jinja)"
+CLAUDE_SETTINGS="$(echo template/*.claude*/settings.json.jinja)"
 
 for cfg in "$CODEX_CONFIG" "$CLAUDE_SETTINGS"; do
     require_file "$cfg" "backend config template" || continue
