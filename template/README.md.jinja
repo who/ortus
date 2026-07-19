@@ -16,6 +16,10 @@ The backend is resolved as `--backend` flag > `ORTUS_BACKEND` env > the `agent_c
 The primary orchestrator is `./ortus/goal.sh` — a single long-lived `claude -p "/goal CONDITION"` session that drives the queue and lets the `/goal` evaluator decide termination. `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` with the same arguments; it is kept for one minor version so existing aliases and scripts keep working, and shares `.beads/ralph.flock` with `goal.sh` so only one orchestrator runs at a time. `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
 {%- endif %}
 
+The loops run on either the Claude Code CLI or the ChatGPT Codex CLI — see
+[docs/choosing-a-backend.md](docs/choosing-a-backend.md) for auth, cost, model
+choice, and the flows that are Claude-only today.
+
 ### Scoped runs (`goal.sh -c`)
 
 Pass `-c|--condition STR` to `goal.sh` to drive the queue until a specific milestone is reached instead of the default queue-drain condition. The evaluator judges your condition against the running transcript each turn and exits when it answers yes — useful for finishing one epic, producing a single artifact, or smoke-testing a small change end-to-end:
