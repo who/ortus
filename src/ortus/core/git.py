@@ -1,4 +1,4 @@
-"""Thin wrapper over the `git` CLI for grind's branch discipline (ortus-6fu6).
+"""Thin wrapper over the `git` CLI for grind's branch discipline.
 
 grind workers commit + push the work that closes their issue. A worker that
 drifts onto a feature branch (e.g. ``git checkout -b feature``) commits there
@@ -25,6 +25,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ortus.core.grind_loop import BranchState, DEFAULT_INTEGRATION_BRANCH
+
+_RUNTIME_PATHS = (
+    "logs",
+    ".cache",
+    ".beads/ortus.flock",
+)
+
+_WORKER_PATHSPECS = (
+    ".",
+    *tuple(f":(exclude){path}" for path in _RUNTIME_PATHS),
+)
 
 
 @dataclass
@@ -70,6 +81,11 @@ class GitClient:
         """True when at least one git remote is configured."""
         proc = self._run("remote")
         return proc.returncode == 0 and bool(proc.stdout.strip())
+
+    def is_clean(self) -> bool:
+        """True when no non-runtime worktree changes exist."""
+        proc = self._run("status", "--porcelain", "--", *_WORKER_PATHSPECS)
+        return proc.returncode == 0 and not proc.stdout.strip()
 
     def current_branch(self) -> str:
         """Checked-out branch name, or "" for a detached HEAD / on error.
@@ -146,3 +162,20 @@ class GitClient:
         exists to make visible.
         """
         return self._run("push", "origin", branch).returncode == 0
+
+    def commit_all(self, message: str) -> bool:
+        """Stage and commit the current iteration's changes.
+
+        The Codex grind path calls this only after verifying that the tree was
+        clean before the worker ran, so ``git add -A`` cannot absorb unrelated
+        operator work.
+        """
+        if self._run("add", "-A").returncode != 0:
+            return False
+        if self._run("reset", "--quiet", "--", *_RUNTIME_PATHS).returncode != 0:
+            return False
+        # A close can occasionally be persisted outside the git worktree. In
+        # that case there is nothing to commit and the iteration is still safe.
+        if self._run("diff", "--cached", "--quiet").returncode == 0:
+            return True
+        return self._run("commit", "-m", message).returncode == 0

@@ -185,3 +185,35 @@ def test_check_reports_prompt_overrides(
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0
     assert "grind-prompt.md" in result.stdout
+
+
+def test_check_codex_uses_codex_binary_and_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "codex-project"
+    (repo / ".beads").mkdir(parents=True)
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text(
+        'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
+    )
+    (repo / ".ortusrc").write_text('backend = "codex"\n')
+    seen: list[str] = []
+
+    def which(binary: str) -> str:
+        seen.append(binary)
+        return f"/usr/bin/{binary}"
+
+    monkeypatch.setattr(check_mod.shutil, "which", which)
+
+    class _CP:
+        stdout = "fake 1.0.0\n"
+        stderr = ""
+
+    monkeypatch.setattr(check_mod.subprocess, "run", lambda *a, **k: _CP())
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "codex" in seen
+    assert "claude" not in seen
+    assert ".codex/config.toml" in result.stdout
+    assert "hooks" not in result.stdout

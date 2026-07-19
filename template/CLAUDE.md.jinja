@@ -1,295 +1,34 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+**Read `AGENTS.md` first — it is the operational source of truth for this repo.**
 
-## AI Guidance
+Everything an agent needs to work here lives in `AGENTS.md`: session start, AI
+guidance, the Goal-loop work execution policy, the sandbox model, the technology
+stack and command reference, the fast-tools/search conventions, and the session
+completion protocol. That content is deliberately kept in one file rather than
+mirrored here, because Codex reads `AGENTS.md` and does not read this file — a
+copy here would drift and only one backend would notice.
 
-* After receiving tool results, carefully reflect on their quality and determine optimal next steps before proceeding.
-* For maximum efficiency, invoke multiple independent operations simultaneously rather than sequentially.
-* Before you finish, verify your solution.
-* Do what has been asked; nothing more, nothing less.
-* NEVER create files unless absolutely necessary for achieving your goal.
-* ALWAYS prefer editing an existing file to creating a new one.
-* NEVER proactively create documentation files (*.md) or README files unless explicitly requested.
+This file exists so Claude Code, which loads `CLAUDE.md` automatically, is pointed
+at the same instructions.
 
-## Work Execution Policy
+Claude Code is one of two supported backends; the other is the ChatGPT Codex CLI.
+Which one a run uses is resolved as `--backend claude|codex` > `ORTUS_BACKEND` >
+the `agent_cli` answer this project was generated with (see `AGENTS.md`
+§ Orchestrator for this project's value). For install, auth, cost, model choice,
+and the flows that are Claude-only, see
+[docs/choosing-a-backend.md](docs/choosing-a-backend.md).
 
-**All implementation work MUST go through a Goal loop** (`./ortus/goal.sh`).
+## Claude Code specifics
 
-When asked to implement features, fix bugs, or make code changes:
+These apply only to the Claude Code backend; the Codex equivalents (where there
+are any) are covered in `AGENTS.md`.
 
-1. **Do NOT implement directly** - Instead, create beads issues with detailed descriptions
-2. **Create well-structured issues** - Use `bd create` with clear titles, descriptions, and acceptance criteria
-3. **Set up dependencies** - Use `bd dep add` to establish proper ordering
-4. **Defer to Goal** - `ortus/goal.sh` runs a single long-lived `claude -p "/goal CONDITION"` session via `ortus/prompts/goal-prompt.md`; the `/goal` evaluator decides termination. `ortus/ralph.sh` is now a deprecation shim that prints a notice to stderr and `exec`s `goal.sh` — kept for one minor version so existing muscle memory and scripts keep working. New invocations should call `goal.sh` directly. The shim shares `.beads/ralph.flock` with `goal.sh`, so only one orchestrator can run at a time.
-
-**Allowed without a Goal loop:**
-- Answering questions about the codebase
-- Reading/exploring files for research
-- Creating beads issues
-- Discussing architecture or approach
-
-**Requires a Goal loop:**
-- Writing or modifying code
-- Creating new files
-- Running tests or builds
-- Any implementation work
-
-This ensures all work is tracked, atomic, and follows the defined workflow.
-
-## Sandbox Model
-
-**Rule**: The OS sandbox and `--dangerously-skip-permissions` (DSP) are complementary layers; both are in force during orchestrator runs.
-
-The OS sandbox (Seatbelt on macOS, bubblewrap on Linux/WSL2) enforces filesystem-write and network boundaries on subprocesses spawned by Claude Code — it is the actual containment surface. DSP only suppresses Claude's interactive permission prompts so an unattended `goal.sh` loop can proceed; it does not reduce containment. Together: DSP keeps the loop unblocked while the OS sandbox keeps the blast radius bounded.
-
-Two tiers are supported:
-- **Tier 1** (default): native OS sandbox only. Lighter-weight; requires Seatbelt (built-in on macOS) or bubblewrap+socat (Linux/WSL2).
-- **Tier 2**: Docker outer + native inner (`./ortus/goal.sh --docker`). Stronger isolation for hosts where the native sandbox is insufficient or unavailable.
-
-See `README.md` for OS prerequisites and install instructions.
-
-## Project Overview
-
-{{ project_description }}
-
-## Technology Stack
-
-- **Language**: {{ language | capitalize }}
-{%- if package_manager != 'none' %}
-- **Package Manager**: {{ package_manager }}
-{%- endif %}
-{%- if framework != 'none' %}
-- **Framework**: {{ framework }}
-{%- endif %}
-{%- if linter != 'none' %}
-- **Linter**: {{ linter }}
-{%- endif %}
-
-## Development Guidelines
-
-### Code Standards
-
-{%- if language == 'python' %}
-* Type hints required for all functions
-* Use Pydantic models for data validation
-* Follow Google Python Style Guide
-{%- if linter == 'ruff' %}
-* Use `ruff` for linting and formatting
-{%- endif %}
-{%- if package_manager == 'uv' %}
-* Use `uv` for dependency management (not pip)
-{%- endif %}
-{%- elif language == 'typescript' %}
-* TypeScript strict mode enabled
-* Use interfaces for object shapes
-* Follow Airbnb JavaScript Style Guide
-{%- if linter == 'eslint' %}
-* Use `eslint` for linting
-{%- endif %}
-{%- elif language == 'go' %}
-* Follow Effective Go guidelines
-* Use `gofmt` for formatting
-{%- if linter == 'golangci' %}
-* Use `golangci-lint` for linting
-{%- endif %}
-{%- elif language == 'rust' %}
-* Follow Rust API Guidelines
-* Use `rustfmt` for formatting
-{%- if linter == 'clippy' %}
-* Use `clippy` for linting
-{%- endif %}
-{%- else %}
-<!-- TODO: Define your code standards -->
-{%- endif %}
-
-### Before Committing
-
-{%- if language == 'python' and package_manager == 'uv' %}
-1. Run `uv run ruff check .` and `uv run ruff format .`
-2. Run `uv run pytest` if tests exist
-3. Stage changes appropriately
-{%- elif language == 'typescript' %}
-1. Run `{{ package_manager }} run lint`
-2. Run `{{ package_manager }} test` if tests exist
-3. Stage changes appropriately
-{%- elif language == 'go' %}
-1. Run `go fmt ./...`
-2. Run `golangci-lint run`
-3. Run `go test ./...`
-4. Stage changes appropriately
-{%- elif language == 'rust' %}
-1. Run `cargo fmt`
-2. Run `cargo clippy`
-3. Run `cargo test`
-4. Stage changes appropriately
-{%- else %}
-<!-- TODO: Define your pre-commit checklist -->
-{%- endif %}
-
-## Command Reference
-
-### Development
-
-{%- if language == 'python' and package_manager == 'uv' %}
-```bash
-# Setup (first time)
-uv sync                              # Install all dependencies
-uv venv                              # Create virtual environment (if needed)
-
-# Run development server
-{%- if framework == 'fastapi' %}
-uv run uvicorn app.main:app --reload --port 8000
-{%- elif framework == 'flask' %}
-uv run flask --app app.main run --port 8000
-{%- elif framework == 'django' %}
-uv run python manage.py runserver
-{%- else %}
-uv run python -m app.main
-{%- endif %}
-
-# Run tests
-uv run pytest
-
-# Linting
-uv run ruff check .
-uv run ruff format .
-
-# Add dependencies
-uv add <package>                     # Add to main dependencies
-uv add --dev <package>               # Add to dev dependencies
-```
-{%- elif language == 'typescript' %}
-```bash
-# Setup (first time)
-{{ package_manager }} install
-
-# Run development server
-{{ package_manager }} run dev
-
-# Run tests
-{{ package_manager }} test
-
-# Linting
-{{ package_manager }} run lint
-{{ package_manager }} run format
-```
-{%- elif language == 'go' %}
-```bash
-# Setup (first time)
-go mod download
-
-# Run development server
-go run ./cmd/server
-
-# Run tests
-go test ./...
-
-# Linting
-golangci-lint run
-go fmt ./...
-```
-{%- elif language == 'rust' %}
-```bash
-# Build
-cargo build
-
-# Run
-cargo run
-
-# Run tests
-cargo test
-
-# Linting
-cargo clippy
-cargo fmt
-```
-{%- else %}
-<!-- TODO: Add your development commands -->
-{%- endif %}
-
-### File Operations - Use Fast Tools
-
-```bash
-# List files (FAST)
-fd . -t f           # All files recursively
-rg --files          # All files (respects .gitignore)
-fd . -t d           # All directories
-
-# Search content (FAST)
-rg "search_term"                # Search in all files
-rg -i "case_insensitive"        # Case-insensitive
-rg "pattern" -g "*.ext"         # Only specific file type
-rg -l "pattern"                 # Filenames with matches
-rg -c "pattern"                 # Count matches per file
-rg -n "pattern"                 # Show line numbers
-rg -A 3 -B 3 "pattern"          # Context lines
-
-# Find files by name (FAST)
-fd "filename"                   # Find by name pattern
-fd -e ext                       # All files with extension
-```
-
-### Banned Commands - Avoid These Slow Tools
-
-* `tree` - use `fd` instead
-* `find` - use `fd` or `rg --files`
-* `grep` or `grep -r` - use `rg` instead
-* `ls -R` - use `rg --files` or `fd`
-* `cat file | grep` - use `rg pattern file`
-
-### Search Strategy
-
-1. Start broad, then narrow: `rg "partial" | rg "specific"`
-2. Filter by type early: `rg "pattern" -g "*.ext"`
-3. Batch patterns: `rg "(pattern1|pattern2|pattern3)"`
-4. Limit scope: `rg "pattern" src/`
-
-## Project Architecture
-
-### File Structure
-
-```
-{{ project_name }}/
-├── src/                      # Source code
-├── tests/                    # Test suite (optional)
-├── prd/                      # Product requirements documents
-├── .beads/                   # Issue tracking
-├── .claude/                  # Claude Code settings
-└── CLAUDE.md                 # This file
-```
-
-## Issue Tracking
-
-This project uses **beads** (`bd`) for issue tracking. See **AGENTS.md** for workflow and session protocol.
-
-### Beads Visualization
-
-View your issues in a visual interface:
-- [bdui](https://github.com/assimelha/bdui) - Web-based beads visualization
-
-Or use the CLI:
-```bash
-bd list              # List all issues
-bd ready             # Show issues ready to work
-bd stats             # Project statistics
-```
-
-## Important Files
-
-* **CLAUDE.md** - AI agent instructions (this file)
-* **AGENTS.md** - Session rules and landing-the-plane protocol
-* **ortus/prompts/** - All prompt files (goal-prompt.md, ralph-prompt.md, interview-prompt.md, prd-prompt.md)
-* **ortus/goal.sh** - `/goal`-directive orchestrator (primary)
-* **ortus/ralph.sh** - Deprecation shim — execs `goal.sh`
-* **ortus/interview.sh** - Interactive feature interview with Claude
-
-## Pro Tips for AI Agents
-
-* Always use `--json` flags when available for programmatic use
-* Use dependency trees to understand complex relationships
-* Higher priority issues (0-1) are usually more important than lower (2-4)
-
-## CodeGraph (optional)
-
-If you have [CodeGraph](https://github.com/colbymchenry/codegraph) installed, the orchestrator will use it automatically; if not, nothing changes. Not required — the loop detects CodeGraph at runtime and falls back silently to grep/glob/Read when absent.
+* Prefer `/compact` over letting the context window fill — a compaction loses less
+  than an overflow. Re-run `bd prime` afterwards, per `AGENTS.md` § Session Start.
+* Subagents are useful for wide read-only fan-out (searching many files for a
+  symbol or convention). Keep the write path in the main session so the Goal loop's
+  bookkeeping stays in one transcript.
+* `.claude/settings.json` holds this project's permissions, hooks, and sandbox
+  allowlist. `bd setup claude` installs the beads `SessionStart`/`PreCompact` hooks
+  into it.

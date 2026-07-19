@@ -20,10 +20,14 @@ bd close <id> --reason "..."          # close
 
 ## Orchestrator (ortus grind)
 
-Drive the queue to zero via the subprocess-per-task `claude -p /goal` loop.
-Each iteration spawns a fresh claude with a NARROW per-task condition
-("close one issue"); the outer loop trusts only observable bd state to
-decide success, orphan-claim, or no-change retry.
+Drive the queue to zero via Ortus's subprocess-per-task loop. This project
+defaults to the **{{ backend }}** backend. Each iteration spawns a fresh agent
+with a NARROW per-task condition ("close one issue"); the outer loop trusts
+only observable bd state to decide success, orphan-claim, or no-change retry.
+
+Claude workers use `claude -p "/goal ..."`. Codex workers use a plain
+`codex exec "..."` prompt; do not invoke `ortus grind`, `goal.sh`, or
+`ralph.sh` from inside a worker.
 
 {% raw %}
 ```bash
@@ -31,7 +35,7 @@ ortus grind .                            # drain bd ready
 ortus grind . --tasks 1                  # exactly one task closed
 ortus grind . --orphan-policy revert     # revert claimed-but-unclosed
 ortus grind . --idle-sleep 0             # no idle backoff on no-change iters
-ortus grind . -c "<custom condition>"    # custom per-iteration /goal text
+ortus grind . -c "<custom condition>"    # custom per-iteration task text
 ```
 {% endraw %}
 

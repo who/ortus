@@ -1,0 +1,12 @@
+
+=== NEW SESSION ===
+019f7787-73a3-73a2-8a00-129b2010e41a
+  [ERROR] Model metadata for `gpt-5-fake` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+[SYS] turn.started
+  [ERROR] Reconnecting... 1/5 (We're currently experiencing high demand, which may cause temporary errors.)
+  [ERROR] Reconnecting... 2/5 (We're currently experiencing high demand, which may cause temporary errors.)
+  [ERROR] Reconnecting... 3/5 (We're currently experiencing high demand, which may cause temporary errors.)
+  [ERROR] Reconnecting... 4/5 (We're currently experiencing high demand, which may cause temporary errors.)
+  [ERROR] Reconnecting... 5/5 (We're currently experiencing high demand, which may cause temporary errors.)
+  [ERROR] We're currently experiencing high demand, which may cause temporary errors.
+  [TURN FAILED] We're currently experiencing high demand, which may cause temporary errors.

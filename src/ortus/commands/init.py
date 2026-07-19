@@ -1,4 +1,4 @@
-"""ortus init <repo> — bootstrap a fresh repo with bd + .claude + AGENTS.md (q075.5)."""
+"""ortus init <repo> — bootstrap bd plus Claude or Codex project config."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Optional
 import typer
 
 from ortus.core import output
+from ortus.core.agent import BACKENDS
 from ortus.core.init_render import (
     FRAMEWORK_CHOICES,
     FRAMEWORK_DEFAULTS,
@@ -42,6 +43,39 @@ def _bd_init(repo: Path, prefix: str | None) -> None:
     if prefix:
         args.extend(["--prefix", prefix])
     subprocess.run(args, cwd=str(repo), check=True)
+
+
+def _remove_bd_claude_scaffold(repo: Path) -> None:
+    """Remove Claude-only files that ``bd init`` creates in a new Codex repo."""
+    settings = repo / ".claude" / "settings.json"
+    if settings.is_file():
+        settings.unlink()
+    claude_dir = repo / ".claude"
+    if claude_dir.is_dir() and not any(claude_dir.iterdir()):
+        claude_dir.rmdir()
+    claude_md = repo / "CLAUDE.md"
+    if claude_md.is_file():
+        claude_md.unlink()
+
+
+def _normalize_initial_branch(repo: Path, branch: str = "main") -> None:
+    """Put a newly initialized repo on grind's default integration branch."""
+    if not (repo / ".git").exists():
+        return
+    current = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if current.returncode == 0 and current.stdout.strip() != branch:
+        subprocess.run(
+            ["git", "branch", "-m", branch],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
 
 
 def _resolve_choice(
@@ -101,12 +135,23 @@ def init(
         "--linter",
         help="Linter (choices depend on --project-type; per-language default applies if omitted).",
     ),
+    backend: str = typer.Option(
+        "claude",
+        "--backend",
+        help="Agent backend to configure (claude|codex). Claude remains the default.",
+    ),
 ) -> None:
-    """Bootstrap a new repo: bd workspace, .claude/settings.json, .ortusrc, AGENTS.md."""
+    """Bootstrap a new repo with bd, backend config, .ortusrc, and AGENTS.md."""
     if project_type not in PROJECT_TYPES:
         output.error(
             f"--project-type={project_type!r} is not recognized",
             hint=f"choices: {', '.join(PROJECT_TYPES)}",
+        )
+        raise typer.Exit(code=1)
+    if backend not in BACKENDS:
+        output.error(
+            f"--backend={backend!r} is not recognized",
+            hint=f"choices: {', '.join(BACKENDS)}",
         )
         raise typer.Exit(code=1)
 
@@ -148,6 +193,12 @@ def init(
             output.error(f"bd init failed (exit {exc.returncode})")
             raise typer.Exit(code=1)
         output.success(f"bd workspace initialized (prefix={resolved_prefix})")
+        _normalize_initial_branch(target)
+        if backend == "codex":
+            # bd currently installs its Claude integration unconditionally.
+            # These files were created moments ago by this init operation, so
+            # remove them before rendering the selected backend's config.
+            _remove_bd_claude_scaffold(target)
     elif force:
         output.warn(f".beads/ exists; skipping bd init (--force re-renders templates only)")
 
@@ -162,6 +213,7 @@ def init(
         package_manager=resolved_pm,
         framework=resolved_fw,
         linter=resolved_lint,
+        backend=backend,
     )
     written = render_all(target, ctx)
     for p in written:

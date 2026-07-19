@@ -1,14 +1,22 @@
 #!/bin/bash
 # interview.sh - Interactive Claude-powered interviews for feature refinement
 #
-# Usage: ./ortus/interview.sh [feature-id]
+# Usage: ./ortus/interview.sh [--backend claude|codex] [feature-id]
 #
 # Options:
-#   <feature-id>    Optional: Interview a specific feature
-#   -h, --help      Show this help message
+#   <feature-id>       Optional: Interview a specific feature
+#   --backend <name>   Agent backend to use (claude, codex). Default: FR-002
+#                      precedence — flag > ORTUS_BACKEND > generated default.
+#   -h, --help         Show this help message
 #
 # This script conducts dynamic interviews using Claude's AskUserQuestion tool
 # to gather requirements for features before PRD generation.
+#
+# Backend support: claude only. AskUserQuestion has no Codex equivalent, so
+# under --backend codex this script refuses immediately rather than launching
+# a session that would stall waiting for a surface the backend cannot drive
+# (NFR-004/NFR-005). The backend-agnostic replacement is the two-phase
+# envelope + operator loop already used by `ortus triage` (ortus-0a1k).
 #
 # Workflow:
 #   1. Finds features assigned to ralph without 'interviewed' label
@@ -23,16 +31,26 @@
 #   0 - Interview completed successfully
 #   1 - Error occurred
 #   2 - No features need interviewing
+#   3 - Selected backend cannot run this flow
 
 set -e
 
 # Parse arguments
 FEATURE_ID=""
+BACKEND_FLAG=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     -h|--help)
-      head -n 23 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
+      head -n 34 "$0" | tail -n +2 | sed 's/^# //' | sed 's/^#//'
       exit 0
+      ;;
+    --backend)
+      BACKEND_FLAG="${2:-}"
+      shift 2
+      ;;
+    --backend=*)
+      BACKEND_FLAG="${1#--backend=}"
+      shift
       ;;
     *)
       FEATURE_ID="$1"
@@ -40,6 +58,32 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Resolve the backend BEFORE any bd lookup or operator prompt, so an
+# unsupported backend costs one message and no waiting (NFR-004). backend.sh
+# owns the precedence chain and the validation — this script only asks.
+# shellcheck source=lib/backend.sh
+. "$(dirname "$0")/lib/backend.sh"
+BACKEND=$(resolve_backend "$BACKEND_FLAG") || exit 1
+export ORTUS_BACKEND="$BACKEND"
+
+if [ "$BACKEND" != "claude" ]; then
+  cat >&2 <<EOF
+interview.sh: the interview flow is not available under the '$BACKEND' backend.
+
+The interview is driven by AskUserQuestion, which is a Claude Code tool with
+no equivalent in the codex CLI. Rather than launch a session that would stall
+on a question it cannot ask, this script stops here.
+
+Your options:
+  * Run the interview on Claude:  ./ortus/interview.sh --backend claude
+  * Triage instead, which is backend-agnostic:  ortus triage
+
+Tracking: the two-phase envelope + operator loop that makes this flow
+backend-agnostic is scoped under the Codex-backend epic (ortus-n3rm).
+EOF
+  exit 3
+fi
 
 # Colors for output (respect NO_COLOR)
 if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then

@@ -1,0 +1,104 @@
+{
+  "_comment": [
+    "Golden argv fixtures for NFR-001 (ortus-rqoy). Every `expect` array below",
+    "was captured from the pre-refactor tree — goal.sh at 5dabac8^ and idea.sh",
+    "at 649c75a^ — i.e. the last commits where the launchers still invoked",
+    "`claude` inline. They are the contract that the backend=claude path must",
+    "not drift from.",
+    "",
+    "Do NOT regenerate these from the current adapter: a fixture derived from",
+    "the code it checks proves nothing. Editing one is a deliberate statement",
+    "that the Claude invocation itself changed, and needs the same review as",
+    "changing the invocation would.",
+    "",
+    "Pre-refactor source lines:",
+    "  goal          goal.sh:387  \"${CLAUDE_CMD[@]}\" -p \"$prompt\" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE",
+    "  goal/docker   goal.sh:367  CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)",
+    "  prd-decompose idea.sh:96   claude --allowedTools \"Read($prd_path),Bash(bd:*)\" --dangerously-skip-permissions -p \"$full_prompt\"",
+    "  idea-expand   idea.sh:126  claude --print \"$prompt\""
+  ],
+  "cases": [
+    {
+      "name": "goal",
+      "role": "goal",
+      "args": ["/goal DRAIN THE QUEUE"],
+      "env": {},
+      "claude_cmd": null,
+      "expect": [
+        "claude",
+        "-p",
+        "/goal DRAIN THE QUEUE",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions"
+      ]
+    },
+    {
+      "name": "goal-fast-mode",
+      "role": "goal",
+      "args": ["/goal DRAIN THE QUEUE"],
+      "env": {"FAST_MODE": "--fast"},
+      "claude_cmd": null,
+      "expect": [
+        "claude",
+        "-p",
+        "/goal DRAIN THE QUEUE",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--fast"
+      ]
+    },
+    {
+      "name": "goal-docker",
+      "role": "goal",
+      "args": ["/goal DRAIN THE QUEUE"],
+      "env": {},
+      "claude_cmd": ["docker", "sandbox", "run", "claude", "--name", "ortus-goal", "--"],
+      "expect": [
+        "docker",
+        "sandbox",
+        "run",
+        "claude",
+        "--name",
+        "ortus-goal",
+        "--",
+        "-p",
+        "/goal DRAIN THE QUEUE",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions"
+      ]
+    },
+    {
+      "name": "prd-decompose",
+      "role": "prd-decompose",
+      "args": ["Decompose this PRD into bd issues.", "prd/example.md"],
+      "env": {},
+      "claude_cmd": null,
+      "expect": [
+        "claude",
+        "--allowedTools",
+        "Read(prd/example.md),Bash(bd:*)",
+        "--dangerously-skip-permissions",
+        "-p",
+        "Decompose this PRD into bd issues."
+      ]
+    },
+    {
+      "name": "idea-expand",
+      "role": "idea-expand",
+      "args": ["Expand this one-liner into a feature description."],
+      "env": {},
+      "claude_cmd": null,
+      "expect": [
+        "claude",
+        "--print",
+        "Expand this one-liner into a feature description."
+      ]
+    }
+  ]
+}

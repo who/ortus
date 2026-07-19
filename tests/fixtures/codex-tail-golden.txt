@@ -1,0 +1,24 @@
+
+=== NEW SESSION ===
+019f7787-14a4-7151-9123-fe6c13abf620
+  [ERROR] Model metadata for `gpt-5-fake` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.
+[SYS] turn.started
+  (thinking) **Planning the spike**
+Write a note file, then read it back.
+  [TODO] 0/2
+    [ ] Write the note file
+    [ ] Read it back
+  [TOOL] command_execution
+  /bin/bash -lc "printf 'spike\\n' > spike-note.txt && cat spike-note.txt"
+  [RESULT] command_execution: completed
+  spike
+  [TOOL] command_execution
+  /bin/bash -lc 'exit 3'
+  [RESULT] command_execution: ERROR (exit 3)
+
+<<< ASSISTANT
+Wrote `spike-note.txt` containing `spike`. The failing command exited 3 as expected.
+  [TODO] 0/2
+    [ ] Write the note file
+    [ ] Read it back
+  [USAGE] input=5800 cached=1280 output=230 reasoning=80

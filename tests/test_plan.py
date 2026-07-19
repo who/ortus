@@ -18,6 +18,9 @@ pytestmark = pytest.mark.integration
 runner = CliRunner()
 
 FAKE_CLAUDE_PLAN = shim_path("fake-claude-plan")
+# Exits 0 without creating a single issue — stands in for a decomposition
+# session whose own tool calls all failed (ortus-jke7).
+FAKE_CLAUDE_NOOP = shim_path("fake-claude")
 TINY_PRD = Path(__file__).parent / "fixtures" / "sample-prds" / "tiny-3-task.md"
 
 
@@ -91,6 +94,24 @@ def test_plan_no_prd_runs_idea_expansion(
     result = runner.invoke(app, ["plan", str(bd_workspace)])
     assert result.exit_code == 0
     assert "plan created" in result.stdout
+
+
+def test_plan_zero_issues_exits_one(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-jke7: a claude exit-0 that created nothing must not read as success.
+
+    The failure that motivated this: every Bash call inside the decomposition
+    session died on a sandbox EPERM, so no `bd create` ran, yet claude exited 0
+    and `ortus plan` reported done — the zero-issue outcome was invisible.
+    """
+    _swap_runner(monkeypatch, str(FAKE_CLAUDE_NOOP))
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 1, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert "no issues" in combined
+    # The message must point at the log so the real cause is one `cat` away.
+    assert "plan-" in combined and ".log" in combined
 
 
 def test_plan_missing_prd_exits_one(bd_workspace: Path) -> None:

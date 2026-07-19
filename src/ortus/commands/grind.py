@@ -1,6 +1,8 @@
 """ortus grind <repo> — subprocess-per-task outer loop (ortus-3ico pivot).
 
-Each iteration spawns a fresh `claude -p "/goal CLOSE-ONE"` subprocess.
+Each iteration spawns a fresh backend worker subprocess. Claude receives a
+narrow `/goal`; Codex receives the same logical task as a plain `codex exec`
+prompt.
 The outer Python loop trusts ONLY observable bd state (counts plus the
 in_progress id set) to decide whether the iteration closed an issue,
 orphaned a claim, or did nothing. Model claims, /goal evaluator judgments,
@@ -17,7 +19,7 @@ Preserved invariants from the prior shape:
   - sandbox smoke test (Tier 1 bwrap) OR docker_precondition_check (Tier 2)
   - hook precheck (refuse to launch if disableAllHooks=true anywhere)
   - cache env-var exports (relocate ~/.cache into project-local)
-  - cleanup_children trap via core.claude._kill_group
+  - process-group cleanup via the shared runner implementation
   - tee to logs/grind-<ts>.log; terminal stays quiet (ortus-6q8v invariant)
 
 New behavior:
@@ -38,6 +40,7 @@ from typing import Callable, Optional
 import typer
 
 from ortus.core import cache, hooks, output, sandbox
+from ortus.core.agent import BackendError, compose_worker_prompt, make_runner, resolve_backend
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.git import GitClient
@@ -63,9 +66,9 @@ from ortus.core.grind_loop import (
 from ortus.core.repo import resolve_repo
 
 
-def _make_runner() -> ClaudeRunner:
-    """Indirection so tests can swap in a fake claude binary."""
-    return ClaudeRunner()
+def _make_runner(backend: str = "claude") -> ClaudeRunner:
+    """Indirection so tests can swap in a fake backend runner."""
+    return make_runner(backend)  # type: ignore[arg-type]
 
 
 def _make_bd(repo: Path) -> BdClient:
@@ -182,7 +185,7 @@ def _snapshot(bd: BdClient) -> StateSnapshot:
     )
 
 
-def _legacy_prompt(custom_condition: str) -> str:
+def _legacy_prompt(custom_condition: str, backend: str = "claude") -> str:
     """The per-subprocess /goal prompt for the legacy `--condition` path.
 
     When the operator pins a custom condition we leave SELECTION to the worker
@@ -190,15 +193,15 @@ def _legacy_prompt(custom_condition: str) -> str:
     instead has the harness select+claim and inject the issue per iteration
     (see `_compose_work_prompt`), which is composed live inside the loop.
     """
-    return f"/goal {custom_condition}"
+    return compose_worker_prompt(backend, custom_condition)  # type: ignore[arg-type]
 
 
-def _compose_work_prompt(template: str, issue: dict) -> str:
+def _compose_work_prompt(template: str, issue: dict, backend: str = "claude") -> str:
     """Fill the work-issue template with the harness-claimed issue's id +
     details and prefix the /goal directive. The worker is TOLD which issue to
     work rather than choosing/transcribing it — eliminating the hallucinated-id
     failure mode at the source."""
-    return f"/goal {inject_issue(template, issue)}"
+    return compose_worker_prompt(backend, inject_issue(template, issue))  # type: ignore[arg-type]
 
 
 def _log_writer(log_path: Path) -> Callable[[str], None]:
@@ -269,9 +272,19 @@ def grind(
         "--dry-run",
         help="Print resolved flags + composed per-iteration prompt; do not spawn claude.",
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Agent backend (claude|codex); overrides ORTUS_BACKEND and .ortusrc.",
+    ),
 ) -> None:
     """Drive the bd queue via a subprocess-per-task /goal loop (ortus-3ico)."""
     target = resolve_repo(repo)
+    try:
+        resolved_backend = resolve_backend(backend, repo=target)
+    except BackendError as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
 
     # Two per-iteration prompt shapes:
     #   - default (no --condition): the harness selects + claims the next ready
@@ -301,16 +314,17 @@ def grind(
         )
         output.info(f"fast:           {fast}")
         output.info(f"docker:         {docker}")
+        output.info(f"backend:        {resolved_backend}")
         output.info(f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}")
         output.info("--- per-iteration prompt ---")
         if harness_select:
             output.info(
-                "/goal " + work_template.rstrip()
+                compose_worker_prompt(resolved_backend, work_template.rstrip())
                 + "\n(the harness fills <ISSUE_ID>/<ISSUE_DETAILS> per iteration "
                 "from the next ready issue it claims.)"
             )
         else:
-            output.info(_legacy_prompt(condition))
+            output.info(_legacy_prompt(condition, resolved_backend))
         return
 
     # Phase 0 — sandbox precondition (Tier 1 native vs Tier 2 docker).
@@ -324,18 +338,22 @@ def grind(
         raise typer.Exit(code=1)
 
     # Phase 1 — hook precheck (must run BEFORE any claude spawn).
-    try:
-        hooks.check_hooks_enabled(target)
-    except hooks.HookConflictError as exc:
-        output.error(str(exc).splitlines()[0])
-        raise typer.Exit(code=1)
+    if resolved_backend == "claude":
+        try:
+            hooks.check_hooks_enabled(target)
+        except hooks.HookConflictError as exc:
+            output.error(str(exc).splitlines()[0])
+            raise typer.Exit(code=1)
 
     # Phase 2 — flock so two grinds can't race for the same repo.
     try:
         with grind_flock(target):
             log = _log_path(target)
             write_log = _log_writer(log)
-            write_log("=== ortus grind started (subprocess-per-task shape) ===")
+            write_log(
+                "=== ortus grind started "
+                f"(subprocess-per-task shape; backend={resolved_backend}) ==="
+            )
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
@@ -399,7 +417,12 @@ def grind(
             # Phase 3 — cache env vars (relocate ~/.cache into project-local).
             cache.ensure_cache_dirs(target)
             cache_env = cache.env_overrides(target)
-            runner = _make_runner()
+            # Preserve the zero-argument seam used by existing Claude test and
+            # plugin overrides. Codex is the only branch that needs an explicit
+            # selector here.
+            runner = (
+                _make_runner() if resolved_backend == "claude" else _make_runner("codex")
+            )
             runner.extra_env.update(cache_env)
 
             tasks_completed = 0
@@ -420,6 +443,26 @@ def grind(
                 _enforce_branch_discipline(
                     git, integration_branch, write_log, phase="pre-iter"
                 )
+
+                # Codex runs under workspace-write, which intentionally keeps
+                # .git metadata read-only. Ortus therefore owns the commit
+                # after a verified close. Requiring a clean tree beforehand
+                # makes the later `git add -A` safe: it cannot sweep unrelated
+                # operator work into the worker's commit.
+                if (
+                    resolved_backend == "codex"
+                    and git.is_git_repo()
+                    and not git.is_clean()
+                ):
+                    write_log(
+                        "pre-iter: HALT — Codex backend requires a clean git "
+                        "worktree before it can create an iteration commit"
+                    )
+                    output.error(
+                        "grind: Codex backend requires a clean git worktree",
+                        hint="commit or stash existing changes, then re-run grind",
+                    )
+                    raise typer.Exit(code=1)
 
                 # Default path: select + claim the next ready issue IN-HARNESS,
                 # then inject its exact id + details into the per-iteration
@@ -457,16 +500,21 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
-                    iteration_prompt = _compose_work_prompt(work_template, target_issue)
+                    iteration_prompt = _compose_work_prompt(
+                        work_template, target_issue, resolved_backend
+                    )
                     write_log(
                         f"iter {iters_run + 1}: harness selected+claimed {issue_id}; "
-                        "injected into /goal prompt"
+                        f"injected into {resolved_backend} worker prompt"
                     )
                 else:
-                    iteration_prompt = _legacy_prompt(condition)
+                    iteration_prompt = _legacy_prompt(condition, resolved_backend)
 
                 iters_run += 1
-                write_log(f"iter {iters_run}: spawning claude (work-issue /goal)")
+                write_log(
+                    f"iter {iters_run}: spawning {resolved_backend} "
+                    "(single-issue worker)"
+                )
                 # A stuck-but-alive worker would otherwise block the entire
                 # loop forever (only a human kill recovers it). --worker-timeout
                 # hard-caps the iteration: on exceed the runner SIGTERM/SIGKILLs
@@ -499,6 +547,25 @@ def grind(
                         f"iter {iters_run}: closed +{delta.closed_delta} "
                         f"(tasks_completed={tasks_completed}, rc={rc})"
                     )
+                    if resolved_backend == "codex" and git.is_git_repo():
+                        commit_subject = (
+                            f"{issue_id}: complete Codex grind task"
+                            if harness_select
+                            else "ortus: complete Codex grind iteration"
+                        )
+                        if not git.commit_all(commit_subject):
+                            write_log(
+                                f"iter {iters_run}: HALT — outer Codex commit failed"
+                            )
+                            output.error(
+                                "grind: Codex completed the issue but the outer "
+                                "git commit failed",
+                                hint="inspect the worktree and commit the completed work manually",
+                            )
+                            raise typer.Exit(code=1)
+                        write_log(
+                            f"iter {iters_run}: outer Codex commit completed"
+                        )
                     # Verify the close actually reached origin/<integration>.
                     # If the worker committed onto main but didn't push, push
                     # it; if it drifted onto a side branch and committed the

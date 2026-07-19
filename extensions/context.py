@@ -5,7 +5,7 @@ Provides default values for author_name and author_email from git config.
 
 import subprocess
 
-from copier_templates_extensions import ContextHook
+from copier_template_extensions import ContextHook
 
 
 class GitConfigContext(ContextHook):

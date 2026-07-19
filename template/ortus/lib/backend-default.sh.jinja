@@ -1,0 +1,12 @@
+# ortus/lib/backend-default.sh — generated from the `agent_cli` copier answer.
+#
+# The last link in FR-002's precedence chain: --backend flag > ORTUS_BACKEND >
+# this file. lib/backend.sh sources it (guarded, so the Ortus repo itself
+# works without one) before applying its own "claude" fallback.
+#
+# This file exists so backend.sh stays byte-identical between ortus/ and
+# template/ortus/ — `make parity` compares them, and a templated backend.sh
+# would break that. Edit `agent_cli` in .copier-answers.yml and re-run
+# `copier update`, or just override ORTUS_BACKEND per invocation.
+: "${ORTUS_BACKEND_DEFAULT:={{ agent_cli }}}"
+export ORTUS_BACKEND_DEFAULT

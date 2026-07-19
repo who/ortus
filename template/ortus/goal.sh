@@ -9,6 +9,8 @@
 #   --tasks N             Stop after N tasks completed (default: unlimited)
 #   --iterations N        Stop after N loop iterations (default: unlimited)
 #   --docker              Tier 2 isolation: route claude through docker sandbox
+#   --backend NAME        Agent backend: claude|codex. Overrides $ORTUS_BACKEND,
+#                         which in turn overrides the generated default.
 #   -c, --condition STR   Custom completion condition (default: canonical from PRD Appendix A)
 #                         Scoped-run examples (drive the queue until a specific milestone):
 #                           -c 'all children of bd-auth-epic are closed'
@@ -34,6 +36,7 @@ FAST_MODE=""
 MAX_TASKS=0
 MAX_ITERS=0
 USE_DOCKER=""
+BACKEND_FLAG=""
 CONDITION=""
 DRY_RUN=""
 DRY_RUN_CONDITION=""
@@ -46,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --tasks) MAX_TASKS="$2"; shift 2 ;;
     --iterations) MAX_ITERS="$2"; shift 2 ;;
     --docker) USE_DOCKER=1; shift ;;
+    --backend) BACKEND_FLAG="$2"; shift 2 ;;
     -c|--condition) CONDITION="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --dry-run-condition) DRY_RUN_CONDITION=1; shift ;;
@@ -54,6 +58,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; echo "Run '$0 -h' for usage." >&2; exit 2 ;;
   esac
 done
+
+# Resolve the backend once, here, and export it so every later consumer
+# (backend.sh's own functions, the sourced libs, any child process) reads one
+# already-decided value instead of re-running the precedence rules (NFR-002).
+# Sourced before the dry-run exits so --dry-run reports the resolved backend.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/backend.sh"
+ORTUS_BACKEND="$(resolve_backend "$BACKEND_FLAG")" || exit 1
+export ORTUS_BACKEND
 
 build_condition() {
   # Emit the /goal condition on stdout.
@@ -164,6 +176,7 @@ if [ -n "$DRY_RUN" ]; then
   echo "MAX_TASKS=$MAX_TASKS"
   echo "MAX_ITERS=$MAX_ITERS"
   echo "USE_DOCKER=$USE_DOCKER"
+  echo "ORTUS_BACKEND=$ORTUS_BACKEND"
   echo "CONDITION=$CONDITION"
   exit 0
 fi
@@ -180,18 +193,22 @@ fi
 # on .beads/ralph.flock (mirrors the --dry-run / --dry-run-condition
 # isolation pattern). Deliberately omitted from -h (per yr7d.5 design).
 if [ -n "$PRINT_CMD" ]; then
-  if [ -n "$USE_DOCKER" ]; then
-    PRINT_CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
-  else
-    PRINT_CLAUDE_CMD=(claude)
+  # Built by the adapter, not inline, so what this prints cannot drift from
+  # what a real launch would run — and so `--backend codex --print-cmd`
+  # shows the Codex argv (FR-004) rather than a Claude one.
+  if [ -n "$USE_DOCKER" ] && [ "$ORTUS_BACKEND" = "claude" ]; then
+    CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
   fi
-  PRINT_PROMPT="/goal $(build_condition)"
-  PRINT_ARGV=("${PRINT_CLAUDE_CMD[@]}" -p "$PRINT_PROMPT" --output-format stream-json --verbose --dangerously-skip-permissions)
-  [ -n "$FAST_MODE" ] && PRINT_ARGV+=("$FAST_MODE")
-  printf '%q ' "${PRINT_ARGV[@]}"
+  backend_argv goal "/goal $(build_condition)" || exit 1
+  printf '%q ' "${BACKEND_ARGV[@]}"
   printf '\n'
   exit 0
 fi
+
+# Backend preflight (FR-013). Deliberately ahead of the flock guard: a launch
+# that dies on a missing or logged-out CLI must not leave a lock file behind
+# for the next run to trip over. Silent on success.
+backend_preflight || exit 1
 
 # Single-instance guard (FR-005). Concurrent orchestrator instances (ralph.sh
 # OR goal.sh) against the same repo race each other through bd's auto-start
@@ -261,11 +278,23 @@ fi
 # ralph.sh:95 so tail.sh's glob picks up both prefixes once yr7d.8 widens it.
 mkdir -p logs
 LOG_FILE="logs/goal-$(date '+%Y%m%d-%H%M%S').log"
+# ortus-36w3: stamp the backend as the log's first line so tail.sh picks its
+# decoder from the log itself rather than from out-of-band state that may have
+# changed since the run. Written straight to the file, not through log(), so
+# the marker stays machine-readable and off the operator's stream.
+printf '# ortus-backend: %s\n' "$ORTUS_BACKEND" > "$LOG_FILE"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
 log "=== goal.sh Started ==="
 if [ -n "$FAST_MODE" ]; then
-  log "Fast mode: enabled (2.5x faster output, premium pricing)"
+  # Codex has no fast-output tier; --fast is a documented no-op there
+  # (FR-004). Say so at launch rather than letting the operator believe a
+  # flag they passed took effect.
+  if [ "$ORTUS_BACKEND" = "codex" ]; then
+    log "Fast mode: ignored ($FAST_MODE is Claude-only; no-op under the codex backend)"
+  else
+    log "Fast mode: enabled (2.5x faster output, premium pricing)"
+  fi
 fi
 log "Log file: $LOG_FILE"
 log "Watch live:"
@@ -305,45 +334,83 @@ else
   sandbox_smoke_test
 fi
 
+# Past this point the outer sandbox is enforced AND verified — neither branch
+# above returns on failure, they exit. Publish that fact so the backend
+# adapter can pick the codex inner posture from it (FR-010): a relaxed inner
+# sandbox is only defensible behind an enforced outer one. An operator whose
+# wrapper provides no outer sandbox sets ORTUS_OUTER_SANDBOX=off in the
+# environment and the adapter falls back to a real inner sandbox — that
+# opt-out changes the inner posture only; it never skips the gate above.
+export ORTUS_OUTER_SANDBOX="${ORTUS_OUTER_SANDBOX:-enforced}"
+
 # Hook-disabled precheck (ortus-sooj). Runs after sandbox/docker checks and
 # before any claude spawn. /goal is implemented as a managed Stop hook; if
 # disableAllHooks=true is set anywhere in the settings layer stack, the
 # directive silently degrades. Refuse to launch in that case.
-check_hooks_enabled
+#
+# Claude-only (FR-008). Under codex, /goal is native to the CLI rather than a
+# managed Stop hook, so Claude's disableAllHooks setting says nothing about
+# whether the directive will fire — running the gate there could only produce a
+# false refusal on a settings file the codex run never reads.
+if [ "$ORTUS_BACKEND" = "claude" ]; then
+  check_hooks_enabled
+else
+  log "Hook precheck: skipped (backend=$ORTUS_BACKEND; /goal is native, not a managed Stop hook)"
+fi
+
+# bd exemption preflight (FR-006). The single most likely source of a silently
+# broken loop is a sandbox that lets bd read the queue but not write it: the
+# session then burns a full run and closes nothing. Runs after the posture is
+# settled above (bd_preflight reads ORTUS_BACKEND and, under codex, the config
+# CODEX_HOME points at) and before any agent spawn. Not skippable via env var,
+# for the same reason the sandbox smoke test isn't — a skippable gate is just a
+# slower way to reach the failure it was added to prevent.
+backend_env
+bd_preflight || {
+  log "ERROR: refusing to start — see the bd preflight diagnostic above."
+  exit 1
+}
 
 # Cache helpers (project-local .cache/ subdirs + XDG/per-tool cache env
 # exports) live in ortus/lib/cache.sh so canonical/template parity (FR-022)
 # is structural rather than copy-paste. No log() dependency.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/cache.sh"
 
-# Claude invocation routing — when --docker is set, route the inner claude
+# Invocation routing — when --docker is set, route the inner claude
 # session through `docker sandbox run claude --name ortus-goal --` so it
 # runs inside Docker's bundled-image sandbox. No Dockerfile; bind-mount
 # defaults map host cwd -> /workspace; logs remain tee'd to the host
 # LOG_FILE so tail.sh works in both modes. The --name is ortus-goal
 # (not ortus-ralph) so docker can tell the two orchestrators apart.
-if [ -n "$USE_DOCKER" ]; then
+# The wrapper is claude-specific, so it is only applied under that backend —
+# same guard the --print-cmd path uses, so the printed argv and the executed
+# one cannot disagree.
+if [ -n "$USE_DOCKER" ] && [ "$ORTUS_BACKEND" = "claude" ]; then
   CLAUDE_CMD=(docker sandbox run claude --name ortus-goal --)
-else
-  CLAUDE_CMD=(claude)
 fi
 
 # Build the /goal prompt: the literal directive name followed by the
 # canonical (or -c-supplied) condition body from build_condition.
 prompt="/goal $(build_condition)"
 
-log "Invoking claude -p '/goal ...' (long-lived session; /goal evaluator owns termination)"
+# The argv itself comes from the adapter (FR-003): goal.sh no longer knows
+# which binary or which flags implement "run a /goal session", only that it
+# wants the `goal` role. Stream flags, the permission posture and the
+# --fast pass-through all live in lib/backend.sh.
+backend_argv goal "$prompt" || exit 1
+
+log "Invoking ${BACKEND_ARGV[0]} '/goal ...' (long-lived session; /goal evaluator owns termination)"
 log "Press Ctrl+C to abort"
 
-# pipefail ensures claude's exit code propagates through the tee pipe
+# pipefail ensures the agent's exit code propagates through the tee pipe
 # (tee normally only fails if its output file is unwritable, which the
 # mkdir + log() warm-up above would have already surfaced). The `||
 # exit_code=$?` clause absorbs the non-zero exit so `set -e` doesn't kill
 # the script before we log the end banner — we want goal.sh's own exit
-# code to mirror claude's, not abort silently mid-pipeline.
+# code to mirror the agent's, not abort silently mid-pipeline.
 set -o pipefail
 exit_code=0
-"${CLAUDE_CMD[@]}" -p "$prompt" --output-format stream-json --verbose --dangerously-skip-permissions $FAST_MODE 2>&1 | tee -a "$LOG_FILE" >/dev/null || exit_code=$?
+"${BACKEND_ARGV[@]}" 2>&1 | tee -a "$LOG_FILE" >/dev/null || exit_code=$?
 
 # Session-end progress bookend (analog of ralph.sh's per-iteration line).
 # Derive drained = INITIAL_READY - READY_REMAINING; do not clamp — a model

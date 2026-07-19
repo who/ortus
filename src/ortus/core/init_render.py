@@ -27,6 +27,11 @@ BUNDLED_TEMPLATES: tuple[str, ...] = (
     ".gitignore",
 )
 
+BACKEND_TEMPLATES: dict[str, str] = {
+    "claude": ".claude/settings.json",
+    "codex": ".codex/config.toml",
+}
+
 
 # Per-project-type choices for the three stack flags. Mirrors the historical
 # copier.yaml blocks for package_manager / framework / linter.
@@ -81,6 +86,7 @@ PROJECT_TYPES: tuple[str, ...] = tuple(PACKAGE_MANAGER_CHOICES.keys())
 @dataclass(frozen=True)
 class RenderContext:
     prefix: str
+    backend: str = "claude"
     project_type: str = "polyglot"
     package_manager: str = "none"
     framework: str = "none"
@@ -91,6 +97,7 @@ class RenderContext:
     def as_dict(self) -> dict[str, Any]:
         return {
             "prefix": self.prefix,
+            "backend": self.backend,
             "project_type": self.project_type,
             "package_manager": self.package_manager,
             "framework": self.framework,
@@ -122,7 +129,11 @@ def render_template(name: str, ctx: RenderContext) -> str:
 def render_all(target: Path, ctx: RenderContext) -> list[Path]:
     """Render every bundled template into `target`. Returns list of written paths."""
     written: list[Path] = []
-    for name in BUNDLED_TEMPLATES:
+    names = tuple(
+        BACKEND_TEMPLATES[ctx.backend] if name == ".claude/settings.json" else name
+        for name in BUNDLED_TEMPLATES
+    )
+    for name in names:
         rendered = render_template(name, ctx)
         dest = target / name
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -131,6 +142,9 @@ def render_all(target: Path, ctx: RenderContext) -> list[Path]:
     return written
 
 
-def list_bundled() -> list[str]:
+def list_bundled(backend: str = "claude") -> list[str]:
     """Used by tests + ortus check to enumerate what ships in the package."""
-    return list(BUNDLED_TEMPLATES)
+    return [
+        BACKEND_TEMPLATES[backend] if name == ".claude/settings.json" else name
+        for name in BUNDLED_TEMPLATES
+    ]
