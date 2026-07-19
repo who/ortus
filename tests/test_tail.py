@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import threading
 import time
@@ -144,6 +145,24 @@ def test_format_line_emits_result_kind() -> None:
         _format_line('{"type":"result","result":"ok"}', show_tools=False, show_system=False)
         == "[result] ok"
     )
+
+
+def test_tail_renders_normalized_codegraph_events_without_verbose() -> None:
+    line = json.dumps(
+        {
+            "type": "ortus.codegraph",
+            "schema": 1,
+            "kind": "query",
+            "phase": "verification",
+            "tool": "codegraph_search",
+            "query": "Widget.render",
+            "success": True,
+            "hit": False,
+        }
+    )
+    rendered = _format_line(line, show_tools=False, show_system=False)
+    assert rendered is not None
+    assert "[CODEGRAPH]" in rendered and "verification" in rendered and "miss" in rendered
 
 
 def test_tail_fr003_no_beads(tmp_path: Path) -> None:

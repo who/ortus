@@ -371,7 +371,11 @@ bd stats             # Project statistics
 
 ## CodeGraph (optional)
 
-If you have [CodeGraph](https://github.com/colbymchenry/codegraph) installed, the orchestrator will use it automatically; if not, nothing changes. Not required — the loop detects CodeGraph at runtime and falls back silently to grep/glob/Read when absent.
+Ortus owns the injected `off`, `auto`, or `required` CodeGraph phase contract.
+In auto mode, use registered MCP tools when the outer probe is healthy and state
+the grep/Read fallback reason when it is not; fallbacks are never silent. In
+required mode a missing capability handshake or failed required refresh is fatal.
+Keep queries bounded and never copy full source payloads into progress or comments.
 
 ## Session Completion
 

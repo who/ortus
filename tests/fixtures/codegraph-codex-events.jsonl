@@ -1,0 +1,4 @@
+{"type":"item.started","item":{"id":"mc1","type":"mcp_tool_call","server":"codegraph","tool":"codegraph_search","arguments":{"query":"Config.load"}}}
+{"type":"item.completed","item":{"id":"mc1","type":"mcp_tool_call","server":"codegraph","tool":"codegraph_search","arguments":{"query":"Config.load"},"result":{"results":[{"symbol":"Config.load","source":"PRIVATE_SOURCE"}]}}}
+{"type":"item.started","item":{"id":"mc2","type":"mcp_tool_call","server":"codegraph","tool":"codegraph_callees","arguments":{"symbol":"Config.load"}}}
+{"type":"item.completed","item":{"id":"mc2","type":"mcp_tool_call","server":"codegraph","tool":"codegraph_callees","arguments":{"symbol":"Config.load"},"result":{"results":[]}}}

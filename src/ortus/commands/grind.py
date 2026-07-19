@@ -32,6 +32,7 @@ New behavior:
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -43,6 +44,17 @@ from ortus.core import cache, hooks, output, sandbox
 from ortus.core.agent import BackendError, compose_worker_prompt, make_runner, resolve_backend
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
+from ortus.core.codegraph import (
+    CodeGraphAdapter,
+    CodeGraphMode,
+    CodeGraphPhase,
+    CodeGraphUnavailable,
+    append_normalized,
+    parse_transcript,
+    phase_contract,
+    require_handshake,
+)
+from ortus.core.config import load_config
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
@@ -79,6 +91,11 @@ def _make_bd(repo: Path) -> BdClient:
 def _make_git(repo: Path) -> GitClient:
     """Indirection so tests can swap in a stub git client."""
     return GitClient(repo=repo)
+
+
+def _make_codegraph() -> CodeGraphAdapter:
+    """Indirection for lifecycle tests with a deterministic fake adapter."""
+    return CodeGraphAdapter()
 
 
 def _enforce_branch_discipline(
@@ -196,12 +213,86 @@ def _legacy_prompt(custom_condition: str, backend: str = "claude") -> str:
     return compose_worker_prompt(backend, custom_condition)  # type: ignore[arg-type]
 
 
-def _compose_work_prompt(template: str, issue: dict, backend: str = "claude") -> str:
-    """Fill the work-issue template with the harness-claimed issue's id +
-    details and prefix the /goal directive. The worker is TOLD which issue to
-    work rather than choosing/transcribing it — eliminating the hallucinated-id
-    failure mode at the source."""
-    return compose_worker_prompt(backend, inject_issue(template, issue))  # type: ignore[arg-type]
+_CLAUDE_GOAL_CONDITION_LIMIT = 4_000
+
+
+def _compose_work_prompt(
+    template: str,
+    issue: dict,
+    backend: str = "claude",
+    *,
+    phase_instruction: str = "",
+    phase_contract_text: str = "",
+) -> str:
+    """Build one backend-appropriate prompt for a harness-claimed issue.
+
+    Codex receives the complete issue packet because its plain ``exec`` prompt
+    has no slash-command condition limit. Claude's ``/goal`` condition is
+    capped at 4,000 characters, so it receives the exact claimed id and loads
+    the authoritative, deliberately thorough packet from bd itself.
+    """
+    issue_id = str(issue.get("id") or "")
+    if not issue_id:
+        raise ValueError("cannot compose a worker prompt for an issue with no id")
+
+    if backend == "codex":
+        task = inject_issue(template, issue)
+        if phase_instruction:
+            task = phase_instruction.rstrip() + "\n\n" + task
+        task += phase_contract_text
+        return compose_worker_prompt("codex", task)
+
+    task = (
+        f"Work bd issue {issue_id}. The grind harness already selected and claimed "
+        "this exact issue. Do not run bd ready, select another issue, or operate on "
+        f"any other id. First run `bd show {issue_id} --json`; its description, "
+        "design, acceptance criteria, and notes are the authoritative implementation "
+        "packet. Follow that packet and the repository instructions. Run the required "
+        "checks, use only the exact claimed id in bd commands, and do not invoke another "
+        "queue orchestrator. If a human decision is required, flag this exact issue and "
+        "stop. Otherwise complete only this issue, close it when the active phase permits, "
+        "commit and push when repository instructions require it, then end the session."
+    )
+    if phase_instruction:
+        task += "\n\n" + phase_instruction.rstrip()
+    task += phase_contract_text
+    if len(task) > _CLAUDE_GOAL_CONDITION_LIMIT:
+        raise BackendError(
+            "internal Claude /goal condition exceeds the 4,000-character limit "
+            f"({len(task)} characters)"
+        )
+    return compose_worker_prompt("claude", task)
+
+
+def _claude_goal_rejection(
+    log_path: Path, *, start_offset: int
+) -> str | None:
+    """Return a zero-turn Claude goal-condition rejection from a log slice."""
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(start_offset)
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+    for line in lines:
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "result":
+            continue
+        result = event.get("result")
+        if event.get("num_turns") != 0 or not isinstance(result, str):
+            continue
+        lowered = result.lower()
+        if "goal condition" in lowered and any(
+            marker in lowered for marker in ("limited", "invalid", "exceed")
+        ):
+            return result.strip()
+    return None
 
 
 def _log_writer(log_path: Path) -> Callable[[str], None]:
@@ -277,6 +368,12 @@ def grind(
         "--backend",
         help="Agent backend (claude|codex); overrides ORTUS_BACKEND and .ortusrc.",
     ),
+    codegraph: Optional[CodeGraphMode] = typer.Option(
+        None,
+        "--codegraph",
+        help="CodeGraph policy: off|auto|required (defaults from .ortusrc).",
+        case_sensitive=False,
+    ),
 ) -> None:
     """Drive the bd queue via a subprocess-per-task /goal loop (ortus-3ico)."""
     target = resolve_repo(repo)
@@ -285,6 +382,30 @@ def grind(
     except BackendError as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
+
+    configured_mode = load_config(repo=target).get("codegraph", "auto")
+    try:
+        codegraph_mode = codegraph or CodeGraphMode(configured_mode)
+    except ValueError:
+        output.error(
+            f"invalid CodeGraph mode {configured_mode!r}; expected off, auto, or required"
+        )
+        raise typer.Exit(code=1)
+    codegraph_adapter = _make_codegraph()
+    if not dry_run:
+        output.progress("grind", f"CodeGraph probe (mode={codegraph_mode.value})")
+    try:
+        codegraph_probe = codegraph_adapter.probe(target, codegraph_mode)
+    except CodeGraphUnavailable as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
+    if not dry_run:
+        if codegraph_mode is CodeGraphMode.OFF:
+            output.progress("grind", "CodeGraph disabled by policy")
+        elif codegraph_probe.available:
+            output.progress("grind", "CodeGraph activated for issue transactions")
+        else:
+            output.progress("grind", f"CodeGraph fallback: {codegraph_probe.reason}")
 
     # Two per-iteration prompt shapes:
     #   - default (no --condition): the harness selects + claims the next ready
@@ -315,11 +436,16 @@ def grind(
         output.info(f"fast:           {fast}")
         output.info(f"docker:         {docker}")
         output.info(f"backend:        {resolved_backend}")
+        output.info(f"codegraph:      {codegraph_mode.value}")
         output.info(f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}")
         output.info("--- per-iteration prompt ---")
         if harness_select:
             output.info(
-                compose_worker_prompt(resolved_backend, work_template.rstrip())
+                _compose_work_prompt(
+                    work_template,
+                    {"id": "<ISSUE_ID>", "title": "<ISSUE_DETAILS>"},
+                    resolved_backend,
+                )
                 + "\n(the harness fills <ISSUE_ID>/<ISSUE_DETAILS> per iteration "
                 "from the next ready issue it claims.)"
             )
@@ -500,9 +626,25 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
-                    iteration_prompt = _compose_work_prompt(
-                        work_template, target_issue, resolved_backend
+                    implementation_instruction = (
+                        "IMPLEMENTATION PHASE ONLY. Make candidate edits and run targeted "
+                        "checks, but do not add the final verification comment and do not "
+                        "close the issue; a fresh verifier follows."
                     )
+                    try:
+                        iteration_prompt = _compose_work_prompt(
+                            work_template,
+                            target_issue,
+                            resolved_backend,
+                            phase_instruction=implementation_instruction,
+                            phase_contract_text=phase_contract(
+                                CodeGraphPhase.IMPLEMENTATION, codegraph_probe
+                            ),
+                        )
+                    except BackendError as exc:
+                        bd.update_status(issue_id, "open")
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
                     write_log(
                         f"iter {iters_run + 1}: harness selected+claimed {issue_id}; "
                         f"injected into {resolved_backend} worker prompt"
@@ -524,6 +666,12 @@ def grind(
                 # then hung still counts, and a claimed-but-unclosed issue still
                 # gets the orphan-policy treatment.
                 try:
+                    phase_offset = log.stat().st_size if log.exists() else 0
+                    output.progress(
+                        "grind",
+                        "implementation CodeGraph "
+                        + ("engaged" if codegraph_probe.available else "fallback active"),
+                    )
                     rc = runner.run(
                         iteration_prompt,
                         repo=target,
@@ -537,6 +685,146 @@ def grind(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
                     )
+
+                if resolved_backend == "claude":
+                    rejection = _claude_goal_rejection(
+                        log, start_offset=phase_offset
+                    )
+                    if rejection is not None:
+                        if harness_select:
+                            bd.update_status(issue_id, "open")
+                        write_log(
+                            f"iter {iters_run}: HALT — Claude rejected /goal before "
+                            f"running a worker turn: {rejection}"
+                        )
+                        output.error(
+                            "grind: Claude rejected the /goal condition before worker work",
+                            hint=rejection,
+                        )
+                        raise typer.Exit(code=1)
+
+                implementation_summary = parse_transcript(
+                    log,
+                    phase=CodeGraphPhase.IMPLEMENTATION,
+                    probe=codegraph_probe,
+                    start_offset=phase_offset,
+                )
+                append_normalized(log, implementation_summary)
+                write_log(
+                    f"CodeGraph implementation summary: queries={len(implementation_summary.events)} "
+                    f"fallbacks={implementation_summary.fallbacks or 'none'}"
+                )
+                try:
+                    require_handshake(implementation_summary)
+                except CodeGraphUnavailable as exc:
+                    if harness_select:
+                        bd.update_status(issue_id, "open")
+                    output.error(str(exc))
+                    raise typer.Exit(code=1)
+
+                # Candidate edits are indexed by the parent before a fresh
+                # verifier starts. Refresh failure is blocking only in required
+                # mode (auto records the stale fallback and continues).
+                output.progress("grind", "refreshing CodeGraph index before verification")
+                freshness, sync_ms = codegraph_adapter.refresh(target, codegraph_probe)
+                implementation_summary.freshness = freshness
+                implementation_summary.sync_duration_ms = sync_ms
+                write_log(
+                    f"CodeGraph refresh: result={freshness} duration_ms={sync_ms}"
+                )
+                if freshness == "sync-failed" and codegraph_mode is CodeGraphMode.REQUIRED:
+                    if harness_select:
+                        bd.update_status(issue_id, "open")
+                    output.error(
+                        "CodeGraph required but index refresh failed before verification"
+                    )
+                    raise typer.Exit(code=1)
+
+                mid = _snapshot(bd)
+                if harness_select and issue_id in mid.in_progress_ids:
+                    verification_instruction = (
+                        "FRESH VERIFICATION PHASE. Do not trust the implementation worker's "
+                        "claims. Inspect the candidate diff and issue independently, run the "
+                        "changed-surface tests, add a thorough bd comment, and close only if "
+                        "every acceptance criterion passes."
+                    )
+                    try:
+                        verifier_prompt = _compose_work_prompt(
+                            work_template,
+                            target_issue,
+                            resolved_backend,
+                            phase_instruction=verification_instruction,
+                            phase_contract_text=phase_contract(
+                                CodeGraphPhase.VERIFICATION, codegraph_probe
+                            ),
+                        )
+                    except BackendError as exc:
+                        bd.update_status(issue_id, "open")
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
+                    verify_offset = log.stat().st_size if log.exists() else 0
+                    output.progress(
+                        "grind",
+                        "verification CodeGraph "
+                        + ("engaged" if codegraph_probe.available else "fallback active"),
+                    )
+                    try:
+                        rc = runner.run(
+                            verifier_prompt,
+                            repo=target,
+                            log_path=log,
+                            fast=fast,
+                            timeout=(worker_timeout if worker_timeout > 0 else None),
+                        )
+                    except subprocess.TimeoutExpired:
+                        rc = 143
+                        write_log(
+                            f"iter {iters_run}: verifier TIMEOUT after {worker_timeout}s"
+                        )
+                    if resolved_backend == "claude":
+                        rejection = _claude_goal_rejection(
+                            log, start_offset=verify_offset
+                        )
+                        if rejection is not None:
+                            bd.update_status(issue_id, "open")
+                            write_log(
+                                f"iter {iters_run}: HALT — Claude rejected verifier /goal "
+                                f"before running a worker turn: {rejection}"
+                            )
+                            output.error(
+                                "grind: Claude rejected the verifier /goal condition "
+                                "before worker work",
+                                hint=rejection,
+                            )
+                            raise typer.Exit(code=1)
+                    verification_summary = parse_transcript(
+                        log,
+                        phase=CodeGraphPhase.VERIFICATION,
+                        probe=codegraph_probe,
+                        start_offset=verify_offset,
+                    )
+                    verification_summary.freshness = freshness
+                    verification_summary.sync_duration_ms = sync_ms
+                    append_normalized(log, verification_summary)
+                    try:
+                        require_handshake(verification_summary)
+                    except CodeGraphUnavailable as exc:
+                        bd.update_status(issue_id, "open")
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
+                else:
+                    # Compatibility/safety: if an implementation worker closed
+                    # despite the phase contract, still leave durable evidence.
+                    verification_summary = implementation_summary
+                    verification_summary.phase = CodeGraphPhase.VERIFICATION.value
+
+                if harness_select:
+                    bd.add_comment(issue_id, verification_summary.report())
+                output.progress(
+                    "grind",
+                    f"CodeGraph phase summary: {len(verification_summary.events)} queries, "
+                    f"freshness={freshness}",
+                )
 
                 after = _snapshot(bd)
                 delta = compute_delta(before, after)

@@ -1,0 +1,6 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"cg1","name":"mcp__codegraph__codegraph_search","input":{"query":"Widget.render"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"cg1","content":"{\"results\":[{\"symbol\":\"Widget.render\",\"source\":\"SECRET_SOURCE_MUST_NOT_NORMALIZE\"}]}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"cg2","name":"mcp__codegraph__codegraph_callers","input":{"symbol":"Missing.symbol"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"cg2","content":"{\"results\":[]}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"cg3","name":"mcp__codegraph__codegraph_impact","input":{"query":"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"cg3","is_error":true,"content":"token=SECRET_DO_NOT_COPY"}]}}
