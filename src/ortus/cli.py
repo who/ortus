@@ -50,11 +50,11 @@ def main(
 
 
 # FR-002: exactly 8 verbs. Order here drives --help listing order.
-app.command(name="init", help="Bootstrap a fresh repo (bd + .claude + AGENTS.md).")(init)
+app.command(name="init", help="Bootstrap a fresh repo for Claude or Codex.")(init)
 app.command(name="plan", help="Decompose a PRD (or freeform idea) into bd issues.")(plan)
-app.command(name="grind", help="Drive the bd queue via a subprocess-per-task claude /goal loop.")(grind)
+app.command(name="grind", help="Drive the bd queue via backend-neutral subprocess-per-task workers.")(grind)
 app.command(name="interview", help="Interactive PRD-building interview.")(interview)
 app.command(name="tail", help="Tail orchestrator log files (grind-*, goal-*, ralph-*).")(tail)
 app.command(name="triage", help="Triage open bd issues interactively.")(triage)
 app.command(name="human", help="Emit HUMAN-TODO.md for items needing a human decision.")(human)
-app.command(name="check", help="Verify bd/claude/sandbox prereqs.")(check)
+app.command(name="check", help="Verify bd/agent/sandbox prerequisites.")(check)

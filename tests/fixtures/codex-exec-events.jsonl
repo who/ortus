@@ -1,0 +1,12 @@
+{"type":"thread.started","thread_id":"019f7787-14a4-7151-9123-fe6c13abf620"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5-fake` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"**Planning the spike**\nWrite a note file, then read it back."}}
+{"type":"item.started","item":{"id":"item_2","type":"todo_list","items":[{"text":"Write the note file","completed":false},{"text":"Read it back","completed":false}]}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc \"printf 'spike\\\\n' > spike-note.txt && cat spike-note.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc \"printf 'spike\\\\n' > spike-note.txt && cat spike-note.txt\"","aggregated_output":"spike\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'exit 3'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/bin/bash -lc 'exit 3'","aggregated_output":"","exit_code":3,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"Wrote `spike-note.txt` containing `spike`. The failing command exited 3 as expected."}}
+{"type":"item.completed","item":{"id":"item_2","type":"todo_list","items":[{"text":"Write the note file","completed":false},{"text":"Read it back","completed":false}]}}
+{"type":"turn.completed","usage":{"input_tokens":5800,"cached_input_tokens":1280,"output_tokens":230,"reasoning_output_tokens":80}}

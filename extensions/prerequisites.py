@@ -8,7 +8,7 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING
 
-from copier_templates_extensions import ContextHook
+from copier_template_extensions import ContextHook
 
 if TYPE_CHECKING:
     from jinja2 import Environment

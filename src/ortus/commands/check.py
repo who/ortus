@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -16,8 +17,14 @@ from typing import Callable, Optional
 import typer
 
 from ortus.core import output, sandbox
+from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.config import load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,10 @@ def check_bd() -> CheckResult:
 
 def check_claude() -> CheckResult:
     return _binary_check("claude")
+
+
+def check_codex() -> CheckResult:
+    return _binary_check("codex")
 
 
 def check_jq() -> CheckResult:
@@ -88,6 +99,22 @@ def check_claude_settings(repo: Path) -> CheckResult:
     return CheckResult(".claude/settings.json", True, str(settings))
 
 
+def check_codex_settings(repo: Path) -> CheckResult:
+    settings = repo / ".codex" / "config.toml"
+    if not settings.is_file():
+        return CheckResult(".codex/config.toml", False, f"missing at {settings}")
+    try:
+        with settings.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return CheckResult(".codex/config.toml", False, f"unparseable: {exc}")
+    if data.get("sandbox_mode") != "workspace-write":
+        return CheckResult(
+            ".codex/config.toml", False, "sandbox_mode must be workspace-write"
+        )
+    return CheckResult(".codex/config.toml", True, str(settings))
+
+
 def check_hooks(repo: Path) -> CheckResult:
     try:
         check_hooks_enabled(repo)
@@ -118,26 +145,33 @@ def check_prompt_overrides(repo: Path) -> CheckResult:
     )
 
 
-CHECKS: list[Callable[..., CheckResult]] = [
-    check_bd,
-    check_claude,
-    check_jq,
-    check_sandbox,
-]
-
-
-def _run_all(repo: Path) -> list[CheckResult]:
+def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     results: list[CheckResult] = []
-    for c in CHECKS:
+    checks: list[Callable[..., CheckResult]] = [
+        check_bd,
+        check_claude if backend == "claude" else check_codex,
+        check_jq,
+        check_sandbox,
+    ]
+    for c in checks:
         output.progress("check", f"{c.__name__.removeprefix('check_')} ...")
         results.append(c())
-    for fn, label in (
+    repo_checks: list[tuple[Callable[[Path], CheckResult], str]] = [
         (check_beads_dir, ".beads/"),
-        (check_claude_settings, ".claude/settings.json"),
-        (check_hooks, "hooks"),
-        (check_ortusrc, ".ortusrc"),
-        (check_prompt_overrides, ".ortus/prompts/"),
-    ):
+        (
+            check_claude_settings if backend == "claude" else check_codex_settings,
+            ".claude/settings.json" if backend == "claude" else ".codex/config.toml",
+        ),
+    ]
+    if backend == "claude":
+        repo_checks.append((check_hooks, "hooks"))
+    repo_checks.extend(
+        [
+            (check_ortusrc, ".ortusrc"),
+            (check_prompt_overrides, ".ortus/prompts/"),
+        ]
+    )
+    for fn, label in repo_checks:
         output.progress("check", f"{label} ...")
         results.append(fn(repo))
     return results
@@ -147,11 +181,22 @@ def check(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Agent backend to verify (claude|codex); defaults from .ortusrc.",
+    ),
 ) -> None:
     """Verify bd/claude/sandbox prereqs and hook-disable state."""
     target = (repo if repo is not None else Path.cwd()).resolve()
+    try:
+        resolved_backend = resolve_backend(backend, repo=target)
+    except BackendError as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
     output.progress("check", f"target: {target}")
-    results = _run_all(target)
+    output.progress("check", f"backend: {resolved_backend}")
+    results = _run_all(target, resolved_backend)
     output.table(
         ["", "Check", "Status", "Details"],
         [

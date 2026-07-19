@@ -1,8 +1,8 @@
-"""ortus triage <repo> — operator-driven triage with claude-assisted context.
+"""ortus triage <repo> — operator-driven triage with agent-assisted context.
 
 Two-phase flow:
 
-  Phase 1 (claude): a non-interactive `claude -p` session reads the bd
+  Phase 1 (agent): a non-interactive backend session reads the bd
   human-flagged queue, gathers context per issue, and appends one
   JSON envelope per issue to `logs/triage-envelopes.jsonl`.
 
@@ -11,7 +11,7 @@ Two-phase flow:
   decisions via direct `bd` subprocess calls.
 
 The split exists because `AskUserQuestion` is an interactive-only
-surface and is unreachable under `claude -p` — the agent would silently
+surface and is unreachable from the non-interactive worker — the agent would silently
 no-op the prompt. The Python wrapper owns operator I/O so stdin is
 real, and the agent stays scoped to context gathering.
 """
@@ -27,6 +27,7 @@ from typing import Callable, Optional
 import typer
 
 from ortus.core import output
+from ortus.core.agent import BackendError, make_runner, resolve_backend
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.prompts import resolve_prompt
@@ -51,8 +52,8 @@ CLOSE_REASONS: dict[str, str] = {
 }
 
 
-def _make_runner() -> ClaudeRunner:
-    return ClaudeRunner()
+def _make_runner(backend: str = "claude") -> ClaudeRunner:
+    return make_runner(backend)  # type: ignore[arg-type]
 
 
 def _read_envelopes(path: Path) -> list[dict]:
@@ -224,9 +225,19 @@ def triage(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
     ),
+    backend: Optional[str] = typer.Option(
+        None,
+        "--backend",
+        help="Agent backend (claude|codex); defaults from .ortusrc.",
+    ),
 ) -> None:
-    """Triage bd `human`-flagged issues: claude gathers context, you decide."""
+    """Triage bd `human`-flagged issues: an agent gathers context, you decide."""
     target = resolve_repo(repo)
+    try:
+        resolved_backend = resolve_backend(backend, repo=target)
+    except BackendError as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1)
     client = BdClient(target)
     flagged = client.list_human()
     if not flagged:
@@ -243,20 +254,23 @@ def triage(
 
     output.info(
         f"triage starting; {len(flagged)} human-flagged issue(s); "
-        f"claude log → {log_path.relative_to(target)}"
+        f"{resolved_backend} log → {log_path.relative_to(target)}"
     )
-    rc = _make_runner().run(prompt, repo=target, log_path=log_path)
+    runner = (
+        _make_runner() if resolved_backend == "claude" else _make_runner("codex")
+    )
+    rc = runner.run(prompt, repo=target, log_path=log_path)
     if rc != 0:
-        output.error(f"claude (context phase) exited {rc}; see {log_path}")
+        output.error(f"{resolved_backend} (context phase) exited {rc}; see {log_path}")
         raise typer.Exit(code=rc)
 
     envelopes = _read_envelopes(envelopes_path)
     if not envelopes:
         output.error(
-            "claude did not write any envelopes",
+            f"{resolved_backend} did not write any envelopes",
             hint=(
                 f"expected at least one JSON line in {ENVELOPES_FILE}; "
-                f"see {log_path.relative_to(target)} for the claude transcript."
+                f"see {log_path.relative_to(target)} for the agent transcript."
             ),
         )
         raise typer.Exit(code=2)

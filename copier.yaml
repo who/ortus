@@ -1,7 +1,7 @@
 _min_copier_version: "9.0.0"
 
 _jinja_extensions:
-  - copier_templates_extensions.TemplateExtensionLoader
+  - copier_template_extensions.TemplateExtensionLoader
   - extensions/context.py:GitConfigContext
   - extensions/validators.py:AnswersValidator
   - extensions/prerequisites.py:PrerequisiteChecker
@@ -136,6 +136,51 @@ language_profile:
     language_profile must be one of: python, javascript, go, rust, polyglot.
     {% endif %}
 
+network_allowlist:
+  type: json
+  # Computed, never asked. The single source of truth for the sandbox network
+  # allowlist: .claude/settings.json (allowedDomains) and .codex/config.toml
+  # both read this one value, so the two backends cannot drift as the profile
+  # logic evolves (FR-005).
+  when: false
+  default: >-
+    {{ (
+      [
+        "api.anthropic.com",
+        "github.com",
+        "api.github.com",
+        "codeload.github.com",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com"
+      ]
+      + (["registry.npmjs.org"] if language_profile in ["javascript", "polyglot"] else [])
+      + (["pypi.org", "files.pythonhosted.org"] if language_profile in ["python", "polyglot"] else [])
+      + (["crates.io", "static.crates.io"] if language_profile in ["rust", "polyglot"] else [])
+      + (["proxy.golang.org", "sum.golang.org"] if language_profile in ["go", "polyglot"] else [])
+    ) | tojson }}
+
+# =============================================================================
+# Agent Backend
+# =============================================================================
+
+agent_cli:
+  type: str
+  help: >-
+    Which agent CLI drives the Ortus loops? `claude` is Claude Code; `codex` is
+    the ChatGPT Codex CLI. This picks which config file the project ships
+    (.claude/settings.json vs .codex/config.toml), which instruction file the
+    agent reads, and the generated ORTUS_BACKEND_DEFAULT. Either way the
+    loops can be pointed at the other backend at runtime with
+    `--backend` / ORTUS_BACKEND, so this is a default and not a lock-in.
+  choices:
+    Claude Code: claude
+    ChatGPT Codex: codex
+  default: claude
+  validator: >-
+    {% if agent_cli not in ['claude', 'codex'] %}
+    agent_cli must be one of: claude, codex.
+    {% endif %}
+
 # =============================================================================
 # Project Type
 # =============================================================================
@@ -209,9 +254,23 @@ _skip_if_exists:
 _tasks:
   - "chmod +x ortus/ralph.sh ortus/interview.sh ortus/idea.sh ortus/tail.sh"
   - "git init"
-  - "bd init --server"
+  # --skip-agents on codex: `bd init` otherwise writes a .claude/settings.json
+  # into a project that ships none (M4). The beads section the codex backend
+  # does want lands in AGENTS.md via `bd setup codex` below.
+  - "bd init --server{{ ' --skip-agents' if agent_cli == 'codex' else '' }}"
   - "chmod 700 .beads"
-  - "bd setup claude"
+  # Backend-matched recipe: bd ships both a `claude` and a `codex` recipe, and
+  # `bd setup claude` would write a .claude/settings.json into a project that
+  # deliberately ships none (M4). If the installed bd is older and lacks the
+  # recipe for this backend, degrade to a printed manual instruction rather than
+  # failing generation (FR-011).
+  - >-
+    if bd setup --list 2>/dev/null | grep -qE '^[[:space:]]*{{ agent_cli }}[[:space:]]'; then
+    bd setup {{ agent_cli }};
+    else
+    echo "NOTE: this bd has no '{{ agent_cli }}' setup recipe; skipping beads integration setup." >&2;
+    echo "      Upgrade bd and run 'bd setup {{ agent_cli }}' manually to install it." >&2;
+    fi
   - "{{ 'cp \"' + prd_path + '\" prd/intake.md' if has_prd else 'true' }}"
   - "git add -A && git commit -m 'Initial commit from Ortus template'"
   - "./ortus/idea.sh{{ ' --prd prd/intake.md' if has_prd else '' }}"

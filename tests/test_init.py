@@ -36,6 +36,23 @@ def test_init_on_empty_dir_creates_all_artifacts(tmp_path: Path) -> None:
     assert (target / ".ortusrc").is_file()
     assert (target / "AGENTS.md").is_file()
     assert (target / ".gitignore").is_file()
+    branch = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "main"
+
+
+def test_init_codex_creates_only_codex_config(tmp_path: Path) -> None:
+    target = tmp_path / "codex"
+    result = runner.invoke(app, ["init", str(target), "--backend", "codex"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (target / ".codex" / "config.toml").is_file()
+    assert not (target / ".claude").exists()
+    assert 'backend = "codex"' in (target / ".ortusrc").read_text()
 
 
 def test_settings_json_has_bd_excluded_and_hooks(tmp_path: Path) -> None:

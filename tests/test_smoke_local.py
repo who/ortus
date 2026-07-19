@@ -25,7 +25,12 @@ from typing import Callable
 
 import pytest
 
-from .conftest import _link_claude_auth, requires_claude_auth
+from .conftest import (
+    _link_claude_auth,
+    requires_claude_auth,
+    requires_no_nested_sandbox,
+    skip_if_srt_mux_eperm,
+)
 from ._shims import normalize_git_branch
 
 pytestmark = pytest.mark.smoke
@@ -143,6 +148,28 @@ def _require(*binaries: str) -> None:
     missing = [b for b in binaries if shutil.which(b) is None]
     if missing:
         pytest.skip(f"required binaries not on PATH: {', '.join(missing)}")
+
+
+def _session_log_tail(repo: Path, pattern: str, *, lines: int = 40) -> str:
+    """Tail of the most recent logs/<pattern> session log, for assertions.
+
+    A zero-issue `ortus plan` says nothing about *why* on stdout — the cause
+    lives in the session log (e.g. every Bash tool call failing on a sandbox
+    EPERM, ortus-jke7). Inlining the tail makes the failure self-diagnosing
+    instead of sending the next reader digging through pytest tmpdirs.
+    """
+    logs = sorted((repo / "logs").glob(pattern))
+    if not logs:
+        return f"(no {pattern} under {repo / 'logs'})"
+    try:
+        text = logs[-1].read_text(errors="replace")
+    except OSError as exc:  # pragma: no cover - diagnostics only
+        return f"({logs[-1]}: {exc})"
+    return f"{logs[-1]}:\n" + "\n".join(text.splitlines()[-lines:])
+
+
+def _plan_log_tail(repo: Path, *, lines: int = 40) -> str:
+    return _session_log_tail(repo, "plan-*.log", lines=lines)
 
 
 @pytest.fixture(autouse=True)
@@ -483,6 +510,7 @@ def test_triage_skipped_interactive() -> None:
 
 @pytest.mark.slow
 @requires_claude_auth
+@requires_no_nested_sandbox
 def test_plan_decompose_tiny_prd(
     local_ortus: OrtusCallable, tmp_repo: Path, random_prefix: str
 ) -> None:
@@ -501,9 +529,12 @@ def test_plan_decompose_tiny_prd(
         "3. Write unit tests for both\n"
     )
     proc = local_ortus("plan", str(tmp_repo), str(prd), timeout=300.0)
+    if proc.returncode != 0:
+        skip_if_srt_mux_eperm(_plan_log_tail(tmp_repo), what="`ortus plan`")
     assert proc.returncode == 0, (
         f"`ortus plan` exited {proc.returncode} on tiny PRD.\n"
-        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}\n"
+        f"--- plan session log tail ---\n{_plan_log_tail(tmp_repo)}"
     )
     issues = json.loads(
         subprocess.run(
@@ -511,9 +542,12 @@ def test_plan_decompose_tiny_prd(
             cwd=str(tmp_repo), check=True, capture_output=True, text=True,
         ).stdout
     )
+    if len(issues) < 3:
+        skip_if_srt_mux_eperm(_plan_log_tail(tmp_repo), what="`ortus plan`")
     assert len(issues) >= 3, (
         f"`ortus plan` produced {len(issues)} issues; expected ≥ 3 from a "
-        f"3-task PRD. Decomposition logic may have regressed."
+        f"3-task PRD. Decomposition logic may have regressed.\n"
+        f"--- plan session log tail ---\n{_plan_log_tail(tmp_repo)}"
     )
     wrong_prefix = [
         i["id"] for i in issues if not i["id"].startswith(f"{random_prefix}-")
@@ -527,6 +561,7 @@ def test_plan_decompose_tiny_prd(
 
 @pytest.mark.slow
 @requires_claude_auth
+@requires_no_nested_sandbox
 def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     """AC #7: grind --tasks 1 against a seeded fixture closes one issue."""
     _require("bd", "claude")
@@ -546,6 +581,12 @@ def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
         ).stdout
     )
     proc = local_ortus("grind", str(tmp_repo), "--tasks", "1", timeout=600.0)
+    if proc.returncode != 0:
+        skip_if_srt_mux_eperm(
+            _session_log_tail(tmp_repo, "goal-*.log")
+            + _session_log_tail(tmp_repo, "ralph-*.log"),
+            what="`ortus grind --tasks 1`",
+        )
     assert proc.returncode == 0, (
         f"`ortus grind` exited {proc.returncode}.\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
@@ -556,6 +597,12 @@ def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
             cwd=str(tmp_repo), check=True, capture_output=True, text=True,
         ).stdout
     )
+    if len(open_after) != len(open_before) - 1:
+        skip_if_srt_mux_eperm(
+            _session_log_tail(tmp_repo, "goal-*.log")
+            + _session_log_tail(tmp_repo, "ralph-*.log"),
+            what="`ortus grind --tasks 1`",
+        )
     assert len(open_after) == len(open_before) - 1, (
         f"`ortus grind --tasks 1` did not close exactly one issue: "
         f"before={len(open_before)} after={len(open_after)}. grind loop may "

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -49,6 +50,113 @@ def test_grind_dry_run_prints_resolved_flags_and_exits(
     assert "repo:" in result.stdout
     assert "tasks:" in result.stdout
     assert "/goal" in result.stdout
+
+
+def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path)
+    (repo / ".ortusrc").write_text('backend = "codex"\n')
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "backend:        codex" in result.stdout
+    prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
+    assert "Work bd issue" in prompt
+    assert "/goal" not in prompt
+
+
+def test_codex_outer_loop_drives_three_issues_to_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / "codex-loop"
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--non-interactive", "--prefix", "cdx"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    normalize_git_branch(repo)
+    for number in range(3):
+        subprocess.run(
+            [
+                "bd", "create", "--silent", "--title", f"task {number}",
+                "--type", "task", "--priority", "2",
+            ],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    (repo / ".ortusrc").write_text('backend = "codex"\n')
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
+    with (repo / ".gitignore").open("a") as fh:
+        fh.write("\nlogs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "test fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    prompts: list[str] = []
+
+    class ClosingCodex:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, *, repo: Path, log_path: Path, **kwargs: object) -> int:
+            prompts.append(prompt)
+            assert not prompt.startswith("/goal")
+            assert "Do NOT invoke `ortus grind`" in prompt
+            match = re.search(r"Work bd issue ([^\.\s]+)\.", prompt)
+            assert match
+            subprocess.run(
+                ["bd", "close", match.group(1), "--reason", "fake codex completed it"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            marker = repo / "codex-worker-output.txt"
+            prior = marker.read_text() if marker.exists() else ""
+            marker.write_text(prior + match.group(1) + "\n")
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda backend="claude": ClosingCodex())
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--backend", "codex", "--idle-sleep", "0"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(prompts) == 3
+    commits = subprocess.run(
+        ["git", "log", "--format=%s"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert sum("complete Codex grind task" in subject for subject in commits) == 3
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+    ready = subprocess.run(
+        ["bd", "ready", "--json"], cwd=repo, check=True, capture_output=True, text=True
+    )
+    assert json.loads(ready.stdout) == []
 
 
 def test_dry_run_startup_under_500ms(tmp_path: Path) -> None:

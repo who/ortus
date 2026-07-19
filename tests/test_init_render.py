@@ -131,6 +131,17 @@ def test_rendered_ortusrc_validates_as_toml() -> None:
     parsed = tomllib.loads(text)
     assert parsed["prefix"] == "acme"
     assert parsed["project_type"] == "go"
+    assert parsed["backend"] == "claude"
+
+
+def test_codex_render_uses_codex_config_and_no_claude_dir(tmp_path: Path) -> None:
+    ctx = RenderContext(prefix="acme", project_type="python", backend="codex")
+    written = render_all(tmp_path, ctx)
+    assert tmp_path / ".codex" / "config.toml" in written
+    assert (tmp_path / ".codex" / "config.toml").is_file()
+    assert not (tmp_path / ".claude").exists()
+    assert 'backend = "codex"' in (tmp_path / ".ortusrc").read_text()
+    assert "plain" in (tmp_path / "AGENTS.md").read_text()
 
 
 # Acceptance #4 — {% raw %} round-trips bash snippets.

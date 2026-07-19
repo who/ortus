@@ -337,7 +337,7 @@ When `codegraph_available` is false, omit the block entirely — the comment mus
 ```
 **Important**: Only use BLOCKED when there's an actual issue you claimed but cannot complete. Do NOT use BLOCKED when the queue is empty.
 
-**Note**: `<promise>BLOCKED</promise>` is a transcript marker only — no shell parser depends on it. The /goal evaluator may read it from this turn's transcript to judge whether the active issue is stuck; `ortus grind` (the orchestrator) does not grep for the sentinel. Historically the inverse of the pre-Python `ralph.sh` loop, where the BLOCKED sentinel drove the stop condition.
+**Note**: `<promise>BLOCKED</promise>` is a transcript marker only — no shell parser depends on it. A backend may use it as context, but `ortus grind` does not grep for the sentinel; the outer scheduler trusts bd state.
 
 After outputting any signal, stop immediately. Do not continue working.
 

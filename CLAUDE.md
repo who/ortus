@@ -14,56 +14,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Work Execution Policy
 
-**All implementation work MUST go through a Goal loop** (`./ortus/goal.sh`).
-
-When asked to implement features, fix bugs, or make code changes:
-
-1. **Do NOT implement directly** - Instead, create beads issues with detailed descriptions
-2. **Create well-structured issues** - Use `bd create` with clear titles, descriptions, and acceptance criteria
-3. **Set up dependencies** - Use `bd dep add` to establish proper ordering
-4. **Defer to Goal** - `ortus/goal.sh` runs a single long-lived `claude -p "/goal CONDITION"` session via `ortus/prompts/goal-prompt.md`; the `/goal` evaluator decides termination. `ortus/ralph.sh` is now a deprecation shim that prints a notice to stderr and `exec`s `goal.sh` — kept for one minor version so existing muscle memory and scripts keep working. New invocations should call `goal.sh` directly. The shim shares `.beads/ralph.flock` with `goal.sh`, so only one orchestrator can run at a time.
-
-**Allowed without a Goal loop:**
-- Answering questions about the codebase
-- Reading/exploring files for research
-- Creating beads issues
-- Discussing architecture or approach
-
-**Requires a Goal loop:**
-- Writing or modifying code
-- Creating new files
-- Running tests or builds
-- Any implementation work
-
-This ensures all work is tracked, atomic, and follows the defined workflow.
+Track implementation work in beads and follow the session protocol in `AGENTS.md`. Use `ortus grind` for autonomous queue execution. The Python scheduler owns repetition and verifies results from bd state; workers handle one issue per fresh subprocess.
 
 ## Project Overview
 
-Ortus is a Copier template for bootstrapping projects with Claude Code integration, beads issue tracking, and `/goal`-driven automation loops.
+Ortus is a Python CLI for bootstrapping and autonomously executing bd-tracked work with either Claude Code or Codex. Claude is the default; Codex is optional.
 
 ## Technology Stack
 
-- **Template Engine**: Copier (Python)
-- **Template Syntax**: Jinja2
+- **CLI**: Python + Typer
+- **Project templates**: Jinja2 resources under `src/ortus/templates/`
+- **Issue tracking**: beads (`bd`)
 - **Supported Languages**: TypeScript, Python, Go, Rust, and others
 
 ## Development Guidelines
 
 ### Code Standards
-* Template files use Jinja2 syntax for variable substitution
-* Files needing variable substitution use `.jinja` extension
-* Use `{% raw %}...{% endraw %}` to escape template markers in Jinja files
-
-### Before Committing
-1. Test template: `copier copy --defaults template /tmp/test-project`
-2. Verify generated project structure
+* Template files use Jinja2 syntax and a `.jinja` extension.
+* Claude-specific behavior stays in `ClaudeRunner`; Codex-specific behavior stays in `CodexRunner`.
+* Never pass a literal `/goal` to `codex exec`.
+* Run tests covering the changed surface; shared core or prompt changes justify the full suite.
 
 ## Command Reference
 
 ### Development
+
 ```bash
-# Test template generation
-copier copy --defaults --data project_name=testproj --data github_username=testuser template /tmp/test-project
+uv run pytest
+uv build
+ortus init /tmp/test-project --backend claude
+ortus init /tmp/test-project-codex --backend codex
 ```
 
 ### File Operations - Use Fast Tools
@@ -105,30 +85,7 @@ fd -e ext                       # All files with extension
 
 ## Project Architecture
 
-### File Structure
-
-```
-ortus/                        # Project root
-├── ortus/                    # Ortus tooling (matches generated project layout)
-│   ├── goal.sh               # /goal-directive orchestrator (primary)
-│   ├── ralph.sh              # Deprecation shim — execs goal.sh
-│   ├── tail.sh               # Log viewer (ralph-*.log + goal-*.log)
-│   ├── idea.sh               # Quick feature creation
-│   ├── interview.sh          # Interactive interview → PRD → tasks
-│   ├── lib/                  # Shared sandbox.sh / cache.sh helpers
-│   └── prompts/
-│       ├── goal-prompt.md    # /goal session per-task body
-│       ├── ralph-prompt.md   # Legacy ralph prompt (retained until shim retires)
-│       └── prd-prompt.md     # PRD generation prompt
-├── template/                 # Copier template files
-│   ├── ortus/                # Template version of ortus/ tooling
-│   └── *.jinja               # Jinja-templated files
-├── copier.yaml               # Template configuration
-├── .beads/                   # Issue tracking
-├── AGENTS.md                 # Session rules
-├── CLAUDE.md                 # This file
-└── .claude/                  # Claude Code settings
-```
+`src/ortus/commands/` contains the eight CLI verbs. `src/ortus/core/` contains shared scheduler, backend, bd, Git, sandbox, and rendering infrastructure. `src/ortus/prompts/` contains worker prompts and conditions. `src/ortus/templates/` contains the small per-project files emitted by `ortus init`.
 
 ## Issue Tracking
 
@@ -138,8 +95,8 @@ This project uses **beads** (`bd`) for issue tracking. See **AGENTS.md** for wor
 
 * **CLAUDE.md** - AI agent instructions (this file)
 * **AGENTS.md** - Session rules and landing-the-plane protocol
-* **copier.yaml** - Template configuration and questions
-* **template/** - Files that get copied to new projects
+* **src/ortus/core/agent.py** - backend selection and Codex runner
+* **src/ortus/commands/grind.py** - deterministic subprocess-per-task scheduler
 
 ## Pro Tips for AI Agents
 
