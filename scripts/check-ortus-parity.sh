@@ -49,10 +49,47 @@ while IFS= read -r -d '' f; do
     fi
 done < <(find "$SOURCE" -type f -print0)
 
+# ---------------------------------------------------------------------------
+# Required backend artifacts (NFR-003).
+#
+# The walk above already byte-compares lib/backend.sh — but only while the file
+# exists on the source side; deleting both copies would pass silently. And the
+# Codex config template lives outside ortus/ (template/.codex/), so the walk
+# never sees it at all. Assert both explicitly.
+
+require_file() {
+    local path="$1" why="$2"
+    if [ ! -f "$path" ]; then
+        echo "parity: MISSING  $path is required ($why)" >&2
+        status=1
+        return 1
+    fi
+}
+
+require_file "$SOURCE/lib/backend.sh" "backend adapter — canonical copy"
+require_file "$MIRROR/lib/backend.sh" "backend adapter — template mirror"
+
+# The two backend config templates must both draw their network allowlist from
+# the one computed `network_allowlist` copier answer (see copier.yaml). If
+# either stops referencing it, the backends have drifted onto separate posture
+# logic — the exact regression NFR-003 exists to catch. Rendered-value equality
+# is covered by tests/test_codex_config_template.py; this is the cheap,
+# dependency-free structural half that runs in CI via `make parity`.
+CODEX_CONFIG="template/.codex/config.toml.jinja"
+CLAUDE_SETTINGS="template/.claude/settings.json.jinja"
+
+for cfg in "$CODEX_CONFIG" "$CLAUDE_SETTINGS"; do
+    require_file "$cfg" "backend config template" || continue
+    if ! grep -q 'network_allowlist' "$cfg"; then
+        echo "parity: DIVERGED $cfg no longer references the shared network_allowlist answer" >&2
+        status=1
+    fi
+done
+
 if [ "$status" -eq 0 ]; then
     echo "parity: OK — $SOURCE/ and $MIRROR/ in sync"
 else
-    echo "parity: FAIL — mirror $SOURCE/ into $MIRROR/ (or add a .jinja counterpart)" >&2
+    echo "parity: FAIL — see divergences above; for $SOURCE/ files, mirror into $MIRROR/ (or add a .jinja counterpart)" >&2
 fi
 
 exit "$status"
