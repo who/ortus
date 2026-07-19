@@ -54,10 +54,16 @@
 BACKEND_CHOICES="claude codex"
 
 # The copier-generated default — the final fallback in FR-002's precedence
-# chain. The template renders this from the `agent_cli` answer (ortus-1xvv);
-# until that question lands the rendered value is "claude" either way. An
-# already-exported value wins so a generated project can carry its own
-# default without editing this file.
+# chain. A generated project ships lib/backend-default.sh rendered from its
+# `agent_cli` answer; this file is not templated (so `make parity` can compare
+# it byte-for-byte between ortus/ and template/ortus/), it just reads that one
+# if it is there. The Ortus repo itself has no such file and falls through to
+# "claude". An already-exported value wins over both, so ORTUS_BACKEND_DEFAULT
+# can be set by the environment without editing anything.
+_backend_default_file="$(dirname "${BASH_SOURCE[0]}")/backend-default.sh"
+# shellcheck source=/dev/null
+[ -r "$_backend_default_file" ] && . "$_backend_default_file"
+unset _backend_default_file
 ORTUS_BACKEND_DEFAULT="${ORTUS_BACKEND_DEFAULT:-claude}"
 
 # Resolve the backend name and echo it. Precedence: flag > ORTUS_BACKEND >

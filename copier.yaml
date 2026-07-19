@@ -160,6 +160,28 @@ network_allowlist:
     ) | tojson }}
 
 # =============================================================================
+# Agent Backend
+# =============================================================================
+
+agent_cli:
+  type: str
+  help: >-
+    Which agent CLI drives the Ortus loops? `claude` is Claude Code; `codex` is
+    the ChatGPT Codex CLI. This picks which config file the project ships
+    (.claude/settings.json vs .codex/config.toml), which instruction file the
+    agent reads, and the generated ORTUS_BACKEND_DEFAULT. Either way the
+    loops can be pointed at the other backend at runtime with
+    `--backend` / ORTUS_BACKEND, so this is a default and not a lock-in.
+  choices:
+    Claude Code: claude
+    ChatGPT Codex: codex
+  default: claude
+  validator: >-
+    {% if agent_cli not in ['claude', 'codex'] %}
+    agent_cli must be one of: claude, codex.
+    {% endif %}
+
+# =============================================================================
 # Project Type
 # =============================================================================
 
