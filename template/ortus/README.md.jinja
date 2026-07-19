@@ -7,7 +7,11 @@ This project was bootstrapped with [Ortus](https://github.com/{{ github_username
 Ortus is a project template that sets up:
 - **Beads** (`bd`) - Local-first issue tracking
 - **Ralph** - Autonomous task execution loop (default)
+{%- if agent_cli == 'codex' %}
+- **Goal** - Opt-in `/goal`-directive orchestrator (long-lived Codex session)
+{%- else %}
 - **Goal** - Opt-in `/goal`-directive orchestrator (long-lived Claude session)
+{%- endif %}
 - **Interview** - PRD generation through conversation
 
 ## Scripts
@@ -15,7 +19,11 @@ Ortus is a project template that sets up:
 | Script | Purpose |
 |--------|---------|
 | `./ortus/ralph.sh` | Run the task implementation loop (default) |
+{%- if agent_cli == 'codex' %}
+| `./ortus/goal.sh` | Opt-in alternative: long-lived `codex exec "/goal CONDITION"` session |
+{%- else %}
 | `./ortus/goal.sh` | Opt-in alternative: long-lived `claude -p "/goal CONDITION"` session |
+{%- endif %}
 | `./ortus/idea.sh` | Quick-start a new feature |
 | `./ortus/interview.sh` | Generate PRD through interview |
 | `./ortus/tail.sh` | Watch ralph + goal logs |
@@ -24,7 +32,14 @@ Ortus is a project template that sets up:
 
 ## Prompts
 
+{%- if agent_cli == 'codex' %}
+
+The `prompts/` folder contains instructions for the agent (Codex, per this
+project's `agent_cli` answer; `--backend`/`ORTUS_BACKEND` can flip it per run):
+{%- else %}
+
 The `prompts/` folder contains instructions for Claude:
+{%- endif %}
 - `ralph-prompt.md` - Ralph per-task execution instructions
 - `goal-prompt.md` - Goal loop per-task body
 - `interview-prompt.md` - PRD interview flow

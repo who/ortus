@@ -6,7 +6,15 @@
 
 This project was scaffolded with [Ortus](https://github.com/who/ortus), which provides AI-powered development workflows including PRD-to-issues decomposition and automated implementation loops. See the ortus/ directory for scripts and prompts.
 
+{%- if agent_cli == 'codex' %}
+
+The primary orchestrator is `./ortus/goal.sh` — a single long-lived `codex exec "/goal CONDITION"` session that drives the queue and lets the `/goal` evaluator decide termination. `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` with the same arguments; it is kept for one minor version so existing aliases and scripts keep working, and shares `.beads/ralph.flock` with `goal.sh` so only one orchestrator runs at a time. `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
+
+The backend is resolved as `--backend` flag > `ORTUS_BACKEND` env > the `agent_cli` answer baked in at generation time (`{{ agent_cli }}` for this project), so a run can flip backends without regenerating the project.
+{%- else %}
+
 The primary orchestrator is `./ortus/goal.sh` — a single long-lived `claude -p "/goal CONDITION"` session that drives the queue and lets the `/goal` evaluator decide termination. `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` with the same arguments; it is kept for one minor version so existing aliases and scripts keep working, and shares `.beads/ralph.flock` with `goal.sh` so only one orchestrator runs at a time. `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
+{%- endif %}
 
 ### Scoped runs (`goal.sh -c`)
 
@@ -42,22 +50,51 @@ Phrase the condition so a third party reading the transcript can decide pass/fai
 
 - **[beads](https://github.com/steveyegge/beads) v1.0.0+** — issue tracking. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that the Ortus workflow no longer supports. This project runs beads in Dolt server mode (see `.beads/metadata.json`) so concurrent Ralph loops do not contend on an embedded flock.
 - **[dolt](https://docs.dolthub.com/introduction/installation)** — SQL server that backs beads. Must be on `PATH`; beads auto-starts the server on first invocation.
+{%- if agent_cli == 'codex' %}
+- **[codex](https://developers.openai.com/codex/cli)** — Codex CLI for Ralph loops. Install with `npm install -g @openai/codex`, then authenticate with `codex login` (or export `OPENAI_API_KEY` for unattended runs).
+{%- else %}
 - **[claude](https://github.com/anthropics/claude-code)** — Claude CLI for Ralph loops.
+{%- endif %}
 - **[jq](https://jqlang.github.io/jq/)**, **[rg](https://github.com/BurntSushi/ripgrep)**, **[fd](https://github.com/sharkdp/fd)** — used by ortus scripts.
 
 **Optional: [CodeGraph](https://github.com/colbymchenry/codegraph).** Ralph's investigation step runs faster when CodeGraph is installed in the project — it provides a pre-indexed semantic graph of the codebase, so step-4 (Investigate) can resolve symbols, callers, and call graphs in one MCP call instead of dozens of grep/glob/Read calls. **Not required.** Ralph detects CodeGraph at runtime: if `.codegraph/` exists and the MCP server is reachable, Ralph uses it; otherwise it falls back silently to the default search behavior. When CodeGraph is present, Ralph closure comments and PRD decomposition outputs also include CodeGraph-derived structural data (a parseable change record on closures; reference checks and likely-touched files on decompositions); when absent, both remain byte-equivalent to the pre-CodeGraph baseline.
 
 ## Sandboxing prerequisites
 
+{%- if agent_cli == 'codex' %}
+
+Ralph runs Codex inside the OS sandbox so that bash subprocesses spawned during a loop are confined to filesystem-write and network boundaries. The native sandbox is the actual containment surface; Codex's `--sandbox workspace-write` and its approval-bypass flag only stop the CLI pausing for interactive approval and do not reduce containment (see [AGENTS.md](AGENTS.md) "Sandbox Model" for the layered defense). Without the OS dependencies below, `ortus/ralph.sh` will fail-fast at smoke-test time rather than silently degrade to unsandboxed execution.
+{%- else %}
+
 Ralph runs Claude Code inside the OS sandbox so that bash subprocesses spawned during a loop are confined to filesystem-write and network boundaries. The native sandbox is the actual containment surface; `--dangerously-skip-permissions` only suppresses interactive prompts and does not reduce containment (see [CLAUDE.md](CLAUDE.md) "Sandbox Model" for the layered defense). Without the OS dependencies below, `ortus/ralph.sh` will fail-fast at smoke-test time rather than silently degrade to unsandboxed execution.
+{%- endif %}
 
 - **macOS**: Seatbelt is built into the OS — no install required.
 - **Linux / WSL2**: install bubblewrap and socat via `sudo apt-get install bubblewrap socat` (or your distro's equivalent).
 - **WSL1**: unsupported — the sandbox requires WSL2's Linux kernel.
 
+{%- if agent_cli == 'codex' %}
+
+For stronger isolation on hosts where the native sandbox is insufficient, use Tier 2 (`./ortus/ralph.sh --docker`), which adds a Docker outer layer around the native inner sandbox — currently Claude-only, see below.
+{%- else %}
+
 For stronger isolation on hosts where the native sandbox is insufficient, use Tier 2 (`./ortus/ralph.sh --docker`), which adds a Docker outer layer around the native inner sandbox.
+{%- endif %}
 
 ### Sandbox + bd setup
+
+{%- if agent_cli == 'codex' %}
+
+Tier 1's native sandbox blocks loopback TCP by default, but `bd` (beads) needs loopback to talk to its Dolt SQL server. Codex has no per-command exemption list; the equivalent grant in the generated `.codex/config.toml` is a writable workspace, which is where bd keeps its embedded Dolt store:
+
+```toml
+sandbox_mode = "workspace-write"
+```
+
+`ortus/goal.sh` refuses to start if this is narrowed. If you customize `.codex/config.toml`, preserve it.
+
+**Never pipe bd into other commands or use `xargs bd`.**
+{%- else %}
 
 Tier 1's native sandbox blocks loopback TCP by default, but `bd` (beads) needs loopback to talk to its Dolt SQL server. The generated `.claude/settings.json` therefore exempts `bd` from sandbox network containment:
 
@@ -71,7 +108,8 @@ Tier 1's native sandbox blocks loopback TCP by default, but `bd` (beads) needs l
 
 Both entries are required: `bd` matches bare invocations, `bd *` matches subcommands (`bd ready`, `bd show ...`). If you customize `.claude/settings.json`, preserve both entries.
 
-**Never pipe bd into other commands or use `xargs bd`.** The sandbox exemption only applies when `bd` is the directly-invoked binary on the bash command line. Inside `bd list | jq ... | xargs bd show`, the inner `bd` is a child of `xargs` and inherits the sandboxed network namespace, where it hangs indefinitely on the Dolt connection. Use multi-id `bd show <id1> <id2> ...` (which accepts space-separated ids natively) instead of piping into bd.
+**Never pipe bd into other commands or use `xargs bd`.**
+{%- endif %} The sandbox exemption only applies when `bd` is the directly-invoked binary on the bash command line. Inside `bd list | jq ... | xargs bd show`, the inner `bd` is a child of `xargs` and inherits the sandboxed network namespace, where it hangs indefinitely on the Dolt connection. Use multi-id `bd show <id1> <id2> ...` (which accepts space-separated ids natively) instead of piping into bd.
 
 ## Sandbox Tiers
 
@@ -84,6 +122,22 @@ Ortus offers two sandboxing tiers. **Tier 1 (native sandbox only) is the default
 | Startup cost           | None — direct `exec`.                                                          | Container start adds ~1–3s per loop, plus a one-time image pull on first run.             |
 | Docker required        | No.                                                                            | Yes — the `docker sandbox` CLI must be installed.                                         |
 | Recommended scenario   | Solo interactive development; fast iteration on trusted code.                  | Unattended overnight Ralph runs; CI; reviewing untrusted or unfamiliar code.              |
+
+{%- if agent_cli == 'codex' %}
+
+### Authentication
+
+Codex authenticates on the host, before the loop starts — there is no in-container OAuth step, because Tier 2 is Claude-only today (see below). Two paths:
+
+- **`codex login`** — run it once; credentials are written under `CODEX_HOME` and reused by every subsequent loop. Ortus pins `CODEX_HOME` to `$PWD/.codex`, so log in from the project root.
+- **Pre-exported `OPENAI_API_KEY`** — export the env var before invoking `goal.sh`; it skips the login flow entirely. Use this for unattended/CI runs.
+
+`ortus/goal.sh` preflights for both and refuses to launch with a login hint rather than burning a loop on an unauthenticated CLI.
+
+### Tier 2 (`--docker`) is Claude-only
+
+The `--docker` wrapper shells out to `docker sandbox run claude`, which has no Codex equivalent, so `goal.sh --docker` under the Codex backend silently runs Tier 1. Codex projects get their isolation from the native OS sandbox plus `sandbox_mode = "workspace-write"` in `.codex/config.toml`. Flip the backend to `claude` (`--backend claude`) for a run that needs Tier 2.
+{%- else %}
 
 ### Tier 2 (`--docker`): bind-mount and first-run auth
 
@@ -99,3 +153,4 @@ Credentials are cached across runs in the `docker-claude-sandbox-data` Docker vo
 ### Tier 2 on Linux: `enableWeakerNestedSandbox`
 
 On Linux, running the native sandbox inside the Docker container means nesting bubblewrap inside another containment layer, and nested bubblewrap has reduced isolation guarantees — so `.claude/settings.json` sets `enableWeakerNestedSandbox: true` to let the inner sandbox start under these conditions. In Tier 2 the container is the primary security boundary, and the inner native sandbox runs as defense-in-depth on top of it. The security trade-off — weaker nested isolation in exchange for the layered containment Tier 2 provides — is acceptable in this configuration, because the container itself already enforces the strong fs/net boundary against the host.
+{%- endif %}
