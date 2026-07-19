@@ -27,6 +27,24 @@ approval_policy = "never"
 # child of the wrapper and hangs on dolt.
 sandbox_mode = "workspace-write"
 
+# Model selection (Q5). Ortus does not pin one: unset means the Codex CLI's
+# own current default, which tracks whatever OpenAI ships as the recommended
+# coding model. Pinning a name here would rot the moment that default moves,
+# and every generated project would carry the stale name forever.
+#
+# This file is the ONE place to change it — there is deliberately no
+# `codex_model` copier question. A question would bake the answer in at
+# generation time, where re-answering means a `copier update`; editing the
+# config is a one-line commit in the project that owns the decision. Pin it
+# when a project needs a specific model (reproducibility, cost, a capability
+# only one model has):
+#
+# model = "gpt-5-codex"
+#
+# For a single run without editing this file, export ORTUS_CODEX_MODEL=<name>;
+# ortus/lib/backend.sh appends it as `-m <name>`, which the CLI resolves ahead
+# of the config value. Precedence: ORTUS_CODEX_MODEL > this file > CLI default.
+
 [sandbox_workspace_write]
 # The agent needs the network for package installs and API calls; the outer
 # sandbox is what narrows that to the allowlist below. bd itself does not need

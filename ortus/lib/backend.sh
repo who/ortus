@@ -41,7 +41,8 @@
 #                  "inner". Unset (the norm) means "derive it from
 #                  ORTUS_OUTER_SANDBOX". See _backend_codex_posture.
 #   ORTUS_CODEX_MODEL
-#                  optional model name; appended as `-m <model>` to codex argv.
+#                  optional per-run model override; appended as `-m <model>` to
+#                  the codex argv, winning over .codex/config.toml's `model`.
 #   CLAUDE_CMD     optional array; the launcher's command prefix including the
 #                  binary (e.g. the docker sandbox wrapper). Defaults to the
 #                  bare backend binary.
@@ -222,9 +223,11 @@ _backend_argv_codex() {
     # built once by the launcher and is byte-identical across backends.
     BACKEND_ARGV=("${cmd[@]}" exec "$prompt" "${BACKEND_STREAM_FLAGS[@]}" "${CODEX_POSTURE_ARGV[@]}")
 
-    # Model selection is provisional pending Q5 (ortus-z5tj); until then it is
-    # an opt-in env var and the flag is omitted entirely when unset, so the
-    # Codex CLI's own default applies.
+    # Model selection (Q5, ortus-z5tj): .codex/config.toml is the project's
+    # default and ORTUS_CODEX_MODEL is the per-run override, appended as
+    # `-m <name>` which the CLI resolves ahead of the config value. Unset (the
+    # norm) omits the flag entirely, so the config — or, if that leaves `model`
+    # unset too, the Codex CLI's own default — applies.
     [ -n "${ORTUS_CODEX_MODEL:-}" ] && BACKEND_ARGV+=(-m "$ORTUS_CODEX_MODEL")
 
     # Codex has no fast-output tier. Say so rather than silently dropping a

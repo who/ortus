@@ -122,6 +122,40 @@ def test_neither_template_hardcodes_the_registry_logic() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Q5 (ortus-z5tj) — model selection is config-only, and unpinned by default.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_model_is_unpinned_but_documented(profile: str) -> None:
+    """No `model` key ships active — the CLI's own default applies — but the
+    config must teach how to pin one, since it is the only place to do it."""
+    rendered = render(CODEX_TEMPLATE, profile)
+    assert "model" not in tomllib.loads(rendered)
+    assert "# model = " in rendered, "config must show how to pin a model"
+    assert "ORTUS_CODEX_MODEL" in rendered, "config must name the per-run override"
+
+
+def test_no_codex_model_copier_question() -> None:
+    """Config-only means exactly one place to set it (NFR-002); a copier
+    question would be a second."""
+    assert "codex_model" not in yaml.safe_load(COPIER_YAML.read_text())
+
+
+def test_readme_documents_the_model_default_for_codex_only() -> None:
+    template = REPO_ROOT / "template" / "ortus" / "README.md.jinja"
+    body = _env().from_string(template.read_text())
+
+    codex = body.render(github_username="demo", agent_cli="codex")
+    assert "## Model" in codex
+    assert "ORTUS_CODEX_MODEL" in codex
+    assert ".codex/config.toml" in codex
+
+    # A claude project has no Codex model to document.
+    assert "ORTUS_CODEX_MODEL" not in body.render(github_username="demo", agent_cli="claude")
+
+
+# ---------------------------------------------------------------------------
 # M4 — conditional emission. Each backend's config dir sits behind a
 # conditionally-rendered directory name; copier drops a path whose name renders
 # empty, so a claude project never materialises .codex/ and vice versa.

@@ -29,6 +29,31 @@ Ortus is a project template that sets up:
 | `./ortus/tail.sh` | Watch ralph + goal logs |
 
 `ralph.sh` and `goal.sh` share `.beads/ralph.flock`, so only one orchestrator can run at a time.
+{%- if agent_cli == 'codex' %}
+
+## Model
+
+The default is **whatever the Codex CLI itself defaults to** — Ortus does not
+pin a model name. Pinning one would go stale as soon as OpenAI moves that
+default, and every project generated before the move would carry the old name.
+
+To pin a model for this project, uncomment the `model` line in
+`.codex/config.toml`:
+
+```toml
+model = "gpt-5-codex"
+```
+
+That file is the only place to set it; there is no `codex_model` copier
+question to re-answer. For one run without editing it, export
+`ORTUS_CODEX_MODEL`:
+
+```bash
+ORTUS_CODEX_MODEL=gpt-5-codex ./ortus/goal.sh "..."
+```
+
+Precedence: `ORTUS_CODEX_MODEL` > `.codex/config.toml` > the CLI's own default.
+{%- endif %}
 
 ## Prompts
 
