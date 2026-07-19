@@ -12,6 +12,13 @@ copy here would drift and only one backend would notice.
 This file exists so Claude Code, which loads `CLAUDE.md` automatically, is pointed
 at the same instructions.
 
+Claude Code is one of two supported backends; the other is the ChatGPT Codex CLI.
+Which one a run uses is resolved as `--backend claude|codex` > `ORTUS_BACKEND` >
+the `agent_cli` answer this project was generated with (see `AGENTS.md`
+§ Orchestrator for this project's value). For install, auth, cost, model choice,
+and the flows that are Claude-only, see
+[docs/choosing-a-backend.md](docs/choosing-a-backend.md).
+
 ## Claude Code specifics
 
 These apply only to the Claude Code backend; the Codex equivalents (where there

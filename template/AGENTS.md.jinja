@@ -64,9 +64,15 @@ All autonomous loops run through `./ortus/goal.sh`, which drives a single long-l
 {%- endif %}
 The legacy `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` — kept for one minor version so existing aliases and CI invocations keep working. New scripts should call `goal.sh` directly. Both share `.beads/ralph.flock`, so only one orchestrator runs at a time per repo. Logs land at `logs/goal-<timestamp>.log` (and `logs/ralph-*.log` for archival pre-shim runs); `./ortus/tail.sh` follows both transparently.
 
-The backend is resolved as `--backend` flag > `ORTUS_BACKEND` env > the `agent_cli`
-answer baked in at generation time (`{{ agent_cli }}` for this project), so a run can
-flip backends without regenerating the project.
+The loops run on either backend — Claude Code (`claude`) or the ChatGPT Codex CLI
+(`codex`). The backend is resolved as `--backend` flag > `ORTUS_BACKEND` env > the
+`agent_cli` answer baked in at generation time (`{{ agent_cli }}` for this project),
+so a run can flip backends without regenerating the project. Install and auth are
+`claude` + `/login` (or `ANTHROPIC_API_KEY`) and `npm install -g @openai/codex` +
+`codex login` (or `OPENAI_API_KEY`); `goal.sh` preflights auth and fails fast with a
+login hint rather than burning a loop. `interview.sh` and `triage.sh` are Claude-only
+and refuse under `--backend codex`. Full comparison:
+[docs/choosing-a-backend.md](docs/choosing-a-backend.md).
 
 ## Sandbox Model
 

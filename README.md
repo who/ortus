@@ -97,11 +97,17 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 |---|---|---|
 | **uv** | install + run ortus | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
 | **bd** (beads) v1.0.0+ | issue tracking (backed by embedded Dolt) | `brew install beads` or [GH release](https://github.com/gastownhall/beads/releases) |
-| **claude** | the model running inside `ortus grind` | [Claude Code](https://github.com/anthropics/claude-code) |
+| **claude** | the model running inside `ortus grind` (the CLI is Claude-only — see [Agent backends](#agent-backends)) | [Claude Code](https://github.com/anthropics/claude-code) |
 | **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
 | **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
 
 Optional: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. If `.codegraph/` exists in a project, `ortus grind`'s prompts use it for faster symbol/caller/callee lookups; otherwise the loop falls back to grep + Read.
+
+## Agent backends
+
+The `ortus` CLI drives **Claude Code** (`claude`); it has no `--backend` flag today, so `claude` is a hard prerequisite for `ortus grind`.
+
+The older Copier-vendored bash workflow (`copier copy gh:who/ortus`, which generates `ortus/goal.sh` into your project) runs on **either** Claude Code or the **ChatGPT Codex CLI**. There the backend is picked by the `agent_cli` copier question at generation time and overridden per run with `--backend claude|codex` or `ORTUS_BACKEND`. Install/auth is `claude` + `/login` (or `ANTHROPIC_API_KEY`) for Claude, and `npm install -g @openai/codex` + `codex login` (or `OPENAI_API_KEY`) for Codex; `interview.sh` and `triage.sh` are Claude-only. See [`template/docs/choosing-a-backend.md`](template/docs/choosing-a-backend.md) for the full comparison. That workflow is being archived — see [`docs/sunset-notes.md`](docs/sunset-notes.md).
 
 ## Why ortus
 

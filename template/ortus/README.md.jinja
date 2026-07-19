@@ -29,6 +29,23 @@ Ortus is a project template that sets up:
 | `./ortus/tail.sh` | Watch ralph + goal logs |
 
 `ralph.sh` and `goal.sh` share `.beads/ralph.flock`, so only one orchestrator can run at a time.
+
+## Backend
+
+Every script above runs on one of two agent CLIs: Claude Code (`claude`) or the
+ChatGPT Codex CLI (`codex`). This project was generated with `agent_cli =
+{{ agent_cli }}`, but that is a default, not a lock-in — the backend is resolved
+as `--backend` flag > `ORTUS_BACKEND` env > the generated default:
+
+```bash
+./ortus/goal.sh --backend codex "..."
+ORTUS_BACKEND=claude ./ortus/goal.sh
+```
+
+`interview.sh` and `triage.sh` are Claude-only — they need Claude Code's
+structured-question mechanism and refuse immediately under `--backend codex`.
+See [../docs/choosing-a-backend.md](../docs/choosing-a-backend.md) for install,
+auth, cost, model choice, and the full list of gaps.
 {%- if agent_cli == 'codex' %}
 
 ## Model
@@ -63,7 +80,8 @@ The `prompts/` folder contains instructions for the agent (Codex, per this
 project's `agent_cli` answer; `--backend`/`ORTUS_BACKEND` can flip it per run):
 {%- else %}
 
-The `prompts/` folder contains instructions for Claude:
+The `prompts/` folder contains instructions for the agent (Claude, per this
+project's `agent_cli` answer; `--backend`/`ORTUS_BACKEND` can flip it per run):
 {%- endif %}
 - `ralph-prompt.md` - Ralph per-task execution instructions
 - `goal-prompt.md` - Goal loop per-task body

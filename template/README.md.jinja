@@ -10,15 +10,28 @@ This project was scaffolded with [Ortus](https://github.com/who/ortus), which pr
 
 The primary orchestrator is `./ortus/goal.sh` — a single long-lived `codex exec "/goal CONDITION"` session that drives the queue and lets the `/goal` evaluator decide termination. `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` with the same arguments; it is kept for one minor version so existing aliases and scripts keep working, and shares `.beads/ralph.flock` with `goal.sh` so only one orchestrator runs at a time. `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
 
-The backend is resolved as `--backend` flag > `ORTUS_BACKEND` env > the `agent_cli` answer baked in at generation time (`{{ agent_cli }}` for this project), so a run can flip backends without regenerating the project.
 {%- else %}
 
 The primary orchestrator is `./ortus/goal.sh` — a single long-lived `claude -p "/goal CONDITION"` session that drives the queue and lets the `/goal` evaluator decide termination. `./ortus/ralph.sh` is now a one-line deprecation shim that prints a notice and `exec`s `goal.sh` with the same arguments; it is kept for one minor version so existing aliases and scripts keep working, and shares `.beads/ralph.flock` with `goal.sh` so only one orchestrator runs at a time. `./ortus/tail.sh` follows both `ralph-*.log` and `goal-*.log`. See `ortus/README.md` for the per-script reference.
 {%- endif %}
 
-The loops run on either the Claude Code CLI or the ChatGPT Codex CLI — see
+### Backends
+
+The loops run on either the Claude Code CLI (`claude`) or the ChatGPT Codex CLI
+(`codex`). The backend is resolved as `--backend` flag > `ORTUS_BACKEND` env >
+the `agent_cli` answer baked in at generation time (`{{ agent_cli }}` for this
+project), so a run can flip backends without regenerating the project:
+
+```bash
+./ortus/goal.sh --backend codex "..."   # one run on Codex
+ORTUS_BACKEND=claude ./ortus/goal.sh    # one shell's worth of runs on Claude
+```
+
+Two flows are Claude-only today: `ortus/interview.sh` and `ortus/triage.sh` need
+Claude Code's structured-question mechanism and refuse immediately under
+`--backend codex`; run them with `--backend claude`. See
 [docs/choosing-a-backend.md](docs/choosing-a-backend.md) for auth, cost, model
-choice, and the flows that are Claude-only today.
+choice, and the full gap list.
 
 ### Scoped runs (`goal.sh -c`)
 
@@ -55,9 +68,11 @@ Phrase the condition so a third party reading the transcript can decide pass/fai
 - **[beads](https://github.com/steveyegge/beads) v1.0.0+** — issue tracking. The v0.55.0 → v1.0.0 arc completed beads' migration to Dolt as the sole storage backend; earlier versions used pre-Dolt SQLite/noms/JSONL modes that the Ortus workflow no longer supports. This project runs beads in Dolt server mode (see `.beads/metadata.json`) so concurrent Ralph loops do not contend on an embedded flock.
 - **[dolt](https://docs.dolthub.com/introduction/installation)** — SQL server that backs beads. Must be on `PATH`; beads auto-starts the server on first invocation.
 {%- if agent_cli == 'codex' %}
-- **[codex](https://developers.openai.com/codex/cli)** — Codex CLI for Ralph loops. Install with `npm install -g @openai/codex`, then authenticate with `codex login` (or export `OPENAI_API_KEY` for unattended runs).
+- **[codex](https://developers.openai.com/codex/cli)** — agent CLI for the loops; this project's default backend. Install with `npm install -g @openai/codex`, then authenticate with `codex login` (or export `OPENAI_API_KEY` for unattended runs). Log in **from the project root**: Ortus pins `CODEX_HOME` to `$PWD/.codex`.
+- **[claude](https://github.com/anthropics/claude-code)** — only needed if you run `--backend claude`, or use `interview.sh`/`triage.sh`, which are Claude-only. Authenticate with `claude` then `/login` (or export `ANTHROPIC_API_KEY` for unattended runs).
 {%- else %}
-- **[claude](https://github.com/anthropics/claude-code)** — Claude CLI for Ralph loops.
+- **[claude](https://github.com/anthropics/claude-code)** — agent CLI for the loops; this project's default backend. Authenticate with `claude` then `/login` (or export `ANTHROPIC_API_KEY` for unattended runs).
+- **[codex](https://developers.openai.com/codex/cli)** — only needed if you run `--backend codex`. Install with `npm install -g @openai/codex`, then authenticate with `codex login` (or export `OPENAI_API_KEY` for unattended runs). Log in **from the project root**: Ortus pins `CODEX_HOME` to `$PWD/.codex`.
 {%- endif %}
 - **[jq](https://jqlang.github.io/jq/)**, **[rg](https://github.com/BurntSushi/ripgrep)**, **[fd](https://github.com/sharkdp/fd)** — used by ortus scripts.
 
