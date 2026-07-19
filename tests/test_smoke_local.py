@@ -17,9 +17,11 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -415,6 +417,38 @@ def test_check_missing_bd_fails(
 # ---------------------------------------------------------------------------
 
 
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """SIGTERM the child's whole process group, escalating to SIGKILL.
+
+    Returns once nothing in the group can still hold the inherited pipes, so a
+    following communicate() is guaranteed to see EOF. Windows has no killpg;
+    there we can only reach the direct child.
+    """
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":  # pragma: no cover - POSIX-only CI
+        proc.terminate()
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+
 def test_tail_runs_against_seeded_log(tmp_repo: Path) -> None:
     """AC #6: tail runs without crashing and surfaces content from a seeded
     grind-*.log fixture.
@@ -434,16 +468,17 @@ def test_tail_runs_against_seeded_log(tmp_repo: Path) -> None:
     proc = subprocess.Popen(
         ["uv", "run", "--project", str(_REPO_ROOT), "ortus", "tail", str(tmp_repo)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        # `uv run` execs a child ortus process that inherits the stdout/stderr
+        # pipes. Terminating only the parent leaves that descendant holding the
+        # write ends open, so communicate() blocks on EOF forever. Own session
+        # => one killable process group, mirroring core.claude._kill_group.
+        **({} if sys.platform == "win32" else {"start_new_session": True}),
     )
     try:
         stdout, stderr = proc.communicate(timeout=3.0)
     except subprocess.TimeoutExpired:
-        proc.terminate()
-        try:
-            stdout, stderr = proc.communicate(timeout=3.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            stdout, stderr = proc.communicate()
+        _terminate_process_group(proc)
+        stdout, stderr = proc.communicate()
     assert "smoke harness saw this" in stdout, (
         f"`ortus tail` did not surface seeded log content within 3s; the "
         f"log-filter or flush may have regressed.\n"
