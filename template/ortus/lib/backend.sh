@@ -9,6 +9,10 @@
 #   backend_argv <role> [prompt] [prd_path]
 #       Fills the global array BACKEND_ARGV with the full command line.
 #       Roles: goal, prd-decompose, idea-expand.
+#       Also sets BACKEND_OUTPUT_FILE: empty when the role's product is the
+#       command's own stdout (every claude role), or a path the caller must
+#       read and delete when the backend can only deliver the product via a
+#       file (codex idea-expand — its stdout carries session chrome).
 #   backend_env
 #       Exports the env a backend needs before it is invoked. For codex that
 #       is CODEX_HOME=$PWD/.codex; for claude it is a no-op. Always returns 0.
@@ -27,7 +31,8 @@
 # invocation.
 #
 # Env inputs:
-#   ORTUS_BACKEND  backend name; "claude" (all roles) or "codex" (goal role).
+#   ORTUS_BACKEND  backend name; "claude" (all roles) or "codex" (goal and
+#                  idea-expand roles; prd-decompose is not implemented yet).
 #   ORTUS_BACKEND_DEFAULT
 #                  the copier-generated default; final fallback (FR-002).
 #   FAST_MODE      optional extra flag appended to the goal argv. Claude-only;
@@ -208,13 +213,35 @@ _backend_argv_codex() {
     local role="$1" prompt="$2"
     local -a cmd
 
-    if [ "$role" != "goal" ]; then
-        echo "ERROR: backend 'codex' does not implement role '$role' yet (implemented: goal)" >&2
+    if [ "$role" != "goal" ] && [ "$role" != "idea-expand" ]; then
+        echo "ERROR: backend 'codex' does not implement role '$role' yet (implemented: goal, idea-expand)" >&2
         return 1
     fi
 
     _backend_cmd codex
     cmd=("${BACKEND_CMD[@]}")
+
+    if [ "$role" = "idea-expand" ]; then
+        # `codex exec` writes session chrome (config banner, token counts) to
+        # stdout alongside the answer, so capturing stdout the way the claude
+        # branch allows would put that chrome into the bd issue body. -o is the
+        # CLI's own answer: the final assistant message, and nothing else, in a
+        # file. The caller reads BACKEND_OUTPUT_FILE instead of $(...).
+        BACKEND_OUTPUT_FILE=$(mktemp "${TMPDIR:-/tmp}/ortus-idea-expand.XXXXXX") || return 1
+        # read-only, not the goal posture: expanding an idea is a one-shot
+        # completion that has no reason to touch the tree, and the narrower
+        # sandbox makes that unrunnable rather than merely unlikely.
+        # --skip-git-repo-check because idea.sh is reachable before `git init`.
+        BACKEND_ARGV=(
+            "${cmd[@]}" exec "$prompt"
+            --sandbox read-only --ask-for-approval never
+            --skip-git-repo-check --color never
+            -o "$BACKEND_OUTPUT_FILE"
+        )
+        [ -n "${ORTUS_CODEX_MODEL:-}" ] && BACKEND_ARGV+=(-m "$ORTUS_CODEX_MODEL")
+        return 0
+    fi
+
     backend_stream_flags
     _backend_codex_posture || return 1
 
@@ -250,6 +277,10 @@ backend_argv() {
     local role="${1:-}"
     local prompt="${2:-}"
     local prd_path="${3:-${ORTUS_PRD_PATH:-}}"
+
+    # Cleared on every call: a stale path left by a previous role would send
+    # the caller to a file this invocation never writes.
+    BACKEND_OUTPUT_FILE=""
 
     # Role validation is shared: an unknown role fails identically whichever
     # backend is active, so the error can never disagree with itself.

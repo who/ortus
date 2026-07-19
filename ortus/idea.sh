@@ -129,7 +129,16 @@ handle_idea() {
     backend_argv idea-expand "$prompt_template
 
 Idea: $idea" || exit 1
-    description=$("${BACKEND_ARGV[@]}")
+    if [[ -n "${BACKEND_OUTPUT_FILE:-}" ]]; then
+        # Backend delivers the answer in a file (codex). Its stdout is session
+        # chrome: show it on stderr rather than swallowing it, so a failed run
+        # says why instead of just producing an empty description.
+        "${BACKEND_ARGV[@]}" >&2 || true
+        description=$(cat "$BACKEND_OUTPUT_FILE" 2>/dev/null || true)
+        rm -f "$BACKEND_OUTPUT_FILE"
+    else
+        description=$("${BACKEND_ARGV[@]}")
+    fi
 
     local feature_id
     if [[ -z "$description" ]]; then

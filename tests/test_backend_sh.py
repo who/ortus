@@ -249,10 +249,60 @@ def test_codex_stream_flag_is_json() -> None:
 
 
 def test_codex_refuses_the_roles_it_does_not_implement_yet() -> None:
-    for role in ("prd-decompose", "idea-expand"):
-        proc = run_bash(f"backend_argv {role} P || echo rc=$?", env=CODEX)
-        assert "rc=1" in proc.stdout
-        assert "does not implement role" in proc.stderr
+    proc = run_bash("backend_argv prd-decompose P || echo rc=$?", env=CODEX)
+    assert "rc=1" in proc.stdout
+    assert "does not implement role" in proc.stderr
+
+
+# ortus-8njj — codex idea-expand: the answer arrives in a file, not on stdout.
+def test_codex_idea_expand_writes_the_answer_to_backend_output_file(tmp_path) -> None:
+    proc = run_bash(
+        'backend_argv idea-expand "expand this"; '
+        'printf "%s\\n" "${BACKEND_ARGV[@]}"; echo "OUT=$BACKEND_OUTPUT_FILE"',
+        env={**CODEX, "TMPDIR": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    out = lines[-1].removeprefix("OUT=")
+    assert out.startswith(f"{tmp_path}/ortus-idea-expand.")
+    assert Path(out).is_file()
+    assert lines[:-1] == [
+        "codex",
+        "exec",
+        "expand this",
+        "--sandbox",
+        "read-only",
+        "--ask-for-approval",
+        "never",
+        "--skip-git-repo-check",
+        "--color",
+        "never",
+        "-o",
+        out,
+    ]
+
+
+def test_codex_idea_expand_carries_no_stream_flags(tmp_path) -> None:
+    """--json would put JSONL events into the captured product."""
+    argv = argv_with_args("idea-expand", "P", env={**CODEX, "TMPDIR": str(tmp_path)})
+    assert "--json" not in argv
+
+
+def test_backend_output_file_is_empty_for_stdout_roles(tmp_path) -> None:
+    """A stale path from a previous role must not survive into the next call."""
+    proc = run_bash(
+        'backend_argv idea-expand P; backend_argv goal P; echo "OUT=[$BACKEND_OUTPUT_FILE]"',
+        env={**CODEX, "TMPDIR": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "OUT=[]"
+
+    proc = run_bash(
+        'backend_argv idea-expand P; echo "OUT=[$BACKEND_OUTPUT_FILE]"',
+        env={"TMPDIR": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "OUT=[]"
 
 
 def test_unknown_role_fails_identically_under_codex() -> None:
