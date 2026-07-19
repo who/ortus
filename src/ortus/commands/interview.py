@@ -24,11 +24,17 @@ def _make_runner() -> ClaudeRunner:
 
 
 def _pick_feature(client: BdClient) -> Optional[str]:
-    """Return the oldest (by created_at) open feature, or None."""
+    """Return the oldest (by created_at) open feature, or None.
+
+    bd stores created_at at second resolution, so two features created in
+    the same second tie. `bd list --json` does not promise a stable order,
+    so the id is a secondary key: ties then resolve the same way on every
+    call instead of tracking whatever order bd happened to return.
+    """
     features = [i for i in client.list_open() if i.get("issue_type") == "feature"]
     if not features:
         return None
-    features.sort(key=lambda i: i.get("created_at") or "")
+    features.sort(key=lambda i: (i.get("created_at") or "", i["id"]))
     return features[0]["id"]
 
 

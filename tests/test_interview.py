@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import time
@@ -32,6 +33,37 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _created_at(workspace: Path, issue_id: str) -> str:
+    out = subprocess.run(
+        ["bd", "show", issue_id, "--json"],
+        cwd=str(workspace), check=True, capture_output=True, text=True,
+    ).stdout
+    data = json.loads(out)
+    if isinstance(data, list):
+        data = data[0]
+    return data["created_at"]
+
+
+def _create_feature(workspace: Path, title: str, *, after: str | None = None) -> str:
+    """Create an open feature; if `after` is given, retry until bd stamps it
+    strictly later than that issue so the created_at ordering is real."""
+    deadline = time.monotonic() + 10
+    while True:
+        new_id = subprocess.run(
+            ["bd", "create", "--silent", "--title", title,
+             "--type", "feature", "--priority", "2"],
+            cwd=str(workspace), check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        if after is None or _created_at(workspace, after) < _created_at(workspace, new_id):
+            return new_id
+        # Same second as `after`: drop this one and try again once bd's clock moves.
+        subprocess.run(
+            ["bd", "close", new_id], cwd=str(workspace), check=True, capture_output=True
+        )
+        assert time.monotonic() < deadline, "bd created_at never advanced"
+        time.sleep(0.25)
+
+
 def _swap_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(iv, "_make_runner", lambda: ClaudeRunner(claude_binary=str(FAKE)))
 
@@ -55,19 +87,13 @@ def test_interview_picks_first_open_feature_when_no_id(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Acceptance #1: no feature_id → picks first open feature."""
-    f1 = subprocess.run(
-        ["bd", "create", "--silent", "--title", "first", "--type", "feature", "--priority", "2"],
-        cwd=str(workspace), check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    # bd stores `created_at` at second resolution. Without this sleep, both
-    # creates land in the same second on fast CI runners; _pick_feature's
-    # sort by created_at then ties and either feature may be returned,
-    # making the "first" assertion non-deterministic.
-    time.sleep(1.1)
-    subprocess.run(
-        ["bd", "create", "--silent", "--title", "second", "--type", "feature", "--priority", "2"],
-        cwd=str(workspace), check=True, capture_output=True,
-    )
+    f1 = _create_feature(workspace, "first")
+    # bd stores `created_at` at second resolution, so both creates can land
+    # in the same second and tie _pick_feature's sort. Wait on bd's own
+    # observed timestamp rather than a fixed sleep: the assertion below is
+    # only meaningful once the two features are actually ordered.
+    f2 = _create_feature(workspace, "second", after=f1)
+    assert _created_at(workspace, f1) < _created_at(workspace, f2)
     _swap_runner(monkeypatch)
     result = runner.invoke(app, ["interview", str(workspace)])
     assert result.exit_code == 0, result.stdout + result.stderr
