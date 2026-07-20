@@ -27,6 +27,7 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.config import load_config
+from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.prompts import resolve_prompt
 from ortus.core.repo import resolve_repo
 
@@ -42,7 +43,13 @@ def _make_codegraph() -> CodeGraphAdapter:
 
 
 def _decompose_prd(
-    repo: Path, prd: Path, *, log_path: Path, backend: str = "claude", contract: str = ""
+    repo: Path,
+    prd: Path,
+    *,
+    log_path: Path,
+    backend: str = "claude",
+    profile: AgentProfile | None = None,
+    contract: str = "",
 ) -> int:
     """Run claude with the plan prompt, expanded to reference the PRD path."""
     prompt = resolve_prompt("plan-prompt", repo=repo).text
@@ -50,11 +57,16 @@ def _decompose_prd(
     # PRD path; substitute it before handing to claude.
     expanded = prompt.replace("$prd_path", str(prd.resolve())) + contract
     runner = _make_runner() if backend == "claude" else _make_runner("codex")
-    return runner.run(expanded, repo=repo, log_path=log_path)
+    return runner.run(expanded, repo=repo, log_path=log_path, profile=profile)
 
 
 def _expand_idea(
-    repo: Path, *, log_path: Path, backend: str = "claude", contract: str = ""
+    repo: Path,
+    *,
+    log_path: Path,
+    backend: str = "claude",
+    profile: AgentProfile | None = None,
+    contract: str = "",
 ) -> int:
     """Run the interactive idea-expansion flow (interview→PRD→tasks)."""
     # Use the grind prompt's interview entry-point indirectly; for now we
@@ -67,7 +79,7 @@ def _expand_idea(
         "draft a brief PRD inline, then call `bd create` for each work item. "
         "End the turn when bd ready shows the new issues."
     )
-    return runner.run(prompt + contract, repo=repo, log_path=log_path)
+    return runner.run(prompt + contract, repo=repo, log_path=log_path, profile=profile)
 
 
 def plan(
@@ -85,6 +97,14 @@ def plan(
         None,
         "--backend",
         help="Agent backend (claude|codex); defaults from .ortusrc.",
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", help="Override the planning profile model for this run."
+    ),
+    reasoning_effort: Optional[str] = typer.Option(
+        None,
+        "--reasoning-effort",
+        help="Override the planning profile reasoning effort for this run.",
     ),
     codegraph: Optional[CodeGraphMode] = typer.Option(
         None,
@@ -105,12 +125,20 @@ def plan(
     target = resolve_repo(repo)
     try:
         resolved_backend = resolve_backend(backend, repo=target)
-    except BackendError as exc:
+        config = load_config(repo=target)
+        profile = config.resolve_profile(
+            resolved_backend,
+            Phase.PLAN,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
     output.progress("plan", f"target: {target}")
+    output.progress("plan", f"phase profile: {profile.display_name}")
 
-    configured_mode = load_config(repo=target).get("codegraph", "auto")
+    configured_mode = config.get("codegraph", "auto")
     try:
         mode = codegraph or CodeGraphMode(configured_mode)
     except ValueError:
@@ -155,6 +183,7 @@ def plan(
             prd,
             log_path=log_path,
             backend=resolved_backend,
+            profile=profile,
             contract=phase_contract(CodeGraphPhase.PLANNING, probe),
         )
     else:
@@ -166,15 +195,14 @@ def plan(
             target,
             log_path=log_path,
             backend=resolved_backend,
+            profile=profile,
             contract=phase_contract(CodeGraphPhase.PLANNING, probe),
         )
     if rc != 0:
         output.error(f"plan failed ({resolved_backend} exit {rc}); see {log_path}")
         raise typer.Exit(code=rc)
 
-    summary = parse_transcript(
-        log_path, phase=CodeGraphPhase.PLANNING, probe=probe
-    )
+    summary = parse_transcript(log_path, phase=CodeGraphPhase.PLANNING, probe=probe)
     append_normalized(log_path, summary)
     try:
         require_handshake(summary)

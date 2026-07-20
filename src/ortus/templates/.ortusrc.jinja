@@ -4,3 +4,17 @@
 prefix = "{{ prefix }}"
 project_type = "{{ project_type }}"
 backend = "{{ backend }}"
+
+# Optional phase-specific agent profiles. Omit any field to use the selected
+# provider's default. Project values override matching fields in ~/.ortusrc.
+# [profiles.{{ backend }}.plan]
+# model = "provider-model-name"
+# reasoning_effort = "high"
+#
+# [profiles.{{ backend }}.implement]
+# model = "provider-model-name"
+# reasoning_effort = "high"
+#
+# [profiles.{{ backend }}.verify]
+# model = "provider-model-name"
+# reasoning_effort = "high"

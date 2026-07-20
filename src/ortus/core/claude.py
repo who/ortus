@@ -19,7 +19,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from ortus.core.profiles import AgentProfile
 
 # Windows lacks setsid(), getpgid(), killpg(), and SIGKILL. The process-group
 # reap path collapses to proc.terminate()/.kill() on the parent PID — Windows
@@ -43,9 +43,19 @@ class ClaudeRunner:
     claude_binary: str = "claude"
     extra_env: dict[str, str] = field(default_factory=dict)
 
-    def build_argv(self, prompt: str, *, fast: bool = False) -> list[str]:
+    def build_argv(
+        self,
+        prompt: str,
+        *,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+    ) -> list[str]:
         argv: list[str] = [self.claude_binary, "-p", prompt]
         argv.extend(STANDARD_FLAGS)
+        if profile is not None and profile.model is not None:
+            argv.extend(["--model", profile.model])
+        if profile is not None and profile.reasoning_effort is not None:
+            argv.extend(["--effort", profile.reasoning_effort])
         if fast:
             argv.append("--fast")
         return argv
@@ -57,6 +67,7 @@ class ClaudeRunner:
         repo: Path,
         log_path: Path,
         fast: bool = False,
+        profile: AgentProfile | None = None,
         timeout: float | None = None,
     ) -> int:
         """Spawn claude, tee output to log_path (NOT stdout), return exit code.
@@ -64,7 +75,7 @@ class ClaudeRunner:
         Raises subprocess.TimeoutExpired if timeout is exceeded; the child
         and its process group are SIGKILL'd before the exception propagates.
         """
-        argv = self.build_argv(prompt, fast=fast)
+        argv = self.build_argv(prompt, fast=fast, profile=profile)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, **self.extra_env}
 

@@ -17,6 +17,7 @@ from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
+from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from tests._shims import make_inline_python_shim, normalize_git_branch, shim_path
 
@@ -36,7 +37,7 @@ def _fixture_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "fixture"
     (repo / ".beads").mkdir(parents=True)
     settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir()
+    settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
     return repo
 
@@ -62,6 +63,79 @@ def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
     assert "Work bd issue" in prompt
     assert "/goal" not in prompt
+
+
+def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path)
+    (repo / ".ortusrc").write_text(
+        '[profiles.claude.implement]\nmodel = "sonnet"\n'
+        '[profiles.claude.verify]\nreasoning_effort = "high"\n'
+    )
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "claude/implement (model=sonnet, effort=provider-default)" in result.stdout
+    assert "claude/verify (model=provider-default, effort=high)" in result.stdout
+
+
+def test_grind_routes_profiles_and_fast_only_to_implementation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / "profile-routing"
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--non-interactive", "--prefix", "route"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    normalize_git_branch(repo)
+    issue_id = subprocess.run(
+        ["bd", "create", "--silent", "--title", "route profiles", "--type", "task"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    (repo / ".ortusrc").write_text(
+        '[profiles.claude.implement]\nmodel = "sonnet"\n'
+        '[profiles.claude.verify]\nmodel = "opus"\n'
+    )
+    calls: list[dict[str, object]] = []
+
+    class RoutingRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
+            calls.append(kwargs)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            profile = kwargs["profile"]
+            if profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
+                subprocess.run(
+                    ["bd", "close", issue_id, "--reason", "verified"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: RoutingRunner())
+    result = runner.invoke(
+        app, ["grind", str(repo), "--fast", "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert [call["profile"].phase for call in calls] == [  # type: ignore[union-attr]
+        Phase.IMPLEMENT,
+        Phase.VERIFY,
+    ]
+    assert [call["fast"] for call in calls] == [True, False]
 
 
 def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
@@ -94,10 +168,14 @@ def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
     offset = log.stat().st_size
     rejection = "Goal condition is limited to 4000 characters (got 7523)"
     with log.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"type": "result", "num_turns": 0, "result": rejection}) + "\n")
+        fh.write(
+            json.dumps({"type": "result", "num_turns": 0, "result": rejection}) + "\n"
+        )
 
     assert grind_mod._claude_goal_rejection(log, start_offset=offset) == rejection
-    assert grind_mod._claude_goal_rejection(log, start_offset=log.stat().st_size) is None
+    assert (
+        grind_mod._claude_goal_rejection(log, start_offset=log.stat().st_size) is None
+    )
 
 
 def test_codex_outer_loop_drives_three_issues_to_zero(
@@ -117,8 +195,15 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
     for number in range(3):
         subprocess.run(
             [
-                "bd", "create", "--silent", "--title", f"task {number}",
-                "--type", "task", "--priority", "2",
+                "bd",
+                "create",
+                "--silent",
+                "--title",
+                f"task {number}",
+                "--type",
+                "task",
+                "--priority",
+                "2",
             ],
             cwd=repo,
             check=True,
@@ -134,9 +219,7 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
         cwd=repo,
         check=True,
     )
-    subprocess.run(
-        ["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True
-    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(
         ["git", "commit", "-m", "test fixture baseline"],
@@ -150,7 +233,9 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
     class ClosingCodex:
         extra_env: dict[str, str] = {}
 
-        def run(self, prompt: str, *, repo: Path, log_path: Path, **kwargs: object) -> int:
+        def run(
+            self, prompt: str, *, repo: Path, log_path: Path, **kwargs: object
+        ) -> int:
             prompts.append(prompt)
             assert not prompt.startswith("/goal")
             assert "Do NOT invoke `ortus grind`" in prompt
@@ -168,7 +253,9 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
             return 0
 
     _fake_sandbox(monkeypatch)
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda backend="claude": ClosingCodex())
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda backend="claude": ClosingCodex()
+    )
     result = runner.invoke(
         app,
         ["grind", str(repo), "--backend", "codex", "--idle-sleep", "0"],
@@ -183,13 +270,16 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
         text=True,
     ).stdout.splitlines()
     assert sum("complete Codex grind task" in subject for subject in commits) == 3
-    assert subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout == ""
+    assert (
+        subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == ""
+    )
     ready = subprocess.run(
         ["bd", "ready", "--json"], cwd=repo, check=True, capture_output=True, text=True
     )
@@ -203,7 +293,9 @@ def test_dry_run_startup_under_500ms(tmp_path: Path) -> None:
     result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
     elapsed = time.monotonic() - t0
     assert result.exit_code == 0
-    assert elapsed < 0.5, f"grind --dry-run took {elapsed*1000:.0f}ms (NFR-002 budget: 500ms)"
+    assert elapsed < 0.5, (
+        f"grind --dry-run took {elapsed * 1000:.0f}ms (NFR-002 budget: 500ms)"
+    )
 
 
 def test_grind_exits_one_on_missing_sandbox(
@@ -212,7 +304,9 @@ def test_grind_exits_one_on_missing_sandbox(
     repo = _fixture_repo(tmp_path)
 
     def _boom() -> None:
-        raise sandbox_mod.SandboxUnavailable("Sandbox prerequisite missing: bubblewrap (bwrap)\n  hint")
+        raise sandbox_mod.SandboxUnavailable(
+            "Sandbox prerequisite missing: bubblewrap (bwrap)\n  hint"
+        )
 
     monkeypatch.setattr(sandbox_mod, "smoke_test", _boom)
     result = runner.invoke(app, ["grind", str(repo)])
@@ -226,7 +320,9 @@ def test_grind_exits_one_on_disabled_hooks_before_claude(
     """Acceptance #3: disableAllHooks=true → exit 1 BEFORE any claude spawn."""
     repo = _fixture_repo(tmp_path)
     (repo / ".claude" / "settings.json").write_text(
-        json.dumps({"disableAllHooks": True, "sandbox": {"excludedCommands": ["bd", "bd *"]}})
+        json.dumps(
+            {"disableAllHooks": True, "sandbox": {"excludedCommands": ["bd", "bd *"]}}
+        )
     )
     _fake_sandbox(monkeypatch)
     # Force home so the user's real ~/.claude isn't checked.
@@ -241,7 +337,9 @@ def test_grind_exits_one_on_disabled_hooks_before_claude(
 
     result = runner.invoke(app, ["grind", str(repo)])
     assert result.exit_code == 1
-    assert "disableAllHooks" in (result.stdout + result.stderr) or "hooks" in (result.stdout + result.stderr)
+    assert "disableAllHooks" in (result.stdout + result.stderr) or "hooks" in (
+        result.stdout + result.stderr
+    )
 
 
 def test_grind_runs_fake_claude_and_logs_locally(
@@ -268,7 +366,17 @@ def test_grind_runs_fake_claude_and_logs_locally(
     # Seed one ready issue so queue_drained() doesn't short-circuit before
     # claude is spawned.
     subprocess.run(
-        ["bd", "create", "--silent", "--title", "smoke task", "--type", "task", "--priority", "2"],
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "smoke task",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+        ],
         cwd=str(repo),
         check=True,
         capture_output=True,
@@ -279,7 +387,9 @@ def test_grind_runs_fake_claude_and_logs_locally(
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(FAKE_CLAUDE)))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(FAKE_CLAUDE))
+    )
 
     result = runner.invoke(
         app,
@@ -317,7 +427,17 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
     )
     normalize_git_branch(repo)
     create = subprocess.run(
-        ["bd", "create", "--silent", "--title", "inject me", "--type", "task", "--priority", "1"],
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "inject me",
+            "--type",
+            "task",
+            "--priority",
+            "1",
+        ],
         cwd=str(repo),
         check=True,
         capture_output=True,
