@@ -28,7 +28,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim, normalize_git_branch
+from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -57,10 +57,16 @@ def _seed_repo(tmp_path: Path, n_issues: int = 1) -> Path:
     for i in range(n_issues):
         subprocess.run(
             [
-                "bd", "create", "--silent",
-                "--title", f"delta-test-{i}",
-                "--type", "task",
-                "--priority", "2",
+                "bd",
+                "create",
+                "--silent",
+                "--title",
+                f"delta-test-{i}",
+                "--type",
+                "task",
+                "--priority",
+                "2",
+                *ready_issue_args(),
             ],
             cwd=str(repo),
             check=True,
@@ -140,7 +146,9 @@ def test_closed_branch_when_subprocess_closes_an_issue(
         ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"],
     )
     log = _read_log(repo)
-    assert result.exit_code == 0, result.stdout + result.stderr + "\n--- log ---\n" + log
+    assert result.exit_code == 0, (
+        result.stdout + result.stderr + "\n--- log ---\n" + log
+    )
     assert "closed +1" in log, f"expected closed-branch log entry; got:\n{log}"
     assert "WARN orphan" not in log
     assert "WARN no bd-state change" not in log
@@ -182,14 +190,20 @@ def test_orphan_branch_when_subprocess_claims_without_closing(
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "warn",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "warn",
         ],
     )
     log = _read_log(repo)
-    assert result.exit_code == 0, result.stdout + result.stderr + "\n--- log ---\n" + log
+    assert result.exit_code == 0, (
+        result.stdout + result.stderr + "\n--- log ---\n" + log
+    )
     assert "WARN orphan claim" in log, f"expected orphan-branch log entry; got:\n{log}"
     assert "warn: orphan claim on " in log, "orphan-policy=warn should record the id"
 
@@ -226,11 +240,24 @@ def test_no_change_branch_when_subprocess_touches_nothing(
 
     result = runner.invoke(
         app,
-        ["grind", str(repo), "-c", "do nothing", "--iterations", "1", "--idle-sleep", "0"],
+        [
+            "grind",
+            str(repo),
+            "-c",
+            "do nothing",
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+        ],
     )
     log = _read_log(repo)
-    assert result.exit_code == 0, result.stdout + result.stderr + "\n--- log ---\n" + log
-    assert "WARN no bd-state change" in log, f"expected no-change branch log entry; got:\n{log}"
+    assert result.exit_code == 0, (
+        result.stdout + result.stderr + "\n--- log ---\n" + log
+    )
+    assert "WARN no bd-state change" in log, (
+        f"expected no-change branch log entry; got:\n{log}"
+    )
 
 
 # --- queue exhaustion (acceptance #6) ------------------------------------
@@ -256,11 +283,17 @@ def test_human_only_queue_treated_as_drained_without_spawn(
     for i in range(2):
         new_id = subprocess.run(
             [
-                "bd", "create", "--silent",
-                "--title", f"human-only-{i}",
-                "--type", "task",
-                "--priority", "2",
-                "--labels", "human",
+                "bd",
+                "create",
+                "--silent",
+                "--title",
+                f"human-only-{i}",
+                "--type",
+                "task",
+                "--priority",
+                "2",
+                "--labels",
+                "human",
             ],
             cwd=str(repo),
             check=True,
@@ -381,7 +414,9 @@ def test_tasks_cap_stops_outer_loop_after_n_closes(
         ["grind", str(repo), "--tasks", "2", "--idle-sleep", "0"],
     )
     log = _read_log(repo)
-    assert result.exit_code == 0, result.stdout + result.stderr + "\n--- log ---\n" + log
+    assert result.exit_code == 0, (
+        result.stdout + result.stderr + "\n--- log ---\n" + log
+    )
     assert "--tasks cap reached: 2/2" in log, f"expected tasks-cap exit; got:\n{log}"
     # One issue should remain open (3 seeded, 2 closed under cap).
     proc = subprocess.run(

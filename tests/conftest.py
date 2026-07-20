@@ -19,7 +19,7 @@ from typing import Callable
 
 import pytest
 
-from tests._shims import normalize_git_branch, shim_path
+from tests._shims import normalize_git_branch, ready_issue_args, shim_path
 
 _DEPENDENCY_MARKERS = ("fast", "integration", "network", "live_provider")
 _HERMETIC_TEST_BUDGET_SECONDS = 5.0
@@ -46,12 +46,16 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     markers remain authoritative; all other tests are fast hermetic tests.
     """
     for item in items:
-        classes = [name for name in _DEPENDENCY_MARKERS if item.get_closest_marker(name)]
+        classes = [
+            name for name in _DEPENDENCY_MARKERS if item.get_closest_marker(name)
+        ]
         if not classes:
             # Smoke/regression tests exercise command or subprocess boundaries
             # even when their provider/binary is canned, so keep them out of
             # the bounded unit loop.
-            if item.get_closest_marker("smoke") or item.get_closest_marker("regression"):
+            if item.get_closest_marker("smoke") or item.get_closest_marker(
+                "regression"
+            ):
                 item.add_marker(pytest.mark.integration)
             else:
                 item.add_marker(pytest.mark.fast)
@@ -100,6 +104,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
             f"{_HERMETIC_TEST_BUDGET_SECONDS:.0f}s must be optimized or marked slow"
         )
 
+
 # The canonical bash/Copier implementation is archived. Keep its historical
 # tests in-tree with the final-bash sources, but do not collect them once the
 # canonical ``ortus/*.sh`` launchers have been removed. The Python CLI suites
@@ -131,9 +136,9 @@ _CANNED_DIR = _FIXTURES / "canned-claude-responses"
 # do NOT mirror the whole directory, since hermeticity for memory paths,
 # settings, sessions, etc. is the whole point of fake HOME.
 _CLAUDE_AUTH_FILES = (
-    ".credentials.json",   # current claude (>=1.x): hidden, 0600
-    "credentials.json",    # older/forward-compat variant
-    "auth.json",           # older/forward-compat variant
+    ".credentials.json",  # current claude (>=1.x): hidden, 0600
+    "credentials.json",  # older/forward-compat variant
+    "auth.json",  # older/forward-compat variant
 )
 
 
@@ -316,7 +321,17 @@ def seeded_3_issues(tmp_path: Path) -> Path:
     normalize_git_branch(repo)
     # Epic
     epic = subprocess.run(
-        ["bd", "create", "--silent", "--title", "Test epic", "--type", "epic", "--priority", "1"],
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "Test epic",
+            "--type",
+            "epic",
+            "--priority",
+            "1",
+        ],
         cwd=str(repo),
         check=True,
         capture_output=True,
@@ -325,9 +340,18 @@ def seeded_3_issues(tmp_path: Path) -> Path:
     # Ready child
     ready = subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", "Child ready", "--type", "task", "--priority", "2",
-            "--parent", epic,
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "Child ready",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            "--parent",
+            epic,
+            *ready_issue_args(),
         ],
         cwd=str(repo),
         check=True,
@@ -337,9 +361,18 @@ def seeded_3_issues(tmp_path: Path) -> Path:
     # Blocked child (depends on the ready one being closed first)
     blocked = subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", "Child blocked", "--type", "task", "--priority", "2",
-            "--parent", epic,
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "Child blocked",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            "--parent",
+            epic,
+            *ready_issue_args(),
         ],
         cwd=str(repo),
         check=True,

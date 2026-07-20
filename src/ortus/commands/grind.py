@@ -63,6 +63,7 @@ from ortus.core.codegraph import (
 )
 from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
+from ortus.core.readiness import ReadinessReport
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
@@ -157,7 +158,9 @@ def _codex_codegraph_handshake(
         elif not summary.capability_observed:
             reason = "; ".join(summary.fallbacks[:3])
         else:
-            output.progress("grind", f"{phase.value} CodeGraph child handshake succeeded")
+            output.progress(
+                "grind", f"{phase.value} CodeGraph child handshake succeeded"
+            )
             _append_handshake(log_path, phase, success=True)
             return probe
 
@@ -794,7 +797,53 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
-                    target_issue = select_ready_issue(ready)
+                    # `bd ready` can return a compact projection. Load each
+                    # authoritative packet before the readiness guard decides
+                    # whether a fast implementer may claim it.
+                    ready_packets: list[dict] = []
+                    for candidate in ready:
+                        if (
+                            str(
+                                candidate.get("issue_type")
+                                or candidate.get("type")
+                                or ""
+                            )
+                            .strip()
+                            .lower()
+                            == "epic"
+                        ):
+                            ready_packets.append(candidate)
+                            continue
+                        candidate_id = str(candidate.get("id") or "").strip()
+                        if not candidate_id:
+                            message = "readiness skip: ready entry has no issue id"
+                            write_log(message)
+                            output.warn(message)
+                            continue
+                        try:
+                            ready_packets.append(bd.show(candidate_id))
+                        except Exception as exc:
+                            message = (
+                                f"readiness skip: {candidate_id}: could not load full "
+                                f"issue packet ({exc})"
+                            )
+                            write_log(message)
+                            output.warn(message)
+
+                    def report_unready(
+                        candidate: dict, report: ReadinessReport
+                    ) -> None:
+                        diagnostic = report.diagnostic()
+                        message = (
+                            f"readiness skip (left open for planning/human repair): "
+                            f"{diagnostic}"
+                        )
+                        write_log(message)
+                        output.warn(message)
+
+                    target_issue = select_ready_issue(
+                        ready_packets, on_unready=report_unready
+                    )
                     if target_issue is None:
                         # Queue is non-empty (not drained) but nothing is ready —
                         # everything left is blocked or human-flagged. We hold the

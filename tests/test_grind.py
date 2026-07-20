@@ -20,6 +20,7 @@ from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from tests._shims import make_inline_python_shim, normalize_git_branch, shim_path
+from tests.test_readiness import ready_issue
 
 runner = CliRunner()
 
@@ -41,6 +42,36 @@ def _fixture_repo(tmp_path: Path) -> Path:
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
     return repo
+
+
+def _create_ready_issue(
+    repo: Path, title: str, *, priority: str = "2", extra_description: str = ""
+) -> str:
+    packet = ready_issue()
+    description = packet["description"] + extra_description
+    return subprocess.run(
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            title,
+            "--type",
+            "task",
+            "--priority",
+            priority,
+            "--description",
+            description,
+            "--design",
+            packet["design"],
+            "--acceptance",
+            packet["acceptance_criteria"],
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def test_grind_dry_run_prints_resolved_flags_and_exits(
@@ -93,13 +124,7 @@ def test_grind_routes_profiles_and_fast_only_to_implementation(
         capture_output=True,
     )
     normalize_git_branch(repo)
-    issue_id = subprocess.run(
-        ["bd", "create", "--silent", "--title", "route profiles", "--type", "task"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    issue_id = _create_ready_issue(repo, "route profiles")
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
@@ -196,22 +221,7 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
     )
     normalize_git_branch(repo)
     for number in range(3):
-        subprocess.run(
-            [
-                "bd",
-                "create",
-                "--silent",
-                "--title",
-                f"task {number}",
-                "--type",
-                "task",
-                "--priority",
-                "2",
-            ],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-        )
+        _create_ready_issue(repo, f"task {number}")
     (repo / ".ortusrc").write_text('backend = "codex"\n')
     (repo / ".codex").mkdir()
     (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
@@ -369,22 +379,7 @@ def test_grind_runs_fake_claude_and_logs_locally(
     normalize_git_branch(repo)
     # Seed one ready issue so queue_drained() doesn't short-circuit before
     # claude is spawned.
-    subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "smoke task",
-            "--type",
-            "task",
-            "--priority",
-            "2",
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
+    _create_ready_issue(repo, "smoke task")
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
@@ -431,24 +426,7 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
         capture_output=True,
     )
     normalize_git_branch(repo)
-    create = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "inject me",
-            "--type",
-            "task",
-            "--priority",
-            "1",
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    issue_id = create.stdout.strip()
+    issue_id = _create_ready_issue(repo, "inject me", priority="1")
     assert issue_id, "expected bd create to print the new id"
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
@@ -489,25 +467,12 @@ def test_claude_goal_rejection_restores_claim_and_halts_without_retry(
         capture_output=True,
     )
     normalize_git_branch(repo)
-    issue_id = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "oversized planned issue",
-            "--description",
-            "thorough implementation packet " * 300,
-            "--type",
-            "task",
-            "--priority",
-            "1",
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    issue_id = _create_ready_issue(
+        repo,
+        "oversized planned issue",
+        priority="1",
+        extra_description="\n" + "thorough implementation packet " * 300,
+    )
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))

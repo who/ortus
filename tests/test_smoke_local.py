@@ -18,7 +18,6 @@ import os
 import secrets
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import time
@@ -26,6 +25,8 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+
+from tests._shims import ready_issue_args
 
 from .conftest import (
     _link_claude_auth,
@@ -113,8 +114,15 @@ def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
     repo.mkdir()
     proc = subprocess.run(
         [
-            "uv", "run", "--project", str(_REPO_ROOT), "ortus", "init",
-            str(repo), "--prefix", random_prefix,
+            "uv",
+            "run",
+            "--project",
+            str(_REPO_ROOT),
+            "ortus",
+            "init",
+            str(repo),
+            "--prefix",
+            random_prefix,
         ],
         check=False,
         capture_output=True,
@@ -175,7 +183,9 @@ def _plan_log_tail(repo: Path, *, lines: int = 40) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _isolate_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
     """Reroute $HOME so the user's real ~/.claude/settings.json can't influence
     the test outcome — `ortus check`'s hook-precheck reads it.
 
@@ -351,9 +361,7 @@ def test_check_green_path(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     )
 
 
-def test_check_disabled_hooks_fails(
-    local_ortus: OrtusCallable, tmp_repo: Path
-) -> None:
+def test_check_disabled_hooks_fails(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     """AC #6: disableAllHooks=true → check exits 1 with hook-precheck error."""
     _require("bd")
     settings = tmp_repo / ".claude" / "settings.json"
@@ -468,7 +476,9 @@ def test_tail_runs_against_seeded_log(tmp_repo: Path) -> None:
     )
     proc = subprocess.Popen(
         ["uv", "run", "--project", str(_REPO_ROOT), "ortus", "tail", str(tmp_repo)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
         # `uv run` execs a child ortus process that inherits the stdout/stderr
         # pipes. Terminating only the parent leaves that descendant holding the
         # write ends open, so communicate() blocks on EOF forever. Own session
@@ -492,18 +502,27 @@ def test_tail_runs_against_seeded_log(tmp_repo: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_human_writes_todo(
-    local_ortus: OrtusCallable, tmp_repo: Path
-) -> None:
+def test_human_writes_todo(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     """AC #6: human emits HUMAN-TODO.md listing each flagged issue."""
     _require("bd")
     issue_id = subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", "smoke decision needed",
-            "--type", "task", "--priority", "2", "--labels", "human",
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "smoke decision needed",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            "--labels",
+            "human",
         ],
-        cwd=str(tmp_repo), check=True, capture_output=True, text=True,
+        cwd=str(tmp_repo),
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     proc = local_ortus("human", str(tmp_repo))
     assert proc.returncode == 0, (
@@ -576,7 +595,10 @@ def test_plan_decompose_tiny_prd(
     issues = json.loads(
         subprocess.run(
             ["bd", "list", "--status", "open", "--json"],
-            cwd=str(tmp_repo), check=True, capture_output=True, text=True,
+            cwd=str(tmp_repo),
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout
     )
     if len(issues) < 3:
@@ -605,17 +627,29 @@ def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     _require("bd", "claude")
     subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", "Write hello-world to README.md",
-            "--description", "Append the line 'hello world' to README.md.",
-            "--type", "task", "--priority", "2",
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "Write hello-world to README.md",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            *ready_issue_args(),
         ],
-        cwd=str(tmp_repo), check=True, capture_output=True, text=True,
+        cwd=str(tmp_repo),
+        check=True,
+        capture_output=True,
+        text=True,
     )
     open_before = json.loads(
         subprocess.run(
             ["bd", "list", "--status", "open", "--json"],
-            cwd=str(tmp_repo), check=True, capture_output=True, text=True,
+            cwd=str(tmp_repo),
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout
     )
     proc = local_ortus("grind", str(tmp_repo), "--tasks", "1", timeout=600.0)
@@ -632,7 +666,10 @@ def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
     open_after = json.loads(
         subprocess.run(
             ["bd", "list", "--status", "open", "--json"],
-            cwd=str(tmp_repo), check=True, capture_output=True, text=True,
+            cwd=str(tmp_repo),
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout
     )
     if len(open_after) != len(open_before) - 1:

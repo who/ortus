@@ -15,4 +15,6 @@ You are done when the procedure above is complete, with exactly one issue moving
 
 When the procedure is complete, end the session. Do not pick a second issue. Do not output a sentinel; the evaluator reads this transcript.
 
-You may stop early without closing if <ISSUE_ID> cannot be completed because it requires a human decision; in that case run `bd human <ISSUE_ID>` to flag it and exit without closing. The harness will revert the claim and move on.
+If repository reality contradicts the packet, or a material architecture/product choice is still unresolved, this is a structured plan gap. Do not improvise. Preserve any candidate edits already made, but do not commit, discard, or close them. Add one durable comment with `bd comments add <ISSUE_ID> "PLAN-GAP: <the contradiction or missing decision, evidence, and affected files/symbols>"`, then run `bd human <ISSUE_ID>` to route the issue to planning/human handling and exit. Do not add the final verification comment. The harness will apply its configured recovery policy to the claim.
+
+For any other human-only blocker, run `bd human <ISSUE_ID>` and exit without closing.

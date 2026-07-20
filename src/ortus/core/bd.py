@@ -72,6 +72,11 @@ class BdClient:
         _, data = self._run("list", "--status", "open", "--json", parse_json=True)
         return data or []
 
+    def list_all(self) -> list[dict[str, Any]]:
+        """Return every issue, including closed ones, without the default limit."""
+        _, data = self._run("list", "--all", "--limit", "0", "--json", parse_json=True)
+        return data or []
+
     def list_human(self) -> list[dict[str, Any]]:
         """`bd human list --json`: issues flagged for a human decision."""
         _, data = self._run("human", "list", "--json", parse_json=True)
@@ -109,7 +114,16 @@ class BdClient:
         labels: list[str] | None = None,
     ) -> str:
         """Create an issue via `bd create --silent`. Returns the new issue id."""
-        args = ["create", "--silent", "--title", title, "--type", issue_type, "--priority", str(priority)]
+        args = [
+            "create",
+            "--silent",
+            "--title",
+            title,
+            "--type",
+            issue_type,
+            "--priority",
+            str(priority),
+        ]
         if description:
             args.extend(["--description", description])
         if design:

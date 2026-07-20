@@ -31,7 +31,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim, normalize_git_branch
+from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
 
 
 # These tests spawn a real subprocess that hangs until the watchdog kills it;
@@ -62,10 +62,16 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
     normalize_git_branch(repo)
     issue_id = subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", "worker-timeout test",
-            "--type", "task",
-            "--priority", "2",
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "worker-timeout test",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            *ready_issue_args(),
         ],
         cwd=str(repo),
         check=True,
@@ -107,7 +113,9 @@ def _grind_log(repo: Path) -> str:
 
 
 # A worker that NEVER touches bd and sleeps far past the watchdog timeout.
-_SLEEP_FOREVER = 'import time\nprint("hanging, no bd touch", flush=True)\ntime.sleep(120)\n'
+_SLEEP_FOREVER = (
+    'import time\nprint("hanging, no bd touch", flush=True)\ntime.sleep(120)\n'
+)
 
 # A worker that CLAIMS the first ready issue, then hangs (case 1: stuck-alive).
 _CLAIM_THEN_HANG = textwrap.dedent(
@@ -158,21 +166,29 @@ def test_worker_timeout_kills_hung_worker_and_proceeds(
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-    _install_shim(monkeypatch, make_inline_python_shim(tmp_path, "claude-hang", _SLEEP_FOREVER))
+    _install_shim(
+        monkeypatch, make_inline_python_shim(tmp_path, "claude-hang", _SLEEP_FOREVER)
+    )
 
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--worker-timeout", "2",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--worker-timeout",
+            "2",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
     log = _grind_log(repo)
-    assert "worker TIMEOUT after 2s" in log, f"watchdog should log the kill; got:\n{log}"
+    assert "worker TIMEOUT after 2s" in log, (
+        f"watchdog should log the kill; got:\n{log}"
+    )
     # The worker never claimed anything, so bd state is unchanged.
     assert _bd_show(repo, issue_id)["status"] == "open"
 
@@ -187,17 +203,23 @@ def test_worker_timeout_recovers_claimed_orphan_via_policy(
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
     _install_shim(
-        monkeypatch, make_inline_python_shim(tmp_path, "claude-claim-hang", _CLAIM_THEN_HANG)
+        monkeypatch,
+        make_inline_python_shim(tmp_path, "claude-claim-hang", _CLAIM_THEN_HANG),
     )
 
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--worker-timeout", "2",
-            "--orphan-policy", "revert",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--worker-timeout",
+            "2",
+            "--orphan-policy",
+            "revert",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -220,7 +242,8 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
     _install_shim(
-        monkeypatch, make_inline_python_shim(tmp_path, "claude-close-hang", _CLOSE_THEN_HANG)
+        monkeypatch,
+        make_inline_python_shim(tmp_path, "claude-close-hang", _CLOSE_THEN_HANG),
     )
 
     # Headroom: the worker runs three bd calls (ready/update/close) against
@@ -231,11 +254,16 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--worker-timeout", "15",
-            "--orphan-policy", "revert",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--worker-timeout",
+            "15",
+            "--orphan-policy",
+            "revert",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -259,16 +287,22 @@ def test_worker_timeout_zero_disables_watchdog(
     _force_fake_home(monkeypatch, tmp_path)
     _install_shim(
         monkeypatch,
-        make_inline_python_shim(tmp_path, "claude-noop", 'print("did nothing", flush=True)\n'),
+        make_inline_python_shim(
+            tmp_path, "claude-noop", 'print("did nothing", flush=True)\n'
+        ),
     )
 
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--worker-timeout", "0",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--worker-timeout",
+            "0",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr

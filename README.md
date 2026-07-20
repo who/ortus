@@ -156,6 +156,30 @@ accepts `--implement-model`, `--implement-reasoning-effort`, `--verify-model`,
 and `--verify-reasoning-effort`. The compatibility `--fast` flag applies only
 to Claude implementation workers and never to verification.
 
+### Implementation readiness
+
+`ortus plan` writes executable leaves using readiness schema v1 in the existing
+Beads description, design, and acceptance-criteria fields. Leaves must state
+their objective and behavioral context; scope and non-goals; concrete files and
+symbols; resolved decisions and compatibility constraints; ordered steps,
+dependencies, edge cases, and plan-gap handling; and AC-numbered observable
+criteria mapped one-to-one to exact checks plus targeted tests. Epics are
+containers and are exempt.
+
+After decomposition, `ortus plan` validates every new leaf mechanically. It may
+run one fresh repair subprocess with the resolved planning profile, updating
+only the named issues in place. A repair that creates replacement issues, or
+leaves any packet incomplete, makes planning exit nonzero before work is
+claimed.
+
+`ortus grind` applies the same guard immediately before claim. Unready legacy or
+manually authored leaves remain open, and their exact missing sections are
+printed and written to the grind log for planning or human repair; grind may
+continue to a later ready leaf. If implementation discovers a repository
+contradiction or unresolved material choice, the worker records a `PLAN-GAP`
+comment, preserves candidate edits, flags the issue for human handling, and
+stops without committing or closing it.
+
 ### CodeGraph lifecycle
 
 `auto` is the default. Planning and each grind issue transaction emit a clear

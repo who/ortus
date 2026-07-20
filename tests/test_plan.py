@@ -13,7 +13,9 @@ from ortus.cli import app
 from ortus.commands import plan as plan_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import AgentProfile, Phase
+from ortus.core.readiness import validate_issue
 from tests._shims import shim_path
+from tests.test_readiness import ready_issue
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
@@ -42,6 +44,79 @@ def _swap_runner(monkeypatch: pytest.MonkeyPatch, binary: str) -> None:
     monkeypatch.setattr(
         plan_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=binary)
     )
+
+
+def _planner_factory(repo: Path, *, repair: str) -> tuple[type, list[str]]:
+    """Return fresh fake runners sharing a small invocation journal."""
+
+    calls: list[str] = []
+
+    class Planner:
+        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
+            calls.append(prompt)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch()
+            if len(calls) == 1:
+                subprocess.run(
+                    [
+                        "bd",
+                        "create",
+                        "--silent",
+                        "--title",
+                        "incomplete leaf",
+                        "--type",
+                        "task",
+                    ],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            elif repair == "complete":
+                issue_id = subprocess.run(
+                    ["bd", "list", "--status", "open", "--json"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+                import json
+
+                target = json.loads(issue_id)[0]["id"]
+                packet = ready_issue(target)
+                subprocess.run(
+                    [
+                        "bd",
+                        "update",
+                        target,
+                        "--description",
+                        packet["description"],
+                        "--design",
+                        packet["design"],
+                        "--acceptance",
+                        packet["acceptance_criteria"],
+                    ],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            elif repair == "duplicate":
+                subprocess.run(
+                    [
+                        "bd",
+                        "create",
+                        "--silent",
+                        "--title",
+                        "replacement leaf",
+                        "--type",
+                        "task",
+                    ],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            return 0
+
+    return Planner, calls
 
 
 def test_decompose_routes_only_the_supplied_plan_profile(
@@ -139,6 +214,90 @@ def test_plan_zero_issues_exits_one(
     assert "no issues" in combined
     # The message must point at the log so the real cause is one `cat` away.
     assert "plan-" in combined and ".log" in combined
+
+
+def test_plan_repairs_incomplete_leaf_once(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner, calls = _planner_factory(bd_workspace, repair="complete")
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(calls) == 2
+    assert "Repair ONLY these existing issue IDs" in calls[1]
+    issue_id = subprocess.run(
+        ["bd", "list", "--status", "open", "--json"],
+        cwd=bd_workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    import json
+
+    issue = json.loads(issue_id)[0]
+    shown = subprocess.run(
+        ["bd", "show", issue["id"], "--json"],
+        cwd=bd_workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert validate_issue(json.loads(shown)[0]).ready
+
+
+def test_plan_irreparable_leaf_exits_after_one_repair(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner, calls = _planner_factory(bd_workspace, repair="none")
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 1
+    assert len(calls) == 2
+    assert "single repair pass" in result.stderr
+
+
+def test_plan_repair_rejects_replacement_duplicate(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner, calls = _planner_factory(bd_workspace, repair="duplicate")
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 1
+    assert len(calls) == 2
+    assert "replacement issue" in result.stderr
+
+
+def test_plan_epic_only_decomposition_needs_no_repair(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    class EpicPlanner:
+        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
+            nonlocal calls
+            calls += 1
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch()
+            subprocess.run(
+                [
+                    "bd",
+                    "create",
+                    "--silent",
+                    "--title",
+                    "broad container",
+                    "--type",
+                    "epic",
+                ],
+                cwd=bd_workspace,
+                check=True,
+                capture_output=True,
+            )
+            return 0
+
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: EpicPlanner())
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert calls == 1
 
 
 def test_plan_missing_prd_exits_one(bd_workspace: Path) -> None:

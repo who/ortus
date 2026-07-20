@@ -27,7 +27,6 @@ wrapping happens here.
 
 from __future__ import annotations
 
-import os
 import stat
 import subprocess
 import sys
@@ -38,6 +37,60 @@ _BIN_DIR = _FIXTURES / "bin"
 _CANNED_DIR = _FIXTURES / "canned-claude-responses"
 
 IS_WINDOWS = sys.platform == "win32"
+
+
+def ready_issue_args() -> list[str]:
+    """Return bd-create fields for a minimal readiness-schema-v1 test leaf."""
+
+    return [
+        "--description",
+        """## Objective
+Exercise the behavior owned by this test.
+
+## Behavioral context
+The fixture supplies one executable leaf so grind can run the tested worker path.""",
+        "--design",
+        """## Readiness schema
+v1
+
+## Scope
+Run the fixture's single bounded worker scenario.
+
+## Non-goals
+No production feature implementation.
+
+## Concrete locations
+Exercise `src/ortus/commands/grind.py` in `grind()` through the fixture worker interface.
+
+## Resolved decisions
+Use the existing fake-worker scenario and observable Beads state.
+
+## Compatibility constraints
+Keep the fixture hermetic on supported platforms.
+
+## Ordered steps
+1. Let grind claim the fixture leaf.
+2. Run the configured worker scenario.
+3. Assert the resulting state and logs.
+
+## Dependencies
+None — the fixture leaf is standalone; its consumer is `grind()`.
+
+## Edge cases
+The individual test defines timeout, orphan, close, or no-op behavior.
+
+## Plan-gap guidance
+If fixture behavior contradicts the grind contract, record PLAN-GAP and stop.""",
+        "--acceptance",
+        """## Observable criteria
+- AC-1: The configured grind scenario reaches its asserted state.
+
+## Criterion checks
+- AC-1: Run `uv run pytest tests/test_grind.py -q`.
+
+## Targeted tests
+Run `uv run pytest tests/test_grind.py -q`.""",
+    ]
 
 
 def _ensure_executable(path: Path) -> None:
@@ -54,8 +107,7 @@ def _write_bat_wrapper(py_path: Path) -> Path:
     """
     bat = py_path.with_suffix(".bat")
     bat.write_text(
-        "@echo off\r\n"
-        f'"{sys.executable}" "{py_path}" %*\r\n',
+        f'@echo off\r\n"{sys.executable}" "{py_path}" %*\r\n',
         encoding="utf-8",
     )
     return bat
@@ -79,9 +131,7 @@ def shim_path(stem: str) -> Path:
         py = d / f"{stem}.py"
         if py.is_file():
             return _wrap_for_os(py)
-    raise FileNotFoundError(
-        f"no shim named {stem!r} under {_BIN_DIR} or {_CANNED_DIR}"
-    )
+    raise FileNotFoundError(f"no shim named {stem!r} under {_BIN_DIR} or {_CANNED_DIR}")
 
 
 def normalize_git_branch(repo: Path, branch: str = "main") -> None:
