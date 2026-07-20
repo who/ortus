@@ -64,6 +64,7 @@ from ortus.core.codegraph import (
 from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.readiness import ReadinessReport
+from ortus.core.transaction import CandidateJournal, JournalStore
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
@@ -195,16 +196,20 @@ def _checkpoint_codex_preflight(
     git: GitClient,
     integration_branch: str,
     write_log: Callable[[str], None],
-) -> None:
-    """Checkpoint generated tracker exports or reject unowned changes.
+    *,
+    allowed_dirty: frozenset[str] = frozenset(),
+    accept_baseline: bool = False,
+    checkpoint_tracker: bool = True,
+) -> frozenset[str]:
+    """Checkpoint tracker exports and classify remaining dirty paths.
 
     Beads can update and stage its JSONL exports while Grind reads queue state.
-    Those generated files are safe to commit at a distinct preflight boundary;
-    source changes are not. Keeping the two classes separate prevents startup
-    bookkeeping from tripping Codex's safety guard without weakening it.
+    At startup, source changes become a preserved operator baseline instead of
+    blocking Codex. Later calls accept only that baseline plus paths recorded by
+    the active candidate transaction.
     """
     if not git.is_git_repo():
-        return
+        return frozenset()
     dirty = git.dirty_paths()
     if dirty is None:
         write_log("preflight: HALT — git status failed during ownership check")
@@ -214,34 +219,75 @@ def _checkpoint_codex_preflight(
         )
         raise typer.Exit(code=1)
     if not dirty:
-        return
-    unowned = dirty - _TRACKER_EXPORT_PATHS
-    if unowned:
-        rendered = ", ".join(sorted(unowned))
-        write_log(f"preflight: HALT — unowned worktree changes: {rendered}")
+        return frozenset()
+
+    unexpected = dirty - _TRACKER_EXPORT_PATHS - allowed_dirty
+    if unexpected and not accept_baseline:
+        rendered = ", ".join(sorted(unexpected))
+        write_log(f"preflight: HALT — paths outside transaction ownership: {rendered}")
         output.error(
-            "grind: Codex backend found unowned worktree changes",
-            hint=f"commit or stash these paths, then re-run grind: {rendered}",
+            "grind: worktree changed outside the recorded Codex transaction",
+            hint=f"inspect these paths before resuming: {rendered}",
         )
         raise typer.Exit(code=1)
-    write_log(
-        "preflight: tracker-only changes detected; creating housekeeping commit: "
-        + ", ".join(sorted(dirty))
-    )
-    if not git.commit_paths(dirty, "chore: sync beads state"):
+
+    tracker_paths = dirty & _TRACKER_EXPORT_PATHS if checkpoint_tracker else frozenset()
+    if tracker_paths:
+        write_log(
+            "preflight: tracker changes detected; creating housekeeping commit: "
+            + ", ".join(sorted(tracker_paths))
+        )
+    if tracker_paths and not git.commit_paths(tracker_paths, "chore: sync beads state"):
         write_log("preflight: HALT — tracker housekeeping commit failed")
         output.error(
             "grind: failed to checkpoint generated Beads state",
             hint="inspect the staged tracker exports and git configuration",
         )
         raise typer.Exit(code=1)
-    write_log("preflight: tracker housekeeping commit completed")
-    _enforce_branch_discipline(
-        git,
-        integration_branch,
-        write_log,
-        phase="post-housekeeping",
-    )
+    if tracker_paths:
+        write_log("preflight: tracker housekeeping commit completed")
+        _enforce_branch_discipline(
+            git,
+            integration_branch,
+            write_log,
+            phase="post-housekeeping",
+        )
+
+    remaining = git.dirty_paths()
+    if remaining is None:
+        output.error("grind: could not re-read worktree after tracker checkpoint")
+        raise typer.Exit(code=1)
+    if accept_baseline and remaining:
+        write_log(
+            "preflight: preserving dirty operator baseline: "
+            + ", ".join(sorted(remaining))
+        )
+    return remaining
+
+
+def _capture_codex_candidate(
+    git: GitClient,
+    store: JournalStore,
+    journal: CandidateJournal,
+    baseline: frozenset[str],
+    *,
+    phase: str,
+) -> CandidateJournal:
+    """Persist current candidate ownership without absorbing baseline edits."""
+
+    dirty = git.dirty_paths()
+    if dirty is None:
+        output.error("grind: could not capture Codex candidate paths")
+        raise typer.Exit(code=1)
+    if not journal.baseline_is_unchanged(git.repo):
+        output.error(
+            "grind: worker changed a path that was dirty before Codex grind started",
+            hint="operator baseline was preserved; inspect the overlapping path",
+        )
+        raise typer.Exit(code=1)
+    updated = journal.with_candidate(dirty - baseline, phase=phase)
+    store.save(updated)
+    return updated
 
 
 def _enforce_branch_discipline(
@@ -484,9 +530,9 @@ def grind(
         help=(
             "Hard cap (secs) on a single iteration's worker subprocess. On exceed, "
             "SIGTERM then SIGKILL the worker's whole process group (killing any child "
-            "bd/dolt/build processes and releasing their locks), then run the normal "
-            "post-iteration recovery (bd-state delta + orphan-policy). 0 disables the "
-            "watchdog (workers may then hang the loop indefinitely)."
+            "bd/dolt/build processes and releasing their locks). Codex preserves the "
+            "claimed candidate for restart; Claude runs bd-state/orphan-policy "
+            "recovery. 0 disables the watchdog (workers may then hang indefinitely)."
         ),
     ),
     integration_branch: str = typer.Option(
@@ -679,6 +725,82 @@ def grind(
             _enforce_branch_discipline(
                 git, integration_branch, write_log, phase="startup"
             )
+            transaction_store = JournalStore(target)
+            active_journal: CandidateJournal | None = None
+            codex_baseline = frozenset[str]()
+            resume_issue_id: str | None = None
+            if resolved_backend == "codex":
+                active_journal = transaction_store.load()
+                if active_journal is None:
+                    if transaction_store.path.exists():
+                        output.error(
+                            "grind: saved Codex transaction journal is invalid",
+                            hint="inspect logs/grind-transaction.json before resuming",
+                        )
+                        raise typer.Exit(code=1)
+                    codex_baseline = _checkpoint_codex_preflight(
+                        git,
+                        integration_branch,
+                        write_log,
+                        accept_baseline=True,
+                    )
+                else:
+                    dirty = git.dirty_paths()
+                    current_head = git.head_oid()
+                    if dirty is None or current_head != active_journal.base_head:
+                        output.error(
+                            "grind: saved Codex transaction no longer matches HEAD",
+                            hint=(
+                                f"transaction issue={active_journal.issue_id}; "
+                                "inspect logs/grind-transaction.json before resuming"
+                            ),
+                        )
+                        raise typer.Exit(code=1)
+                    if not active_journal.baseline_is_unchanged(target):
+                        output.error(
+                            "grind: a preserved operator baseline path changed during "
+                            "the Codex transaction",
+                            hint="inspect the saved transaction and dirty paths",
+                        )
+                        raise typer.Exit(code=1)
+                    codex_baseline = frozenset(active_journal.baseline_paths)
+                    current_candidate = dirty - codex_baseline
+                    recorded_candidate = frozenset(active_journal.candidate_paths)
+                    sealed_phases = {
+                        "implementation-timeout",
+                        "verification-timeout",
+                        "orphaned-candidate",
+                        "incomplete-candidate",
+                    }
+                    if (
+                        active_journal.phase in sealed_phases
+                        and current_candidate != recorded_candidate
+                    ):
+                        output.error(
+                            "grind: worktree paths no longer match the timed-out "
+                            "Codex candidate",
+                            hint="inspect the saved transaction before resuming",
+                        )
+                        raise typer.Exit(code=1)
+                    active_journal = active_journal.with_candidate(
+                        current_candidate, phase="resume"
+                    )
+                    transaction_store.save(active_journal)
+                    resume_issue_id = active_journal.issue_id
+                    _checkpoint_codex_preflight(
+                        git,
+                        integration_branch,
+                        write_log,
+                        allowed_dirty=dirty,
+                        checkpoint_tracker=False,
+                    )
+                    write_log(
+                        f"transaction resume: issue={resume_issue_id} "
+                        f"candidate_paths={sorted(current_candidate)}"
+                    )
+                    output.progress(
+                        "grind", f"resuming preserved Codex candidate {resume_issue_id}"
+                    )
             initial_snapshot = _snapshot(bd)
             write_log(
                 f"initial state: open={initial_snapshot.open} "
@@ -698,8 +820,10 @@ def grind(
             # (compute_delta on the before/after diff) can never see these
             # because they sit in `before.in_progress_ids` and get subtracted
             # out of every later delta.
-            if initial_snapshot.in_progress_ids:
-                orphan_ids = initial_snapshot.in_progress_ids
+            orphan_ids = initial_snapshot.in_progress_ids - (
+                {resume_issue_id} if resume_issue_id is not None else set()
+            )
+            if orphan_ids:
                 write_log(
                     f"startup orphan sweep: {len(orphan_ids)} "
                     f"orphan(s) from prior grind: {sorted(orphan_ids)}"
@@ -721,13 +845,6 @@ def grind(
                     f"post-sweep state: open={initial_snapshot.open} "
                     f"in_progress={initial_snapshot.in_progress} "
                     f"closed={initial_snapshot.closed}"
-                )
-
-            if resolved_backend == "codex":
-                _checkpoint_codex_preflight(
-                    git,
-                    integration_branch,
-                    write_log,
                 )
 
             if queue_drained(initial_snapshot):
@@ -773,13 +890,19 @@ def grind(
                 )
 
                 # Queue reads can auto-export generated Beads state between
-                # iterations. Checkpoint that state at its own commit boundary,
-                # while continuing to reject every unowned source change.
+                # iterations. Checkpoint that state while preserving the dirty
+                # operator baseline and any active candidate ownership.
                 if resolved_backend == "codex":
+                    allowed = codex_baseline
+                    if active_journal is not None:
+                        allowed |= frozenset(active_journal.candidate_paths)
+                        allowed |= _TRACKER_EXPORT_PATHS
                     _checkpoint_codex_preflight(
                         git,
                         integration_branch,
                         write_log,
+                        allowed_dirty=allowed,
+                        checkpoint_tracker=active_journal is None,
                     )
 
                 # Default path: select + claim the next ready issue IN-HARNESS,
@@ -791,7 +914,11 @@ def grind(
                 # branch and gets the orphan-policy treatment, unchanged.
                 if harness_select:
                     try:
-                        ready = bd.list_ready(exclude_labels=EXCLUDED_LABELS)
+                        ready = (
+                            [bd.show(resume_issue_id)]
+                            if resume_issue_id is not None
+                            else bd.list_ready(exclude_labels=EXCLUDED_LABELS)
+                        )
                     except Exception as exc:  # bd hiccup: don't crash the loop
                         write_log(f"iter prep: bd ready failed ({exc}); idle-sleeping")
                         if idle_sleep > 0:
@@ -864,6 +991,26 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
+                    if resolved_backend == "codex":
+                        if active_journal is None:
+                            active_journal = CandidateJournal.start(
+                                repo=target,
+                                issue_id=issue_id,
+                                base_head=git.head_oid(),
+                                baseline_paths=codex_baseline,
+                            )
+                        dirty_after_claim = git.dirty_paths()
+                        if dirty_after_claim is None:
+                            output.error(
+                                "grind: could not record Codex candidate ownership"
+                            )
+                            raise typer.Exit(code=1)
+                        active_journal = active_journal.with_candidate(
+                            dirty_after_claim - codex_baseline,
+                            phase="implementation",
+                        )
+                        transaction_store.save(active_journal)
+                        resume_issue_id = None
                     configure_codegraph = getattr(runner, "configure_codegraph", None)
                     if callable(configure_codegraph):
                         configure_codegraph(codegraph_probe.capability)
@@ -928,6 +1075,7 @@ def grind(
                 # bd state is ground truth, so a worker that closed its issue
                 # then hung still counts, and a claimed-but-unclosed issue still
                 # gets the orphan-policy treatment.
+                implementation_timed_out = False
                 try:
                     phase_offset = log.stat().st_size if log.exists() else 0
                     output.progress(
@@ -948,11 +1096,36 @@ def grind(
                         timeout=(worker_timeout if worker_timeout > 0 else None),
                     )
                 except subprocess.TimeoutExpired:
+                    implementation_timed_out = True
                     rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
                     write_log(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
                     )
+
+                if (
+                    resolved_backend == "codex"
+                    and implementation_timed_out
+                    and active_journal is not None
+                ):
+                    active_journal = _capture_codex_candidate(
+                        git,
+                        transaction_store,
+                        active_journal,
+                        codex_baseline,
+                        phase="implementation-timeout",
+                    )
+                    write_log(
+                        f"iter {iters_run}: preserved timed-out candidate for "
+                        f"{active_journal.issue_id}: "
+                        f"{list(active_journal.candidate_paths)}"
+                    )
+                    output.progress(
+                        "grind",
+                        f"preserved timed-out candidate {active_journal.issue_id}; "
+                        "re-run grind to resume",
+                    )
+                    break
 
                 if resolved_backend == "claude":
                     rejection = _claude_goal_rejection(log, start_offset=phase_offset)
@@ -1077,6 +1250,7 @@ def grind(
                             else "fallback active"
                         ),
                     )
+                    verification_timed_out = False
                     try:
                         rc = runner.run(
                             verifier_prompt,
@@ -1087,10 +1261,34 @@ def grind(
                             timeout=(worker_timeout if worker_timeout > 0 else None),
                         )
                     except subprocess.TimeoutExpired:
+                        verification_timed_out = True
                         rc = 143
                         write_log(
                             f"iter {iters_run}: verifier TIMEOUT after {worker_timeout}s"
                         )
+                    if (
+                        resolved_backend == "codex"
+                        and verification_timed_out
+                        and active_journal is not None
+                    ):
+                        active_journal = _capture_codex_candidate(
+                            git,
+                            transaction_store,
+                            active_journal,
+                            codex_baseline,
+                            phase="verification-timeout",
+                        )
+                        write_log(
+                            f"iter {iters_run}: preserved verifier-timeout candidate "
+                            f"for {active_journal.issue_id}: "
+                            f"{list(active_journal.candidate_paths)}"
+                        )
+                        output.progress(
+                            "grind",
+                            f"preserved timed-out candidate {active_journal.issue_id}; "
+                            "re-run grind to resume",
+                        )
+                        break
                     if resolved_backend == "claude":
                         rejection = _claude_goal_rejection(
                             log, start_offset=verify_offset
@@ -1161,7 +1359,20 @@ def grind(
                             if harness_select
                             else "ortus: complete Codex grind iteration"
                         )
-                        if not git.commit_all(commit_subject):
+                        if active_journal is None:
+                            output.error(
+                                "grind: closed Codex issue has no ownership journal"
+                            )
+                            raise typer.Exit(code=1)
+                        active_journal = _capture_codex_candidate(
+                            git,
+                            transaction_store,
+                            active_journal,
+                            codex_baseline,
+                            phase="finalizing",
+                        )
+                        owned_paths = frozenset(active_journal.candidate_paths)
+                        if not git.commit_paths(owned_paths, commit_subject):
                             write_log(
                                 f"iter {iters_run}: HALT — outer Codex commit failed"
                             )
@@ -1172,6 +1383,8 @@ def grind(
                             )
                             raise typer.Exit(code=1)
                         write_log(f"iter {iters_run}: outer Codex commit completed")
+                        transaction_store.clear()
+                        active_journal = None
                     # Verify the close actually reached origin/<integration>.
                     # If the worker committed onto main but didn't push, push
                     # it; if it drifted onto a side branch and committed the
@@ -1185,6 +1398,31 @@ def grind(
                         f"iter {iters_run}: WARN orphan claim "
                         f"(in_progress +{delta.in_progress_delta}, ids={sorted(delta.orphan_ids)}, rc={rc})"
                     )
+                    if resolved_backend == "codex" and active_journal is not None:
+                        active_journal = _capture_codex_candidate(
+                            git,
+                            transaction_store,
+                            active_journal,
+                            codex_baseline,
+                            phase="orphaned-candidate",
+                        )
+                        source_candidate = (
+                            frozenset(active_journal.candidate_paths)
+                            - _TRACKER_EXPORT_PATHS
+                        )
+                        if source_candidate:
+                            write_log(
+                                f"iter {iters_run}: preserving owned candidate for "
+                                f"{active_journal.issue_id}: {sorted(source_candidate)}"
+                            )
+                            output.progress(
+                                "grind",
+                                f"preserved candidate {active_journal.issue_id}; "
+                                "re-run grind to resume",
+                            )
+                            break
+                        transaction_store.clear()
+                        active_journal = None
                     action = apply_orphan_policy(
                         orphan_policy,
                         delta.orphan_ids,
@@ -1194,6 +1432,28 @@ def grind(
                     for line in action.actions_taken:
                         write_log(f"  orphan-policy: {line}")
                 else:
+                    if (
+                        resolved_backend == "codex"
+                        and active_journal is not None
+                        and active_journal.issue_id in after.in_progress_ids
+                    ):
+                        active_journal = _capture_codex_candidate(
+                            git,
+                            transaction_store,
+                            active_journal,
+                            codex_baseline,
+                            phase="incomplete-candidate",
+                        )
+                        write_log(
+                            f"iter {iters_run}: preserving incomplete candidate for "
+                            f"{active_journal.issue_id}"
+                        )
+                        output.progress(
+                            "grind",
+                            f"preserved candidate {active_journal.issue_id}; "
+                            "re-run grind to resume",
+                        )
+                        break
                     write_log(f"iter {iters_run}: WARN no bd-state change (rc={rc})")
 
                 # Cap checks BEFORE the idle-sleep so we don't burn idle time
@@ -1214,6 +1474,13 @@ def grind(
                     time.sleep(idle_sleep)
 
             final_snapshot = _snapshot(bd)
+            if resolved_backend == "codex" and active_journal is None:
+                _checkpoint_codex_preflight(
+                    git,
+                    integration_branch,
+                    write_log,
+                    allowed_dirty=codex_baseline,
+                )
             write_log(
                 f"=== ortus grind ended; closed {tasks_completed} "
                 f"(open: {initial_snapshot.open} → {final_snapshot.open}, "

@@ -135,6 +135,11 @@ class GitClient:
         name = proc.stdout.strip()
         return "" if name == "HEAD" else name
 
+    def head_oid(self) -> str:
+        """Return the current HEAD object id, or an empty string when unborn."""
+        proc = self._run("rev-parse", "--verify", "HEAD")
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
     def _count(self, *rev_args: str) -> int:
         """`git rev-list --count <rev_args>` → int, 0 on any error.
 
@@ -198,36 +203,24 @@ class GitClient:
         """
         return self._run("push", "origin", branch).returncode == 0
 
-    def commit_all(self, message: str) -> bool:
-        """Stage and commit the current iteration's changes.
-
-        The Codex grind path calls this only after verifying that the tree was
-        clean before the worker ran, so ``git add -A`` cannot absorb unrelated
-        operator work.
-        """
-        if self._run("add", "-A").returncode != 0:
-            return False
-        if self._run("reset", "--quiet", "--", *_RUNTIME_PATHS).returncode != 0:
-            return False
-        # A close can occasionally be persisted outside the git worktree. In
-        # that case there is nothing to commit and the iteration is still safe.
-        if self._run("diff", "--cached", "--quiet").returncode == 0:
-            return True
-        return self._run("commit", "-m", message).returncode == 0
-
     def commit_paths(self, paths: frozenset[str], message: str) -> bool:
-        """Commit only explicitly owned paths, preserving everything else."""
+        """Commit only explicitly owned paths, preserving everything else.
+
+        ``git commit --only`` builds the commit from the named worktree paths
+        while leaving unrelated staged changes in the index. That matters when
+        grind started from an intentionally dirty operator checkout.
+        """
         if not paths:
             return True
         ordered = sorted(paths)
         if self._run("add", "--", *ordered).returncode != 0:
             return False
-        staged = self._run("diff", "--cached", "--name-only", "-z")
+        staged = self._run("diff", "--cached", "--name-only", "-z", "--", *ordered)
         if staged.returncode != 0:
             return False
         staged_paths = frozenset(path for path in staged.stdout.split("\0") if path)
-        if not staged_paths.issubset(paths):
-            return False
         if not staged_paths:
             return True
-        return self._run("commit", "-m", message).returncode == 0
+        return (
+            self._run("commit", "--only", "-m", message, "--", *ordered).returncode == 0
+        )
