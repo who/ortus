@@ -84,8 +84,43 @@ class GitClient:
 
     def is_clean(self) -> bool:
         """True when no non-runtime worktree changes exist."""
-        proc = self._run("status", "--porcelain", "--", *_WORKER_PATHSPECS)
-        return proc.returncode == 0 and not proc.stdout.strip()
+        return self.dirty_paths() == frozenset()
+
+    def dirty_paths(self) -> frozenset[str] | None:
+        """Return every staged, unstaged, or untracked non-runtime path.
+
+        Porcelain ``-z`` output avoids quoting and whitespace ambiguity. Rename
+        and copy entries contain a second path record; both paths are retained
+        so ownership checks fail safely unless the complete operation is
+        allowlisted.
+        """
+        proc = self._run(
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            *_WORKER_PATHSPECS,
+        )
+        if proc.returncode != 0:
+            return None
+        records = proc.stdout.split("\0")
+        paths: set[str] = set()
+        index = 0
+        while index < len(records):
+            record = records[index]
+            index += 1
+            if not record:
+                continue
+            if len(record) < 4:
+                continue
+            status = record[:2]
+            paths.add(record[3:])
+            if "R" in status or "C" in status:
+                if index < len(records) and records[index]:
+                    paths.add(records[index])
+                index += 1
+        return frozenset(paths)
 
     def current_branch(self) -> str:
         """Checked-out branch name, or "" for a detached HEAD / on error.
@@ -177,5 +212,22 @@ class GitClient:
         # A close can occasionally be persisted outside the git worktree. In
         # that case there is nothing to commit and the iteration is still safe.
         if self._run("diff", "--cached", "--quiet").returncode == 0:
+            return True
+        return self._run("commit", "-m", message).returncode == 0
+
+    def commit_paths(self, paths: frozenset[str], message: str) -> bool:
+        """Commit only explicitly owned paths, preserving everything else."""
+        if not paths:
+            return True
+        ordered = sorted(paths)
+        if self._run("add", "--", *ordered).returncode != 0:
+            return False
+        staged = self._run("diff", "--cached", "--name-only", "-z")
+        if staged.returncode != 0:
+            return False
+        staged_paths = frozenset(path for path in staged.stdout.split("\0") if path)
+        if not staged_paths.issubset(paths):
+            return False
+        if not staged_paths:
             return True
         return self._run("commit", "-m", message).returncode == 0
