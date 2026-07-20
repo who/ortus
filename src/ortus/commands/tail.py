@@ -521,7 +521,12 @@ def _render_codex_object(
 def _render_codegraph_event(obj: dict, palette: _Palette) -> str:
     """Render normalized lifecycle records at every verbosity level."""
     phase = obj.get("phase", "?")
-    if obj.get("kind") == "query":
+    if obj.get("kind") == "handshake":
+        state = "succeeded" if obj.get("success") else "failed"
+        line = f"[CODEGRAPH] {phase} child handshake {state}"
+        if obj.get("reason"):
+            line += f": {obj['reason']}"
+    elif obj.get("kind") == "query":
         state = "ok" if obj.get("success") else "error"
         hit = obj.get("hit")
         hit_label = "hit" if hit is True else "miss" if hit is False else "unknown"

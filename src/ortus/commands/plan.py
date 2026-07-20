@@ -21,6 +21,7 @@ from ortus.core.codegraph import (
     CodeGraphMode,
     CodeGraphPhase,
     CodeGraphUnavailable,
+    CodeGraphCapability,
     append_normalized,
     parse_transcript,
     phase_contract,
@@ -50,6 +51,7 @@ def _decompose_prd(
     backend: str = "claude",
     profile: AgentProfile | None = None,
     contract: str = "",
+    capability: CodeGraphCapability | None = None,
 ) -> int:
     """Run claude with the plan prompt, expanded to reference the PRD path."""
     prompt = resolve_prompt("plan-prompt", repo=repo).text
@@ -57,6 +59,9 @@ def _decompose_prd(
     # PRD path; substitute it before handing to claude.
     expanded = prompt.replace("$prd_path", str(prd.resolve())) + contract
     runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    configure = getattr(runner, "configure_codegraph", None)
+    if callable(configure):
+        configure(capability)
     return runner.run(expanded, repo=repo, log_path=log_path, profile=profile)
 
 
@@ -67,12 +72,16 @@ def _expand_idea(
     backend: str = "claude",
     profile: AgentProfile | None = None,
     contract: str = "",
+    capability: CodeGraphCapability | None = None,
 ) -> int:
     """Run the interactive idea-expansion flow (interview→PRD→tasks)."""
     # Use the grind prompt's interview entry-point indirectly; for now we
     # just hand claude a freeform "interview the user about their idea"
     # instruction. Phase 3 idzn.1 fleshes out the full interview prompt.
     runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    configure = getattr(runner, "configure_codegraph", None)
+    if callable(configure):
+        configure(capability)
     prompt = (
         "The user invoked `ortus plan <repo>` without a PRD. Run an interactive "
         "idea-expansion interview: ask 3-7 questions to clarify the goal, then "
@@ -149,14 +158,14 @@ def plan(
     adapter = _make_codegraph()
     output.progress("plan", f"CodeGraph probe (mode={mode.value})")
     try:
-        probe = adapter.probe(target, mode)
+        probe = adapter.probe(target, mode, backend=resolved_backend)
     except CodeGraphUnavailable as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
     if mode is CodeGraphMode.OFF:
         output.progress("plan", "CodeGraph disabled by policy")
     elif probe.available:
-        output.progress("plan", "CodeGraph activated for planning")
+        output.progress("plan", "CodeGraph child registration ready; awaiting handshake")
     else:
         output.progress("plan", f"CodeGraph fallback: {probe.reason}")
 
@@ -185,6 +194,7 @@ def plan(
             backend=resolved_backend,
             profile=profile,
             contract=phase_contract(CodeGraphPhase.PLANNING, probe),
+            capability=probe.capability,
         )
     else:
         output.progress(
@@ -197,6 +207,7 @@ def plan(
             backend=resolved_backend,
             profile=profile,
             contract=phase_contract(CodeGraphPhase.PLANNING, probe),
+            capability=probe.capability,
         )
     if rc != 0:
         output.error(f"plan failed ({resolved_backend} exit {rc}); see {log_path}")

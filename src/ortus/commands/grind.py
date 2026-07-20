@@ -35,6 +35,7 @@ import datetime as _dt
 import json
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -53,6 +54,7 @@ from ortus.core.codegraph import (
     CodeGraphAdapter,
     CodeGraphMode,
     CodeGraphPhase,
+    CodeGraphProbe,
     CodeGraphUnavailable,
     append_normalized,
     parse_transcript,
@@ -60,7 +62,7 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.config import load_config
-from ortus.core.profiles import Phase, ProfileError
+from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
@@ -110,6 +112,80 @@ def _make_git(repo: Path) -> GitClient:
 def _make_codegraph() -> CodeGraphAdapter:
     """Indirection for lifecycle tests with a deterministic fake adapter."""
     return CodeGraphAdapter()
+
+
+def _codex_codegraph_handshake(
+    runner: ClaudeRunner,
+    *,
+    repo: Path,
+    log_path: Path,
+    phase: CodeGraphPhase,
+    probe: CodeGraphProbe,
+    profile: AgentProfile,
+    timeout: float | None,
+) -> CodeGraphProbe:
+    """Prove child registration in a read-only process before phase work."""
+    if not getattr(probe, "available", False):
+        return probe
+    handshake = getattr(runner, "run_codegraph_handshake", None)
+    offset = log_path.stat().st_size if log_path.exists() else 0
+    reason: str | None = None
+    if not callable(handshake):
+        reason = "Codex runner does not support the CodeGraph child handshake"
+    else:
+        output.progress("grind", f"{phase.value} CodeGraph child handshake probe")
+        try:
+            rc = handshake(
+                phase=phase.value,
+                repo=repo,
+                log_path=log_path,
+                profile=profile,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            rc = 143
+            reason = "Codex CodeGraph child handshake timed out"
+        except OSError as exc:
+            rc = 1
+            reason = f"Codex CodeGraph child handshake could not launch: {exc}"
+        summary = parse_transcript(
+            log_path, phase=phase, probe=probe, start_offset=offset
+        )
+        append_normalized(log_path, summary)
+        if rc != 0 and reason is None:
+            reason = f"Codex CodeGraph child handshake exited {rc}"
+        elif not summary.capability_observed:
+            reason = "; ".join(summary.fallbacks[:3])
+        else:
+            output.progress("grind", f"{phase.value} CodeGraph child handshake succeeded")
+            _append_handshake(log_path, phase, success=True)
+            return probe
+
+    assert reason is not None
+    _append_handshake(log_path, phase, success=False, reason=reason)
+    if probe.mode is CodeGraphMode.REQUIRED:
+        raise CodeGraphUnavailable(f"CodeGraph required but {reason}")
+    output.progress("grind", f"{phase.value} CodeGraph fallback: {reason}")
+    return replace(probe, available=False, reason=reason, capability=None)
+
+
+def _append_handshake(
+    log_path: Path,
+    phase: CodeGraphPhase,
+    *,
+    success: bool,
+    reason: str | None = None,
+) -> None:
+    record = {
+        "type": "ortus.codegraph",
+        "schema": 1,
+        "kind": "handshake",
+        "phase": phase.value,
+        "success": success,
+        "reason": reason,
+    }
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def _checkpoint_codex_preflight(
@@ -492,7 +568,9 @@ def grind(
     if not dry_run:
         output.progress("grind", f"CodeGraph probe (mode={codegraph_mode.value})")
     try:
-        codegraph_probe = codegraph_adapter.probe(target, codegraph_mode)
+        codegraph_probe = codegraph_adapter.probe(
+            target, codegraph_mode, backend=resolved_backend
+        )
     except CodeGraphUnavailable as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
@@ -500,7 +578,9 @@ def grind(
         if codegraph_mode is CodeGraphMode.OFF:
             output.progress("grind", "CodeGraph disabled by policy")
         elif codegraph_probe.available:
-            output.progress("grind", "CodeGraph activated for issue transactions")
+            output.progress(
+                "grind", "CodeGraph child registration ready; awaiting handshake"
+            )
         else:
             output.progress("grind", f"CodeGraph fallback: {codegraph_probe.reason}")
 
@@ -663,6 +743,9 @@ def grind(
                 if resolved_backend == "claude"
                 else _make_runner("codex")
             )
+            configure_codegraph = getattr(runner, "configure_codegraph", None)
+            if callable(configure_codegraph):
+                configure_codegraph(codegraph_probe.capability)
             runner.extra_env.update(cache_env)
 
             tasks_completed = 0
@@ -670,6 +753,8 @@ def grind(
 
             while True:
                 before = _snapshot(bd)
+                implementation_probe = codegraph_probe
+                verification_probe = codegraph_probe
                 if queue_drained(before):
                     write_log(
                         f"queue drained; exiting outer loop. tasks_completed={tasks_completed}"
@@ -730,6 +815,31 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
+                    configure_codegraph = getattr(runner, "configure_codegraph", None)
+                    if callable(configure_codegraph):
+                        configure_codegraph(codegraph_probe.capability)
+                    try:
+                        implementation_probe = (
+                            _codex_codegraph_handshake(
+                                runner,
+                                repo=target,
+                                log_path=log,
+                                phase=CodeGraphPhase.IMPLEMENTATION,
+                                probe=codegraph_probe,
+                                profile=implement_profile,
+                                timeout=(
+                                    worker_timeout if worker_timeout > 0 else None
+                                ),
+                            )
+                            if resolved_backend == "codex"
+                            else codegraph_probe
+                        )
+                    except CodeGraphUnavailable as exc:
+                        bd.update_status(issue_id, "open")
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
+                    if callable(configure_codegraph):
+                        configure_codegraph(implementation_probe.capability)
                     implementation_instruction = (
                         "IMPLEMENTATION PHASE ONLY. Make candidate edits and run targeted "
                         "checks, but do not add the final verification comment and do not "
@@ -742,7 +852,7 @@ def grind(
                             resolved_backend,
                             phase_instruction=implementation_instruction,
                             phase_contract_text=phase_contract(
-                                CodeGraphPhase.IMPLEMENTATION, codegraph_probe
+                                CodeGraphPhase.IMPLEMENTATION, implementation_probe
                             ),
                         )
                     except BackendError as exc:
@@ -773,10 +883,10 @@ def grind(
                     phase_offset = log.stat().st_size if log.exists() else 0
                     output.progress(
                         "grind",
-                        "implementation CodeGraph "
+                        "implementation CodeGraph handshake "
                         + (
-                            "engaged"
-                            if codegraph_probe.available
+                            "requested"
+                            if implementation_probe.available
                             else "fallback active"
                         ),
                     )
@@ -813,10 +923,20 @@ def grind(
                 implementation_summary = parse_transcript(
                     log,
                     phase=CodeGraphPhase.IMPLEMENTATION,
-                    probe=codegraph_probe,
+                    probe=implementation_probe,
                     start_offset=phase_offset,
                 )
                 append_normalized(log, implementation_summary)
+                if implementation_summary.capability_observed:
+                    output.progress(
+                        "grind", "implementation CodeGraph handshake succeeded"
+                    )
+                elif codegraph_mode is not CodeGraphMode.OFF:
+                    output.progress(
+                        "grind",
+                        "implementation CodeGraph fallback: "
+                        + "; ".join(implementation_summary.fallbacks[:3]),
+                    )
                 write_log(
                     f"CodeGraph implementation summary: queries={len(implementation_summary.events)} "
                     f"fallbacks={implementation_summary.fallbacks or 'none'}"
@@ -854,6 +974,30 @@ def grind(
 
                 mid = _snapshot(bd)
                 if harness_select and issue_id in mid.in_progress_ids:
+                    if callable(configure_codegraph):
+                        configure_codegraph(codegraph_probe.capability)
+                    try:
+                        verification_probe = (
+                            _codex_codegraph_handshake(
+                                runner,
+                                repo=target,
+                                log_path=log,
+                                phase=CodeGraphPhase.VERIFICATION,
+                                probe=codegraph_probe,
+                                profile=verify_profile,
+                                timeout=(
+                                    worker_timeout if worker_timeout > 0 else None
+                                ),
+                            )
+                            if resolved_backend == "codex"
+                            else codegraph_probe
+                        )
+                    except CodeGraphUnavailable as exc:
+                        bd.update_status(issue_id, "open")
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
+                    if callable(configure_codegraph):
+                        configure_codegraph(verification_probe.capability)
                     verification_instruction = (
                         "FRESH VERIFICATION PHASE. Do not trust the implementation worker's "
                         "claims. Inspect the candidate diff and issue independently, run the "
@@ -867,7 +1011,7 @@ def grind(
                             resolved_backend,
                             phase_instruction=verification_instruction,
                             phase_contract_text=phase_contract(
-                                CodeGraphPhase.VERIFICATION, codegraph_probe
+                                CodeGraphPhase.VERIFICATION, verification_probe
                             ),
                         )
                     except BackendError as exc:
@@ -877,9 +1021,9 @@ def grind(
                     verify_offset = log.stat().st_size if log.exists() else 0
                     output.progress(
                         "grind",
-                        "verification CodeGraph "
+                        "verification CodeGraph handshake "
                         + (
-                            "engaged"
+                            "requested"
                             if codegraph_probe.available
                             else "fallback active"
                         ),
@@ -917,12 +1061,22 @@ def grind(
                     verification_summary = parse_transcript(
                         log,
                         phase=CodeGraphPhase.VERIFICATION,
-                        probe=codegraph_probe,
+                        probe=verification_probe,
                         start_offset=verify_offset,
                     )
                     verification_summary.freshness = freshness
                     verification_summary.sync_duration_ms = sync_ms
                     append_normalized(log, verification_summary)
+                    if verification_summary.capability_observed:
+                        output.progress(
+                            "grind", "verification CodeGraph handshake succeeded"
+                        )
+                    elif codegraph_mode is not CodeGraphMode.OFF:
+                        output.progress(
+                            "grind",
+                            "verification CodeGraph fallback: "
+                            + "; ".join(verification_summary.fallbacks[:3]),
+                        )
                     try:
                         require_handshake(verification_summary)
                     except CodeGraphUnavailable as exc:
