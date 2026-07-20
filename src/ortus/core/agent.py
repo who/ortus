@@ -13,6 +13,7 @@ from typing import Literal, cast
 
 from ortus.core.claude import ClaudeRunner
 from ortus.core.config import load_config
+from ortus.core.profiles import AgentProfile, Phase as Phase
 
 Backend = Literal["claude", "codex"]
 BACKENDS: tuple[Backend, ...] = ("claude", "codex")
@@ -40,10 +41,16 @@ class CodexRunner(ClaudeRunner):
     def codex_binary(self) -> str:
         return self.claude_binary
 
-    def build_argv(self, prompt: str, *, fast: bool = False) -> list[str]:
+    def build_argv(
+        self,
+        prompt: str,
+        *,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+    ) -> list[str]:
         # `fast` is intentionally ignored. Codex service-tier selection is a
         # Codex configuration concern and is not equivalent to Claude --fast.
-        return [
+        argv = [
             self.codex_binary,
             "exec",
             prompt,
@@ -53,6 +60,11 @@ class CodexRunner(ClaudeRunner):
             "--color",
             "never",
         ]
+        if profile is not None and profile.model is not None:
+            argv.extend(["-m", profile.model])
+        if profile is not None and profile.reasoning_effort is not None:
+            argv.extend(["-c", f"model_reasoning_effort={profile.reasoning_effort}"])
+        return argv
 
 
 def resolve_backend(
@@ -82,8 +94,7 @@ def compose_worker_prompt(backend: Backend, task: str) -> str:
     if backend == "claude":
         return f"/goal {task}"
     return (
-        task
-        + "\n\nCodex sandbox note: `.git` metadata is intentionally read-only in "
+        task + "\n\nCodex sandbox note: `.git` metadata is intentionally read-only in "
         "the workspace-write sandbox. Replace procedure step (3) with: do not "
         "run `git commit` or `git push`; after you close the one assigned issue, "
         "the outer Ortus process will commit and push the completed work."

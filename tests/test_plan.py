@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import plan as plan_mod
 from ortus.core.claude import ClaudeRunner
+from ortus.core.profiles import AgentProfile, Phase
 from tests._shims import shim_path
 
 pytestmark = pytest.mark.integration
@@ -38,7 +39,32 @@ def bd_workspace(tmp_path: Path) -> Path:
 
 
 def _swap_runner(monkeypatch: pytest.MonkeyPatch, binary: str) -> None:
-    monkeypatch.setattr(plan_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=binary))
+    monkeypatch.setattr(
+        plan_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=binary)
+    )
+
+
+def test_decompose_routes_only_the_supplied_plan_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class SpyRunner:
+        def run(self, prompt: str, **kwargs: object) -> int:
+            captured.update(kwargs)
+            return 0
+
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: SpyRunner())
+    prd = tmp_path / "prd.md"
+    prd.write_text("# Plan\n")
+    profile = AgentProfile("claude", Phase.PLAN, "opus", "high")
+    assert (
+        plan_mod._decompose_prd(
+            tmp_path, prd, log_path=tmp_path / "plan.log", profile=profile
+        )
+        == 0
+    )
+    assert captured["profile"] is profile
 
 
 def test_plan_with_prd_creates_issues_in_repo(
@@ -56,8 +82,9 @@ def test_plan_with_prd_creates_issues_in_repo(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     # 3 issues land in the workspace's .beads/, NOT in the PRD's directory.
-    assert not (prd_elsewhere.parent / ".beads").exists(), \
+    assert not (prd_elsewhere.parent / ".beads").exists(), (
         "FR-014 bug regression: issues created in PRD's directory"
+    )
 
     bd_list = subprocess.run(
         ["bd", "ready", "--json"],
@@ -178,6 +205,7 @@ def test_plan_writes_timestamped_log(
     assert len(matches) == 1, f"expected one plan-*.log, got {matches}"
     # Filename shape: plan-YYYYMMDD-HHMMSS.log (8 digits, dash, 6 digits).
     import re
+
     assert re.fullmatch(r"plan-\d{8}-\d{6}\.log", matches[0].name), matches[0].name
     # Old fixed-name file must not be created.
     assert not (bd_workspace / "logs" / "plan.log").exists()

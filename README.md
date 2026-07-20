@@ -129,7 +129,32 @@ project_type = "python" # python | typescript | go | rust | polyglot
 backend = "claude"      # claude | codex
 codegraph = "auto"      # off | auto | required
 codegraph_refresh_blocking = false
+
+[profiles.claude.plan]
+model = "opus"
+reasoning_effort = "high"
+
+[profiles.claude.implement]
+model = "sonnet"
+
+[profiles.claude.verify]
+model = "opus"
+reasoning_effort = "high"
+
+[profiles.codex.implement]
+model = "gpt-5.2-codex"
+reasoning_effort = "high"
 ```
+
+Profiles are independent for `plan`, `implement`, and `verify`, and are scoped
+to the selected backend. Resolution is CLI phase override, then the matching
+project table, then the matching user table, then the provider default. Nested
+tables merge field by field, so a project can override only `model` while
+inheriting `reasoning_effort` from `~/.ortusrc`. Omitted fields add no backend
+CLI flags. `ortus plan` accepts `--model` and `--reasoning-effort`; `ortus grind`
+accepts `--implement-model`, `--implement-reasoning-effort`, `--verify-model`,
+and `--verify-reasoning-effort`. The compatibility `--fast` flag applies only
+to Claude implementation workers and never to verification.
 
 ### CodeGraph lifecycle
 

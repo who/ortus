@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from ortus.core.agent import (
+    AgentProfile,
     BackendError,
     CodexRunner,
     compose_worker_prompt,
     make_runner,
     resolve_backend,
+    Phase,
 )
 from ortus.core.claude import ClaudeRunner
 
@@ -50,3 +52,19 @@ def test_codex_exec_gets_plain_prompt_not_slash_goal() -> None:
 
 def test_claude_keeps_goal_contract() -> None:
     assert compose_worker_prompt("claude", "close one") == "/goal close one"
+
+
+def test_codex_profile_routes_model_and_reasoning_effort() -> None:
+    profile = AgentProfile("codex", Phase.IMPLEMENT, "gpt-5.2-codex", "xhigh")
+    argv = CodexRunner().build_argv("work", profile=profile)
+    assert argv[argv.index("-m") + 1] == "gpt-5.2-codex"
+    assert argv[argv.index("-c") + 1] == "model_reasoning_effort=xhigh"
+
+
+def test_codex_unset_profile_preserves_old_argv() -> None:
+    plain = CodexRunner().build_argv("work")
+    unset = CodexRunner().build_argv(
+        "work", profile=AgentProfile("codex", Phase.VERIFY)
+    )
+    assert unset == plain
+    assert "-m" not in unset and "-c" not in unset

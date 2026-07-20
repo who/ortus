@@ -41,7 +41,12 @@ from typing import Callable, Optional
 import typer
 
 from ortus.core import cache, hooks, output, sandbox
-from ortus.core.agent import BackendError, compose_worker_prompt, make_runner, resolve_backend
+from ortus.core.agent import (
+    BackendError,
+    compose_worker_prompt,
+    make_runner,
+    resolve_backend,
+)
 from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.codegraph import (
@@ -55,6 +60,7 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.config import load_config
+from ortus.core.profiles import Phase, ProfileError
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
@@ -264,9 +270,7 @@ def _compose_work_prompt(
     return compose_worker_prompt("claude", task)
 
 
-def _claude_goal_rejection(
-    log_path: Path, *, start_offset: int
-) -> str | None:
+def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
     """Return a zero-turn Claude goal-condition rejection from a log slice."""
     try:
         with log_path.open("rb") as fh:
@@ -354,7 +358,25 @@ def grind(
             "branch instead of silently leaving origin stale."
         ),
     ),
-    fast: bool = typer.Option(False, "--fast", help="Use claude --fast (premium output)."),
+    fast: bool = typer.Option(
+        False, "--fast", help="Use claude --fast (premium output)."
+    ),
+    implement_model: Optional[str] = typer.Option(
+        None, "--implement-model", help="Override the implementation profile model."
+    ),
+    implement_reasoning_effort: Optional[str] = typer.Option(
+        None,
+        "--implement-reasoning-effort",
+        help="Override the implementation profile reasoning effort.",
+    ),
+    verify_model: Optional[str] = typer.Option(
+        None, "--verify-model", help="Override the verification profile model."
+    ),
+    verify_reasoning_effort: Optional[str] = typer.Option(
+        None,
+        "--verify-reasoning-effort",
+        help="Override the verification profile reasoning effort.",
+    ),
     docker: bool = typer.Option(
         False, "--docker", help="Run claude inside docker sandbox instead of bwrap."
     ),
@@ -379,11 +401,24 @@ def grind(
     target = resolve_repo(repo)
     try:
         resolved_backend = resolve_backend(backend, repo=target)
-    except BackendError as exc:
+        config = load_config(repo=target)
+        implement_profile = config.resolve_profile(
+            resolved_backend,
+            Phase.IMPLEMENT,
+            model=implement_model,
+            reasoning_effort=implement_reasoning_effort,
+        )
+        verify_profile = config.resolve_profile(
+            resolved_backend,
+            Phase.VERIFY,
+            model=verify_model,
+            reasoning_effort=verify_reasoning_effort,
+        )
+    except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
 
-    configured_mode = load_config(repo=target).get("codegraph", "auto")
+    configured_mode = config.get("codegraph", "auto")
     try:
         codegraph_mode = codegraph or CodeGraphMode(configured_mode)
     except ValueError:
@@ -431,13 +466,19 @@ def grind(
         output.info(f"integration:    {integration_branch}")
         output.info(f"idle-sleep:     {idle_sleep}s")
         output.info(
-            f"worker-timeout: {worker_timeout}s" if worker_timeout > 0 else "worker-timeout: off"
+            f"worker-timeout: {worker_timeout}s"
+            if worker_timeout > 0
+            else "worker-timeout: off"
         )
         output.info(f"fast:           {fast}")
         output.info(f"docker:         {docker}")
         output.info(f"backend:        {resolved_backend}")
+        output.info(f"implement:      {implement_profile.display_name}")
+        output.info(f"verify:         {verify_profile.display_name}")
         output.info(f"codegraph:      {codegraph_mode.value}")
-        output.info(f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}")
+        output.info(
+            f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}"
+        )
         output.info("--- per-iteration prompt ---")
         if harness_select:
             output.info(
@@ -480,6 +521,8 @@ def grind(
                 "=== ortus grind started "
                 f"(subprocess-per-task shape; backend={resolved_backend}) ==="
             )
+            write_log(f"phase profile: {implement_profile.display_name}")
+            write_log(f"phase profile: {verify_profile.display_name}")
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
@@ -547,7 +590,9 @@ def grind(
             # plugin overrides. Codex is the only branch that needs an explicit
             # selector here.
             runner = (
-                _make_runner() if resolved_backend == "claude" else _make_runner("codex")
+                _make_runner()
+                if resolved_backend == "claude"
+                else _make_runner("codex")
             )
             runner.extra_env.update(cache_env)
 
@@ -670,13 +715,18 @@ def grind(
                     output.progress(
                         "grind",
                         "implementation CodeGraph "
-                        + ("engaged" if codegraph_probe.available else "fallback active"),
+                        + (
+                            "engaged"
+                            if codegraph_probe.available
+                            else "fallback active"
+                        ),
                     )
                     rc = runner.run(
                         iteration_prompt,
                         repo=target,
                         log_path=log,
                         fast=fast,
+                        profile=implement_profile,
                         timeout=(worker_timeout if worker_timeout > 0 else None),
                     )
                 except subprocess.TimeoutExpired:
@@ -687,9 +737,7 @@ def grind(
                     )
 
                 if resolved_backend == "claude":
-                    rejection = _claude_goal_rejection(
-                        log, start_offset=phase_offset
-                    )
+                    rejection = _claude_goal_rejection(log, start_offset=phase_offset)
                     if rejection is not None:
                         if harness_select:
                             bd.update_status(issue_id, "open")
@@ -725,14 +773,19 @@ def grind(
                 # Candidate edits are indexed by the parent before a fresh
                 # verifier starts. Refresh failure is blocking only in required
                 # mode (auto records the stale fallback and continues).
-                output.progress("grind", "refreshing CodeGraph index before verification")
+                output.progress(
+                    "grind", "refreshing CodeGraph index before verification"
+                )
                 freshness, sync_ms = codegraph_adapter.refresh(target, codegraph_probe)
                 implementation_summary.freshness = freshness
                 implementation_summary.sync_duration_ms = sync_ms
                 write_log(
                     f"CodeGraph refresh: result={freshness} duration_ms={sync_ms}"
                 )
-                if freshness == "sync-failed" and codegraph_mode is CodeGraphMode.REQUIRED:
+                if (
+                    freshness == "sync-failed"
+                    and codegraph_mode is CodeGraphMode.REQUIRED
+                ):
                     if harness_select:
                         bd.update_status(issue_id, "open")
                     output.error(
@@ -766,14 +819,19 @@ def grind(
                     output.progress(
                         "grind",
                         "verification CodeGraph "
-                        + ("engaged" if codegraph_probe.available else "fallback active"),
+                        + (
+                            "engaged"
+                            if codegraph_probe.available
+                            else "fallback active"
+                        ),
                     )
                     try:
                         rc = runner.run(
                             verifier_prompt,
                             repo=target,
                             log_path=log,
-                            fast=fast,
+                            fast=False,
+                            profile=verify_profile,
                             timeout=(worker_timeout if worker_timeout > 0 else None),
                         )
                     except subprocess.TimeoutExpired:
@@ -851,9 +909,7 @@ def grind(
                                 hint="inspect the worktree and commit the completed work manually",
                             )
                             raise typer.Exit(code=1)
-                        write_log(
-                            f"iter {iters_run}: outer Codex commit completed"
-                        )
+                        write_log(f"iter {iters_run}: outer Codex commit completed")
                     # Verify the close actually reached origin/<integration>.
                     # If the worker committed onto main but didn't push, push
                     # it; if it drifted onto a side branch and committed the
@@ -876,9 +932,7 @@ def grind(
                     for line in action.actions_taken:
                         write_log(f"  orphan-policy: {line}")
                 else:
-                    write_log(
-                        f"iter {iters_run}: WARN no bd-state change (rc={rc})"
-                    )
+                    write_log(f"iter {iters_run}: WARN no bd-state change (rc={rc})")
 
                 # Cap checks BEFORE the idle-sleep so we don't burn idle time
                 # when the loop is about to exit anyway.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -12,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group
+from ortus.core.profiles import AgentProfile, Phase
 from tests._shims import shim_path
 
 FAKE_CLAUDE = shim_path("fake-claude")
@@ -49,6 +49,21 @@ def test_fast_false_omits_flag() -> None:
     runner = ClaudeRunner()
     argv = runner.build_argv("do thing", fast=False)
     assert "--fast" not in argv
+
+
+def test_profile_routes_model_and_effort() -> None:
+    profile = AgentProfile("claude", Phase.PLAN, "opus", "high")
+    argv = ClaudeRunner().build_argv("do thing", profile=profile)
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_unset_profile_preserves_old_argv() -> None:
+    plain = ClaudeRunner().build_argv("do thing")
+    unset = ClaudeRunner().build_argv(
+        "do thing", profile=AgentProfile("claude", Phase.VERIFY)
+    )
+    assert unset == plain
 
 
 # --- tee-to-log-not-terminal -----------------------------------------------
