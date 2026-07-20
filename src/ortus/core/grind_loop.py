@@ -18,7 +18,9 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
+
+from ortus.core.readiness import ReadinessReport, validate_issue
 
 
 CLOSE_ONE_CONDITION_FILE = "close-one.txt"
@@ -142,14 +144,10 @@ def read_close_one_condition() -> str:
     """
     res = files(CONDITIONS_PACKAGE).joinpath(CLOSE_ONE_CONDITION_FILE)
     if not res.is_file():
-        raise FileNotFoundError(
-            f"close-one condition missing in {CONDITIONS_PACKAGE}"
-        )
+        raise FileNotFoundError(f"close-one condition missing in {CONDITIONS_PACKAGE}")
     text = res.read_text(encoding="utf-8")
     if text.lstrip().startswith("TODO PLACEHOLDER"):
-        raise FileNotFoundError(
-            "close-one condition is still a TODO placeholder"
-        )
+        raise FileNotFoundError("close-one condition is still a TODO placeholder")
     return text
 
 
@@ -162,33 +160,43 @@ def read_work_issue_condition() -> str:
     """
     res = files(CONDITIONS_PACKAGE).joinpath(WORK_ISSUE_CONDITION_FILE)
     if not res.is_file():
-        raise FileNotFoundError(
-            f"work-issue condition missing in {CONDITIONS_PACKAGE}"
-        )
+        raise FileNotFoundError(f"work-issue condition missing in {CONDITIONS_PACKAGE}")
     text = res.read_text(encoding="utf-8")
     if text.lstrip().startswith("TODO PLACEHOLDER"):
-        raise FileNotFoundError(
-            "work-issue condition is still a TODO placeholder"
-        )
+        raise FileNotFoundError("work-issue condition is still a TODO placeholder")
     return text
 
 
-def select_ready_issue(ready: Iterable[dict]) -> Optional[dict]:
+def select_ready_issue(
+    ready: Iterable[dict],
+    *,
+    on_unready: Callable[[dict, ReadinessReport], None] | None = None,
+) -> Optional[dict]:
     """Pick the issue the harness should claim next: the first ready entry
     that is directly workable.
 
     `bd ready` already orders by priority (lowest number first), so we keep
-    that ordering — we just move selection out of the worker (which
-    mis-transcribed ids) and into the deterministic harness. Epics are SKIPPED:
+    that ordering. Epics are SKIPPED:
     `bd ready` surfaces a parent epic alongside its ready children (and, being
     higher priority, often first), but an epic is a container, not a unit of
     work — a worker can't implement+close it, so claiming one would strand it
     in_progress while the worker closes a child instead. This mirrors the
     long-standing worker behavior (it always skipped epics in `bd ready`).
-    Returns None when nothing workable is ready.
+    Executable leaves must also satisfy readiness schema v1. Invalid legacy or
+    manually authored leaves are left open and reported through ``on_unready``
+    rather than being handed to an implementer. Returns None when nothing
+    workable is ready.
     """
     for issue in ready:
-        if str(issue.get("issue_type") or issue.get("type") or "").strip() == "epic":
+        if (
+            str(issue.get("issue_type") or issue.get("type") or "").strip().lower()
+            == "epic"
+        ):
+            continue
+        report = validate_issue(issue)
+        if not report.ready:
+            if on_unready is not None:
+                on_unready(issue, report)
             continue
         return issue
     return None
@@ -218,7 +226,7 @@ def format_issue_details(issue: dict) -> str:
 
     labels = issue.get("labels") or []
     if labels:
-        lines.append("Labels: " + ", ".join(str(l) for l in labels))
+        lines.append("Labels: " + ", ".join(str(label) for label in labels))
 
     for field, heading in (
         ("description", "Description"),
@@ -326,16 +334,16 @@ def apply_orphan_policy(
 class BranchDisposition(str, enum.Enum):
     """What the loop should do about the observed git branch state.
 
-      - OK        → on the integration branch and in sync with origin; proceed.
-      - PUSH      → on the integration branch but local is ahead of origin;
-                    push it (backstop for a worker that committed but didn't
-                    push) and proceed.
-      - REASSERT  → on a stray branch that carries NO commits absent from the
-                    integration branch; safe to re-checkout the integration
-                    branch and proceed (re-assert discipline, no work lost).
-      - HALT      → stranded work detected (stray branch WITH unique commits,
-                    or detached HEAD); surface loudly and stop rather than bury
-                    the commits where deploys never see them.
+    - OK        → on the integration branch and in sync with origin; proceed.
+    - PUSH      → on the integration branch but local is ahead of origin;
+                  push it (backstop for a worker that committed but didn't
+                  push) and proceed.
+    - REASSERT  → on a stray branch that carries NO commits absent from the
+                  integration branch; safe to re-checkout the integration
+                  branch and proceed (re-assert discipline, no work lost).
+    - HALT      → stranded work detected (stray branch WITH unique commits,
+                  or detached HEAD); surface loudly and stop rather than bury
+                  the commits where deploys never see them.
     """
 
     OK = "ok"

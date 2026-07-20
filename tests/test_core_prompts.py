@@ -26,6 +26,19 @@ def test_bundled_plan_prompt_resolves_by_default(tmp_path: Path) -> None:
     result = resolve_prompt("plan-prompt", repo=tmp_path, home=tmp_path / "home")
     assert result.source == "bundled"
     assert "Decompose the provided PRD" in result.text
+    for heading in (
+        "## Scope",
+        "## Non-goals",
+        "## Concrete locations",
+        "## Resolved decisions",
+        "## Ordered steps",
+        "## Dependencies",
+        "## Edge cases",
+        "## Criterion checks",
+        "## Targeted tests",
+    ):
+        assert heading in result.text
+    assert "Complete executable-leaf example" in result.text
 
 
 def test_user_layer_overrides_bundled(tmp_path: Path) -> None:

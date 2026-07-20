@@ -30,14 +30,19 @@ from ortus.core.grind_loop import (
     read_work_issue_condition,
     select_ready_issue,
 )
+from tests.test_readiness import ready_issue
 
 
 # --- StateSnapshot / compute_delta -----------------------------------------
 
 
 def test_compute_delta_closed_branch() -> None:
-    before = StateSnapshot.from_counts(closed=5, in_progress=1, open=3, in_progress_ids=["a"])
-    after = StateSnapshot.from_counts(closed=6, in_progress=0, open=3, in_progress_ids=[])
+    before = StateSnapshot.from_counts(
+        closed=5, in_progress=1, open=3, in_progress_ids=["a"]
+    )
+    after = StateSnapshot.from_counts(
+        closed=6, in_progress=0, open=3, in_progress_ids=[]
+    )
     delta = compute_delta(before, after)
     assert delta.closed_delta == 1
     assert delta.in_progress_delta == -1
@@ -49,8 +54,12 @@ def test_compute_delta_closed_branch() -> None:
 
 def test_compute_delta_orphan_branch() -> None:
     """Subprocess claimed an issue but didn't close it: closed_delta=0, in_progress_delta>0."""
-    before = StateSnapshot.from_counts(closed=5, in_progress=0, open=3, in_progress_ids=[])
-    after = StateSnapshot.from_counts(closed=5, in_progress=1, open=2, in_progress_ids=["x"])
+    before = StateSnapshot.from_counts(
+        closed=5, in_progress=0, open=3, in_progress_ids=[]
+    )
+    after = StateSnapshot.from_counts(
+        closed=5, in_progress=1, open=2, in_progress_ids=["x"]
+    )
     delta = compute_delta(before, after)
     assert delta.closed_delta == 0
     assert delta.in_progress_delta == 1
@@ -91,8 +100,12 @@ def test_compute_delta_close_and_claim_in_same_iter_counts_as_closed() -> None:
     """If an iteration closed one and claimed another, closed_delta>=1 wins
     over in_progress_delta>0. Acceptance #4: orphan branch fires ONLY when
     closed_delta == 0."""
-    before = StateSnapshot.from_counts(closed=5, in_progress=0, open=3, in_progress_ids=[])
-    after = StateSnapshot.from_counts(closed=6, in_progress=1, open=1, in_progress_ids=["y"])
+    before = StateSnapshot.from_counts(
+        closed=5, in_progress=0, open=3, in_progress_ids=[]
+    )
+    after = StateSnapshot.from_counts(
+        closed=6, in_progress=1, open=1, in_progress_ids=["y"]
+    )
     delta = compute_delta(before, after)
     assert delta.closed_one_or_more
     assert not delta.is_orphan
@@ -253,12 +266,15 @@ def test_work_issue_condition_is_packaged_and_has_placeholders() -> None:
     # whole point of moving selection into the harness.
     lowered = body.lower()
     assert "bd ready" in lowered, "work-issue.txt should mention not running bd ready"
+    assert "PLAN-GAP" in body
+    assert "bd comments add <ISSUE_ID>" in body
+    assert "do not commit, discard, or close" in lowered
     assert WORK_ISSUE_CONDITION_FILE == "work-issue.txt"
 
 
 def test_select_ready_issue_takes_first() -> None:
-    ready = [{"id": "p-1"}, {"id": "p-2"}, {"id": "p-3"}]
-    assert select_ready_issue(ready) == {"id": "p-1"}
+    ready = [ready_issue("p-1"), ready_issue("p-2"), ready_issue("p-3")]
+    assert select_ready_issue(ready) == ready[0]
 
 
 def test_select_ready_issue_empty_returns_none() -> None:
@@ -272,14 +288,29 @@ def test_select_ready_issue_skips_epics() -> None:
     epic in_progress while the worker closes a child instead."""
     ready = [
         {"id": "e-1", "issue_type": "epic", "priority": 1},
-        {"id": "t-1", "issue_type": "task", "priority": 2},
+        {**ready_issue("t-1"), "priority": 2},
     ]
-    assert select_ready_issue(ready) == {"id": "t-1", "issue_type": "task", "priority": 2}
+    assert select_ready_issue(ready) == ready[1]
 
 
 def test_select_ready_issue_all_epics_returns_none() -> None:
     """If every ready entry is an epic, there's nothing workable to claim."""
     assert select_ready_issue([{"id": "e-1", "issue_type": "epic"}]) is None
+
+
+def test_select_ready_issue_skips_legacy_leaf_with_exact_diagnostics() -> None:
+    legacy = {"id": "old-1", "issue_type": "task", "description": "do it"}
+    current = ready_issue("new-1")
+    seen = []
+    assert (
+        select_ready_issue(
+            [legacy, current],
+            on_unready=lambda issue, report: seen.append((issue, report)),
+        )
+        == current
+    )
+    assert seen[0][0] == legacy
+    assert "design/scope" in seen[0][1].diagnostic()
 
 
 def test_format_issue_details_includes_core_fields() -> None:
@@ -393,9 +424,7 @@ def test_classify_stray_branch_with_commits_halts() -> None:
 
     grind must HALT and name the branch, not silently re-checkout main (which
     would bury the commits off the deploy path)."""
-    decision = classify_branch_state(
-        _branch_state("prdpad-01v-clerk-dark", stray=12)
-    )
+    decision = classify_branch_state(_branch_state("prdpad-01v-clerk-dark", stray=12))
     assert decision.disposition is BranchDisposition.HALT
     assert decision.should_halt
     assert "prdpad-01v-clerk-dark" in decision.reason
@@ -413,9 +442,7 @@ def test_classify_detached_head_halts() -> None:
 def test_classify_honors_custom_integration_branch() -> None:
     """When the integration branch is something other than main, being ON it
     is OK and being on main is then a stray branch."""
-    on_release = classify_branch_state(
-        _branch_state("release", integration="release")
-    )
+    on_release = classify_branch_state(_branch_state("release", integration="release"))
     assert on_release.disposition is BranchDisposition.OK
     on_main = classify_branch_state(
         _branch_state("main", stray=3, integration="release")

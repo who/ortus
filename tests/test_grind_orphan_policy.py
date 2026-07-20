@@ -21,7 +21,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim, normalize_git_branch
+from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -51,10 +51,16 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
     normalize_git_branch(repo)
     issue_id = subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", "orphan-policy test",
-            "--type", "task",
-            "--priority", "2",
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "orphan-policy test",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            *ready_issue_args(),
         ],
         cwd=str(repo),
         check=True,
@@ -134,10 +140,14 @@ def test_orphan_policy_warn_leaves_issue_in_progress(
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "warn",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "warn",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -166,10 +176,14 @@ def test_orphan_policy_revert_returns_issue_to_open(
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "revert",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "revert",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -197,10 +211,14 @@ def test_orphan_policy_escalate_labels_issue_human(
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "escalate",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "escalate",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -243,7 +261,9 @@ def test_startup_sweep_reverts_cross_restart_orphan_under_revert_policy(
     # Simulate the prior killed grind: pre-claim the issue before grind starts.
     subprocess.run(
         ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo), check=True, capture_output=True,
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
     )
     pre = _bd_show(repo, issue_id)
     assert pre["status"] == "in_progress", "pre-claim setup failed"
@@ -253,10 +273,14 @@ def test_startup_sweep_reverts_cross_restart_orphan_under_revert_policy(
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "revert",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "revert",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -285,17 +309,23 @@ def test_startup_sweep_warn_logs_orphan_without_mutating(
     _force_fake_home(monkeypatch, tmp_path)
     subprocess.run(
         ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo), check=True, capture_output=True,
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
     )
     _install_shim(monkeypatch, _no_op_shim(tmp_path))
 
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "warn",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "warn",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -319,17 +349,23 @@ def test_startup_sweep_escalate_labels_cross_restart_orphan(
     _force_fake_home(monkeypatch, tmp_path)
     subprocess.run(
         ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo), check=True, capture_output=True,
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
     )
     _install_shim(monkeypatch, _no_op_shim(tmp_path))
 
     result = runner.invoke(
         app,
         [
-            "grind", str(repo),
-            "--iterations", "1",
-            "--idle-sleep", "0",
-            "--orphan-policy", "escalate",
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "escalate",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -357,7 +393,9 @@ def test_default_orphan_policy_is_revert_for_cross_restart_recovery(
     _force_fake_home(monkeypatch, tmp_path)
     subprocess.run(
         ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo), check=True, capture_output=True,
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
     )
     _install_shim(monkeypatch, _no_op_shim(tmp_path))
 

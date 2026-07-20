@@ -7,7 +7,6 @@ ever pipes claude's stdout to the parent, this test fails.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -15,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._shims import normalize_git_branch, shim_path
+from tests._shims import normalize_git_branch, ready_issue_args, shim_path
 
 pytestmark = pytest.mark.regression
 
@@ -48,7 +47,18 @@ def test_grind_terminal_is_quiet_log_is_full(tmp_path: Path) -> None:
     # spawns claude (otherwise queue_drained() short-circuits and the
     # stream-leak check has nothing to validate).
     subprocess.run(
-        ["bd", "create", "--silent", "--title", "leak test", "--type", "task", "--priority", "2"],
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "leak test",
+            "--type",
+            "task",
+            "--priority",
+            "2",
+            *ready_issue_args(),
+        ],
         cwd=str(repo),
         check=True,
         capture_output=True,
@@ -65,7 +75,7 @@ def test_grind_terminal_is_quiet_log_is_full(tmp_path: Path) -> None:
     driver.write_text(
         f"""
 import sys
-sys.path.insert(0, {str(Path(__file__).parent.parent.parent / 'src')!r})
+sys.path.insert(0, {str(Path(__file__).parent.parent.parent / "src")!r})
 from ortus.core.claude import ClaudeRunner
 from ortus.core import sandbox as _sb
 from ortus.core.sandbox import SandboxInfo
@@ -75,7 +85,7 @@ from pathlib import Path
 # Bypass platform sandbox check (CI runners may not have bwrap).
 _sb.smoke_test = lambda: SandboxInfo(platform='Linux', binary='bwrap')
 # Force home so user's real ~/.claude isn't read.
-Path.home = classmethod(lambda cls: Path({str(tmp_path / 'fake-home')!r}))
+Path.home = classmethod(lambda cls: Path({str(tmp_path / "fake-home")!r}))
 # Swap in the fake-claude-stream shim.
 gm._make_runner = lambda: ClaudeRunner(claude_binary={str(FAKE_CLAUDE_STREAM)!r})
 

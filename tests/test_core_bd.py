@@ -82,6 +82,16 @@ def test_close_marks_issue_closed(bd_workspace: Path) -> None:
     assert detail["status"] == "closed"
 
 
+def test_list_all_includes_open_and_closed_without_status_filter(
+    bd_workspace: Path,
+) -> None:
+    client = BdClient(bd_workspace)
+    open_id = client.create(title="open packet", issue_type="task")
+    closed_id = client.create(title="closed packet", issue_type="task")
+    client.close(closed_id)
+    assert {open_id, closed_id} <= {issue["id"] for issue in client.list_all()}
+
+
 def test_bd_error_carries_stderr_verbatim(bd_workspace: Path) -> None:
     """Acceptance #3: BdError.stderr is bd's stderr verbatim."""
     client = BdClient(bd_workspace)
@@ -134,9 +144,7 @@ def test_in_progress_ids_honors_exclude_labels(bd_workspace: Path) -> None:
     """
     client = BdClient(bd_workspace)
     plain = client.create(title="plain in progress", issue_type="task", priority=2)
-    escalated = client.create(
-        title="escalated to human", issue_type="task", priority=2
-    )
+    escalated = client.create(title="escalated to human", issue_type="task", priority=2)
     client.update_status(plain, "in_progress")
     client.update_status(escalated, "in_progress")
     client.add_label(escalated, "human")

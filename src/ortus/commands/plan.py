@@ -30,6 +30,7 @@ from ortus.core.codegraph import (
 from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.prompts import resolve_prompt
+from ortus.core.readiness import ReadinessReport, failed_reports, validate_issues
 from ortus.core.repo import resolve_repo
 
 
@@ -82,13 +83,82 @@ def _expand_idea(
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)
-    prompt = (
+    interview = (
         "The user invoked `ortus plan <repo>` without a PRD. Run an interactive "
         "idea-expansion interview: ask 3-7 questions to clarify the goal, then "
-        "draft a brief PRD inline, then call `bd create` for each work item. "
-        "End the turn when bd ready shows the new issues."
+        "draft a brief PRD inline. Treat that inline PRD as the input to the "
+        "planning instructions below."
     )
-    return runner.run(prompt + contract, repo=repo, log_path=log_path, profile=profile)
+    plan_prompt = resolve_prompt("plan-prompt", repo=repo).text.replace(
+        "$prd_path", "the PRD drafted in this conversation"
+    )
+    return runner.run(
+        interview + "\n\n" + plan_prompt + contract,
+        repo=repo,
+        log_path=log_path,
+        profile=profile,
+    )
+
+
+def _readiness_repair_prompt(reports: tuple[ReadinessReport, ...]) -> str:
+    """Build a bounded repair request that can only update named issues."""
+
+    diagnostics = "\n".join(f"- {report.diagnostic()}" for report in reports)
+    ids = ", ".join(report.issue_id for report in reports)
+    return f"""READINESS REPAIR PASS (one pass only).
+
+The planning run created executable issues that fail readiness schema v1.
+Repair ONLY these existing issue IDs: {ids}
+
+Exact failures:
+{diagnostics}
+
+Use `bd show <id> --json` and `bd update <id>` to fill the existing
+description, design, and acceptance-criteria fields. Do not run `bd create`,
+do not close, replace, supersede, or rename an issue, and do not change issue
+dependencies. Preserve all sound detail already present. Every repaired leaf
+must use readiness schema v1 with these exact field headings:
+
+- description: `## Objective`, `## Behavioral context`
+- design: `## Readiness schema` (body `v1`), `## Scope`, `## Non-goals`,
+  `## Concrete locations`, `## Resolved decisions`,
+  `## Compatibility constraints`, `## Ordered steps` (numbered),
+  `## Dependencies`, `## Edge cases`, `## Plan-gap guidance`
+- acceptance criteria: `## Observable criteria` with unique AC-N identifiers,
+  `## Criterion checks` mapping every AC-N exactly once to an exact command or
+  deterministic check, and `## Targeted tests` with exact bounded test commands
+
+End immediately after updating the named IDs.
+"""
+
+
+def _repair_readiness(
+    repo: Path,
+    reports: tuple[ReadinessReport, ...],
+    *,
+    log_path: Path,
+    backend: str,
+    profile: AgentProfile,
+    contract: str,
+    capability: CodeGraphCapability | None,
+) -> int:
+    """Run one fresh planning-profile subprocess to repair existing packets."""
+
+    runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    configure = getattr(runner, "configure_codegraph", None)
+    if callable(configure):
+        configure(capability)
+    prompt = resolve_prompt("plan-prompt", repo=repo).text
+    prompt += "\n\n" + _readiness_repair_prompt(reports) + contract
+    return runner.run(prompt, repo=repo, log_path=log_path, profile=profile)
+
+
+def _issue_reports(
+    client: BdClient, issue_ids: list[str]
+) -> tuple[ReadinessReport, ...]:
+    """Load authoritative fields rather than relying on compact list output."""
+
+    return validate_issues(client.show(issue_id) for issue_id in issue_ids)
 
 
 def plan(
@@ -165,7 +235,9 @@ def plan(
     if mode is CodeGraphMode.OFF:
         output.progress("plan", "CodeGraph disabled by policy")
     elif probe.available:
-        output.progress("plan", "CodeGraph child registration ready; awaiting handshake")
+        output.progress(
+            "plan", "CodeGraph child registration ready; awaiting handshake"
+        )
     else:
         output.progress("plan", f"CodeGraph fallback: {probe.reason}")
 
@@ -179,7 +251,7 @@ def plan(
     log_path = log_dir / f"plan-{ts}.log"
 
     client = BdClient(target)
-    before = {i["id"] for i in client.list_open()}
+    before = {i["id"] for i in client.list_all()}
 
     if prd:
         output.progress("plan", f"reading PRD from {prd}")
@@ -227,7 +299,7 @@ def plan(
     )
 
     output.progress("plan", "scanning bd workspace for newly-created issues")
-    after = client.list_open()
+    after = client.list_all()
     new_ids = [i["id"] for i in after if i["id"] not in before]
 
     if not new_ids:
@@ -242,10 +314,72 @@ def plan(
         )
         raise typer.Exit(code=1)
 
+    output.progress("plan", "validating readiness of newly-created issues")
+    reports = _issue_reports(client, new_ids)
+    defects = failed_reports(reports)
+    repair_summary = None
+    if defects:
+        for report in defects:
+            output.warn(f"readiness: {report.diagnostic()}")
+        ids_before_repair = {issue["id"] for issue in client.list_all()}
+        repair_log = log_path.with_name(f"{log_path.stem}-repair{log_path.suffix}")
+        output.progress(
+            "plan",
+            "repairing incomplete packets via one fresh planning pass "
+            "(this typically takes 1-3 min)",
+        )
+        repair_rc = _repair_readiness(
+            target,
+            defects,
+            log_path=repair_log,
+            backend=resolved_backend,
+            profile=profile,
+            contract=phase_contract(CodeGraphPhase.PLANNING, probe),
+            capability=probe.capability,
+        )
+        if repair_rc != 0:
+            output.error(
+                f"readiness repair failed ({resolved_backend} exit {repair_rc}); "
+                f"see {repair_log}"
+            )
+            raise typer.Exit(code=repair_rc)
+
+        repair_summary = parse_transcript(
+            repair_log, phase=CodeGraphPhase.PLANNING, probe=probe
+        )
+        append_normalized(repair_log, repair_summary)
+        try:
+            require_handshake(repair_summary)
+        except CodeGraphUnavailable as exc:
+            output.error(str(exc))
+            raise typer.Exit(code=1)
+
+        ids_after_repair = {issue["id"] for issue in client.list_all()}
+        unexpected = sorted(ids_after_repair - ids_before_repair)
+        if unexpected:
+            output.error(
+                "readiness repair created replacement issue(s), which is forbidden: "
+                + ", ".join(unexpected)
+            )
+            raise typer.Exit(code=1)
+
+        output.progress("plan", "revalidating repaired issue packets")
+        defects = failed_reports(_issue_reports(client, new_ids))
+        if defects:
+            for report in defects:
+                output.error(f"readiness: {report.diagnostic()}")
+            output.error(
+                "plan left executable issues incomplete after the single repair pass; "
+                "no work was claimed"
+            )
+            raise typer.Exit(code=1)
+
     # Plan metadata travels with every implementation packet. This remains
     # useful in auto/off mode because an explicit fallback is durable evidence.
     for issue_id in new_ids:
         client.add_comment(issue_id, summary.report())
+        if repair_summary is not None:
+            client.add_comment(issue_id, repair_summary.report())
 
     output.progress("plan", f"done ({len(new_ids)} new issue(s) created)")
     output.success(f"plan created {len(new_ids)} issue(s) in {target}/.beads/")

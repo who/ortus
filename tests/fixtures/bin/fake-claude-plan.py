@@ -12,18 +12,69 @@ Rewritten in Python for Windows compat. See ortus-f4bu.
 from __future__ import annotations
 
 import subprocess
-import sys
 
 
-def _bd_create(title: str, priority: str, description: str, acceptance: str) -> None:
+def _bd_create(title: str, priority: str, objective: str, criterion: str) -> None:
+    description = f"""## Objective
+{objective}
+
+## Behavioral context
+The fixture behavior changes observably while unrelated behavior stays stable."""
+    design = """## Readiness schema
+v1
+
+## Scope
+Implement only the behavior named by this fixture leaf.
+
+## Non-goals
+No unrelated refactor or API redesign.
+
+## Concrete locations
+Edit `src/example.py` in `run()` and cover `tests/test_example.py::test_run`.
+
+## Resolved decisions
+Reuse the existing command path and preserve its interface.
+
+## Compatibility constraints
+Keep existing CLI output and exit codes unchanged.
+
+## Ordered steps
+1. Update `run()`.
+2. Add the focused assertion.
+
+## Dependencies
+None — this fixture leaf is standalone; caller is `cli.run()`.
+
+## Edge cases
+Empty input remains supported and failures stay nonzero.
+
+## Plan-gap guidance
+If `run()` has no stable interface, record PLAN-GAP with the conflicting symbol."""
+    acceptance = f"""## Observable criteria
+- AC-1: {criterion}
+
+## Criterion checks
+- AC-1: Run `uv run pytest tests/test_example.py -q`.
+
+## Targeted tests
+Run `uv run pytest tests/test_example.py -q`."""
     subprocess.run(
         [
-            "bd", "create", "--silent",
-            "--title", title,
-            "--type", "task",
-            "--priority", priority,
-            "--description", description,
-            "--acceptance", acceptance,
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            title,
+            "--type",
+            "task",
+            "--priority",
+            priority,
+            "--description",
+            description,
+            "--design",
+            design,
+            "--acceptance",
+            acceptance,
         ],
         check=True,
         stdout=subprocess.DEVNULL,
