@@ -15,7 +15,7 @@ from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import AgentProfile, Phase
 from tests._shims import shim_path
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
 
 FAKE_CLAUDE_PLAN = shim_path("fake-claude-plan")

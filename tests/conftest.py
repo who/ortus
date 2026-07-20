@@ -11,6 +11,7 @@ generated .bat wrapper). See ortus-f4bu.
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,85 @@ from typing import Callable
 import pytest
 
 from tests._shims import normalize_git_branch, shim_path
+
+_DEPENDENCY_MARKERS = ("fast", "integration", "network", "live_provider")
+_HERMETIC_TEST_BUDGET_SECONDS = 5.0
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--enforce-duration-budget",
+        action="store_true",
+        help="fail when a hermetic test takes over 5s without @pytest.mark.slow",
+    )
+    parser.addoption(
+        "--test-timeout",
+        type=float,
+        default=0.0,
+        help="fail a test after N seconds and name its node id (0 disables)",
+    )
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Give every test one enforceable dependency class.
+
+    Network and live-provider tests are always explicit. Existing integration
+    markers remain authoritative; all other tests are fast hermetic tests.
+    """
+    for item in items:
+        classes = [name for name in _DEPENDENCY_MARKERS if item.get_closest_marker(name)]
+        if not classes:
+            # Smoke/regression tests exercise command or subprocess boundaries
+            # even when their provider/binary is canned, so keep them out of
+            # the bounded unit loop.
+            if item.get_closest_marker("smoke") or item.get_closest_marker("regression"):
+                item.add_marker(pytest.mark.integration)
+            else:
+                item.add_marker(pytest.mark.fast)
+        elif len(classes) > 1:
+            raise pytest.UsageError(
+                f"{item.nodeid} has multiple dependency-class markers: {classes}"
+            )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item: pytest.Item):
+    """Bound individual tests while preserving pytest's normal report path."""
+    seconds = item.config.getoption("--test-timeout")
+    if seconds <= 0:
+        yield
+        return
+
+    def _expired(_signum: int, _frame: object) -> None:
+        raise TimeoutError(f"currently running {item.nodeid}: exceeded {seconds:g}s")
+
+    previous = signal.signal(signal.SIGALRM, _expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    outcome = yield
+    report = outcome.get_result()
+    if (
+        report.when == "call"
+        and report.passed
+        and item.config.getoption("--enforce-duration-budget")
+        and report.duration > _HERMETIC_TEST_BUDGET_SECONDS
+        and item.get_closest_marker("network") is None
+        and item.get_closest_marker("live_provider") is None
+        and item.get_closest_marker("slow") is None
+    ):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{item.nodeid} took {report.duration:.2f}s; hermetic tests over "
+            f"{_HERMETIC_TEST_BUDGET_SECONDS:.0f}s must be optimized or marked slow"
+        )
 
 # The canonical bash/Copier implementation is archived. Keep its historical
 # tests in-tree with the final-bash sources, but do not collect them once the

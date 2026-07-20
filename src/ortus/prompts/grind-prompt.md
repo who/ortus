@@ -49,7 +49,7 @@ You are invoked in a `ortus grind` loop. Each invocation = one task. The loop re
 
    If **not** `codegraph_available`: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
 5. **Implement**: Make the code changes described in the issue
-6. **Verify**: Run tests scoped to the changed surface — pytest narrowed to the files/directories the issue actually touched (e.g. `uv run pytest tests/test_init.py tests/test_init_render.py` when only `init` changed), plus any directly impacted linters/builds. **Defer full-suite coverage to CI**: the GitHub Actions matrix at `.github/workflows/test.yml` runs the full pytest suite across all supported platforms on push, so do not rerun it locally for confidence on routine changes. **High-blast-radius exception**: if your change touches `src/ortus/core/` (shared infrastructure) or `src/ortus/prompts/` (affects every future iteration), the full local `uv run pytest` is still appropriate — the blast radius justifies the wall time. If checks fail, fix and re-verify — this is backpressure, not a reason to stop.
+6. **Verify**: Follow `docs/testing.md`. Implementation workers run the smallest changed-surface modules, or the bounded default `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget`. Fresh verifiers expand by changed path and risk; core/prompt changes use the broader hermetic `-m "fast or integration"` group. Neither phase runs `network` or `live_provider` unless the issue explicitly requires external validation. Main CI owns the comprehensive hermetic platform/Python matrix, and tagged release validation owns external smoke. If checks fail, fix and re-verify — this is backpressure, not a reason to stop.
 
 **6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, skip silently — do not mention it in the completion comment.
 
@@ -196,9 +196,9 @@ If you cannot complete the claimed issue (dependency, technical blocker, persist
 
 ## Verification
 
-Run tests scoped to the changed surface — pytest narrowed to the files/directories your change actually touched (e.g. `uv run pytest tests/test_init.py tests/test_init_render.py` when only `init` changed). When an issue's acceptance criteria say "tests must pass" or name `uv run pytest` without qualification, interpret that as **tests covering the changed surface must pass; CI catches regressions elsewhere** — the GitHub Actions matrix at `.github/workflows/test.yml` runs the full pytest suite across all supported platforms on push, so do not rerun it locally for confidence on routine changes.
+Run tests scoped to the changed surface using `docs/testing.md`. The standard bounded inner loop is `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget`; name directly affected test modules when that is smaller. When acceptance criteria say "tests must pass" without qualification, interpret that as **tests covering the changed surface must pass; CI catches regressions elsewhere**.
 
-**High-blast-radius exception.** If your change touches `src/ortus/core/` (shared infrastructure) or `src/ortus/prompts/` (affects every future iteration), the full local `uv run pytest` is still appropriate — the blast radius justifies the wall time.
+Fresh verification expands according to changed paths and risk. Core or prompt changes select the broader hermetic `-m "fast or integration"` group, not network/build or live-provider smoke. Never run `network` or `live_provider` by default; tagged release validation owns those external groups.
 
 If verification fails, fix the issue and re-verify. This is backpressure — keep iterating until it passes or you determine the issue is a blocker outside your task's scope.
 

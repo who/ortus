@@ -210,10 +210,13 @@ Work is not done until pushed. The generated `AGENTS.md` repeats this in every p
 uv pip install -e '.[dev]'
 
 # Tests
-pytest                              # unit + integration (fast)
-pytest -m smoke                     # end-to-end smoke
-pytest --slow                       # everything, including real-claude smoke
+uv run pytest -m fast --test-timeout=30 --enforce-duration-budget
+uv run pytest -m integration --test-timeout=60 --enforce-duration-budget
 ```
+
+See [the test-gate guide](docs/testing.md) for changed-path selection,
+verifier expansion, CI timing evidence, and tagged network/live-provider
+release smoke.
 
 ## License
 
