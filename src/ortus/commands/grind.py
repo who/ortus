@@ -84,6 +84,14 @@ from ortus.core.grind_loop import (
 from ortus.core.repo import resolve_repo
 
 
+_TRACKER_EXPORT_PATHS = frozenset(
+    {
+        ".beads/issues.jsonl",
+        ".beads/interactions.jsonl",
+    }
+)
+
+
 def _make_runner(backend: str = "claude") -> ClaudeRunner:
     """Indirection so tests can swap in a fake backend runner."""
     return make_runner(backend)  # type: ignore[arg-type]
@@ -102,6 +110,59 @@ def _make_git(repo: Path) -> GitClient:
 def _make_codegraph() -> CodeGraphAdapter:
     """Indirection for lifecycle tests with a deterministic fake adapter."""
     return CodeGraphAdapter()
+
+
+def _checkpoint_codex_preflight(
+    git: GitClient,
+    integration_branch: str,
+    write_log: Callable[[str], None],
+) -> None:
+    """Checkpoint generated tracker exports or reject unowned changes.
+
+    Beads can update and stage its JSONL exports while Grind reads queue state.
+    Those generated files are safe to commit at a distinct preflight boundary;
+    source changes are not. Keeping the two classes separate prevents startup
+    bookkeeping from tripping Codex's safety guard without weakening it.
+    """
+    if not git.is_git_repo():
+        return
+    dirty = git.dirty_paths()
+    if dirty is None:
+        write_log("preflight: HALT — git status failed during ownership check")
+        output.error(
+            "grind: could not classify worktree ownership",
+            hint="run git status, resolve the error, then re-run grind",
+        )
+        raise typer.Exit(code=1)
+    if not dirty:
+        return
+    unowned = dirty - _TRACKER_EXPORT_PATHS
+    if unowned:
+        rendered = ", ".join(sorted(unowned))
+        write_log(f"preflight: HALT — unowned worktree changes: {rendered}")
+        output.error(
+            "grind: Codex backend found unowned worktree changes",
+            hint=f"commit or stash these paths, then re-run grind: {rendered}",
+        )
+        raise typer.Exit(code=1)
+    write_log(
+        "preflight: tracker-only changes detected; creating housekeeping commit: "
+        + ", ".join(sorted(dirty))
+    )
+    if not git.commit_paths(dirty, "chore: sync beads state"):
+        write_log("preflight: HALT — tracker housekeeping commit failed")
+        output.error(
+            "grind: failed to checkpoint generated Beads state",
+            hint="inspect the staged tracker exports and git configuration",
+        )
+        raise typer.Exit(code=1)
+    write_log("preflight: tracker housekeeping commit completed")
+    _enforce_branch_discipline(
+        git,
+        integration_branch,
+        write_log,
+        phase="post-housekeeping",
+    )
 
 
 def _enforce_branch_discipline(
@@ -158,6 +219,7 @@ def _enforce_branch_discipline(
                 "closed work is NOT on origin yet",
                 hint="pull --rebase and push manually, then re-run grind",
             )
+            raise typer.Exit(code=1)
         return
 
     if disp is BranchDisposition.REASSERT:
@@ -578,6 +640,13 @@ def grind(
                     f"closed={initial_snapshot.closed}"
                 )
 
+            if resolved_backend == "codex":
+                _checkpoint_codex_preflight(
+                    git,
+                    integration_branch,
+                    write_log,
+                )
+
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
                 output.progress("grind", "queue already drained; nothing to do.")
@@ -615,25 +684,15 @@ def grind(
                     git, integration_branch, write_log, phase="pre-iter"
                 )
 
-                # Codex runs under workspace-write, which intentionally keeps
-                # .git metadata read-only. Ortus therefore owns the commit
-                # after a verified close. Requiring a clean tree beforehand
-                # makes the later `git add -A` safe: it cannot sweep unrelated
-                # operator work into the worker's commit.
-                if (
-                    resolved_backend == "codex"
-                    and git.is_git_repo()
-                    and not git.is_clean()
-                ):
-                    write_log(
-                        "pre-iter: HALT — Codex backend requires a clean git "
-                        "worktree before it can create an iteration commit"
+                # Queue reads can auto-export generated Beads state between
+                # iterations. Checkpoint that state at its own commit boundary,
+                # while continuing to reject every unowned source change.
+                if resolved_backend == "codex":
+                    _checkpoint_codex_preflight(
+                        git,
+                        integration_branch,
+                        write_log,
                     )
-                    output.error(
-                        "grind: Codex backend requires a clean git worktree",
-                        hint="commit or stash existing changes, then re-run grind",
-                    )
-                    raise typer.Exit(code=1)
 
                 # Default path: select + claim the next ready issue IN-HARNESS,
                 # then inject its exact id + details into the per-iteration
