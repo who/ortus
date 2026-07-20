@@ -31,6 +31,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
+from ortus.core.transaction import CandidateJournal, JournalStore
 from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
 
 
@@ -307,3 +308,142 @@ def test_worker_timeout_zero_disables_watchdog(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "TIMEOUT" not in _grind_log(repo)
+
+
+def test_codex_timeout_candidate_resumes_without_absorbing_dirty_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, issue_id = _seed_repo(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    (repo / ".ortusrc").write_text('backend = "codex"\n')
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / "operator.txt").write_text("keep me out of issue commits\n")
+    subprocess.run(["git", "add", "operator.txt"], cwd=repo, check=True)
+
+    class TimeoutAfterEdit:
+        extra_env: dict[str, str] = {}
+
+        def run(self, *args: object, repo: Path, **kwargs: object) -> int:
+            (repo / "candidate.py").write_text("RECOVERED = True\n")
+            raise subprocess.TimeoutExpired("fake-codex", 1)
+
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda backend="claude": TimeoutAfterEdit()
+    )
+    first = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--backend",
+            "codex",
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--worker-timeout",
+            "1",
+        ],
+    )
+    assert first.exit_code == 0, first.stdout + first.stderr
+    assert _bd_show(repo, issue_id)["status"] == "in_progress"
+    assert (repo / "logs" / "grind-transaction.json").is_file()
+    assert "unowned worktree changes" not in (first.stdout + first.stderr)
+
+    class CloseRecoveredCandidate:
+        extra_env: dict[str, str] = {}
+
+        def run(self, *args: object, repo: Path, **kwargs: object) -> int:
+            subprocess.run(
+                ["bd", "close", issue_id, "--reason", "recovered after timeout"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            return 0
+
+    monkeypatch.setattr(
+        grind_mod,
+        "_make_runner",
+        lambda backend="claude": CloseRecoveredCandidate(),
+    )
+    second = runner.invoke(
+        app,
+        ["grind", str(repo), "--backend", "codex", "--tasks", "1"],
+    )
+
+    assert second.exit_code == 0, second.stdout + second.stderr
+    assert _bd_show(repo, issue_id)["status"] == "closed"
+    assert not (repo / "logs" / "grind-transaction.json").exists()
+    assert (
+        subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "operator.txt"], cwd=repo
+        ).returncode
+        == 1
+    )
+    committed = subprocess.run(
+        ["git", "log", "--format=", "--name-only", "--", "candidate.py"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert "candidate.py" in committed
+    operator_commits = subprocess.run(
+        ["git", "log", "--format=%H", "--", "operator.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert operator_commits == []
+
+
+def test_codex_resume_rejects_journal_head_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _issue_id = _seed_repo(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    JournalStore(repo).save(
+        CandidateJournal.start(
+            repo=repo,
+            issue_id="wt-mismatch",
+            base_head="not-the-current-head",
+            baseline_paths=(),
+        )
+    )
+
+    result = runner.invoke(app, ["grind", str(repo), "--backend", "codex"])
+
+    assert result.exit_code == 1
+    assert "transaction no longer matches HEAD" in (result.stdout + result.stderr)

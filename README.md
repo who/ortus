@@ -112,6 +112,13 @@ Claude remains the default. Select Codex at project creation with `ortus init . 
 
 Claude workers run a narrow `claude -p '/goal …'` session. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`. In both cases the outer `ortus grind` scheduler trusts only observable bd state and starts a fresh process for the next issue.
 
+Codex grind can start from a dirty checkout. Ortus records those paths as the
+operator baseline, leaves them uncommitted, and commits only paths owned by the
+selected issue. If a worker times out after editing files, the issue and its
+candidate paths are journaled under `logs/` and the next grind invocation
+resumes that candidate. A changed baseline, mismatched HEAD, or paths outside
+the recorded transaction still stops with a targeted safety diagnostic.
+
 ## Why ortus
 
 - **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No more `copier update` chasing N repos.

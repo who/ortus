@@ -111,7 +111,7 @@ def test_preflight_reports_tracker_commit_failure() -> None:
     assert any("housekeeping commit failed" in message for message in messages)
 
 
-def test_commit_paths_refuses_an_unowned_pre_staged_path(tmp_path: Path) -> None:
+def test_commit_paths_preserves_an_unowned_pre_staged_path(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     tracker = repo / ".beads" / "issues.jsonl"
     tracker.write_text("baseline\nexported update\n")
@@ -119,10 +119,40 @@ def test_commit_paths_refuses_an_unowned_pre_staged_path(tmp_path: Path) -> None
     subprocess.run(["git", "add", "source.py"], cwd=repo, check=True)
     git = GitClient(repo)
 
-    assert not git.commit_paths(
+    assert git.commit_paths(
         frozenset({".beads/issues.jsonl"}), "chore: sync beads state"
     )
-    assert _subjects(repo)[0] == "baseline"
+    assert _subjects(repo)[0] == "chore: sync beads state"
+    assert (
+        subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "source.py"], cwd=repo
+        ).returncode
+        == 1
+    )
+
+
+def test_dirty_source_becomes_preserved_codex_baseline(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    tracker = repo / ".beads" / "issues.jsonl"
+    tracker.write_text("baseline\nexported update\n")
+    (repo / "source.py").write_text("BASELINE = False\n")
+    subprocess.run(["git", "add", "source.py"], cwd=repo, check=True)
+    git = GitClient(repo)
+    messages: list[str] = []
+
+    baseline = _checkpoint_codex_preflight(
+        git, "main", messages.append, accept_baseline=True
+    )
+
+    assert baseline == frozenset({"source.py"})
+    assert _subjects(repo)[0] == "chore: sync beads state"
+    assert (
+        subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "source.py"], cwd=repo
+        ).returncode
+        == 1
+    )
+    assert any("preserving dirty operator baseline" in item for item in messages)
 
 
 def test_failed_git_status_is_not_treated_as_clean(tmp_path: Path) -> None:
