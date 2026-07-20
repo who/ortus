@@ -24,6 +24,7 @@ from tests._shims import make_inline_python_shim, normalize_git_branch, shim_pat
 runner = CliRunner()
 
 FAKE_CLAUDE = shim_path("fake-claude")
+pytestmark = pytest.mark.integration
 
 
 def _fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,6 +78,7 @@ def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
     assert "claude/verify (model=provider-default, effort=high)" in result.stdout
 
 
+@pytest.mark.slow
 def test_grind_routes_profiles_and_fast_only_to_implementation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -178,6 +180,7 @@ def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
     )
 
 
+@pytest.mark.slow
 def test_codex_outer_loop_drives_three_issues_to_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -342,6 +345,7 @@ def test_grind_exits_one_on_disabled_hooks_before_claude(
     )
 
 
+@pytest.mark.slow
 def test_grind_runs_fake_claude_and_logs_locally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -405,6 +409,7 @@ def test_grind_runs_fake_claude_and_logs_locally(
     assert any("fake-claude done" in p.read_text(encoding="utf-8") for p in logs)
 
 
+@pytest.mark.slow
 def test_grind_harness_selects_claims_and_injects_issue_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -469,6 +474,7 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
     assert f"Work bd issue {issue_id}" in log_text
 
 
+@pytest.mark.slow
 def test_claude_goal_rejection_restores_claim_and_halts_without_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

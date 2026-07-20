@@ -78,30 +78,20 @@ jobs:
       - name: Install editable + dev deps
         run: uv pip install -e '.[dev]'
 
-      - name: Decide pytest markers from event
-        id: markers
-        shell: bash
+      - name: Run comprehensive hermetic pytest gate
         run: |
-          # PR / feature branch push: unit + integration (fast inner loop).
-          # Push to main: add regression. Tag push: add smoke (--slow allowed).
-          markers="not slow"
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            markers="not slow"  # regressions live in the same suite for now
-          fi
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            markers=""  # allow slow smoke tests on tagged releases
-          fi
-          echo "markers=$markers" >> "$GITHUB_OUTPUT"
+          uv run pytest -m "fast or integration" \
+            --test-timeout=180 --enforce-duration-budget --durations=20 \
+            --junitxml=junit.xml \
+            --cov=ortus --cov-report=xml --cov-report=term
 
-      - name: Run pytest with coverage
-        env:
-          PY_MARKERS: ${{ steps.markers.outputs.markers }}
-        run: |
-          if [ -n "$PY_MARKERS" ]; then
-            uv run pytest --cov=ortus --cov-report=xml --cov-report=term -m "$PY_MARKERS"
-          else
-            uv run pytest --cov=ortus --cov-report=xml --cov-report=term
-          fi
+      - name: Upload pytest timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: junit.xml
+          if-no-files-found: warn
 
       - name: Upload coverage artifact (PR only)
         if: github.event_name == 'pull_request'
@@ -109,4 +99,55 @@ jobs:
         with:
           name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
           path: coverage.xml
+          if-no-files-found: warn
+
+  release-smoke:
+    name: tagged network + live-provider smoke
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install bd (beads)
+        run: |
+          version="1.0.4"
+          curl --fail -L -o /tmp/bd.tar.gz \
+            "https://github.com/gastownhall/beads/releases/download/v${version}/beads_${version}_linux_amd64.tar.gz"
+          sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
+
+      - name: Install sandbox prerequisite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      - name: Install editable + dev dependencies
+        run: uv sync --extra dev
+
+      - name: Configure optional provider credentials
+        env:
+          CLAUDE_CREDENTIALS_JSON: ${{ secrets.CLAUDE_CREDENTIALS_JSON }}
+        run: |
+          if [ -n "$CLAUDE_CREDENTIALS_JSON" ]; then
+            npm install --global @anthropic-ai/claude-code
+            mkdir -p "$HOME/.claude"
+            printf '%s' "$CLAUDE_CREDENTIALS_JSON" > "$HOME/.claude/.credentials.json"
+            chmod 600 "$HOME/.claude/.credentials.json"
+          fi
+
+      - name: Run external release smoke
+        run: |
+          uv run pytest -m "network or live_provider" \
+            --test-timeout=900 --durations=20 --junitxml=release-junit.xml
+
+      - name: Upload release timing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-junit
+          path: release-junit.xml
           if-no-files-found: warn

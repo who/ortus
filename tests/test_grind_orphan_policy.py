@@ -24,7 +24,7 @@ from ortus.core.sandbox import SandboxInfo
 from tests._shims import make_inline_python_shim, normalize_git_branch
 
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
 
 

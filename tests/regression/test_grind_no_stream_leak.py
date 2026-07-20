@@ -26,6 +26,7 @@ def _stream_json_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith('{"type":')]
 
 
+@pytest.mark.slow
 def test_grind_terminal_is_quiet_log_is_full(tmp_path: Path) -> None:
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")

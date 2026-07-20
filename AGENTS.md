@@ -31,7 +31,7 @@ Exempt verbs:
 
 ## Acceptance-criteria convention
 
-When writing bd-issue acceptance criteria for code-changing work, prefer **"tests covering the changed surface must pass; CI catches regressions elsewhere"** over **"uv run pytest must pass"**. The full ~5min suite is the GitHub Actions matrix's job (`.github/workflows/test.yml`, Linux+macOS × Python 3.10/3.11/3.12); inner grind iterations should run only the targeted subset that exercises the changed files. The exception is changes under `src/ortus/core/` (shared infrastructure) or `src/ortus/prompts/` (affects every future iteration) — those touch enough downstream that the full local run is justified.
+When writing bd-issue acceptance criteria for code-changing work, prefer **"tests covering the changed surface must pass; CI catches regressions elsewhere"** over **"uv run pytest must pass"**. Follow `docs/testing.md`: implementation workers run directly affected modules or the bounded `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget` gate. Fresh verifiers expand by changed paths and risk; shared core or prompt changes use the broader hermetic `-m "fast or integration"` group. The GitHub Actions matrix owns comprehensive hermetic coverage across Linux/macOS and Python 3.10/3.11/3.12. Network/build and live-provider smoke are tagged-release gates, never local worker defaults.
 
 ## Orchestrator
 

@@ -197,6 +197,7 @@ def _isolate_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.
 
 
 @pytest.mark.slow
+@pytest.mark.network
 def test_uv_build_produces_dynamic_version(tmp_path: Path) -> None:
     # Regression guard for ortus-qyjf: pyproject.toml used to hardcode
     # `version = "0.1.0"`, so every tag built a 0.1.0 wheel and PyPI rejected
@@ -544,6 +545,7 @@ def test_triage_skipped_interactive() -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.live_provider
 @requires_claude_auth
 @requires_no_nested_sandbox
 def test_plan_decompose_tiny_prd(
@@ -595,6 +597,7 @@ def test_plan_decompose_tiny_prd(
 
 
 @pytest.mark.slow
+@pytest.mark.live_provider
 @requires_claude_auth
 @requires_no_nested_sandbox
 def test_grind_one_task(local_ortus: OrtusCallable, tmp_repo: Path) -> None:

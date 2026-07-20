@@ -84,8 +84,11 @@ packages = ["src/ortus"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
-    "integration: tests that shell out to real external binaries (bd, claude, etc.)",
+    "fast: hermetic tests intended for the bounded implementation inner loop",
+    "integration: hermetic changed-surface tests that exercise subprocesses or multiple components",
+    "network: tests that require network access or build/package tooling; release validation only",
+    "live_provider: tests that invoke a paid or authenticated model provider; release validation only",
     "regression: regression tests guarding against specific past bugs (e.g., ortus-6q8v stream-leak)",
     "smoke: end-to-end smoke tests against seeded fixtures + canned claude responses",
-    "slow: tests that exceed ~5s (gated behind --slow in CI; on by default locally)",
+    "slow: tests allowed to exceed the 5s per-test hermetic budget",
 ]
