@@ -40,12 +40,29 @@ class CodeGraphUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CodeGraphCapability:
+    """Credential-free child registration shared by probe and runner."""
+
+    command: str
+    args: tuple[str, ...] = ("serve", "--mcp")
+    tools: tuple[str, ...] = (
+        "codegraph_explore",
+        "codegraph_node",
+        "codegraph_search",
+        "codegraph_callers",
+        "codegraph_callees",
+        "codegraph_impact",
+    )
+
+
+@dataclass(frozen=True)
 class CodeGraphProbe:
     mode: CodeGraphMode
     index_present: bool
     cli_present: bool
     available: bool
     reason: str | None = None
+    capability: CodeGraphCapability | None = None
 
 
 @dataclass(frozen=True)
@@ -75,19 +92,21 @@ class CodeGraphSummary:
 
     @property
     def capability_observed(self) -> bool:
-        return bool(self.events)
+        return any(event.success for event in self.events)
 
     def report(self) -> str:
         tools = sorted({event.tool for event in self.events})
         misses = sum(event.hit is False for event in self.events)
         failures = sum(not event.success for event in self.events)
+        engaged = self.probe.available and self.capability_observed
         return (
             f"**CodeGraph engagement v{SCHEMA_VERSION}**\n"
             f"- phase: {self.phase}\n"
             f"- mode: {self.probe.mode.value}\n"
-            f"- availability: {'available' if self.probe.available else 'unavailable'}"
+            f"- availability: {'engaged' if engaged else 'unavailable'}"
             f" (index={str(self.probe.index_present).lower()}, "
-            f"cli={str(self.probe.cli_present).lower()})\n"
+            f"cli={str(self.probe.cli_present).lower()}, "
+            f"child_handshake={str(self.capability_observed).lower()})\n"
             f"- freshness: {self.freshness}; sync_duration_ms: "
             f"{self.sync_duration_ms if self.sync_duration_ms is not None else 'n/a'}\n"
             f"- tools: {', '.join(tools) if tools else 'none'}; "
@@ -109,18 +128,31 @@ def _bounded_join(values: Iterable[str]) -> str:
 class CodeGraphAdapter:
     """Outer-process adapter; replaceable with a fake in command tests."""
 
-    def probe(self, repo: Path, mode: CodeGraphMode) -> CodeGraphProbe:
+    def probe(
+        self, repo: Path, mode: CodeGraphMode, *, backend: str = "claude"
+    ) -> CodeGraphProbe:
         if mode is CodeGraphMode.OFF:
             return CodeGraphProbe(mode, False, False, False, "disabled by policy")
         index = (repo / ".codegraph").is_dir()
-        cli = shutil.which("codegraph") is not None
-        available = index and cli
+        cli_path = shutil.which("codegraph")
+        cli = cli_path is not None
+        capability = (
+            CodeGraphCapability(cli_path)
+            if backend == "codex" and index and cli_path is not None
+            else None
+        )
+        # Claude owns its MCP registration. Codex receives the exact registration
+        # represented by ``capability`` on every fresh process, avoiding reliance
+        # on project trust or mutable user configuration.
+        available = index and cli and (backend != "codex" or capability is not None)
         missing = []
         if not index:
             missing.append("project index .codegraph/ is missing")
         if not cli:
             missing.append("codegraph CLI is not on PATH")
-        probe = CodeGraphProbe(mode, index, cli, available, "; ".join(missing) or None)
+        probe = CodeGraphProbe(
+            mode, index, cli, available, "; ".join(missing) or None, capability
+        )
         if mode is CodeGraphMode.REQUIRED and not available:
             raise CodeGraphUnavailable(
                 f"CodeGraph required but unavailable: {probe.reason}. "
@@ -171,7 +203,8 @@ def phase_contract(phase: CodeGraphPhase, probe: CodeGraphProbe) -> str:
     }[phase]
     return (
         f"\n\n## CodeGraph phase contract v{SCHEMA_VERSION}\n"
-        f"Phase: {phase.value}; policy: {policy}; outer index+CLI probe: available. "
+        f"Phase: {phase.value}; policy: {policy}; outer index+CLI probe: "
+        f"{'available' if probe.available else 'unavailable'}. "
         "Before other work, test the registered CodeGraph MCP capability with one bounded "
         "repository-orientation query. This tool event is the capability handshake. "
         f"{fallback} {duties} Keep each query label under {MAX_LABEL} characters and never "
@@ -245,6 +278,8 @@ def parse_transcript(
                 break
     if not summary.events:
         summary.fallbacks.append("agent MCP capability handshake not observed")
+    elif not summary.capability_observed:
+        summary.fallbacks.append("agent CodeGraph queries all failed")
     return summary
 
 
@@ -256,7 +291,8 @@ def append_normalized(log_path: Path, summary: CodeGraphSummary) -> None:
             "schema": SCHEMA_VERSION,
             "kind": "phase_summary",
             "phase": summary.phase,
-            "available": summary.probe.available,
+            "available": summary.probe.available and summary.capability_observed,
+            "prerequisites_ready": summary.probe.available,
             "freshness": summary.freshness,
             "query_count": len(summary.events),
             "fallbacks": summary.fallbacks[:5],

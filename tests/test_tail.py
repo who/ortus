@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -163,6 +162,25 @@ def test_tail_renders_normalized_codegraph_events_without_verbose() -> None:
     rendered = _format_line(line, show_tools=False, show_system=False)
     assert rendered is not None
     assert "[CODEGRAPH]" in rendered and "verification" in rendered and "miss" in rendered
+
+
+def test_tail_distinguishes_codegraph_child_handshake_failure() -> None:
+    rendered = _format_line(
+        json.dumps(
+            {
+                "type": "ortus.codegraph",
+                "kind": "handshake",
+                "phase": "implementation",
+                "success": False,
+                "reason": "server unavailable",
+            }
+        ),
+        show_tools=False,
+        show_system=False,
+    )
+    assert rendered is not None
+    assert "child handshake failed" in rendered
+    assert "server unavailable" in rendered
 
 
 def test_tail_fr003_no_beads(tmp_path: Path) -> None:

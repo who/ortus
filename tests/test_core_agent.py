@@ -16,6 +16,7 @@ from ortus.core.agent import (
     Phase,
 )
 from ortus.core.claude import ClaudeRunner
+from ortus.core.codegraph import CodeGraphCapability
 
 
 def test_claude_is_the_default(tmp_path: Path) -> None:
@@ -68,3 +69,23 @@ def test_codex_unset_profile_preserves_old_argv() -> None:
     )
     assert unset == plain
     assert "-m" not in unset and "-c" not in unset
+
+
+def test_codex_gets_explicit_bounded_codegraph_registration() -> None:
+    capability = CodeGraphCapability("/opt/tools/codegraph")
+    argv = CodexRunner(codegraph=capability).build_argv("orient")
+    overrides = [argv[index + 1] for index, value in enumerate(argv) if value == "-c"]
+    joined = "\n".join(overrides)
+    assert 'mcp_servers.codegraph.command="/opt/tools/codegraph"' in joined
+    assert 'mcp_servers.codegraph.args=["serve", "--mcp"]' in joined
+    assert "codegraph_explore" in joined and "codegraph_impact" in joined
+    assert "env" not in joined.lower() and "token" not in joined.lower()
+    assert "--dangerously-bypass-hook-trust" not in argv
+
+
+def test_codex_codegraph_registration_supports_read_only_posture() -> None:
+    runner = CodexRunner(
+        codegraph=CodeGraphCapability("codegraph"), sandbox_mode="read-only"
+    )
+    argv = runner.build_argv("verify graph only")
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
