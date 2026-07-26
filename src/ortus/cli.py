@@ -12,6 +12,7 @@ from ortus.commands.interview import interview
 from ortus.commands.plan import plan
 from ortus.commands.tail import tail
 from ortus.commands.triage import triage
+from ortus.commands.unlock import unlock
 
 app = typer.Typer(
     name="ortus",
@@ -49,7 +50,8 @@ def main(
     """ortus: global CLI for bd-driven Claude Code workflows."""
 
 
-# FR-002: exactly 8 verbs. Order here drives --help listing order.
+# FR-002 verb set (+unlock, added for stuck-flock recovery). Order here
+# drives --help listing order.
 app.command(name="init", help="Bootstrap a fresh repo for Claude or Codex.")(init)
 app.command(name="plan", help="Decompose a PRD (or freeform idea) into bd issues.")(plan)
 app.command(name="grind", help="Drive the bd queue via backend-neutral subprocess-per-task workers.")(grind)
@@ -58,3 +60,7 @@ app.command(name="tail", help="Tail orchestrator log files (grind-*, goal-*, ral
 app.command(name="triage", help="Triage open bd issues interactively.")(triage)
 app.command(name="human", help="Emit HUMAN-TODO.md for items needing a human decision.")(human)
 app.command(name="check", help="Verify bd/agent/sandbox prerequisites.")(check)
+app.command(
+    name="unlock",
+    help="Clear a stuck grind flock; optionally revert in-progress claims.",
+)(unlock)

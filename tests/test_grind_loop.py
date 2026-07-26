@@ -23,6 +23,7 @@ from ortus.core.grind_loop import (
     apply_orphan_policy,
     classify_branch_state,
     compute_delta,
+    epic_is_exhausted,
     format_issue_details,
     inject_issue,
     queue_drained,
@@ -311,6 +312,44 @@ def test_select_ready_issue_skips_legacy_leaf_with_exact_diagnostics() -> None:
     )
     assert seen[0][0] == legacy
     assert "design/scope" in seen[0][1].diagnostic()
+
+
+def test_epic_is_exhausted_all_children_closed() -> None:
+    epic = {
+        "id": "e-1",
+        "issue_type": "epic",
+        "dependents": [
+            {"id": "e-1.1", "dependency_type": "parent-child", "status": "closed"},
+            {"id": "e-1.2", "dependency_type": "parent-child", "status": "closed"},
+            # A blocks-dependent (the next milestone) must not count as a child.
+            {"id": "e-2", "dependency_type": "blocks", "status": "open"},
+        ],
+    }
+    assert epic_is_exhausted(epic)
+
+
+def test_epic_is_exhausted_open_child_or_childless_or_non_epic() -> None:
+    open_child = {
+        "id": "e-1",
+        "issue_type": "epic",
+        "dependents": [
+            {"id": "e-1.1", "dependency_type": "parent-child", "status": "closed"},
+            {"id": "e-1.2", "dependency_type": "parent-child", "status": "open"},
+        ],
+    }
+    assert not epic_is_exhausted(open_child)
+    # Childless epic: possibly not yet decomposed — never auto-close.
+    assert not epic_is_exhausted({"id": "e-3", "issue_type": "epic"})
+    # Non-epics are never exhausted, whatever their dependents look like.
+    assert not epic_is_exhausted(
+        {
+            "id": "t-1",
+            "issue_type": "task",
+            "dependents": [
+                {"id": "x", "dependency_type": "parent-child", "status": "closed"}
+            ],
+        }
+    )
 
 
 def test_format_issue_details_includes_core_fields() -> None:

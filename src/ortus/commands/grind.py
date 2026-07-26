@@ -67,6 +67,7 @@ from ortus.core.readiness import ReadinessReport
 from ortus.core.transaction import CandidateJournal, JournalStore
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
+    CONDITION_CEILING,
     FlockBusy,
     build_condition,
     grind_flock,
@@ -80,6 +81,7 @@ from ortus.core.grind_loop import (
     apply_orphan_policy,
     classify_branch_state,
     compute_delta,
+    epic_is_exhausted,
     inject_issue,
     queue_drained,
     read_work_issue_condition,
@@ -393,6 +395,53 @@ def _snapshot(bd: BdClient) -> StateSnapshot:
         open=bd.count_by_status("open", exclude_labels=EXCLUDED_LABELS),
         in_progress_ids=bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS),
     )
+
+
+def _rollover_exhausted_epics(
+    bd: BdClient, write_log: Callable[[str], None]
+) -> None:
+    """Close every ready epic whose children are all closed, repeatedly,
+    until a pass closes nothing (closing one epic can surface another).
+
+    Runs BEFORE the iteration's `before` snapshot so these harness closes
+    are never misattributed to the worker by the closed-count delta, and so
+    work unblocked by the rollover is claimable in the SAME iteration.
+    Failures are logged and skipped — a bd hiccup here degrades to the old
+    behavior (loop exits "queue blocked"), never a crash.
+    """
+    for _ in range(50):  # cascade guard; real chains are milestone-deep
+        try:
+            ready = bd.list_ready(exclude_labels=EXCLUDED_LABELS)
+        except Exception as exc:
+            write_log(f"epic rollover: bd ready failed ({exc}); skipping pass")
+            return
+        closed_any = False
+        for entry in ready:
+            entry_type = str(
+                entry.get("issue_type") or entry.get("type") or ""
+            ).strip()
+            epic_id = str(entry.get("id") or "").strip()
+            if entry_type != "epic" or not epic_id:
+                continue
+            try:
+                full = bd.show(epic_id)
+            except Exception as exc:
+                write_log(f"epic rollover: bd show {epic_id} failed ({exc})")
+                continue
+            if not epic_is_exhausted(full):
+                continue
+            try:
+                bd.close(
+                    epic_id,
+                    reason="milestone rollover: all child issues closed",
+                )
+            except Exception as exc:
+                write_log(f"epic rollover: close of {epic_id} failed ({exc})")
+                continue
+            write_log(f"epic rollover: closed exhausted epic {epic_id}")
+            closed_any = True
+        if not closed_any:
+            return
 
 
 def _legacy_prompt(custom_condition: str, backend: str = "claude") -> str:
@@ -872,6 +921,11 @@ def grind(
             iters_run = 0
 
             while True:
+                # Milestone rollover: an epic whose children are all closed
+                # is finished work, not a claimable unit — close it here so
+                # the next milestone's subtree unblocks and this iteration
+                # can claim from it. Must precede the `before` snapshot.
+                _rollover_exhausted_epics(bd, write_log)
                 before = _snapshot(bd)
                 implementation_probe = codegraph_probe
                 verification_probe = codegraph_probe
@@ -1052,7 +1106,11 @@ def grind(
                             ),
                         )
                     except BackendError as exc:
+                        # Revert the claim before halting: a worker was never
+                        # spawned, so leaving the issue in_progress would
+                        # strand it.
                         bd.update_status(issue_id, "open")
+                        write_log(f"iter prep: HALT — {exc}")
                         output.error(str(exc))
                         raise typer.Exit(code=1)
                     write_log(

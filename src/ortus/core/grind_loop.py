@@ -202,6 +202,34 @@ def select_ready_issue(
     return None
 
 
+def epic_children(issue: dict) -> list[dict]:
+    """Parent-child dependents of an epic, from a full `bd show` payload."""
+    return [
+        d
+        for d in issue.get("dependents") or []
+        if isinstance(d, dict)
+        and str(d.get("dependency_type") or "").strip() == "parent-child"
+    ]
+
+
+def epic_is_exhausted(issue: dict) -> bool:
+    """True when an epic has children and every one of them is closed.
+
+    Such an epic is complete, but it stays `open` (workers never claim
+    epics), keeps showing up in `bd ready`, and — because milestone epics
+    block each other — gates the next milestone's entire subtree. Left
+    alone, the loop exits "queue blocked" at every milestone boundary even
+    though real work is one dependency-hop away. A childless epic is NOT
+    exhausted: it may simply not have been decomposed yet.
+    """
+    if str(issue.get("issue_type") or issue.get("type") or "").strip() != "epic":
+        return False
+    children = epic_children(issue)
+    return bool(children) and all(
+        str(c.get("status") or "").strip() == "closed" for c in children
+    )
+
+
 def format_issue_details(issue: dict) -> str:
     """Render a ready-list/`bd show` issue dict into a compact human-readable
     block to inject into the worker prompt.
