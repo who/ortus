@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ortus.cli import app
+from ortus.core.readiness import READINESS_MEMORY_KEY
 
 pytestmark = pytest.mark.integration
 runner = CliRunner()
@@ -73,6 +74,60 @@ def test_settings_json_has_bd_excluded_and_hooks(tmp_path: Path) -> None:
         for group in hooks.get("PreCompact", [])
         for h in group["hooks"]
     )
+
+
+def _bd_memories(repo: Path) -> dict:
+    proc = subprocess.run(
+        ["bd", "memories", "--json"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(proc.stdout)
+
+
+def test_init_stores_readiness_memory(tmp_path: Path) -> None:
+    """AC-1: the keyed pointer memory lands in the new bd workspace."""
+    target = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    memories = _bd_memories(target)
+    assert READINESS_MEMORY_KEY in memories, sorted(memories)
+    assert "ortus spec" in memories[READINESS_MEMORY_KEY]
+
+
+@pytest.mark.slow
+def test_init_force_does_not_duplicate_readiness_memory(tmp_path: Path) -> None:
+    """Re-running init over an existing workspace updates the memory in place."""
+    target = tmp_path / "fresh"
+    assert runner.invoke(app, ["init", str(target)]).exit_code == 0
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    memories = _bd_memories(target)
+    matching = [k for k in memories if k.startswith(READINESS_MEMORY_KEY)]
+    assert matching == [READINESS_MEMORY_KEY], matching
+
+
+def test_init_readiness_memory_failure_warns_and_still_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a bd too old for `remember` costs a warning, not the bootstrap."""
+    import ortus.commands.init as init_mod
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["bd", "remember"]:
+            raise subprocess.CalledProcessError(returncode=1, cmd=args)
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(init_mod.subprocess, "run", fake_run)
+    target = tmp_path / "oldbd"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    compact = "".join(combined.split())
+    assert "couldnotstorethereadinessmemory" in compact, combined
+    assert "bdremember" in compact, combined
 
 
 def test_init_refuses_existing_beads_without_force(tmp_path: Path) -> None:
@@ -168,7 +223,9 @@ def test_init_passes_non_interactive_to_bd(tmp_path: Path, monkeypatch: pytest.M
     captured: dict[str, list[str]] = {}
 
     def fake_run(args, cwd, check):  # noqa: ARG001 — match subprocess.run signature
-        captured["args"] = list(args)
+        # Only the first call (bd init) is under test; init also shells out to
+        # `bd remember` afterwards.
+        captured.setdefault("args", list(args))
         # Pretend bd init succeeded so the rest of init can proceed.
         return subprocess.CompletedProcess(args=args, returncode=0)
 

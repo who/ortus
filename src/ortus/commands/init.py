@@ -21,6 +21,11 @@ from ortus.core.init_render import (
     RenderContext,
     render_all,
 )
+from ortus.core.readiness import (
+    READINESS_MEMORY_KEY,
+    readiness_memory_command,
+    readiness_memory_text,
+)
 
 
 def _bd_init(repo: Path, prefix: str | None) -> None:
@@ -43,6 +48,21 @@ def _bd_init(repo: Path, prefix: str | None) -> None:
     if prefix:
         args.extend(["--prefix", prefix])
     subprocess.run(args, cwd=str(repo), check=True)
+
+
+def _bd_remember(repo: Path) -> None:
+    """Store the readiness-contract pointer as a keyed bd memory in `repo`.
+
+    bd injects memories at prime time, so one write here surfaces the contract
+    in every later session of the repo and after every compaction. `--key`
+    makes the write idempotent: bd updates a memory carrying that key in place,
+    so re-running init (including `--force`) never accumulates duplicates.
+    """
+    subprocess.run(
+        ["bd", "remember", readiness_memory_text(), "--key", READINESS_MEMORY_KEY],
+        cwd=str(repo),
+        check=True,
+    )
 
 
 def _remove_bd_claude_scaffold(repo: Path) -> None:
@@ -201,6 +221,21 @@ def init(
             _remove_bd_claude_scaffold(target)
     elif force:
         output.warn(f".beads/ exists; skipping bd init (--force re-renders templates only)")
+
+    # The workspace exists on both paths above, so the memory is seeded for a
+    # fresh repo and retrofitted into an existing one under --force. A failure
+    # here (bd too old for `remember`, read-only workspace) costs the repo a
+    # prime-time pointer, not its bootstrap, so warn and keep going.
+    output.progress("init", f"storing readiness pointer (key={READINESS_MEMORY_KEY})")
+    try:
+        _bd_remember(target)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        output.warn(
+            f"could not store the readiness memory: {exc}\n"
+            f"       add it later with: {readiness_memory_command()}"
+        )
+    else:
+        output.success(f"readiness memory stored (key={READINESS_MEMORY_KEY})")
 
     output.progress(
         "init",

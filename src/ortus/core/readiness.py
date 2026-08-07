@@ -8,12 +8,17 @@ implementation phase while remaining readable in ``bd show``.
 from __future__ import annotations
 
 import re
+import shlex
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 
 READINESS_SCHEMA_VERSION = "v1"
+
+# Stable key for the bd memory that points sessions at the contract. bd updates
+# a memory with a matching key in place, so re-seeding it never duplicates.
+READINESS_MEMORY_KEY = "ortus-readiness-contract"
 
 
 @dataclass(frozen=True)
@@ -413,6 +418,29 @@ def spec_markdown() -> str:
         )
     )
     return "\n".join(lines) + "\n"
+
+
+def readiness_memory_text() -> str:
+    """Render the pointer bd injects into every ``bd prime``.
+
+    Deliberately a pointer rather than the contract itself: memories are
+    reloaded in every session and after every compaction, so the body names
+    the verb that prints the sections instead of restating them.
+    """
+    return (
+        f"Ortus readiness schema {READINESS_SCHEMA_VERSION}: every non-epic bd "
+        "issue must carry the required headings in its description, design and "
+        "acceptance criteria, or `ortus grind` skips it as unready. Run "
+        "`ortus spec` for the full contract."
+    )
+
+
+def readiness_memory_command() -> str:
+    """The exact `bd remember` invocation that seeds the pointer memory."""
+    return (
+        f"bd remember {shlex.quote(readiness_memory_text())} "
+        f"--key {READINESS_MEMORY_KEY}"
+    )
 
 
 def validate_issues(issues: Iterable[dict[str, Any]]) -> tuple[ReadinessReport, ...]:

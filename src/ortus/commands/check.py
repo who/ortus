@@ -20,6 +20,7 @@ from ortus.core import output, sandbox
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.config import load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
+from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_command
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -78,6 +79,46 @@ def check_beads_dir(repo: Path) -> CheckResult:
     if not beads.is_dir():
         return CheckResult(".beads/", False, f"missing at {beads}")
     return CheckResult(".beads/", True, str(beads))
+
+
+def check_readiness_memory(repo: Path) -> CheckResult:
+    """Report whether the readiness-contract pointer reaches `bd prime`.
+
+    Repos initialized before the pointer existed have no such memory, so the
+    failure message carries the exact command that adds it — this check never
+    writes it itself (NFR-006). `--readonly` and `--sandbox` keep the query
+    from taking bd's write or auto-sync paths.
+    """
+    name = "bd readiness memory"
+    if not (repo / ".beads").is_dir():
+        return CheckResult(name, False, f"no bd workspace at {repo / '.beads'}")
+    try:
+        proc = subprocess.run(
+            ["bd", "--readonly", "--sandbox", "memories", "--json"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return CheckResult(name, False, f"bd memories failed to run: {exc}")
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()[0:1]
+        return CheckResult(
+            name,
+            False,
+            f"bd memories exited {proc.returncode}: {detail[0] if detail else '(no output)'}",
+        )
+    try:
+        memories = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return CheckResult(name, False, f"bd memories --json unparseable: {exc}")
+    if READINESS_MEMORY_KEY in memories:
+        return CheckResult(name, True, f"key={READINESS_MEMORY_KEY}")
+    return CheckResult(
+        name, False, f"missing — add it with: {readiness_memory_command()}"
+    )
 
 
 def check_claude_settings(repo: Path) -> CheckResult:
@@ -158,6 +199,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         results.append(c())
     repo_checks: list[tuple[Callable[[Path], CheckResult], str]] = [
         (check_beads_dir, ".beads/"),
+        (check_readiness_memory, "bd readiness memory"),
         (
             check_claude_settings if backend == "claude" else check_codex_settings,
             ".claude/settings.json" if backend == "claude" else ".codex/config.toml",

@@ -12,11 +12,36 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import check as check_mod
+from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_text
 
 runner = CliRunner()
 
 
 # --- fixture helpers -------------------------------------------------------
+
+
+def _fake_bd_run(*, readiness_memory: bool):
+    """Stand in for subprocess.run for every binary `check` shells out to.
+
+    `bd memories --json` answers with a memory map; everything else answers
+    with a version line, which is all `_binary_check` reads.
+    """
+    memories: dict[str, object] = {"schema_version": 1}
+    if readiness_memory:
+        memories[READINESS_MEMORY_KEY] = readiness_memory_text()
+
+    class _CP:
+        def __init__(self, stdout: str) -> None:
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = 0
+
+    def _run(args, *a, **k):
+        if "memories" in args:
+            return _CP(json.dumps(memories))
+        return _CP("fake 1.0.0\n")
+
+    return _run
 
 
 def _healthy_repo(tmp_path: Path) -> Path:
@@ -30,18 +55,14 @@ def _healthy_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _all_binaries_present(monkeypatch: pytest.MonkeyPatch) -> None:
+def _all_binaries_present(
+    monkeypatch: pytest.MonkeyPatch, *, readiness_memory: bool = True
+) -> None:
     """Pretend bd, claude, jq are on PATH and return a version string."""
     import subprocess as _sp
 
     monkeypatch.setattr(check_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-
-    class _CP:
-        def __init__(self) -> None:
-            self.stdout = "fake 1.0.0\n"
-            self.stderr = ""
-
-    monkeypatch.setattr(_sp, "run", lambda *a, **k: _CP())
+    monkeypatch.setattr(_sp, "run", _fake_bd_run(readiness_memory=readiness_memory))
 
 
 def _fake_sandbox_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -139,6 +160,11 @@ def test_check_reports_missing_binary(
 ) -> None:
     repo = _healthy_repo(tmp_path)
     monkeypatch.setattr(check_mod.shutil, "which", lambda binary: None)
+
+    def _absent(args, *a, **k):
+        raise FileNotFoundError(f"no such binary: {args[0]}")
+
+    monkeypatch.setattr(check_mod.subprocess, "run", _absent)
     _fake_sandbox_ok(monkeypatch)
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
@@ -187,6 +213,62 @@ def test_check_reports_prompt_overrides(
     assert "grind-prompt.md" in result.stdout
 
 
+def test_check_reports_present_readiness_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: the pointer memory is reported as present when bd has it."""
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # The table wraps long cells, so compare with whitespace removed.
+    compact = "".join(result.stdout.split())
+    assert f"key={READINESS_MEMORY_KEY}" in compact
+    assert "FAIL" not in result.stdout
+
+
+def test_check_reports_missing_readiness_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a workspace without the pointer fails and names the add command."""
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch, readiness_memory=False)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    # The table wraps long cells, so compare with whitespace removed.
+    compact = "".join(result.stdout.split())
+    assert "bdremember" in compact
+    assert f"--key{READINESS_MEMORY_KEY}" in compact
+
+
+def test_check_readiness_memory_is_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NFR-006: the memory query must not take any bd write path."""
+    repo = _healthy_repo(tmp_path)
+    seen: list[list[str]] = []
+    real = _fake_bd_run(readiness_memory=True)
+
+    def _record(args, *a, **k):
+        seen.append(list(args))
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(check_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    monkeypatch.setattr(check_mod.subprocess, "run", _record)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    runner.invoke(app, ["check", str(repo)])
+    memory_calls = [args for args in seen if "memories" in args]
+    assert memory_calls, seen
+    for args in memory_calls:
+        assert "--readonly" in args and "--sandbox" in args, args
+        assert "remember" not in args, args
+
+
 def test_check_codex_uses_codex_binary_and_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -204,12 +286,9 @@ def test_check_codex_uses_codex_binary_and_config(
         return f"/usr/bin/{binary}"
 
     monkeypatch.setattr(check_mod.shutil, "which", which)
-
-    class _CP:
-        stdout = "fake 1.0.0\n"
-        stderr = ""
-
-    monkeypatch.setattr(check_mod.subprocess, "run", lambda *a, **k: _CP())
+    monkeypatch.setattr(
+        check_mod.subprocess, "run", _fake_bd_run(readiness_memory=True)
+    )
     _fake_sandbox_ok(monkeypatch)
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
