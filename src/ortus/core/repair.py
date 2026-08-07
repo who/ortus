@@ -112,9 +112,17 @@ def repair_readiness(
     profile: AgentProfile,
     contract: str,
     capability: CodeGraphCapability | None,
+    context: str = "",
+    timeout: float | None = None,
     runner_factory: RunnerFactory = _default_runner_factory,
 ) -> int:
-    """Run one fresh planning-profile subprocess to repair existing packets."""
+    """Run one fresh planning-profile subprocess to repair existing packets.
+
+    `context` is extra grounding appended after the repair request (grind has
+    no PRD, so it names each issue's parent epic instead). `timeout` bounds the
+    subprocess for callers that already run under a watchdog; it is forwarded
+    only when set so runners without the kwarg keep working.
+    """
 
     if not reports:
         return 0
@@ -123,5 +131,16 @@ def repair_readiness(
     if callable(configure):
         configure(capability)
     prompt = resolve_prompt("plan-prompt", repo=repo).text
-    prompt += "\n\n" + readiness_repair_prompt(reports) + contract
+    prompt += "\n\n" + readiness_repair_prompt(reports)
+    if context:
+        prompt += "\n" + context
+    prompt += contract
+    if timeout is not None:
+        return runner.run(
+            prompt,
+            repo=repo,
+            log_path=log_path,
+            profile=profile,
+            timeout=timeout,  # type: ignore[call-arg]
+        )
     return runner.run(prompt, repo=repo, log_path=log_path, profile=profile)

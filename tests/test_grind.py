@@ -74,6 +74,283 @@ def _create_ready_issue(
     ).stdout.strip()
 
 
+def _create_unready_issue(repo: Path, title: str, *, priority: str = "2") -> str:
+    """A hand-authored leaf: real work, but no readiness schema v1 packet."""
+    return subprocess.run(
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            title,
+            "--type",
+            "task",
+            "--priority",
+            priority,
+            "--description",
+            "make it work",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _bd_repo(tmp_path: Path, prefix: str) -> Path:
+    """bd-initialized repo with hooks enabled, ready for a grind invocation."""
+    repo = tmp_path / prefix
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--non-interactive", "--prefix", prefix],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    normalize_git_branch(repo)
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    return repo
+
+
+def _issue_ids(repo: Path) -> set[str]:
+    listing = subprocess.run(
+        ["bd", "list", "--all", "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return {issue["id"] for issue in json.loads(listing or "[]")}
+
+
+def _issue(repo: Path, issue_id: str) -> dict:
+    shown = subprocess.run(
+        ["bd", "show", issue_id, "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return json.loads(shown)[0]
+
+
+def _grind_log(repo: Path) -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in (repo / "logs").glob("grind-*.log")
+    )
+
+
+def _repair_packet_into(repo: Path, issue_id: str) -> None:
+    """Stand in for what the repair subprocess does: update the packet in place."""
+    packet = ready_issue()
+    subprocess.run(
+        [
+            "bd",
+            "update",
+            issue_id,
+            "--description",
+            packet["description"],
+            "--design",
+            packet["design"],
+            "--acceptance",
+            packet["acceptance_criteria"],
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.slow
+def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (ortus-xhrj.7): a queue whose only ready leaf fails readiness is
+    repaired in place and then claimed, creating no new issue ids.
+
+    Before this behavior grind logged a readiness skip, found nothing workable,
+    and broke out of the outer loop — which reads to an operator as a grind
+    failure rather than as an authoring defect in one packet.
+    """
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "rpair")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    ids_before = _issue_ids(repo)
+    phases: list[Phase] = []
+
+    class RepairingClaude:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            profile: object,
+            **kwargs: object,
+        ) -> int:
+            phases.append(profile.phase)  # type: ignore[union-attr]
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            if profile.phase is Phase.PLAN:  # type: ignore[union-attr]
+                assert "READINESS REPAIR PASS" in prompt
+                assert f"Repair ONLY these existing issue IDs: {issue_id}" in prompt
+                # Grind has no PRD, so the pass is grounded in the packet itself.
+                assert "which has no PRD" in prompt
+                _repair_packet_into(repo, issue_id)
+            elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
+                subprocess.run(
+                    ["bd", "close", issue_id, "--reason", "verified"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: RepairingClaude())
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # The repair ran on the planning profile, ahead of the implement/verify pair.
+    assert phases == [Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY]
+    assert _issue_ids(repo) == ids_before, "repair must update in place, not create"
+    assert _issue(repo, issue_id)["status"] == "closed"
+    log_text = _grind_log(repo)
+    assert "readiness repair pass 1/2" in log_text
+    assert f"readiness repair: {issue_id} now passes readiness" in log_text
+    assert f"harness selected+claimed {issue_id}" in log_text
+    comments = subprocess.run(
+        ["bd", "comments", issue_id, "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "readiness repair pass" in comments
+
+
+@pytest.mark.slow
+def test_grind_repair_opt_out_restores_skip_and_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: --no-repair-unready spawns nothing and leaves the leaf open."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "optout")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+
+    class NeverRuns:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, **kwargs: object) -> int:
+            raise AssertionError("--no-repair-unready must not spawn any subprocess")
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
+
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--no-repair-unready",
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "open"
+    combined = result.stdout + result.stderr
+    assert "readiness repair disabled by --no-repair-unready" in combined
+    log_text = _grind_log(repo)
+    # The pre-existing skip line keeps its format so log tailing is unaffected.
+    assert "readiness skip (left open for planning/human repair)" in log_text
+    assert "no ready issue to claim (queue blocked or human-only)" in log_text
+
+
+@pytest.mark.slow
+def test_grind_repair_budget_exhausted_prints_diagnostics_and_follow_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: once the per-run budget is spent, grind stops as it does today but
+    names each per-issue failure and the exact follow-up command.
+
+    The second leaf is blocked behind the first, so it only reaches the ready
+    queue after the run's single repair pass is already spent.
+    """
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "budget")
+    first = _create_unready_issue(repo, "first hand authored leaf", priority="1")
+    second = _create_unready_issue(repo, "second hand authored leaf", priority="1")
+    subprocess.run(
+        ["bd", "dep", first, "--blocks", second],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    repairs: list[str] = []
+
+    class OnePassClaude:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            profile: object,
+            **kwargs: object,
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            if profile.phase is Phase.PLAN:  # type: ignore[union-attr]
+                repairs.append(prompt)
+                _repair_packet_into(repo, first)
+            elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
+                subprocess.run(
+                    ["bd", "close", first, "--reason", "verified"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: OnePassClaude())
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--repair-budget", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(repairs) == 1, "the run's single repair pass must not be re-spent"
+    assert _issue(repo, first)["status"] == "closed"
+    assert _issue(repo, second)["status"] == "open"
+    combined = result.stdout + result.stderr
+    assert "readiness repair budget exhausted (1/1 pass(es) used)" in combined
+    assert f"readiness: {second}" in combined
+    # Rich hard-wraps long lines mid-token, so compare whitespace-free.
+    squashed = re.sub(r"\s+", "", combined)
+    assert re.sub(r"\s+", "", f"follow-up: bd update {second}") in squashed
+    assert re.sub(r"\s+", "", f"then re-run: ortus grind {repo}") in squashed
+
+
 def test_grind_dry_run_prints_resolved_flags_and_exits(
     tmp_path: Path,
 ) -> None:

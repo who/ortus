@@ -120,6 +120,45 @@ def test_repair_runs_one_pass_on_the_supplied_profile(tmp_path: Path) -> None:
     assert spy.capabilities == [None]
 
 
+def test_repair_appends_caller_context_before_the_contract(tmp_path: Path) -> None:
+    """Grind has no PRD, so it grounds the pass in the parent epic instead."""
+
+    spy = _SpyRunner()
+    repair_readiness(
+        tmp_path,
+        (_report("fixture-1"),),
+        log_path=tmp_path / "repair.log",
+        backend="claude",
+        profile=AgentProfile("claude", Phase.PLAN, "opus", "high"),
+        contract="\n\nCONTRACT",
+        capability=None,
+        context="CONTEXT. no PRD here.",
+        runner_factory=lambda: spy,
+    )
+    prompt = spy.prompts[0]
+    assert prompt.index("Repair ONLY") < prompt.index("CONTEXT. no PRD here.")
+    assert prompt.endswith("CONTRACT")
+    assert "timeout" not in spy.kwargs[0]
+
+
+def test_repair_forwards_a_timeout_only_when_the_caller_bounds_it(
+    tmp_path: Path,
+) -> None:
+    spy = _SpyRunner()
+    repair_readiness(
+        tmp_path,
+        (_report("fixture-1"),),
+        log_path=tmp_path / "repair.log",
+        backend="claude",
+        profile=AgentProfile("claude", Phase.PLAN, "opus", "high"),
+        contract="",
+        capability=None,
+        timeout=90,
+        runner_factory=lambda: spy,
+    )
+    assert spy.kwargs[0]["timeout"] == 90
+
+
 def test_repair_with_no_reports_is_a_no_op(tmp_path: Path) -> None:
     spy = _SpyRunner()
 

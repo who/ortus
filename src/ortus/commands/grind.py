@@ -87,6 +87,11 @@ from ortus.core.grind_loop import (
     read_work_issue_condition,
     select_ready_issue,
 )
+from ortus.core.repair import (
+    RepairCreatedReplacements,
+    guard_no_replacements,
+    repair_readiness,
+)
 from ortus.core.repo import resolve_repo
 
 
@@ -382,6 +387,81 @@ def _log_path(repo: Path) -> Path:
     return log
 
 
+def _repair_context(bd: BdClient, reports: tuple[ReadinessReport, ...]) -> str:
+    """Ground a grind-side repair in each packet plus its parent epic.
+
+    A grind run has no PRD, and guessing one would repair the packet against
+    the wrong document, so the parent epic is the only extra context the pass
+    gets beyond the issue's own `bd show` output.
+    """
+    lines: list[str] = []
+    for report in reports:
+        try:
+            parent = str(bd.show(report.issue_id).get("parent") or "").strip()
+        except Exception:  # a bd hiccup must not cost us the whole pass
+            parent = ""
+        lines.append(
+            f"- {report.issue_id} is a child of epic {parent}; read it with "
+            f"`bd show {parent} --json` for the parent objective."
+            if parent
+            else f"- {report.issue_id} has no parent epic."
+        )
+    return (
+        "CONTEXT. This pass runs inside `ortus grind`, which has no PRD. Repair "
+        "each packet from its own `bd show <id> --json` output and the parent "
+        "epic named below; do not look for or invent a PRD.\n" + "\n".join(lines) + "\n"
+    )
+
+
+def _run_readiness_repair(
+    bd: BdClient,
+    reports: tuple[ReadinessReport, ...],
+    *,
+    repo: Path,
+    log: Path,
+    write_log: Callable[[str], None],
+    backend: str,
+    profile: AgentProfile,
+    probe: CodeGraphProbe,
+    timeout: int | None,
+) -> tuple[int, object | None]:
+    """Run one bounded readiness repair pass; return (exit code, transcript).
+
+    Raises :class:`RepairCreatedReplacements` when the pass grew the queue
+    instead of updating the packets it was named — that is a hard error, not a
+    skip, because silent queue growth is the failure mode the guard exists for.
+    """
+    repair_log = log.with_name(f"{log.stem}-repair{log.suffix}")
+    ids_before = {issue["id"] for issue in bd.list_all()}
+    try:
+        rc = repair_readiness(
+            repo,
+            reports,
+            log_path=repair_log,
+            backend=backend,
+            profile=profile,
+            contract=phase_contract(CodeGraphPhase.PLANNING, probe),
+            capability=probe.capability,
+            context=_repair_context(bd, reports),
+            timeout=timeout,
+            runner_factory=_make_runner,
+        )
+    except subprocess.TimeoutExpired:
+        write_log(f"readiness repair: TIMEOUT after {timeout}s; see {repair_log}")
+        return 143, None
+    if rc != 0:
+        write_log(f"readiness repair: failed ({backend} exit {rc}); see {repair_log}")
+        return rc, None
+    guard_no_replacements(ids_before, {issue["id"] for issue in bd.list_all()})
+    summary = parse_transcript(repair_log, phase=CodeGraphPhase.PLANNING, probe=probe)
+    append_normalized(repair_log, summary)
+    write_log(
+        f"CodeGraph repair summary: queries={len(summary.events)} "
+        f"fallbacks={summary.fallbacks or 'none'}"
+    )
+    return 0, summary
+
+
 def _snapshot(bd: BdClient) -> StateSnapshot:
     """Read all four bd state values needed by the outer loop in one shot.
 
@@ -594,6 +674,24 @@ def grind(
             "branch instead of silently leaving origin stale."
         ),
     ),
+    repair_unready: bool = typer.Option(
+        True,
+        "--repair-unready/--no-repair-unready",
+        help=(
+            "When the ready queue holds only leaves that fail readiness schema "
+            "v1, repair them in place with one planning-profile pass and keep "
+            "going. --no-repair-unready restores the skip-and-stop behavior."
+        ),
+    ),
+    repair_budget: int = typer.Option(
+        2,
+        "--repair-budget",
+        help=(
+            "Max readiness repair passes per grind run (0 disables). Bounds how "
+            "much of the loop a badly planned queue can burn in repair "
+            "subprocesses; each issue id is attempted at most once per run."
+        ),
+    ),
     fast: bool = typer.Option(
         False, "--fast", help="Use claude --fast (premium output)."
     ),
@@ -650,6 +748,9 @@ def grind(
             model=verify_model,
             reasoning_effort=verify_reasoning_effort,
         )
+        # Repairing an unready packet is authoring work, not implementation, so
+        # the self-heal pass runs on the planning profile.
+        plan_profile = config.resolve_profile(resolved_backend, Phase.PLAN)
     except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
@@ -715,6 +816,14 @@ def grind(
         output.info(f"backend:        {resolved_backend}")
         output.info(f"implement:      {implement_profile.display_name}")
         output.info(f"verify:         {verify_profile.display_name}")
+        output.info(
+            "repair:         "
+            + (
+                f"{plan_profile.display_name}, budget {repair_budget} pass(es)"
+                if repair_unready and repair_budget > 0
+                else "off (unready leaves are skipped)"
+            )
+        )
         output.info(f"codegraph:      {codegraph_mode.value}")
         output.info(
             f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}"
@@ -919,6 +1028,10 @@ def grind(
 
             tasks_completed = 0
             iters_run = 0
+            # Readiness self-heal budget: one attempt per issue id per run, and
+            # at most `repair_budget` passes overall.
+            repair_attempted: set[str] = set()
+            repairs_run = 0
 
             while True:
                 # Milestone rollover: an epic whose children are all closed
@@ -1011,9 +1124,12 @@ def grind(
                             write_log(message)
                             output.warn(message)
 
+                    unready: list[ReadinessReport] = []
+
                     def report_unready(
                         candidate: dict, report: ReadinessReport
                     ) -> None:
+                        unready.append(report)
                         diagnostic = report.diagnostic()
                         message = (
                             f"readiness skip (left open for planning/human repair): "
@@ -1025,6 +1141,119 @@ def grind(
                     target_issue = select_ready_issue(
                         ready_packets, on_unready=report_unready
                     )
+
+                    # Nothing claimable, but the queue is NOT drained and the
+                    # only thing between the loop and real work is packets that
+                    # fail readiness schema v1. Repair those in place and
+                    # revalidate rather than dead-ending on an authoring defect
+                    # (ortus-xhrj.7). A queue that also holds a ready leaf never
+                    # reaches here, so it spends no repair budget; epics never
+                    # reach here either, because select_ready_issue skips them
+                    # without reporting them unready.
+                    repair_blocked: str | None = None
+                    if target_issue is None and unready:
+                        pending = tuple(
+                            report
+                            for report in unready
+                            if report.issue_id not in repair_attempted
+                        )
+                        if not repair_unready:
+                            repair_blocked = (
+                                "readiness repair disabled by --no-repair-unready"
+                            )
+                        elif repairs_run >= repair_budget:
+                            repair_blocked = (
+                                "readiness repair budget exhausted "
+                                f"({repairs_run}/{repair_budget} pass(es) used)"
+                            )
+                        elif not pending:
+                            repair_blocked = (
+                                "every unready issue already spent its one repair "
+                                "attempt this run"
+                            )
+                        else:
+                            repaired_ids = {report.issue_id for report in pending}
+                            repair_attempted |= repaired_ids
+                            repairs_run += 1
+                            write_log(
+                                f"readiness repair pass {repairs_run}/{repair_budget}: "
+                                + ", ".join(sorted(repaired_ids))
+                            )
+                            output.progress(
+                                "grind",
+                                "repairing unready packet(s) via one planning pass "
+                                "(this typically takes 1-3 min)",
+                            )
+                            try:
+                                repair_rc, repair_summary = _run_readiness_repair(
+                                    bd,
+                                    pending,
+                                    repo=target,
+                                    log=log,
+                                    write_log=write_log,
+                                    backend=resolved_backend,
+                                    profile=plan_profile,
+                                    probe=codegraph_probe,
+                                    timeout=(
+                                        worker_timeout if worker_timeout > 0 else None
+                                    ),
+                                )
+                            except RepairCreatedReplacements as exc:
+                                # Silent queue growth is the failure mode the
+                                # guard exists for: halt instead of skipping.
+                                write_log(f"readiness repair: HALT — {exc}")
+                                output.error(str(exc))
+                                raise typer.Exit(code=1)
+                            if repair_rc != 0:
+                                repair_blocked = (
+                                    f"readiness repair pass failed (exit {repair_rc})"
+                                )
+                            else:
+                                # Reload the authoritative packets the pass
+                                # touched, then re-run the pure selector over
+                                # the same queue.
+                                reloaded: list[dict] = []
+                                for packet in ready_packets:
+                                    packet_id = str(packet.get("id") or "").strip()
+                                    if packet_id in repaired_ids:
+                                        try:
+                                            packet = bd.show(packet_id)
+                                        except Exception as exc:
+                                            write_log(
+                                                "readiness repair: could not reload "
+                                                f"{packet_id} ({exc})"
+                                            )
+                                    reloaded.append(packet)
+                                ready_packets = reloaded
+                                unready.clear()
+                                target_issue = select_ready_issue(
+                                    ready_packets, on_unready=report_unready
+                                )
+                                # Record the pass on every issue it touched,
+                                # mirroring what the plan verb already does.
+                                for repaired_id in sorted(repaired_ids):
+                                    try:
+                                        bd.add_comment(
+                                            repaired_id,
+                                            "ortus grind ran one readiness repair "
+                                            "pass on this issue.\n\n"
+                                            + repair_summary.report(),  # type: ignore[union-attr]
+                                        )
+                                    except Exception as exc:
+                                        write_log(
+                                            "readiness repair: could not comment on "
+                                            f"{repaired_id} ({exc})"
+                                        )
+                                if target_issue is None:
+                                    repair_blocked = (
+                                        "readiness repair left the queue unready"
+                                    )
+                                else:
+                                    write_log(
+                                        "readiness repair: "
+                                        f"{target_issue['id']} now passes readiness"
+                                    )
+
                     if target_issue is None:
                         # Queue is non-empty (not drained) but nothing is ready —
                         # everything left is blocked or human-flagged. We hold the
@@ -1034,6 +1263,20 @@ def grind(
                             "no ready issue to claim (queue blocked or human-only); "
                             f"exiting outer loop. tasks_completed={tasks_completed}"
                         )
+                        if repair_blocked is not None:
+                            write_log(f"readiness repair: {repair_blocked}")
+                            output.error(f"grind: {repair_blocked}")
+                        for report in unready:
+                            diagnostic = f"readiness: {report.diagnostic()}"
+                            follow_up = (
+                                f"follow-up: bd update {report.issue_id} "
+                                "--description/--design/--acceptance to readiness "
+                                f"schema v1, then re-run: ortus grind {target}"
+                            )
+                            write_log(diagnostic)
+                            write_log(follow_up)
+                            output.error(diagnostic)
+                            output.error(follow_up)
                         break
                     issue_id = target_issue["id"]
                     try:

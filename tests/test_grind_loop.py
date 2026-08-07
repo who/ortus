@@ -314,6 +314,35 @@ def test_select_ready_issue_skips_legacy_leaf_with_exact_diagnostics() -> None:
     assert "design/scope" in seen[0][1].diagnostic()
 
 
+def test_mixed_ready_queue_returns_the_ready_leaf_in_either_order() -> None:
+    """ortus-xhrj.7 AC-4: a queue holding one ready and one unready leaf is
+    claimable as-is, so grind must never spend repair budget on it.
+
+    The selector stays pure — it just returns the ready leaf — and grind only
+    reaches its repair path when the selector returns None. Both orderings
+    matter because `bd ready` sorts by priority, so the unready leaf can come
+    first.
+    """
+    unready = {"id": "legacy-1", "issue_type": "task", "description": "do it"}
+    ready = ready_issue("new-1")
+
+    for queue in ([unready, ready], [ready, unready]):
+        assert select_ready_issue(queue) == ready
+
+    # An epic in the same queue is skipped silently: it is exempt from
+    # readiness, so it must never be reported as repairable.
+    epic = {"id": "e-1", "issue_type": "epic", "priority": 0}
+    reported: list[str] = []
+    assert (
+        select_ready_issue(
+            [epic, unready, ready],
+            on_unready=lambda issue, report: reported.append(report.issue_id),
+        )
+        == ready
+    )
+    assert reported == ["legacy-1"]
+
+
 def test_epic_is_exhausted_all_children_closed() -> None:
     epic = {
         "id": "e-1",
