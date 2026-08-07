@@ -14,8 +14,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
+from string import Template
 
 PROMPT_PACKAGE = "ortus.prompts"
+
+# The token the bundled plan prompt carries in place of the generated readiness
+# contract. `ortus check` reads it to spot an override copied before it existed.
+READINESS_SPEC_PLACEHOLDER = "$readiness_spec"
 
 
 @dataclass(frozen=True)
@@ -98,3 +103,17 @@ def resolve_prompt(
     return ResolvedPrompt(
         name=name, source="bundled", path=bundled_path, text=bundled_text
     )
+
+
+def substitute(text: str, /, **values: str) -> str:
+    """Fill `$name` placeholders in a resolved prompt, tolerantly.
+
+    Safe-substitution semantics on purpose. Prompts are shell-heavy — `$(...)`,
+    `$ID_FEATURE_A`, `--arg t "$title"` — and a user's private override may
+    predate any placeholder we add later. Silently degrading to an older
+    contract is bad, but crashing every run that loads such an override is
+    worse, so unknown and malformed tokens pass through untouched and
+    `ortus check` reports the staleness instead.
+    """
+
+    return Template(text).safe_substitute(**values)

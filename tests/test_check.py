@@ -213,6 +213,44 @@ def test_check_reports_prompt_overrides(
     assert "grind-prompt.md" in result.stdout
 
 
+def test_check_reports_stale_override_missing_the_placeholder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: an override predating $readiness_spec is reported, not failed."""
+    repo = _healthy_repo(tmp_path)
+    overrides = repo / ".ortus" / "prompts"
+    overrides.mkdir(parents=True)
+    (overrides / "plan-prompt.md").write_text("frozen contract, no placeholder\n")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "FAIL" not in result.stdout
+    # Rich wraps long cells, so compare with whitespace removed.
+    compact = "".join(result.stdout.split())
+    assert "stale" in compact
+    assert "$readiness_spec" in compact
+
+
+def test_check_leaves_a_current_override_out_of_the_stale_override_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An override carrying the placeholder is an ordinary override."""
+    repo = _healthy_repo(tmp_path)
+    overrides = repo / ".ortus" / "prompts"
+    overrides.mkdir(parents=True)
+    (overrides / "plan-prompt.md").write_text("custom preamble\n$readiness_spec\n")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = "".join(result.stdout.split())
+    assert "plan-prompt.md" in compact
+    assert "stale" not in compact
+
+
 def test_check_reports_present_readiness_memory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

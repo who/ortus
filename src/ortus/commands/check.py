@@ -20,6 +20,11 @@ from ortus.core import output, sandbox
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.config import load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
+from ortus.core.prompts import (
+    READINESS_SPEC_PLACEHOLDER,
+    PromptNotFound,
+    resolve_prompt,
+)
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_command
 
 if sys.version_info >= (3, 11):
@@ -173,17 +178,42 @@ def check_ortusrc(repo: Path) -> CheckResult:
     return CheckResult(".ortusrc", True, f"layers loaded: {sources}")
 
 
+def _stale_plan_prompt(repo: Path) -> Optional[str]:
+    """Name the winning plan-prompt override if it predates the placeholder.
+
+    The bundled prompt carries the readiness contract as `$readiness_spec`; an
+    override copied before that still assembles (substitution is tolerant), it
+    just teaches whatever contract was frozen into the copy.
+    """
+    try:
+        resolved = resolve_prompt("plan-prompt", repo=repo)
+    except PromptNotFound:
+        return None
+    if resolved.source == "bundled" or READINESS_SPEC_PLACEHOLDER in resolved.text:
+        return None
+    return f"{resolved.source} plan-prompt.md ({resolved.path})"
+
+
 def check_prompt_overrides(repo: Path) -> CheckResult:
-    """Optional informational check — flags any per-repo prompt overrides."""
+    """Optional informational check — flags any per-repo prompt overrides.
+
+    A stale override is reported, not failed: it still runs, and failing here
+    would break CI in repos whose overrides are otherwise deliberate.
+    """
     override_dir = repo / ".ortus" / "prompts"
     if not override_dir.is_dir():
-        return CheckResult(".ortus/prompts/", True, "no overrides (using bundled)")
-    overrides = sorted(p.name for p in override_dir.glob("*.md"))
-    if not overrides:
-        return CheckResult(".ortus/prompts/", True, "directory empty")
-    return CheckResult(
-        ".ortus/prompts/", True, f"overrides: {', '.join(overrides)}"
-    )
+        message = "no overrides (using bundled)"
+    elif overrides := sorted(p.name for p in override_dir.glob("*.md")):
+        message = f"overrides: {', '.join(overrides)}"
+    else:
+        message = "directory empty"
+    stale = _stale_plan_prompt(repo)
+    if stale:
+        message += (
+            f"; stale {stale} predates {READINESS_SPEC_PLACEHOLDER} and teaches a "
+            "frozen readiness contract — refresh or delete it"
+        )
+    return CheckResult(".ortus/prompts/", True, message)
 
 
 def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:

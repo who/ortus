@@ -18,8 +18,8 @@ from typing import Callable, Iterable, Protocol
 from ortus.core.agent import make_runner
 from ortus.core.codegraph import CodeGraphCapability
 from ortus.core.profiles import AgentProfile
-from ortus.core.prompts import resolve_prompt
-from ortus.core.readiness import ReadinessReport
+from ortus.core.prompts import resolve_prompt, substitute
+from ortus.core.readiness import ReadinessReport, spec_markdown
 
 
 class _Runner(Protocol):
@@ -56,7 +56,12 @@ def _default_runner_factory(backend: str = "claude") -> _Runner:
 
 
 def readiness_repair_prompt(reports: tuple[ReadinessReport, ...]) -> str:
-    """Build a bounded repair request that can only update named issues."""
+    """Build a bounded repair request that can only update named issues.
+
+    The section list is rendered from ``spec_markdown()`` rather than restated,
+    so the repair pass can never teach a contract the validator that rejected
+    the packet no longer enforces.
+    """
 
     diagnostics = "\n".join(f"- {report.diagnostic()}" for report in reports)
     ids = ", ".join(report.issue_id for report in reports)
@@ -74,15 +79,7 @@ do not close, replace, supersede, or rename an issue, and do not change issue
 dependencies. Preserve all sound detail already present. Every repaired leaf
 must use readiness schema v1 with these exact field headings:
 
-- description: `## Objective`, `## Behavioral context`
-- design: `## Readiness schema` (body `v1`), `## Scope`, `## Non-goals`,
-  `## Concrete locations`, `## Resolved decisions`,
-  `## Compatibility constraints`, `## Ordered steps` (numbered),
-  `## Dependencies`, `## Edge cases`, `## Plan-gap guidance`
-- acceptance criteria: `## Observable criteria` with unique AC-N identifiers,
-  `## Criterion checks` mapping every AC-N exactly once to an exact command or
-  deterministic check, and `## Targeted tests` with exact bounded test commands
-
+{spec_markdown()}
 End immediately after updating the named IDs.
 """
 
@@ -130,7 +127,10 @@ def repair_readiness(
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)
-    prompt = resolve_prompt("plan-prompt", repo=repo).text
+    prompt = substitute(
+        resolve_prompt("plan-prompt", repo=repo).text,
+        readiness_spec=spec_markdown(),
+    )
     prompt += "\n\n" + readiness_repair_prompt(reports)
     if context:
         prompt += "\n" + context

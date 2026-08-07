@@ -29,8 +29,13 @@ from ortus.core.codegraph import (
 )
 from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
-from ortus.core.prompts import resolve_prompt
-from ortus.core.readiness import ReadinessReport, failed_reports, validate_issues
+from ortus.core.prompts import resolve_prompt, substitute
+from ortus.core.readiness import (
+    ReadinessReport,
+    failed_reports,
+    spec_markdown,
+    validate_issues,
+)
 from ortus.core.repair import (
     RepairCreatedReplacements,
     guard_no_replacements,
@@ -49,6 +54,17 @@ def _make_codegraph() -> CodeGraphAdapter:
     return CodeGraphAdapter()
 
 
+def _plan_prompt(repo: Path) -> str:
+    """Resolve the plan prompt with the generated readiness contract filled in.
+
+    The contract is rendered from readiness.py rather than restated here, so a
+    schema change cannot leave the planner teaching sections the validator no
+    longer enforces.
+    """
+    prompt = resolve_prompt("plan-prompt", repo=repo).text
+    return substitute(prompt, readiness_spec=spec_markdown())
+
+
 def _decompose_prd(
     repo: Path,
     prd: Path,
@@ -60,9 +76,10 @@ def _decompose_prd(
     capability: CodeGraphCapability | None = None,
 ) -> int:
     """Run claude with the plan prompt, expanded to reference the PRD path."""
-    prompt = resolve_prompt("plan-prompt", repo=repo).text
+    prompt = _plan_prompt(repo)
     # The plan-prompt uses literal "$prd_path" as a placeholder for the absolute
-    # PRD path; substitute it before handing to claude.
+    # PRD path; substitute it before handing to claude. Last, so a PRD path
+    # containing a dollar sign is never itself read as a placeholder.
     expanded = prompt.replace("$prd_path", str(prd.resolve())) + contract
     runner = _make_runner() if backend == "claude" else _make_runner("codex")
     configure = getattr(runner, "configure_codegraph", None)
@@ -94,7 +111,7 @@ def _expand_idea(
         "draft a brief PRD inline. Treat that inline PRD as the input to the "
         "planning instructions below."
     )
-    plan_prompt = resolve_prompt("plan-prompt", repo=repo).text.replace(
+    plan_prompt = _plan_prompt(repo).replace(
         "$prd_path", "the PRD drafted in this conversation"
     )
     return runner.run(

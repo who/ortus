@@ -10,35 +10,7 @@ Read $prd_path. Decompose the provided PRD Markdown into a Beads issue graph usi
 
 Structure hierarchically: epics for major features, decomposed into leaves via parent-child dependencies; use `blocks` for execution-order constraints and `related` for shared context. Give every issue a title, priority (0-4, 0=critical), type, labels, and estimated minutes. Emit all `bd create` and `bd dep add` commands as one sequential bash script and execute the entire script in one process. Do not fan out bd writes: Dolt enforces a single-writer lock.
 
-## Readiness schema v1 for executable leaves
-
-Use these exact Markdown headings inside the existing bd fields. Every section must contain concrete information. `TODO`, `TBD`, `N/A`, an empty heading, and template text are invalid. When something is intentionally absent, write `None — <why that is safe>`.
-
-`description`:
-
-- `## Objective` — the single outcome this leaf owns.
-- `## Behavioral context` — user-visible or system behavior before and after.
-
-`design`:
-
-- `## Readiness schema` — exactly `v1`.
-- `## Scope` — work included in this leaf.
-- `## Non-goals` — explicit boundaries.
-- `## Concrete locations` — candidate files plus symbols, interfaces, or commands; use CodeGraph evidence or record the grep/Read fallback.
-- `## Resolved decisions` — architectural and product decisions already made, including rationale where useful.
-- `## Compatibility constraints` — supported platforms, APIs, stored data, CLI behavior, or an explained absence.
-- `## Ordered steps` — a numbered implementation sequence.
-- `## Dependencies` — issue dependencies plus code callers/consumers, or an explained absence.
-- `## Edge cases` — failures and boundary conditions the implementation must cover.
-- `## Plan-gap guidance` — contradictions or missing material decisions that require the worker to stop, record `PLAN-GAP`, preserve candidate state, and route to planning/human handling instead of improvising.
-
-`acceptance_criteria`:
-
-- `## Observable criteria` — one observable result per stable identifier (`AC-1`, `AC-2`, ...).
-- `## Criterion checks` — exactly one matching entry for every AC identifier, with an exact command or deterministic inspection in backticks.
-- `## Targeted tests` — exact bounded test commands in backticks. Follow the repository's testing policy; do not make a full local matrix the worker default.
-
-Notes may carry supplementary evidence only; never put required readiness content solely in notes.
+$readiness_spec
 
 ## Complete executable-leaf example
 

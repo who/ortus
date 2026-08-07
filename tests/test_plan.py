@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,7 +15,8 @@ from ortus.cli import app
 from ortus.commands import plan as plan_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import AgentProfile, Phase
-from ortus.core.readiness import validate_issue
+from ortus.core.prompts import READINESS_SPEC_PLACEHOLDER, resolve_prompt
+from ortus.core.readiness import spec_markdown, validate_issue
 from tests._shims import shim_path
 from tests.test_readiness import ready_issue
 
@@ -140,6 +143,62 @@ def test_decompose_routes_only_the_supplied_plan_profile(
         == 0
     )
     assert captured["profile"] is profile
+
+
+_BASH_FENCE = re.compile(r"```bash\n(.*?)```", re.DOTALL)
+_EXAMPLE_FIELDS = {
+    "--type=": "issue_type",
+    "--description=": "description",
+    "--design=": "design",
+    "--acceptance=": "acceptance_criteria",
+}
+
+
+def _worked_example_issue(prompt: str) -> dict[str, str]:
+    """Reconstruct the prompt's worked `bd create` as an issue dict.
+
+    The example is hand-maintained prose inside a fenced bash block, so parse
+    the flag values the way a shell would rather than reading the raw fence.
+    """
+    block = next(b for b in _BASH_FENCE.findall(prompt) if "## Objective" in b)
+    issue = {"id": "worked-example"}
+    for token in shlex.split(block):
+        for flag, field in _EXAMPLE_FIELDS.items():
+            if token.startswith(flag):
+                issue[field] = token[len(flag) :]
+    return issue
+
+
+def test_readiness_spec_substituted_into_the_assembled_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the planner is handed the generated contract, not a placeholder."""
+    captured: list[str] = []
+
+    class SpyRunner:
+        def run(self, prompt: str, **kwargs: object) -> int:
+            captured.append(prompt)
+            return 0
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: SpyRunner())
+    prd = tmp_path / "prd.md"
+    prd.write_text("# Plan\n")
+    assert (
+        plan_mod._decompose_prd(tmp_path, prd, log_path=tmp_path / "plan.log") == 0
+    )
+    assert READINESS_SPEC_PLACEHOLDER not in captured[0]
+    assert spec_markdown() in captured[0]
+    # The pre-existing PRD placeholder keeps its behavior and spelling.
+    assert "$prd_path" not in captured[0]
+    assert str(prd.resolve()) in captured[0]
+
+
+def test_worked_example_is_ready(tmp_path: Path) -> None:
+    """AC-2: the example the prompt teaches passes the validator it teaches."""
+    prompt = resolve_prompt("plan-prompt", repo=tmp_path, home=tmp_path / "home").text
+    report = validate_issue(_worked_example_issue(prompt))
+    assert report.ready, report.diagnostic()
 
 
 def test_plan_with_prd_creates_issues_in_repo(
