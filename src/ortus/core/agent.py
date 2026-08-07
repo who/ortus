@@ -85,6 +85,7 @@ class CodexRunner(ClaudeRunner):
         *,
         fast: bool = False,
         profile: AgentProfile | None = None,
+        readonly: bool = False,
     ) -> list[str]:
         # `fast` is intentionally ignored. Codex service-tier selection is a
         # Codex configuration concern and is not equivalent to Claude --fast.
@@ -94,7 +95,7 @@ class CodexRunner(ClaudeRunner):
             prompt,
             "--json",
             "--sandbox",
-            self.sandbox_mode,
+            "read-only" if readonly else self.sandbox_mode,
             "--color",
             "never",
         ]
@@ -118,6 +119,17 @@ class CodexRunner(ClaudeRunner):
             argv.extend(["-m", profile.model])
         if profile is not None and profile.reasoning_effort is not None:
             argv.extend(["-c", f"model_reasoning_effort={profile.reasoning_effort}"])
+        return argv
+
+    def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
+        """Trust Codex's native sandbox while leaving its runtime state writable.
+
+        Wrapping the whole process in the Claude-oriented read-only filesystem
+        sandbox also makes Codex's app-server and session directories read-only,
+        preventing the verifier from starting at all. ``--sandbox read-only``
+        already protects the repository for this backend.
+        """
+
         return argv
 
 

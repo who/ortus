@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import re
 import subprocess
 import time
 from dataclasses import replace
@@ -65,6 +66,14 @@ from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.readiness import ReadinessReport
 from ortus.core.transaction import CandidateJournal, JournalStore
+from ortus.core.transaction import candidate_diff, issue_packet_hash, sha256_bytes
+from ortus.core.verdict import (
+    VerdictError,
+    bound_report,
+    parse_verdict,
+    render_rejection_report,
+    render_report,
+)
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     CONDITION_CEILING,
@@ -100,6 +109,9 @@ _TRACKER_EXPORT_PATHS = frozenset(
         ".beads/issues.jsonl",
         ".beads/interactions.jsonl",
     }
+)
+_EVIDENCE_SECRET = re.compile(
+    r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)([^\r\n]+)"
 )
 
 
@@ -199,6 +211,25 @@ def _append_handshake(
         fh.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+def _append_verdict_event(
+    log_path: Path, *, decision: str, candidate_hash: str, reason: str = ""
+) -> None:
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "type": "ortus.verdict",
+                    "schema": 1,
+                    "decision": decision,
+                    "candidate_hash": candidate_hash,
+                    "reason": reason,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+
+
 def _checkpoint_codex_preflight(
     git: GitClient,
     integration_branch: str,
@@ -211,9 +242,8 @@ def _checkpoint_codex_preflight(
     """Checkpoint tracker exports and classify remaining dirty paths.
 
     Beads can update and stage its JSONL exports while Grind reads queue state.
-    At startup, source changes become a preserved operator baseline instead of
-    blocking Codex. Later calls accept only that baseline plus paths recorded by
-    the active candidate transaction.
+    At startup, source changes are returned as handoff context instead of
+    blocking Codex. Later calls accept the active candidate context.
     """
     if not git.is_git_repo():
         return frozenset()
@@ -266,7 +296,7 @@ def _checkpoint_codex_preflight(
         raise typer.Exit(code=1)
     if accept_baseline and remaining:
         write_log(
-            "preflight: preserving dirty operator baseline: "
+            "preflight: preserving dirty worktree for worker handoff: "
             + ", ".join(sorted(remaining))
         )
     return remaining
@@ -286,15 +316,95 @@ def _capture_codex_candidate(
     if dirty is None:
         output.error("grind: could not capture Codex candidate paths")
         raise typer.Exit(code=1)
-    if not journal.baseline_is_unchanged(git.repo):
-        output.error(
-            "grind: worker changed a path that was dirty before Codex grind started",
-            hint="operator baseline was preserved; inspect the overlapping path",
-        )
-        raise typer.Exit(code=1)
-    updated = journal.with_candidate(dirty - baseline, phase=phase)
+    paths = dirty - baseline - _TRACKER_EXPORT_PATHS
+    try:
+        diff = candidate_diff(git.repo, paths)
+    except RuntimeError as exc:
+        output.error(f"grind: could not create candidate diff: {exc}")
+        raise typer.Exit(code=1) from exc
+    digest, diff_ref = store.save_diff(diff)
+    updated = journal.with_candidate(
+        paths, phase=phase, candidate_hash=digest, diff_ref=diff_ref
+    )
     store.save(updated)
     return updated
+
+
+def _packet_artifact_intact(repo: Path, journal: CandidateJournal) -> bool:
+    """Rehash the on-disk issue packet the verifier is about to be handed.
+
+    The packet reference is a plain file under ``logs/``, so a worker that
+    ignores the phase contract could rewrite it and verify itself against a
+    packet nobody authorized. bd being unchanged is not enough — the artifact
+    bytes must still hash to the advertised digest.
+    """
+
+    if not journal.issue_packet_ref or not journal.issue_packet_hash:
+        return True
+    try:
+        payload = (repo / journal.issue_packet_ref).read_bytes()
+    except OSError:
+        return False
+    return sha256_bytes(payload) == journal.issue_packet_hash
+
+
+def _capture_evidence(
+    store: JournalStore,
+    journal: CandidateJournal,
+    log_path: Path,
+    *,
+    start_offset: int,
+    returncode: int,
+    timed_out: bool,
+) -> CandidateJournal:
+    """Attach bounded, durable implementation evidence to the transaction."""
+
+    try:
+        with log_path.open("rb") as fh:
+            fh.seek(start_offset)
+            transcript = fh.read(64_001)
+    except OSError:
+        transcript = b""
+    truncated = len(transcript) > 64_000
+    transcript = transcript[:64_000]
+    excerpt = transcript.decode("utf-8", errors="replace")
+    excerpt = _EVIDENCE_SECRET.sub(r"\1\2[REDACTED]", excerpt)
+    item = {
+        "kind": "implementation-transcript",
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "sha256": sha256_bytes(transcript),
+        "excerpt": excerpt,
+        "truncated": truncated,
+        "captured_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    updated = journal.with_evidence(item)
+    store.save(updated)
+    return updated
+
+
+def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
+    """Compose a bounded verifier contract referencing immutable artifacts."""
+
+    return (
+        "FRESH READ-ONLY VERIFICATION PHASE. You cannot edit source or bd state. "
+        "Independently inspect the exact issue packet and candidate diff at the paths "
+        "below, run bounded read-only checks (disable pytest cache writes), and emit "
+        "exactly one final assistant line beginning ORTUS_VERDICT: followed by one JSON "
+        "object. Do not emit that prefix anywhere else.\n\n"
+        f"Issue: {journal.issue_id}\n"
+        f"Issue packet: {journal.issue_packet_ref}\n"
+        f"Issue packet SHA-256: {journal.issue_packet_hash}\n"
+        f"Candidate diff: {journal.candidate_diff_ref}\n"
+        f"Candidate SHA-256: {journal.candidate_hash}\n"
+        f"Captured evidence: {json.dumps(journal.evidence, ensure_ascii=False)}\n\n"
+        "The JSON object must have exactly these fields: schema (1), candidate_hash, "
+        "decision (pass or fail), criteria (non-empty array of objects with exactly id, "
+        "status, evidence), and non-empty string arrays commands, reviewed_files, "
+        "reviewed_interfaces, risks, findings, codegraph. A pass requires every criterion "
+        "to pass; a fail requires at least one failed criterion. Bind candidate_hash to "
+        "the supplied SHA-256 exactly.\n" + probe_text
+    )
 
 
 def _enforce_branch_discipline(
@@ -572,8 +682,8 @@ def _compose_work_prompt(
         "packet. Follow that packet and the repository instructions. Run the required "
         "checks, use only the exact claimed id in bd commands, and do not invoke another "
         "queue orchestrator. If a human decision is required, flag this exact issue and "
-        "stop. Otherwise complete only this issue, close it when the active phase permits, "
-        "commit and push when repository instructions require it, then end the session."
+        "stop. Otherwise complete only this issue, leave the result as uncommitted "
+        "candidate edits, then end the session."
     )
     if phase_instruction:
         task += "\n\n" + phase_instruction.rstrip()
@@ -886,43 +996,87 @@ def grind(
             transaction_store = JournalStore(target)
             active_journal: CandidateJournal | None = None
             codex_baseline = frozenset[str]()
+            startup_handoff_paths = frozenset[str]()
             resume_issue_id: str | None = None
+            resume_candidate_ready = False
+            recovery_handoff = False
             if resolved_backend == "codex":
                 active_journal = transaction_store.load()
+                if active_journal is None and transaction_store.path.exists():
+                    dirty = git.dirty_paths()
+                    claimed = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+                    if dirty is not None and len(claimed) == 1:
+                        issue_hint = next(iter(claimed))
+                        handoff_paths = dirty - _TRACKER_EXPORT_PATHS
+                        handoff_diff = candidate_diff(target, handoff_paths)
+                        handoff_hash, handoff_ref = transaction_store.save_diff(
+                            handoff_diff
+                        )
+                        active_journal = CandidateJournal.start(
+                            repo=target,
+                            issue_id=issue_hint,
+                            base_head=git.head_oid(),
+                            baseline_paths=(),
+                        ).with_candidate(
+                            handoff_paths,
+                            phase="handoff",
+                            candidate_hash=handoff_hash,
+                            diff_ref=handoff_ref,
+                        )
+                        transaction_store.save(active_journal)
+                        write_log(
+                            "transaction handoff: rebuilt unusable journal from "
+                            f"claimed issue {issue_hint} and current worktree"
+                        )
                 if active_journal is None:
                     if transaction_store.path.exists():
-                        output.error(
-                            "grind: saved Codex transaction journal is invalid",
-                            hint="inspect logs/grind-transaction.json before resuming",
+                        write_log(
+                            "transaction handoff: journal is unusable and no single "
+                            "claimed issue identifies the work; continuing with the "
+                            "current worktree as worker context"
                         )
-                        raise typer.Exit(code=1)
-                    codex_baseline = _checkpoint_codex_preflight(
+                    startup_changes = _checkpoint_codex_preflight(
                         git,
                         integration_branch,
                         write_log,
                         accept_baseline=True,
                     )
+                    if startup_changes:
+                        # Existing work is an engineering handoff, not a reason
+                        # to fence the worker away from potentially useful code.
+                        # The worker receives the complete diff and decides what
+                        # advances the selected issue.
+                        codex_baseline = frozenset()
+                        startup_handoff_paths = startup_changes
+                        recovery_handoff = True
+                        write_log(
+                            "transaction handoff: presenting existing uncommitted "
+                            "changes to the next worker for relevance assessment"
+                        )
                 else:
+                    recovery_handoff = True
+                    resumed_phase = active_journal.phase
                     dirty = git.dirty_paths()
                     current_head = git.head_oid()
-                    if dirty is None or current_head != active_journal.base_head:
+                    if dirty is None:
                         output.error(
-                            "grind: saved Codex transaction no longer matches HEAD",
-                            hint=(
-                                f"transaction issue={active_journal.issue_id}; "
-                                "inspect logs/grind-transaction.json before resuming"
-                            ),
+                            "grind: could not read the worktree for recovery handoff"
                         )
                         raise typer.Exit(code=1)
-                    if not active_journal.baseline_is_unchanged(target):
-                        output.error(
-                            "grind: a preserved operator baseline path changed during "
-                            "the Codex transaction",
-                            hint="inspect the saved transaction and dirty paths",
+                    baseline_changed = not active_journal.baseline_is_unchanged(target)
+                    if current_head != active_journal.base_head or baseline_changed:
+                        write_log(
+                            "transaction handoff: repository state moved since the "
+                            "prior worker; adopting the current worktree for model review"
                         )
-                        raise typer.Exit(code=1)
-                    codex_baseline = frozenset(active_journal.baseline_paths)
-                    current_candidate = dirty - codex_baseline
+                    active_journal = replace(
+                        active_journal,
+                        base_head=current_head,
+                        baseline_paths=(),
+                        baseline_fingerprints={},
+                    )
+                    codex_baseline = frozenset()
+                    current_candidate = dirty - codex_baseline - _TRACKER_EXPORT_PATHS
                     recorded_candidate = frozenset(active_journal.candidate_paths)
                     sealed_phases = {
                         "implementation-timeout",
@@ -934,14 +1088,34 @@ def grind(
                         active_journal.phase in sealed_phases
                         and current_candidate != recorded_candidate
                     ):
-                        output.error(
-                            "grind: worktree paths no longer match the timed-out "
-                            "Codex candidate",
-                            hint="inspect the saved transaction before resuming",
+                        write_log(
+                            "transaction handoff: candidate path set changed since "
+                            "the prior worker; the next worker will assess the current diff"
                         )
-                        raise typer.Exit(code=1)
+                    current_diff = candidate_diff(target, current_candidate)
+                    current_hash = sha256_bytes(current_diff)
+                    if active_journal.candidate_hash != current_hash:
+                        migrated_hash, migrated_ref = transaction_store.save_diff(
+                            current_diff
+                        )
+                        active_journal = active_journal.with_candidate(
+                            current_candidate,
+                            phase=resumed_phase,
+                            candidate_hash=migrated_hash,
+                            diff_ref=migrated_ref,
+                        )
+                        transaction_store.save(active_journal)
+                        write_log(
+                            "transaction handoff: refreshed candidate for model review "
+                            f"hash={migrated_hash}"
+                        )
+                    resume_candidate_ready = resumed_phase in {
+                        "candidate-captured",
+                        "verification",
+                        "verification-timeout",
+                    }
                     active_journal = active_journal.with_candidate(
-                        current_candidate, phase="resume"
+                        current_candidate, phase=resumed_phase
                     )
                     transaction_store.save(active_journal)
                     resume_issue_id = active_journal.issue_id
@@ -1058,9 +1232,9 @@ def grind(
 
                 # Queue reads can auto-export generated Beads state between
                 # iterations. Checkpoint that state while preserving the dirty
-                # operator baseline and any active candidate ownership.
+                # current handoff and any active candidate context.
                 if resolved_backend == "codex":
-                    allowed = codex_baseline
+                    allowed = codex_baseline | startup_handoff_paths
                     if active_journal is not None:
                         allowed |= frozenset(active_journal.candidate_paths)
                         allowed |= _TRACKER_EXPORT_PATHS
@@ -1288,14 +1462,57 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
+                    # Freeze the post-claim authoritative packet. Verification
+                    # is bound to this exact JSON identity, including status.
+                    target_issue = bd.show(issue_id)
                     if resolved_backend == "codex":
+                        phase_profiles = {
+                            "implementation": implement_profile.display_name,
+                            "verification": verify_profile.display_name,
+                        }
+                        packet_digest, packet_ref = transaction_store.save_packet(
+                            issue_id, target_issue
+                        )
                         if active_journal is None:
                             active_journal = CandidateJournal.start(
                                 repo=target,
                                 issue_id=issue_id,
                                 base_head=git.head_oid(),
                                 baseline_paths=codex_baseline,
+                                packet_hash=packet_digest,
+                                packet_ref=packet_ref,
+                                profiles=phase_profiles,
                             )
+                        elif not active_journal.issue_packet_hash:
+                            active_journal = replace(
+                                active_journal,
+                                issue_packet_hash=packet_digest,
+                                issue_packet_ref=packet_ref,
+                            )
+                            transaction_store.save(active_journal)
+                            write_log(
+                                "transaction migration: bound schema-v1 candidate "
+                                f"to issue packet {packet_digest}"
+                            )
+                        elif (
+                            active_journal.issue_packet_hash != packet_digest
+                            or active_journal.issue_packet_ref != packet_ref
+                        ):
+                            write_log(
+                                "transaction handoff: issue packet changed since the "
+                                "prior worker; adopting the current authoritative packet"
+                            )
+                            active_journal = replace(
+                                active_journal,
+                                issue_packet_hash=packet_digest,
+                                issue_packet_ref=packet_ref,
+                            )
+                            transaction_store.save(active_journal)
+                        if active_journal.profiles != phase_profiles:
+                            active_journal = replace(
+                                active_journal, profiles=phase_profiles
+                            )
+                            transaction_store.save(active_journal)
                         dirty_after_claim = git.dirty_paths()
                         if dirty_after_claim is None:
                             output.error(
@@ -1303,11 +1520,28 @@ def grind(
                             )
                             raise typer.Exit(code=1)
                         active_journal = active_journal.with_candidate(
-                            dirty_after_claim - codex_baseline,
+                            dirty_after_claim - codex_baseline - _TRACKER_EXPORT_PATHS,
                             phase="implementation",
                         )
                         transaction_store.save(active_journal)
                         resume_issue_id = None
+                    else:
+                        packet_digest, packet_ref = transaction_store.save_packet(
+                            issue_id, target_issue
+                        )
+                        active_journal = CandidateJournal.start(
+                            repo=target,
+                            issue_id=issue_id,
+                            base_head=git.head_oid(),
+                            baseline_paths=(),
+                            packet_hash=packet_digest,
+                            packet_ref=packet_ref,
+                            profiles={
+                                "implementation": implement_profile.display_name,
+                                "verification": verify_profile.display_name,
+                            },
+                        )
+                        transaction_store.save(active_journal)
                     configure_codegraph = getattr(runner, "configure_codegraph", None)
                     if callable(configure_codegraph):
                         configure_codegraph(codegraph_probe.capability)
@@ -1334,10 +1568,23 @@ def grind(
                     if callable(configure_codegraph):
                         configure_codegraph(implementation_probe.capability)
                     implementation_instruction = (
-                        "IMPLEMENTATION PHASE ONLY. Make candidate edits and run targeted "
-                        "checks, but do not add the final verification comment and do not "
-                        "close the issue; a fresh verifier follows."
+                        "IMPLEMENTATION PHASE ONLY. These phase rules override any "
+                        "conflicting instruction elsewhere in this prompt. Make candidate "
+                        "edits and run targeted checks, but do not close the issue, do not "
+                        "run git commit or git push, do not select other work, and do not "
+                        "add the final verification comment; a fresh read-only verifier "
+                        "reviews your exact candidate next and Ortus owns finalization. "
+                        "HEAD must be unchanged when you finish — a commit invalidates the "
+                        "candidate."
                     )
+                    if recovery_handoff and not resume_candidate_ready:
+                        implementation_instruction += (
+                            " RECOVERY HANDOFF: A prior engineer left uncommitted work. "
+                            "Inspect `git status`, the complete current diff, and the issue "
+                            "packet. Decide which existing changes advance this issue, keep "
+                            "useful work, correct or complete it, and leave unrelated changes "
+                            "untouched. Continue from the current state instead of restarting."
+                        )
                     try:
                         iteration_prompt = _compose_work_prompt(
                             work_template,
@@ -1377,8 +1624,8 @@ def grind(
                 # then hung still counts, and a claimed-but-unclosed issue still
                 # gets the orphan-policy treatment.
                 implementation_timed_out = False
+                phase_offset = log.stat().st_size if log.exists() else 0
                 try:
-                    phase_offset = log.stat().st_size if log.exists() else 0
                     output.progress(
                         "grind",
                         "implementation CodeGraph handshake "
@@ -1388,14 +1635,25 @@ def grind(
                             else "fallback active"
                         ),
                     )
-                    rc = runner.run(
-                        iteration_prompt,
-                        repo=target,
-                        log_path=log,
-                        fast=fast,
-                        profile=implement_profile,
-                        timeout=(worker_timeout if worker_timeout > 0 else None),
-                    )
+                    if resume_candidate_ready:
+                        rc = int(
+                            active_journal.evidence[-1].get("returncode", 0)
+                            if active_journal and active_journal.evidence
+                            else 0
+                        )
+                        write_log(
+                            f"iter {iters_run}: implementation already captured; "
+                            "resuming at verification"
+                        )
+                    else:
+                        rc = runner.run(
+                            iteration_prompt,
+                            repo=target,
+                            log_path=log,
+                            fast=fast,
+                            profile=implement_profile,
+                            timeout=(worker_timeout if worker_timeout > 0 else None),
+                        )
                 except subprocess.TimeoutExpired:
                     implementation_timed_out = True
                     rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
@@ -1403,6 +1661,38 @@ def grind(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
                     )
+
+                if (
+                    resolved_backend == "claude"
+                    and implementation_timed_out
+                    and active_journal is not None
+                    and issue_id in _snapshot(bd).in_progress_ids
+                ):
+                    if git.is_git_repo():
+                        active_journal = _capture_codex_candidate(
+                            git,
+                            transaction_store,
+                            active_journal,
+                            frozenset(),
+                            phase="implementation-timeout",
+                        )
+                    active_journal = _capture_evidence(
+                        transaction_store,
+                        active_journal,
+                        log,
+                        start_offset=phase_offset,
+                        returncode=rc,
+                        timed_out=True,
+                    )
+                    action = apply_orphan_policy(
+                        orphan_policy,
+                        {issue_id},
+                        revert_fn=lambda i: bd.update_status(i, "open"),
+                        escalate_fn=lambda i: bd.add_label(i, "human"),
+                    )
+                    for line in action.actions_taken:
+                        write_log(f"  orphan-policy: {line}")
+                    break
 
                 if (
                     resolved_backend == "codex"
@@ -1416,6 +1706,19 @@ def grind(
                         codex_baseline,
                         phase="implementation-timeout",
                     )
+                    active_journal = _capture_evidence(
+                        transaction_store,
+                        active_journal,
+                        log,
+                        start_offset=phase_offset,
+                        returncode=rc,
+                        timed_out=True,
+                    )
+                    active_journal = active_journal.with_candidate(
+                        active_journal.candidate_paths,
+                        phase="implementation-timeout",
+                    )
+                    transaction_store.save(active_journal)
                     write_log(
                         f"iter {iters_run}: preserved timed-out candidate for "
                         f"{active_journal.issue_id}: "
@@ -1427,6 +1730,33 @@ def grind(
                         "re-run grind to resume",
                     )
                     break
+
+                if active_journal is not None and not resume_candidate_ready:
+                    if git.is_git_repo():
+                        active_journal = _capture_codex_candidate(
+                            git,
+                            transaction_store,
+                            active_journal,
+                            codex_baseline,
+                            phase="candidate-captured",
+                        )
+                    else:
+                        digest, diff_ref = transaction_store.save_diff(b"")
+                        active_journal = active_journal.with_candidate(
+                            (),
+                            phase="candidate-captured",
+                            candidate_hash=digest,
+                            diff_ref=diff_ref,
+                        )
+                        transaction_store.save(active_journal)
+                    active_journal = _capture_evidence(
+                        transaction_store,
+                        active_journal,
+                        log,
+                        start_offset=phase_offset,
+                        returncode=rc,
+                        timed_out=implementation_timed_out,
+                    )
 
                 if resolved_backend == "claude":
                     rejection = _claude_goal_rejection(log, start_offset=phase_offset)
@@ -1472,6 +1802,66 @@ def grind(
                     output.error(str(exc))
                     raise typer.Exit(code=1)
 
+                if (
+                    harness_select
+                    and active_journal is not None
+                    and not implementation_timed_out
+                ):
+                    implementation_packet = bd.show(issue_id)
+                    status_changed = (
+                        implementation_packet.get("status") != "in_progress"
+                    )
+                    # Ordered most-specific-first: whichever isolation boundary
+                    # broke, the operator sees the concrete one in the report.
+                    reason = None
+                    if status_changed:
+                        reason = "implementation worker changed issue lifecycle state"
+                    elif (
+                        issue_packet_hash(implementation_packet)
+                        != active_journal.issue_packet_hash
+                    ):
+                        reason = (
+                            "implementation worker changed the immutable issue packet"
+                        )
+                    elif not _packet_artifact_intact(target, active_journal):
+                        reason = (
+                            "implementation worker changed the immutable issue packet "
+                            "artifact"
+                        )
+                    elif (
+                        git.is_git_repo()
+                        and git.head_oid() != active_journal.base_head
+                    ):
+                        # A commit moves HEAD, so `git diff HEAD` would report an
+                        # empty candidate and the verifier would review nothing.
+                        reason = (
+                            "implementation worker committed to the repository; the "
+                            f"candidate base {active_journal.base_head} is no longer HEAD"
+                        )
+                    if reason is not None:
+                        if status_changed:
+                            bd.update_status(issue_id, "in_progress")
+                        report = (
+                            "## Ortus implementation isolation report\n\n"
+                            f"Issue: {issue_id}\n"
+                            f"Candidate: `{active_journal.candidate_hash}`\n"
+                            "Decision: **REJECTED**\n\n"
+                            f"Finding: {reason}.\n\n" + implementation_summary.report()
+                        )
+                        report_ref = transaction_store.save_report(
+                            active_journal.candidate_hash,
+                            report,
+                            attempt=active_journal.attempt,
+                        )
+                        bd.add_comment(issue_id, report)
+                        active_journal = active_journal.finish_verification(
+                            report_ref, phase="implementation-rejected"
+                        )
+                        transaction_store.save(active_journal)
+                        write_log(f"iter {iters_run}: {reason}; candidate rejected")
+                        output.error(f"grind: {reason}; candidate rejected")
+                        break
+
                 # Candidate edits are indexed by the parent before a fresh
                 # verifier starts. Refresh failure is blocking only in required
                 # mode (auto records the stale fallback and continues).
@@ -1497,6 +1887,11 @@ def grind(
 
                 mid = _snapshot(bd)
                 if harness_select and issue_id in mid.in_progress_ids:
+                    if active_journal is None:
+                        output.error("grind: verifier has no candidate transaction")
+                        raise typer.Exit(code=1)
+                    active_journal = active_journal.begin_verification()
+                    transaction_store.save(active_journal)
                     if callable(configure_codegraph):
                         configure_codegraph(codegraph_probe.capability)
                     try:
@@ -1521,26 +1916,10 @@ def grind(
                         raise typer.Exit(code=1)
                     if callable(configure_codegraph):
                         configure_codegraph(verification_probe.capability)
-                    verification_instruction = (
-                        "FRESH VERIFICATION PHASE. Do not trust the implementation worker's "
-                        "claims. Inspect the candidate diff and issue independently, run the "
-                        "changed-surface tests, add a thorough bd comment, and close only if "
-                        "every acceptance criterion passes."
+                    verifier_prompt = _verifier_prompt(
+                        active_journal,
+                        phase_contract(CodeGraphPhase.VERIFICATION, verification_probe),
                     )
-                    try:
-                        verifier_prompt = _compose_work_prompt(
-                            work_template,
-                            target_issue,
-                            resolved_backend,
-                            phase_instruction=verification_instruction,
-                            phase_contract_text=phase_contract(
-                                CodeGraphPhase.VERIFICATION, verification_probe
-                            ),
-                        )
-                    except BackendError as exc:
-                        bd.update_status(issue_id, "open")
-                        output.error(str(exc))
-                        raise typer.Exit(code=1)
                     verify_offset = log.stat().st_size if log.exists() else 0
                     output.progress(
                         "grind",
@@ -1560,6 +1939,7 @@ def grind(
                             fast=False,
                             profile=verify_profile,
                             timeout=(worker_timeout if worker_timeout > 0 else None),
+                            readonly=True,
                         )
                     except subprocess.TimeoutExpired:
                         verification_timed_out = True
@@ -1567,17 +1947,99 @@ def grind(
                         write_log(
                             f"iter {iters_run}: verifier TIMEOUT after {worker_timeout}s"
                         )
-                    if (
-                        resolved_backend == "codex"
-                        and verification_timed_out
-                        and active_journal is not None
-                    ):
-                        active_journal = _capture_codex_candidate(
-                            git,
-                            transaction_store,
-                            active_journal,
-                            codex_baseline,
-                            phase="verification-timeout",
+                    if verification_timed_out and active_journal is not None:
+                        timeout_failure = (
+                            f"verifier timed out after {worker_timeout}s without a verdict"
+                        )
+                        timeout_phase = "verification-timeout"
+                        if git.is_git_repo():
+                            post_dirty = git.dirty_paths()
+                            if post_dirty is None:
+                                timeout_failure += (
+                                    "; could not inspect the candidate after timeout"
+                                )
+                                timeout_phase = "verification-rejected"
+                            else:
+                                post_paths = (
+                                    post_dirty - codex_baseline - _TRACKER_EXPORT_PATHS
+                                )
+                                if post_paths != frozenset(
+                                    active_journal.candidate_paths
+                                ):
+                                    timeout_failure += (
+                                        "; verifier mutated the candidate path set"
+                                    )
+                                    timeout_phase = "verification-rejected"
+                                else:
+                                    try:
+                                        post_diff = candidate_diff(target, post_paths)
+                                    except RuntimeError as exc:
+                                        timeout_failure += (
+                                            f"; could not hash the candidate: {exc}"
+                                        )
+                                        timeout_phase = "verification-rejected"
+                                    else:
+                                        if (
+                                            sha256_bytes(post_diff)
+                                            != active_journal.candidate_hash
+                                        ):
+                                            timeout_failure += (
+                                                "; verifier mutated the candidate"
+                                            )
+                                            timeout_phase = "verification-rejected"
+                        current_packet = bd.show(issue_id)
+                        if (
+                            issue_packet_hash(current_packet)
+                            != active_journal.issue_packet_hash
+                        ):
+                            timeout_failure += (
+                                "; authoritative issue packet changed during verification"
+                            )
+                            timeout_phase = "verification-rejected"
+                            if current_packet.get("status") != "in_progress":
+                                bd.update_status(issue_id, "in_progress")
+                        verification_summary = parse_transcript(
+                            log,
+                            phase=CodeGraphPhase.VERIFICATION,
+                            probe=verification_probe,
+                            start_offset=verify_offset,
+                        )
+                        verification_summary.freshness = freshness
+                        verification_summary.sync_duration_ms = sync_ms
+                        append_normalized(log, verification_summary)
+                        report = render_rejection_report(
+                            issue_id=issue_id,
+                            candidate_hash=active_journal.candidate_hash,
+                            failure=timeout_failure,
+                            expected_criteria=dict.fromkeys(
+                                re.findall(
+                                    r"\bAC-\d+\b",
+                                    str(target_issue.get("acceptance_criteria", "")),
+                                )
+                            ),
+                            base_head=active_journal.base_head,
+                            issue_packet_hash=active_journal.issue_packet_hash,
+                            attempt=active_journal.attempt,
+                            profiles=active_journal.profiles,
+                        )
+                        report = bound_report(
+                            report + "\n" + verification_summary.report()
+                        )
+                        report_ref = transaction_store.save_report(
+                            active_journal.candidate_hash,
+                            report,
+                            attempt=active_journal.attempt,
+                        )
+                        bd.add_comment(issue_id, report)
+                        active_journal = active_journal.finish_verification(
+                            report_ref, phase=timeout_phase
+                        )
+                        transaction_store.save(active_journal)
+                        _append_verdict_event(
+                            log,
+                            decision="rejected",
+                            candidate_hash=active_journal.candidate_hash,
+                            reason=timeout_failure,
                         )
                         write_log(
                             f"iter {iters_run}: preserved verifier-timeout candidate "
@@ -1631,14 +2093,137 @@ def grind(
                         bd.update_status(issue_id, "open")
                         output.error(str(exc))
                         raise typer.Exit(code=1)
+                    failure: str | None = None
+                    verdict = None
+                    try:
+                        verdict = parse_verdict(
+                            log,
+                            start_offset=verify_offset,
+                            expected_hash=active_journal.candidate_hash,
+                            expected_criteria=dict.fromkeys(
+                                re.findall(
+                                    r"\bAC-\d+\b",
+                                    str(target_issue.get("acceptance_criteria", "")),
+                                )
+                            ),
+                        )
+                        if git.is_git_repo():
+                            post_dirty = git.dirty_paths()
+                            if post_dirty is None:
+                                raise VerdictError(
+                                    "could not inspect the candidate after verification"
+                                )
+                            post_paths = (
+                                post_dirty - codex_baseline - _TRACKER_EXPORT_PATHS
+                            )
+                            if post_paths != frozenset(active_journal.candidate_paths):
+                                raise VerdictError(
+                                    "verifier mutated the candidate path set during "
+                                    "read-only review"
+                                )
+                            post_diff = candidate_diff(target, post_paths)
+                            if sha256_bytes(post_diff) != active_journal.candidate_hash:
+                                raise VerdictError(
+                                    "verifier mutated the candidate during read-only review"
+                                )
+                        current_packet = bd.show(issue_id)
+                        if (
+                            issue_packet_hash(current_packet)
+                            != active_journal.issue_packet_hash
+                        ):
+                            raise VerdictError(
+                                "authoritative issue packet changed during verification"
+                            )
+                    except (VerdictError, RuntimeError) as exc:
+                        failure = str(exc)
+                    if rc != 0 and failure is None:
+                        failure = f"verifier exited with status {rc}"
+
+                    if verdict is not None and failure is None:
+                        report = render_report(
+                            verdict,
+                            issue_id=issue_id,
+                            base_head=active_journal.base_head,
+                            issue_packet_hash=active_journal.issue_packet_hash,
+                            attempt=active_journal.attempt,
+                            profiles=active_journal.profiles,
+                        )
+                        report = bound_report(
+                            report + "\n" + verification_summary.report()
+                        )
+                        report_ref = transaction_store.save_report(
+                            active_journal.candidate_hash,
+                            report,
+                            attempt=active_journal.attempt,
+                        )
+                        bd.add_comment(issue_id, report)
+                        active_journal = active_journal.finish_verification(
+                            report_ref,
+                            phase=(
+                                "verified-pass" if verdict.passed else "verified-fail"
+                            ),
+                        )
+                        transaction_store.save(active_journal)
+                        _append_verdict_event(
+                            log,
+                            decision=verdict.decision,
+                            candidate_hash=active_journal.candidate_hash,
+                        )
+                        write_log(
+                            f"iter {iters_run}: verifier verdict={verdict.decision} "
+                            f"candidate={active_journal.candidate_hash}"
+                        )
+                    else:
+                        assert failure is not None
+                        # A verifier is observational only. A fake/misconfigured
+                        # runner that changed lifecycle state cannot make its
+                        # own output authoritative; restore the claim before
+                        # persisting the rejection.
+                        if bd.show(issue_id).get("status") != "in_progress":
+                            bd.update_status(issue_id, "in_progress")
+                        report = render_rejection_report(
+                            issue_id=issue_id,
+                            candidate_hash=active_journal.candidate_hash,
+                            failure=failure,
+                            expected_criteria=dict.fromkeys(
+                                re.findall(
+                                    r"\bAC-\d+\b",
+                                    str(target_issue.get("acceptance_criteria", "")),
+                                )
+                            ),
+                            base_head=active_journal.base_head,
+                            issue_packet_hash=active_journal.issue_packet_hash,
+                            attempt=active_journal.attempt,
+                            profiles=active_journal.profiles,
+                        )
+                        report = bound_report(
+                            report + "\n" + verification_summary.report()
+                        )
+                        report_ref = transaction_store.save_report(
+                            active_journal.candidate_hash,
+                            report,
+                            attempt=active_journal.attempt,
+                        )
+                        bd.add_comment(issue_id, report)
+                        active_journal = active_journal.finish_verification(
+                            report_ref, phase="verification-rejected"
+                        )
+                        transaction_store.save(active_journal)
+                        _append_verdict_event(
+                            log,
+                            decision="rejected",
+                            candidate_hash=active_journal.candidate_hash,
+                            reason=failure,
+                        )
+                        write_log(f"iter {iters_run}: verifier rejected: {failure}")
+                        output.error(f"grind: verifier rejected candidate: {failure}")
+                        break
                 else:
                     # Compatibility/safety: if an implementation worker closed
                     # despite the phase contract, still leave durable evidence.
                     verification_summary = implementation_summary
                     verification_summary.phase = CodeGraphPhase.VERIFICATION.value
 
-                if harness_select:
-                    bd.add_comment(issue_id, verification_summary.report())
                 output.progress(
                     "grind",
                     f"CodeGraph phase summary: {len(verification_summary.events)} queries, "
@@ -1647,6 +2232,22 @@ def grind(
 
                 after = _snapshot(bd)
                 delta = compute_delta(before, after)
+
+                if (
+                    active_journal is not None
+                    and active_journal.phase in {"verified-pass", "verified-fail"}
+                    and active_journal.issue_id in after.in_progress_ids
+                ):
+                    write_log(
+                        f"iter {iters_run}: candidate transaction ended in "
+                        f"{active_journal.phase}; finalization is a later lifecycle step"
+                    )
+                    output.progress(
+                        "grind",
+                        f"candidate {active_journal.candidate_hash} "
+                        f"{active_journal.phase}; awaiting finalization",
+                    )
+                    break
 
                 if delta.closed_one_or_more:
                     tasks_completed += delta.closed_delta

@@ -7,13 +7,12 @@ The issue you are working (already claimed for you):
 <ISSUE_DETAILS>
 
 Procedure:
-(1) Complete the work the description and acceptance criteria require. Run the tests and gates the acceptance criteria call for; verify they pass before closing.
-(2) Close the issue with `bd close <ISSUE_ID> --reason "<one-line summary of what shipped>"`.
-(3) If a git remote is configured, commit and push the code changes. Verify `git status` shows "up to date with origin". Do NOT create or switch git branches — stay on whatever branch grind handed you (the integration branch, normally `main`) and commit + push there. Work committed to a side branch is stranded off the deploy path and will be rejected by the harness.
+(1) Complete the work the description and acceptance criteria require. Run the tests and gates the acceptance criteria call for; verify they pass.
+(2) Leave the completed work as uncommitted candidate edits in the worktree. Do NOT run `bd close`, `git commit`, `git push`, `git stash`, or `git reset`, and do NOT create or switch git branches — stay on whatever branch grind handed you (the integration branch, normally `main`). A fresh read-only verifier reviews your exact candidate next, and the outer Ortus process owns closing, committing, and pushing.
 
-You are done when the procedure above is complete, with exactly one issue moving to `closed`. You are NOT driving the queue to zero; the outer Ortus process handles queue exhaustion, retries, and orphan-claim recovery from observable bd state. Your scope is this one issue: <ISSUE_ID>.
+You are done when the work is complete and the candidate edits are in the worktree. You are NOT driving the queue to zero; the outer Ortus process handles queue exhaustion, retries, verification, and orphan-claim recovery from observable bd state. Your scope is this one issue: <ISSUE_ID>.
 
-When the procedure is complete, end the session. Do not pick a second issue. Do not output a sentinel; the evaluator reads this transcript.
+When the procedure is complete, end the session. Do not pick a second issue. Do not add a final verification comment — the verifier writes it. Do not output a sentinel; the evaluator reads this transcript.
 
 If repository reality contradicts the packet, or a material architecture/product choice is still unresolved, this is a structured plan gap. Do not improvise. Preserve any candidate edits already made, but do not commit, discard, or close them. Add one durable comment with `bd comments add <ISSUE_ID> "PLAN-GAP: <the contradiction or missing decision, evidence, and affected files/symbols>"`, then run `bd human <ISSUE_ID>` to route the issue to planning/human handling and exit. Do not add the final verification comment. The harness will apply its configured recovery policy to the claim.
 

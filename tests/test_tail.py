@@ -93,7 +93,9 @@ def test_new_log_file_picked_up_within_two_seconds(tmp_path: Path) -> None:
 
     # Run _follow for 3 iterations (3s with 1s poll).
     def _run() -> None:
-        _follow(logs, raw=False, show_tools=False, show_system=False, iterations=3, out=buf)
+        _follow(
+            logs, raw=False, show_tools=False, show_system=False, iterations=3, out=buf
+        )
 
     thread = threading.Thread(target=_run)
     thread.start()
@@ -123,25 +125,36 @@ def test_tail_is_strictly_read_only(tmp_path: Path) -> None:
 
 def test_format_line_passes_non_json_through() -> None:
     """Plain-text lines (timestamp banners etc.) pass through unfiltered."""
-    assert _format_line(
-        "[2026-05-16 10:00:00] grind.sh Started", show_tools=False, show_system=False
-    ) == "[2026-05-16 10:00:00] grind.sh Started"
+    assert (
+        _format_line(
+            "[2026-05-16 10:00:00] grind.sh Started",
+            show_tools=False,
+            show_system=False,
+        )
+        == "[2026-05-16 10:00:00] grind.sh Started"
+    )
 
 
 def test_format_line_returns_none_for_skipped_kinds() -> None:
     assert (
-        _format_line('{"type":"system","subtype":"x"}', show_tools=False, show_system=False)
+        _format_line(
+            '{"type":"system","subtype":"x"}', show_tools=False, show_system=False
+        )
         is None
     )
     assert (
-        _format_line('{"type":"tool_use","name":"x"}', show_tools=False, show_system=False)
+        _format_line(
+            '{"type":"tool_use","name":"x"}', show_tools=False, show_system=False
+        )
         is None
     )
 
 
 def test_format_line_emits_result_kind() -> None:
     assert (
-        _format_line('{"type":"result","result":"ok"}', show_tools=False, show_system=False)
+        _format_line(
+            '{"type":"result","result":"ok"}', show_tools=False, show_system=False
+        )
         == "[result] ok"
     )
 
@@ -161,7 +174,9 @@ def test_tail_renders_normalized_codegraph_events_without_verbose() -> None:
     )
     rendered = _format_line(line, show_tools=False, show_system=False)
     assert rendered is not None
-    assert "[CODEGRAPH]" in rendered and "verification" in rendered and "miss" in rendered
+    assert (
+        "[CODEGRAPH]" in rendered and "verification" in rendered and "miss" in rendered
+    )
 
 
 def test_tail_distinguishes_codegraph_child_handshake_failure() -> None:
@@ -181,6 +196,23 @@ def test_tail_distinguishes_codegraph_child_handshake_failure() -> None:
     assert rendered is not None
     assert "child handshake failed" in rendered
     assert "server unavailable" in rendered
+
+
+def test_tail_renders_candidate_verdict_without_verbose() -> None:
+    rendered = _format_line(
+        json.dumps(
+            {
+                "type": "ortus.verdict",
+                "schema": 1,
+                "decision": "pass",
+                "candidate_hash": "abcdef0123456789",
+                "reason": "",
+            }
+        ),
+        show_tools=False,
+        show_system=False,
+    )
+    assert rendered == "[VERDICT] PASS candidate=abcdef012345"
 
 
 def test_tail_fr003_no_beads(tmp_path: Path) -> None:
@@ -233,9 +265,7 @@ def test_user_text_messages_are_always_shown(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
     log = logs / "grind-1.log"
-    log.write_text(
-        '{"type":"user","message":{"content":"hi from operator"}}\n'
-    )
+    log.write_text('{"type":"user","message":{"content":"hi from operator"}}\n')
     buf = io.StringIO()
     _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
     assert "hi from operator" in buf.getvalue()
@@ -246,9 +276,7 @@ def test_system_init_renders_as_banner_at_any_verbosity(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     logs.mkdir()
     log = logs / "grind-1.log"
-    log.write_text(
-        '{"type":"system","subtype":"init","session_id":"sess-xyz"}\n'
-    )
+    log.write_text('{"type":"system","subtype":"init","session_id":"sess-xyz"}\n')
     buf = io.StringIO()
     _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
     out = buf.getvalue()
@@ -277,7 +305,15 @@ def test_verbose_renders_every_real_stream_json_category(tmp_path: Path) -> None
     buf = io.StringIO()
     _follow(logs, raw=False, show_tools=True, show_system=True, iterations=1, out=buf)
     out = buf.getvalue()
-    for needle in ("hook_started", "NEW SESSION", "S1", "plan-text", "plan-think", "Bash", "plan-result"):
+    for needle in (
+        "hook_started",
+        "NEW SESSION",
+        "S1",
+        "plan-text",
+        "plan-think",
+        "Bash",
+        "plan-result",
+    ):
         assert needle in out, f"--verbose dropped {needle!r}; saw:\n{out}"
 
 
@@ -289,7 +325,9 @@ def test_tail_smoke_picks_up_new_grind_log(tmp_path: Path) -> None:
     buf = io.StringIO()
 
     def _run() -> None:
-        _follow(logs, raw=False, show_tools=False, show_system=False, iterations=2, out=buf)
+        _follow(
+            logs, raw=False, show_tools=False, show_system=False, iterations=2, out=buf
+        )
 
     t = threading.Thread(target=_run)
     t.start()

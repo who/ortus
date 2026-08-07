@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group
+from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group, _readonly_wrapper
 from ortus.core.profiles import AgentProfile, Phase
 from tests._shims import shim_path
 
@@ -64,6 +64,32 @@ def test_unset_profile_preserves_old_argv() -> None:
         "do thing", profile=AgentProfile("claude", Phase.VERIFY)
     )
     assert unset == plain
+
+
+def test_readonly_argv_denies_provider_write_tools() -> None:
+    argv = ClaudeRunner().build_argv("verify", readonly=True)
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    denied = argv[argv.index("--disallowedTools") + 1]
+    assert all(tool in denied for tool in ("Write", "Edit", "NotebookEdit"))
+
+
+def test_linux_readonly_wrapper_keeps_repo_under_tmp_visible_and_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
+    repo = tmp_path / "nested" / "repo"
+    repo.mkdir(parents=True)
+
+    argv = _readonly_wrapper(["claude", "-p", "verify"], repo)
+
+    assert argv[:5] == ["bwrap", "--ro-bind", "/", "/", "--dev-bind"]
+    assert ["--ro-bind", str(repo.resolve()), str(repo.resolve())] == argv[
+        argv.index(str(repo.resolve())) - 1 : argv.index(str(repo.resolve())) + 2
+    ]
+    assert argv[argv.index("--chdir") + 1] == str(repo.resolve())
+    assert ["--tmpfs", "/tmp"] == argv[
+        argv.index("--tmpfs") : argv.index("--tmpfs") + 2
+    ]
 
 
 # --- tee-to-log-not-terminal -----------------------------------------------

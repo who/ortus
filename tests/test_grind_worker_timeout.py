@@ -250,7 +250,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
     # Headroom: the worker runs three bd calls (ready/update/close) against
     # dolt before it starts hanging, so the timeout must comfortably exceed
     # that latency — otherwise the watchdog kills it mid-close and grind sees
-    # an orphan instead of a landed close. 15s clears it; the worker still
+    # an orphan instead of a landed close. 60s clears it; the worker still
     # hangs (sleep 120) well past it.
     result = runner.invoke(
         app,
@@ -262,7 +262,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
             "--idle-sleep",
             "0",
             "--worker-timeout",
-            "15",
+            "60",
             "--orphan-policy",
             "revert",
         ],
@@ -273,7 +273,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
         "a close that landed before the hang must survive the watchdog kill"
     )
     log = _grind_log(repo)
-    assert "worker TIMEOUT after 15s" in log
+    assert "worker TIMEOUT after 60s" in log
     assert "closed +1" in log
 
 
@@ -310,7 +310,7 @@ def test_worker_timeout_zero_disables_watchdog(
     assert "TIMEOUT" not in _grind_log(repo)
 
 
-def test_codex_timeout_candidate_resumes_without_absorbing_dirty_baseline(
+def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, issue_id = _seed_repo(tmp_path)
@@ -333,8 +333,8 @@ def test_codex_timeout_candidate_resumes_without_absorbing_dirty_baseline(
         check=True,
         capture_output=True,
     )
-    (repo / "operator.txt").write_text("keep me out of issue commits\n")
-    subprocess.run(["git", "add", "operator.txt"], cwd=repo, check=True)
+    (repo / "prior-work.txt").write_text("useful work from the prior engineer\n")
+    subprocess.run(["git", "add", "prior-work.txt"], cwd=repo, check=True)
 
     class TimeoutAfterEdit:
         extra_env: dict[str, str] = {}
@@ -363,25 +363,62 @@ def test_codex_timeout_candidate_resumes_without_absorbing_dirty_baseline(
     )
     assert first.exit_code == 0, first.stdout + first.stderr
     assert _bd_show(repo, issue_id)["status"] == "in_progress"
-    assert (repo / "logs" / "grind-transaction.json").is_file()
+    journal_path = repo / "logs" / "grind-transaction.json"
+    assert journal_path.is_file()
     assert "unowned worktree changes" not in (first.stdout + first.stderr)
 
-    class CloseRecoveredCandidate:
+    # Reproduce an in-flight self-upgrade: the parent that launched the worker
+    # can still have schema v1 loaded while the worker writes schema-v2 code.
+    current = json.loads(journal_path.read_text())
+    legacy_keys = {
+        "issue_id",
+        "base_head",
+        "baseline_paths",
+        "baseline_fingerprints",
+        "candidate_paths",
+        "phase",
+    }
+    legacy = {key: value for key, value in current.items() if key in legacy_keys}
+    legacy["schema"] = 1
+    journal_path.write_text(json.dumps(legacy))
+
+    class VerifyRecoveredCandidate:
         extra_env: dict[str, str] = {}
 
-        def run(self, *args: object, repo: Path, **kwargs: object) -> int:
-            subprocess.run(
-                ["bd", "close", issue_id, "--reason", "recovered after timeout"],
-                cwd=repo,
-                check=True,
-                capture_output=True,
-            )
+        def run(
+            self, *args: object, repo: Path, log_path: Path, **kwargs: object
+        ) -> int:
+            journal = JournalStore(repo).load()
+            assert journal is not None
+            payload = {
+                "schema": 1,
+                "candidate_hash": journal.candidate_hash,
+                "decision": "pass",
+                "criteria": [
+                    {"id": "AC-1", "status": "pass", "evidence": "recovered"},
+                ],
+                "commands": ["uv run pytest tests/test_grind_worker_timeout.py -q"],
+                "reviewed_files": ["candidate.py"],
+                "reviewed_interfaces": ["RECOVERED"],
+                "risks": ["restart ownership"],
+                "findings": ["candidate preserved"],
+                "codegraph": ["fallback recorded"],
+            }
+            event = {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "ORTUS_VERDICT: " + json.dumps(payload),
+                },
+            }
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event) + "\n")
             return 0
 
     monkeypatch.setattr(
         grind_mod,
         "_make_runner",
-        lambda backend="claude": CloseRecoveredCandidate(),
+        lambda backend="claude": VerifyRecoveredCandidate(),
     )
     second = runner.invoke(
         app,
@@ -389,36 +426,30 @@ def test_codex_timeout_candidate_resumes_without_absorbing_dirty_baseline(
     )
 
     assert second.exit_code == 0, second.stdout + second.stderr
-    assert _bd_show(repo, issue_id)["status"] == "closed"
-    assert not (repo / "logs" / "grind-transaction.json").exists()
+    assert _bd_show(repo, issue_id)["status"] == "in_progress"
+    journal = JournalStore(repo).load()
+    assert journal is not None and journal.phase == "verified-pass"
     assert (
         subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "--", "operator.txt"], cwd=repo
+            ["git", "diff", "--cached", "--quiet", "--", "prior-work.txt"], cwd=repo
         ).returncode
         == 1
     )
-    committed = subprocess.run(
-        ["git", "log", "--format=", "--name-only", "--", "candidate.py"],
+    assert (repo / "candidate.py").read_text() == "RECOVERED = True\n"
+    prior_work_commits = subprocess.run(
+        ["git", "log", "--format=%H", "--", "prior-work.txt"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert "candidate.py" in committed
-    operator_commits = subprocess.run(
-        ["git", "log", "--format=%H", "--", "operator.txt"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    assert operator_commits == []
+    assert not prior_work_commits
 
 
-def test_codex_resume_rejects_journal_head_mismatch(
+def test_codex_resume_adopts_head_mismatch_for_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo, _issue_id = _seed_repo(tmp_path)
+    repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
     subprocess.run(
@@ -437,13 +468,34 @@ def test_codex_resume_rejects_journal_head_mismatch(
     JournalStore(repo).save(
         CandidateJournal.start(
             repo=repo,
-            issue_id="wt-mismatch",
+            issue_id=issue_id,
             base_head="not-the-current-head",
             baseline_paths=(),
         )
     )
 
-    result = runner.invoke(app, ["grind", str(repo), "--backend", "codex"])
+    prompts: list[str] = []
 
-    assert result.exit_code == 1
-    assert "transaction no longer matches HEAD" in (result.stdout + result.stderr)
+    class ContinueHandoff:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, *args: object, repo: Path, **kwargs: object) -> int:
+            prompts.append(prompt)
+            (repo / "recovered.py").write_text("RECOVERED = True\n")
+            return 0
+
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda backend="claude": ContinueHandoff()
+    )
+
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--backend", "codex", "--iterations", "1"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _bd_show(repo, issue_id)["status"] == "in_progress"
+    assert any("RECOVERY HANDOFF" in prompt for prompt in prompts)
+    assert (repo / "recovered.py").read_text() == "RECOVERED = True\n"
+    assert "resuming preserved Codex candidate" in (result.stdout + result.stderr)
+    assert "repository state moved" in _grind_log(repo)

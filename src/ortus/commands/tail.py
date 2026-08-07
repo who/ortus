@@ -148,7 +148,11 @@ def _render_assistant(
     the rest. Python iterates every part, so multi-part messages always
     render every text/tool_use/thinking entry.
     """
-    parts = [content] if isinstance(content, str) else (content if isinstance(content, list) else [])
+    parts = (
+        [content]
+        if isinstance(content, str)
+        else (content if isinstance(content, list) else [])
+    )
     text_parts: list[str] = []
     extras: list[str] = []
     for part in parts:
@@ -166,8 +170,12 @@ def _render_assistant(
         elif ptype == "tool_use" and show_tools:
             name = part.get("name", "?")
             inp = part.get("input", "")
-            extras.append(_wrap(f"  [TOOL] {name}", palette.yellow, reset=palette.reset))
-            extras.append(_wrap(f"  {_truncate(inp, 200)}", palette.dim, reset=palette.reset))
+            extras.append(
+                _wrap(f"  [TOOL] {name}", palette.yellow, reset=palette.reset)
+            )
+            extras.append(
+                _wrap(f"  {_truncate(inp, 200)}", palette.dim, reset=palette.reset)
+            )
         elif ptype == "thinking" and show_system:
             thought = part.get("thinking", "")
             if thought:
@@ -182,7 +190,9 @@ def _render_assistant(
     out: list[str] = []
     if text_parts:
         out.append("")
-        out.append(_wrap("<<< ASSISTANT", palette.bold, palette.green, reset=palette.reset))
+        out.append(
+            _wrap("<<< ASSISTANT", palette.bold, palette.green, reset=palette.reset)
+        )
         for text in text_parts:
             out.append(_wrap(text, palette.green, reset=palette.reset))
     out.extend(extras)
@@ -201,7 +211,11 @@ def _render_user(
     User text is always shown (unless --assistant). tool_result parts only
     appear with --tools, mirroring bash's SHOW_TOOLS gate.
     """
-    parts = [content] if isinstance(content, str) else (content if isinstance(content, list) else [])
+    parts = (
+        [content]
+        if isinstance(content, str)
+        else (content if isinstance(content, list) else [])
+    )
     text_parts: list[str] = []
     extras: list[str] = []
     for part in parts:
@@ -219,8 +233,14 @@ def _render_user(
         elif ptype == "tool_result" and show_tools:
             result = part.get("content", "")
             if isinstance(result, list):
-                result = " ".join(p.get("text", "") for p in result if isinstance(p, dict))
-            extras.append(_wrap(f"  [result] {_truncate(result)}", palette.cyan, reset=palette.reset))
+                result = " ".join(
+                    p.get("text", "") for p in result if isinstance(p, dict)
+                )
+            extras.append(
+                _wrap(
+                    f"  [result] {_truncate(result)}", palette.cyan, reset=palette.reset
+                )
+            )
 
     out: list[str] = []
     if text_parts and not assistant_only:
@@ -243,13 +263,28 @@ def _render_object(
     kind = obj.get("type")
     if kind == "ortus.codegraph":
         return [_render_codegraph_event(obj, palette)]
+
+    if kind == "ortus.verdict":
+        decision = str(obj.get("decision", "unknown")).upper()
+        digest = str(obj.get("candidate_hash", ""))[:12]
+        reason = str(obj.get("reason", "")).strip()
+        colour = palette.green if decision == "PASS" else palette.red
+        rendered = f"[VERDICT] {decision} candidate={digest}"
+        if reason:
+            rendered += f" — {_truncate(reason, 160)}"
+        return [_wrap(rendered, colour, reset=palette.reset)]
     if kind == "system":
         subtype = obj.get("subtype", "?")
         if subtype == "init":
             session = obj.get("session_id", "?")
             return [
                 "",
-                _wrap("=== NEW SESSION ===", palette.bold, palette.magenta, reset=palette.reset),
+                _wrap(
+                    "=== NEW SESSION ===",
+                    palette.bold,
+                    palette.magenta,
+                    reset=palette.reset,
+                ),
                 _wrap(session, palette.magenta, reset=palette.reset),
             ]
         if show_system:
@@ -305,7 +340,9 @@ def _render_object(
             )
         if subtype == "error":
             header = _wrap(
-                f"  [RESULT] {tool or 'result'}: ERROR", palette.red, reset=palette.reset
+                f"  [RESULT] {tool or 'result'}: ERROR",
+                palette.red,
+                reset=palette.reset,
             )
             return head + [
                 header,
@@ -395,7 +432,9 @@ def _render_codex_item(
         if not text:
             return []
         return [
-            _wrap(f"  (thinking) {_truncate(text, 200)}", palette.dim, reset=palette.reset)
+            _wrap(
+                f"  (thinking) {_truncate(text, 200)}", palette.dim, reset=palette.reset
+            )
         ]
 
     if itype == "command_execution":
@@ -403,7 +442,9 @@ def _render_codex_item(
             return []
         if started:
             return [
-                _wrap("  [TOOL] command_execution", palette.yellow, reset=palette.reset),
+                _wrap(
+                    "  [TOOL] command_execution", palette.yellow, reset=palette.reset
+                ),
                 _wrap(
                     f"  {_truncate(item.get('command', ''), 200)}",
                     palette.dim,
@@ -421,11 +462,16 @@ def _render_codex_item(
             )
         else:
             header = _wrap(
-                f"  [RESULT] command_execution: {status}", palette.cyan, reset=palette.reset
+                f"  [RESULT] command_execution: {status}",
+                palette.cyan,
+                reset=palette.reset,
             )
         if not body:
             return [header]
-        return [header, _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset)]
+        return [
+            header,
+            _wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset),
+        ]
 
     if itype == "todo_list":
         if not show_system:
@@ -441,7 +487,9 @@ def _render_codex_item(
             mark = "x" if entry.get("completed") else " "
             out.append(
                 _wrap(
-                    f"    [{mark}] {entry.get('text', '')}", palette.dim, reset=palette.reset
+                    f"    [{mark}] {entry.get('text', '')}",
+                    palette.dim,
+                    reset=palette.reset,
                 )
             )
         return out
@@ -472,10 +520,25 @@ def _render_codex_object(
     if kind == "ortus.codegraph":
         return [_render_codegraph_event(obj, palette)]
 
+    if kind == "ortus.verdict":
+        decision = str(obj.get("decision", "unknown")).upper()
+        digest = str(obj.get("candidate_hash", ""))[:12]
+        reason = str(obj.get("reason", "")).strip()
+        colour = palette.green if decision == "PASS" else palette.red
+        rendered = f"[VERDICT] {decision} candidate={digest}"
+        if reason:
+            rendered += f" — {_truncate(reason, 160)}"
+        return [_wrap(rendered, colour, reset=palette.reset)]
+
     if kind == "thread.started":
         return [
             "",
-            _wrap("=== NEW SESSION ===", palette.bold, palette.magenta, reset=palette.reset),
+            _wrap(
+                "=== NEW SESSION ===",
+                palette.bold,
+                palette.magenta,
+                reset=palette.reset,
+            ),
             _wrap(str(obj.get("thread_id", "?")), palette.magenta, reset=palette.reset),
         ]
 
@@ -499,7 +562,11 @@ def _render_codex_object(
         return [_wrap(f"  [TURN FAILED] {message}", palette.red, reset=palette.reset)]
 
     if kind == "error":
-        return [_wrap(f"  [ERROR] {obj.get('message', '')}", palette.red, reset=palette.reset)]
+        return [
+            _wrap(
+                f"  [ERROR] {obj.get('message', '')}", palette.red, reset=palette.reset
+            )
+        ]
 
     if kind in ("item.started", "item.completed"):
         item = obj.get("item")
@@ -737,25 +804,36 @@ def tail(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
     ),
-    raw: bool = typer.Option(False, "--raw", help="Emit log lines verbatim (no stream-json filtering)."),
+    raw: bool = typer.Option(
+        False, "--raw", help="Emit log lines verbatim (no stream-json filtering)."
+    ),
     tools: bool = typer.Option(
-        False, "--tools", "-t",
+        False,
+        "--tools",
+        "-t",
         help="Include tool_use and tool_result entries (assistant calls + user results).",
     ),
     system: bool = typer.Option(
-        False, "--system", "-s",
+        False,
+        "--system",
+        "-s",
         help="Include non-init system events (hook_started, hook_response, thinking, ...).",
     ),
     verbose: bool = typer.Option(
-        False, "--verbose", "-v",
+        False,
+        "--verbose",
+        "-v",
         help="Equivalent to --tools --system; superset of every category.",
     ),
     assistant: bool = typer.Option(
-        False, "--assistant", "-a",
+        False,
+        "--assistant",
+        "-a",
         help="Show assistant messages only (suppress USER blocks; mirrors tail.sh -a).",
     ),
     codex: bool = typer.Option(
-        False, "--codex",
+        False,
+        "--codex",
         help="Compatibility shorthand for --backend codex.",
     ),
     backend: Optional[str] = typer.Option(

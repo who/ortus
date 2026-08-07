@@ -19,6 +19,7 @@ from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
+from ortus.core.transaction import JournalStore
 from tests._shims import make_inline_python_shim, normalize_git_branch, shim_path
 from tests.test_readiness import ready_issue
 
@@ -142,6 +143,38 @@ def _grind_log(repo: Path) -> str:
     )
 
 
+def _emit_verdict(
+    repo: Path, log_path: Path, *, criteria: tuple[str, ...], decision: str = "pass"
+) -> None:
+    """Append the one passing verdict envelope a read-only verifier would emit."""
+    journal = JournalStore(repo).load()
+    assert journal is not None
+    payload = {
+        "schema": 1,
+        "candidate_hash": journal.candidate_hash,
+        "decision": decision,
+        "criteria": [
+            {"id": name, "status": decision, "evidence": "reviewed"}
+            for name in criteria
+        ],
+        "commands": ["uv run pytest tests/test_grind.py -q"],
+        "reviewed_files": ["src/demo.py"],
+        "reviewed_interfaces": ["run"],
+        "risks": ["none"],
+        "findings": ["none"],
+        "codegraph": ["fallback recorded"],
+    }
+    event = {
+        "type": "item.completed",
+        "item": {
+            "type": "agent_message",
+            "text": "ORTUS_VERDICT: " + json.dumps(payload),
+        },
+    }
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event) + "\n")
+
+
 def _repair_packet_into(repo: Path, issue_id: str) -> None:
     """Stand in for what the repair subprocess does: update the packet in place."""
     packet = ready_issue()
@@ -203,12 +236,9 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
                 assert "which has no PRD" in prompt
                 _repair_packet_into(repo, issue_id)
             elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
-                subprocess.run(
-                    ["bd", "close", issue_id, "--reason", "verified"],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                )
+                # The verifier is read-only: it emits a verdict rather than
+                # closing. Finalization is the dependent lifecycle issue's job.
+                _emit_verdict(repo, log_path, criteria=("AC-1", "AC-2"))
             return 0
 
     _fake_sandbox(monkeypatch)
@@ -223,7 +253,9 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
     # The repair ran on the planning profile, ahead of the implement/verify pair.
     assert phases == [Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY]
     assert _issue_ids(repo) == ids_before, "repair must update in place, not create"
-    assert _issue(repo, issue_id)["status"] == "closed"
+    journal = JournalStore(repo).load()
+    assert journal is not None and journal.phase == "verified-pass"
+    assert _issue(repo, issue_id)["status"] == "in_progress"
     log_text = _grind_log(repo)
     assert "readiness repair pass 1/2" in log_text
     assert f"readiness repair: {issue_id} now passes readiness" in log_text
@@ -288,62 +320,40 @@ def test_grind_repair_budget_exhausted_prints_diagnostics_and_follow_up(
     """AC-3: once the per-run budget is spent, grind stops as it does today but
     names each per-issue failure and the exact follow-up command.
 
-    The second leaf is blocked behind the first, so it only reaches the ready
-    queue after the run's single repair pass is already spent.
+    A grind run now owns exactly one candidate transaction (the loop stops at a
+    verdict, because finalization belongs to the dependent lifecycle issue), so
+    exhaustion is exercised with a spent-on-arrival budget over two unready
+    leaves rather than across two iterations.
     """
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     repo = _bd_repo(tmp_path, "budget")
     first = _create_unready_issue(repo, "first hand authored leaf", priority="1")
     second = _create_unready_issue(repo, "second hand authored leaf", priority="1")
-    subprocess.run(
-        ["bd", "dep", first, "--blocks", second],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
     repairs: list[str] = []
 
-    class OnePassClaude:
+    class NoPassClaude:
         extra_env: dict[str, str] = {}
 
-        def run(
-            self,
-            prompt: str,
-            *,
-            repo: Path,
-            log_path: Path,
-            profile: object,
-            **kwargs: object,
-        ) -> int:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.touch(exist_ok=True)
-            if profile.phase is Phase.PLAN:  # type: ignore[union-attr]
-                repairs.append(prompt)
-                _repair_packet_into(repo, first)
-            elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
-                subprocess.run(
-                    ["bd", "close", first, "--reason", "verified"],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                )
-            return 0
+        def run(self, prompt: str, **kwargs: object) -> int:
+            repairs.append(prompt)
+            raise AssertionError("a spent repair budget must not spawn a subprocess")
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: OnePassClaude())
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoPassClaude())
 
     result = runner.invoke(
-        app, ["grind", str(repo), "--repair-budget", "1", "--idle-sleep", "0"]
+        app, ["grind", str(repo), "--repair-budget", "0", "--idle-sleep", "0"]
     )
 
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert len(repairs) == 1, "the run's single repair pass must not be re-spent"
-    assert _issue(repo, first)["status"] == "closed"
+    assert repairs == [], "an exhausted budget must not be spent anyway"
+    assert _issue(repo, first)["status"] == "open"
     assert _issue(repo, second)["status"] == "open"
     combined = result.stdout + result.stderr
-    assert "readiness repair budget exhausted (1/1 pass(es) used)" in combined
+    assert "readiness repair budget exhausted (0/0 pass(es) used)" in combined
+    assert f"readiness: {first}" in combined
     assert f"readiness: {second}" in combined
     # Rich hard-wraps long lines mid-token, so compare whitespace-free.
     squashed = re.sub(r"\s+", "", combined)
@@ -387,7 +397,7 @@ def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
-def test_grind_routes_profiles_and_fast_only_to_implementation(
+def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if shutil.which("bd") is None:
@@ -442,6 +452,164 @@ def test_grind_routes_profiles_and_fast_only_to_implementation(
     assert [call["fast"] for call in calls] == [True, False]
 
 
+@pytest.mark.parametrize(
+    "mutation,expected_phase,expected_text",
+    [
+        ("none", "verified-pass", "Decision: **PASS**"),
+        ("content", "verification-rejected", "mutated the candidate"),
+        ("new-path", "verification-rejected", "mutated the candidate path set"),
+        ("timeout", "verification-timeout", "timed out"),
+        ("nonzero", "verification-rejected", "exited with status 9"),
+        (
+            "implementation-commit",
+            "implementation-rejected",
+            "committed to the repository",
+        ),
+        (
+            "implementation-packet",
+            "implementation-rejected",
+            "changed the immutable issue packet artifact",
+        ),
+    ],
+)
+def test_verifier_report_and_mutation_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected_phase: str,
+    expected_text: str,
+) -> None:
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = tmp_path / mutation
+    repo.mkdir()
+    subprocess.run(
+        ["bd", "init", "--non-interactive", "--prefix", "ver"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    normalize_git_branch(repo)
+    issue_id = _create_ready_issue(repo, "verify candidate transaction")
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    calls = 0
+
+    class TransactionRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            nonlocal calls
+            calls += 1
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            if not readonly:
+                (repo / "candidate.py").write_text("VALUE = 1\n")
+                log_path.touch(exist_ok=True)
+                if mutation == "implementation-commit":
+                    # The forbidden move: committing advances HEAD, so the
+                    # captured candidate diff would come back empty.
+                    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+                    subprocess.run(
+                        ["git", "commit", "-m", "worker commit"],
+                        cwd=repo,
+                        check=True,
+                        capture_output=True,
+                    )
+                elif mutation == "implementation-packet":
+                    journal = JournalStore(repo).load()
+                    assert journal is not None
+                    (repo / journal.issue_packet_ref).write_bytes(b'{"id":"forged"}')
+                return 0
+            assert mutation not in {"implementation-commit", "implementation-packet"}
+            assert calls == 2
+            journal = JournalStore(repo).load()
+            assert journal is not None
+            if mutation == "timeout":
+                raise subprocess.TimeoutExpired("fake-verifier", 1)
+            if mutation == "content":
+                (repo / "candidate.py").write_text("VALUE = 2\n")
+            elif mutation == "new-path":
+                (repo / "verifier-created.py").write_text("MUTATED = True\n")
+            payload = {
+                "schema": 1,
+                "candidate_hash": journal.candidate_hash,
+                "decision": "pass",
+                "criteria": [
+                    {"id": "AC-1", "status": "pass", "evidence": "reviewed"},
+                    {"id": "AC-2", "status": "pass", "evidence": "reviewed"},
+                ],
+                "commands": ["uv run pytest tests/test_grind.py -q"],
+                "reviewed_files": ["candidate.py"],
+                "reviewed_interfaces": ["VALUE"],
+                "risks": ["candidate mutation"],
+                "findings": ["none"],
+                "codegraph": ["fallback recorded"],
+            }
+            event = {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "ORTUS_VERDICT: " + json.dumps(payload),
+                },
+            }
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event) + "\n")
+            return 9 if mutation == "nonzero" else 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: TransactionRunner())
+
+    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    journal = JournalStore(repo).load()
+    assert journal is not None and journal.phase == expected_phase
+    comments = subprocess.run(
+        ["bd", "comments", issue_id, "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert expected_text in comments
+    assert (
+        json.loads(
+            subprocess.run(
+                ["bd", "show", issue_id, "--json"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )[0]["status"]
+        == "in_progress"
+    )
+
+
 def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
     issue = {
         "id": "demo-large",
@@ -483,7 +651,7 @@ def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
 
 
 @pytest.mark.slow
-def test_codex_outer_loop_drives_three_issues_to_zero(
+def test_codex_rejects_implementation_worker_that_closes_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if shutil.which("bd") is None:
@@ -551,7 +719,10 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
         ["grind", str(repo), "--backend", "codex", "--idle-sleep", "0"],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert len(prompts) == 3
+    assert len(prompts) == 1
+    journal = JournalStore(repo).load()
+    assert journal is not None
+    assert journal.phase == "implementation-rejected"
     commits = subprocess.run(
         ["git", "log", "--format=%s"],
         cwd=repo,
@@ -559,21 +730,15 @@ def test_codex_outer_loop_drives_three_issues_to_zero(
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert sum("complete Codex grind task" in subject for subject in commits) == 3
-    assert (
-        subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-        == ""
+    assert sum("complete Codex grind task" in subject for subject in commits) == 0
+    in_progress = subprocess.run(
+        ["bd", "list", "--status", "in_progress", "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    ready = subprocess.run(
-        ["bd", "ready", "--json"], cwd=repo, check=True, capture_output=True, text=True
-    )
-    assert json.loads(ready.stdout) == []
+    assert len(json.loads(in_progress.stdout)) == 1
 
 
 def test_dry_run_startup_under_500ms(tmp_path: Path) -> None:

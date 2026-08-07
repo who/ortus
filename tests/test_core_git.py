@@ -152,7 +152,9 @@ def test_dirty_source_becomes_preserved_codex_baseline(tmp_path: Path) -> None:
         ).returncode
         == 1
     )
-    assert any("preserving dirty operator baseline" in item for item in messages)
+    assert any(
+        "preserving dirty worktree for worker handoff" in item for item in messages
+    )
 
 
 def test_failed_git_status_is_not_treated_as_clean(tmp_path: Path) -> None:

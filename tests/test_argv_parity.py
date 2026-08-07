@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from ortus.core.agent import CodexRunner
+from ortus.core.claude import ClaudeRunner
 from tests._platform import skip_on_windows_bash_shim
 
 pytestmark = skip_on_windows_bash_shim
@@ -37,6 +39,18 @@ FIXTURE = REPO_ROOT / "tests" / "fixtures" / "argv-parity-claude.json"
 ALL_ROLES = ("goal", "prd-decompose", "idea-expand")
 
 CASES = json.loads(FIXTURE.read_text())["cases"]
+
+
+def test_readonly_argv_is_explicit_without_changing_implementation_defaults() -> None:
+    codex = CodexRunner()
+    claude = ClaudeRunner()
+
+    codex_verify = codex.build_argv("verify", readonly=True)
+    codex_implement = codex.build_argv("implement")
+    assert codex_verify[codex_verify.index("--sandbox") + 1] == "read-only"
+    assert codex_implement[codex_implement.index("--sandbox") + 1] == "workspace-write"
+    assert "--disallowedTools" in claude.build_argv("verify", readonly=True)
+    assert "--disallowedTools" not in claude.build_argv("implement")
 
 
 def _adapter_argv(case: dict) -> list[str]:
