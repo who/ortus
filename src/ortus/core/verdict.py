@@ -41,6 +41,12 @@ class Verdict:
     findings: tuple[str, ...]
     codegraph: tuple[str, ...]
     schema: int = VERDICT_SCHEMA
+    # Criterion ids that did not line up with the authoritative packet. Only a
+    # fail verdict can carry these — a pass verdict with any of them is fatal —
+    # and they are appended last so existing positional construction is safe.
+    missing_criteria: tuple[str, ...] = ()
+    unexpected_criteria: tuple[str, ...] = ()
+    duplicated_criteria: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -53,6 +59,43 @@ def _strings(value: Any, field: str) -> tuple[str, ...]:
     ):
         raise VerdictError(f"{field} must be an array of non-empty strings")
     return tuple(item.strip() for item in value)
+
+
+def _criteria_discrepancy(
+    actual_ids: tuple[str, ...], expected_ids: tuple[str, ...]
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Missing, unexpected, and duplicated ids, each in first-seen order."""
+
+    actual = set(actual_ids)
+    expected = set(expected_ids)
+    missing = tuple(item for item in dict.fromkeys(expected_ids) if item not in actual)
+    unexpected = tuple(
+        item for item in dict.fromkeys(actual_ids) if item not in expected
+    )
+    duplicated = tuple(
+        item for item in dict.fromkeys(actual_ids) if actual_ids.count(item) > 1
+    )
+    return missing, unexpected, duplicated
+
+
+def _named_ids(values: tuple[str, ...]) -> str:
+    return ", ".join(values) if values else "none"
+
+
+def _collapse_duplicates(criteria: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Keep one row per criterion id, preferring the failing report.
+
+    A recorded fail verdict renders one matrix row per criterion, so a repeated
+    id must not be counted twice; keeping the failing row means the matrix still
+    explains the decision it belongs to.
+    """
+
+    kept: dict[str, dict[str, str]] = {}
+    for item in criteria:
+        current = kept.get(item["id"])
+        if current is None or (current["status"] == "pass" and item["status"] == "fail"):
+            kept[item["id"]] = item
+    return list(kept.values())
 
 
 def validate_verdict(
@@ -99,10 +142,28 @@ def validate_verdict(
         criteria.append({key: item[key].strip() for key in item})
     expected_ids = tuple(expected_criteria)
     actual_ids = tuple(item["id"] for item in criteria)
-    if expected_ids and (
-        len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected_ids)
-    ):
-        raise VerdictError("verdict criteria do not match the authoritative issue packet")
+    missing: tuple[str, ...] = ()
+    unexpected: tuple[str, ...] = ()
+    duplicated: tuple[str, ...] = ()
+    if expected_ids:
+        missing, unexpected, duplicated = _criteria_discrepancy(
+            actual_ids, expected_ids
+        )
+        # Asymmetric on purpose. Accepting a pass whose ids were never mapped to
+        # the packet would close an issue and commit code against criteria
+        # nobody authorized, so that stays fatal. A fail commits nothing and
+        # leaves the issue open either way, so it is recorded with the
+        # discrepancy attached instead of aborting the run over a schema detail
+        # the correction loop could otherwise act on.
+        if (missing or unexpected or duplicated) and decision == "pass":
+            raise VerdictError(
+                "verdict criteria do not match the authoritative issue packet; "
+                f"missing: {_named_ids(missing)}; "
+                f"unexpected: {_named_ids(unexpected)}; "
+                f"duplicated: {_named_ids(duplicated)}"
+            )
+        if duplicated:
+            criteria = _collapse_duplicates(criteria)
     failed = any(item["status"] == "fail" for item in criteria)
     if (decision == "pass" and failed) or (decision == "fail" and not failed):
         raise VerdictError("verdict decision contradicts criterion statuses")
@@ -118,6 +179,9 @@ def validate_verdict(
         risks=_strings(payload["risks"], "risks"),
         findings=_strings(payload["findings"], "findings"),
         codegraph=_strings(payload["codegraph"], "codegraph"),
+        missing_criteria=missing,
+        unexpected_criteria=unexpected,
+        duplicated_criteria=duplicated,
     )
 
 
@@ -210,6 +274,19 @@ def _section(title: str, entries: Iterable[str], budget: int) -> list[str]:
     return lines
 
 
+def _mismatch_entries(verdict: Verdict) -> tuple[str, ...]:
+    """Keep an accepted id discrepancy visible to the operator and correction pass."""
+
+    labelled = (
+        ("missing from the verdict", verdict.missing_criteria),
+        ("not in the issue packet", verdict.unexpected_criteria),
+        ("reported more than once", verdict.duplicated_criteria),
+    )
+    return tuple(
+        f"{label}: {', '.join(values)}" for label, values in labelled if values
+    )
+
+
 def render_report(
     verdict: Verdict,
     *,
@@ -244,8 +321,11 @@ def render_report(
         ("Findings", verdict.findings),
         ("CodeGraph evidence", verdict.codegraph),
     )
+    mismatch = _mismatch_entries(verdict)
+    if mismatch:
+        sections = (("Criterion id mismatch", mismatch),) + sections
     # The criterion matrix is the audit spine, so it gets the larger share and
-    # the six evidence sections split what remains evenly.
+    # the remaining evidence sections split what is left evenly.
     body = max(0, REPORT_BUDGET - len("\n".join(lines)))
     lines.extend(
         _section(

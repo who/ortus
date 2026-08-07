@@ -124,7 +124,39 @@ def test_grind_prompt_keeps_blocked_as_transcript_marker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (3) ralph-prompt superseded-by preamble
+# (3) verifier contract — the criterion-id rule must be stated, not implied
+# ---------------------------------------------------------------------------
+
+
+def test_verifier_states_criterion_ids_come_from_the_packet() -> None:
+    """The rule `validate_verdict` enforces has to be in the prompt (ortus-wz3v).
+
+    A verifier that was never told the ids are fixed will invent one to record
+    something it could not run, and a pass shaped that way is rejected outright.
+    """
+    from ortus.commands.grind import _verifier_prompt
+    from ortus.core.transaction import CandidateJournal
+
+    journal = CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        issue_packet_ref="logs/packet.json",
+        issue_packet_hash="b" * 64,
+        candidate_hash="a" * 64,
+    )
+    body = _verifier_prompt(journal, "probe contract").lower()
+
+    assert "ac-n" in body
+    assert "issue packet" in body
+    assert "exactly once" in body
+    assert "invented" in body
+    assert "evidence of the criterion" in body
+
+
+# ---------------------------------------------------------------------------
+# (4) ralph-prompt superseded-by preamble
 # ---------------------------------------------------------------------------
 
 

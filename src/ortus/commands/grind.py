@@ -408,7 +408,12 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "status, evidence), and non-empty string arrays commands, reviewed_files, "
         "reviewed_interfaces, risks, findings, codegraph. A pass requires every criterion "
         "to pass; a fail requires at least one failed criterion. Bind candidate_hash to "
-        "the supplied SHA-256 exactly.\n" + probe_text
+        "the supplied SHA-256 exactly.\n\n"
+        "Criterion ids must be exactly the AC-N identifiers listed in the issue packet's "
+        "acceptance criteria — every one of them, each used exactly once, and no invented "
+        "id of your own. If a check could not be run at all, record that in the evidence "
+        "of the criterion it blocks and fail that criterion; do not add a criterion to "
+        "carry it.\n" + probe_text
     )
 
 
