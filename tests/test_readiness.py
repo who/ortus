@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 
-from ortus.core.readiness import failed_reports, validate_issue, validate_issues
+import pytest
+
+from ortus.core.readiness import (
+    _REQUIRED_SECTIONS,
+    RequiredSection,
+    failed_reports,
+    spec_markdown,
+    validate_issue,
+    validate_issues,
+)
 
 
 def ready_issue(issue_id: str = "demo-1") -> dict:
@@ -98,6 +108,62 @@ def test_epic_is_exempt_and_mixed_graph_only_fails_bad_leaf() -> None:
     reports = validate_issues([epic, ready_issue(), bad])
     assert reports[0].ready and reports[0].exempt
     assert [report.issue_id for report in failed_reports(reports)] == ["demo-bad"]
+
+
+_SPEC_BULLET = re.compile(r"^- `## (?P<heading>[^`]+)` — ", re.MULTILINE)
+_SPEC_FIELD = re.compile(r"^`(?P<field>[a-z_]+)`:$", re.MULTILINE)
+
+# Bodies that satisfy the shape rules the rendered spec teaches; every other
+# section only needs concrete, non-placeholder prose.
+_SPEC_BODIES = {
+    "readiness schema": "v1",
+    "concrete locations": "Edit `src/demo.py` in `run()`.",
+    "ordered steps": "1. Parse the flag.\n2. Suppress writes.",
+    "observable criteria": "- AC-1: Preview performs no writes.",
+    "criterion checks": "- AC-1: Run `uv run pytest tests/test_demo.py -q`.",
+    "targeted tests": "Run `uv run pytest tests/test_demo.py -q`.",
+}
+
+
+def _packet_from_spec(rendered: str) -> dict:
+    """Author an issue by following the rendered contract, heading by heading."""
+
+    issue: dict[str, str] = {"id": "spec-1", "issue_type": "task"}
+    section_list = rendered.split("### Shape rules")[0]
+    field: str | None = None
+    for line in section_list.splitlines():
+        field_match = _SPEC_FIELD.match(line)
+        bullet = _SPEC_BULLET.match(line)
+        if field_match:
+            field = field_match.group("field")
+        elif bullet and field:
+            heading = bullet.group("heading")
+            body = _SPEC_BODIES.get(heading.lower(), "Concrete, decided detail.")
+            issue[field] = f"{issue.get(field, '')}\n\n## {heading}\n{body}".strip()
+    return issue
+
+
+def test_spec_markdown_names_every_field_and_heading_in_validator_order() -> None:
+    rendered = spec_markdown()
+    section_list = rendered.split("### Shape rules")[0]
+    assert _SPEC_BULLET.findall(section_list) == [
+        section.heading for section in _REQUIRED_SECTIONS
+    ]
+    assert _SPEC_FIELD.findall(section_list) == list(
+        dict.fromkeys(section.field for section in _REQUIRED_SECTIONS)
+    )
+    assert spec_markdown() == rendered  # stable across runs, no churn
+
+
+def test_rendered_spec_round_trip_passes_validation() -> None:
+    report = validate_issue(_packet_from_spec(spec_markdown()))
+    assert report.failures == ()
+    assert report.ready
+
+
+def test_section_without_guidance_fails_loudly() -> None:
+    with pytest.raises(ValueError, match="guidance"):
+        RequiredSection("design", "Scope", "scope", "  ")
 
 
 def test_contradiction_guidance_must_be_actionable() -> None:

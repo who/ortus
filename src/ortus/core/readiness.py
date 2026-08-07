@@ -48,22 +48,126 @@ class ReadinessReport:
         return f"{self.issue_id}: {details}"
 
 
-_REQUIRED_SECTIONS: tuple[tuple[str, str, str], ...] = (
-    ("description", "objective", "objective"),
-    ("description", "behavioral context", "behavioral_context"),
-    ("design", "readiness schema", "readiness_schema"),
-    ("design", "scope", "scope"),
-    ("design", "non goals", "non_goals"),
-    ("design", "concrete locations", "concrete_locations"),
-    ("design", "resolved decisions", "resolved_decisions"),
-    ("design", "compatibility constraints", "compatibility_constraints"),
-    ("design", "ordered steps", "ordered_steps"),
-    ("design", "dependencies", "dependencies"),
-    ("design", "edge cases", "edge_cases"),
-    ("design", "plan gap guidance", "plan_gap_guidance"),
-    ("acceptance_criteria", "observable criteria", "observable_criteria"),
-    ("acceptance_criteria", "criterion checks", "criterion_mapped_checks"),
-    ("acceptance_criteria", "targeted tests", "targeted_tests"),
+@dataclass(frozen=True)
+class RequiredSection:
+    """One required heading plus the guidance that teaches how to fill it."""
+
+    field: str
+    heading: str
+    code: str
+    guidance: str
+
+    def __post_init__(self) -> None:
+        # A section added without guidance would render an empty bullet in the
+        # generated contract; fail at import instead of teaching nothing.
+        if not self.guidance.strip():
+            raise ValueError(f"required section {self.code!r} has no guidance")
+
+    @property
+    def key(self) -> str:
+        """Normalised heading used to match a parsed section."""
+
+        return _normalise_heading(self.heading)
+
+
+_REQUIRED_SECTIONS: tuple[RequiredSection, ...] = (
+    RequiredSection(
+        "description",
+        "Objective",
+        "objective",
+        "the single outcome this leaf owns.",
+    ),
+    RequiredSection(
+        "description",
+        "Behavioral context",
+        "behavioral_context",
+        "user-visible or system behavior before and after.",
+    ),
+    RequiredSection(
+        "design",
+        "Readiness schema",
+        "readiness_schema",
+        f"exactly `{READINESS_SCHEMA_VERSION}`.",
+    ),
+    RequiredSection(
+        "design",
+        "Scope",
+        "scope",
+        "work included in this leaf.",
+    ),
+    RequiredSection(
+        "design",
+        "Non-goals",
+        "non_goals",
+        "explicit boundaries.",
+    ),
+    RequiredSection(
+        "design",
+        "Concrete locations",
+        "concrete_locations",
+        "candidate files plus symbols, interfaces, or commands; use CodeGraph "
+        "evidence or record the grep/Read fallback.",
+    ),
+    RequiredSection(
+        "design",
+        "Resolved decisions",
+        "resolved_decisions",
+        "architectural and product decisions already made, including rationale "
+        "where useful.",
+    ),
+    RequiredSection(
+        "design",
+        "Compatibility constraints",
+        "compatibility_constraints",
+        "supported platforms, APIs, stored data, CLI behavior, or an explained "
+        "absence.",
+    ),
+    RequiredSection(
+        "design",
+        "Ordered steps",
+        "ordered_steps",
+        "a numbered implementation sequence.",
+    ),
+    RequiredSection(
+        "design",
+        "Dependencies",
+        "dependencies",
+        "issue dependencies plus code callers/consumers, or an explained absence.",
+    ),
+    RequiredSection(
+        "design",
+        "Edge cases",
+        "edge_cases",
+        "failures and boundary conditions the implementation must cover.",
+    ),
+    RequiredSection(
+        "design",
+        "Plan-gap guidance",
+        "plan_gap_guidance",
+        "contradictions or missing material decisions that require the worker "
+        "to stop, record `PLAN-GAP`, preserve candidate state, and route to "
+        "planning/human handling instead of improvising.",
+    ),
+    RequiredSection(
+        "acceptance_criteria",
+        "Observable criteria",
+        "observable_criteria",
+        "one observable result per stable identifier.",
+    ),
+    RequiredSection(
+        "acceptance_criteria",
+        "Criterion checks",
+        "criterion_mapped_checks",
+        "exactly one matching entry for every criterion identifier, with an "
+        "exact command or deterministic inspection in backticks.",
+    ),
+    RequiredSection(
+        "acceptance_criteria",
+        "Targeted tests",
+        "targeted_tests",
+        "exact bounded test commands in backticks. Follow the repository's "
+        "testing policy; do not make a full local matrix the worker default.",
+    ),
 )
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
@@ -124,6 +228,20 @@ def _failure(code: str, field: str, section: str, message: str) -> ReadinessFail
     return ReadinessFailure(code, field, section, message)
 
 
+def _section(code: str) -> RequiredSection:
+    for section in _REQUIRED_SECTIONS:
+        if section.code == code:
+            return section
+    raise KeyError(f"unknown readiness section {code!r}")
+
+
+def _shape_failure(code: str, message: str) -> ReadinessFailure:
+    """A defect in a section that is present but malformed."""
+
+    section = _section(code)
+    return _failure(code, section.field, section.heading, message)
+
+
 def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     """Validate one issue against readiness schema v1; epics are containers."""
 
@@ -134,19 +252,19 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
 
     parsed = {
         field: _sections(issue.get(field))
-        for field in {field for field, _, _ in _REQUIRED_SECTIONS}
+        for field in {section.field for section in _REQUIRED_SECTIONS}
     }
     failures: list[ReadinessFailure] = []
     values: dict[str, str] = {}
-    for field, heading, code in _REQUIRED_SECTIONS:
-        value = parsed[field].get(heading, "")
-        values[code] = value
+    for section in _REQUIRED_SECTIONS:
+        value = parsed[section.field].get(section.key, "")
+        values[section.code] = value
         if _is_placeholder(value):
             failures.append(
                 _failure(
-                    code,
-                    field,
-                    heading,
+                    section.code,
+                    section.field,
+                    section.heading,
                     "missing, empty, or placeholder section",
                 )
             )
@@ -154,10 +272,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     schema = values.get("readiness_schema", "").strip().lower()
     if schema and not _is_placeholder(schema) and schema != READINESS_SCHEMA_VERSION:
         failures.append(
-            _failure(
+            _shape_failure(
                 "readiness_schema",
-                "design",
-                "readiness schema",
                 f"expected {READINESS_SCHEMA_VERSION!r}, got {schema!r}",
             )
         )
@@ -166,10 +282,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     if locations and not _is_placeholder(locations):
         if not _LOCATION.search(locations) or not _SYMBOL.search(locations):
             failures.append(
-                _failure(
+                _shape_failure(
                     "concrete_locations",
-                    "design",
-                    "concrete locations",
                     "must name at least one file and one symbol or interface",
                 )
             )
@@ -177,10 +291,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     steps = values.get("ordered_steps", "")
     if steps and not _is_placeholder(steps) and not _ORDERED_STEP.search(steps):
         failures.append(
-            _failure(
+            _shape_failure(
                 "ordered_steps",
-                "design",
-                "ordered steps",
                 "must contain a numbered implementation step",
             )
         )
@@ -196,10 +308,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     criteria = set(criterion_counts)
     if values.get("observable_criteria") and not criteria:
         failures.append(
-            _failure(
+            _shape_failure(
                 "observable_criteria",
-                "acceptance_criteria",
-                "observable criteria",
                 "each criterion must have an AC-N identifier",
             )
         )
@@ -211,10 +321,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
         or not _CODE_SPAN.search(values["criterion_mapped_checks"])
     ):
         failures.append(
-            _failure(
+            _shape_failure(
                 "criterion_mapped_checks",
-                "acceptance_criteria",
-                "criterion checks",
                 "must map every AC-N exactly once by identifier and include exact commands or checks",
             )
         )
@@ -222,10 +330,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     tests = values.get("targeted_tests", "")
     if tests and not _is_placeholder(tests) and not _TEST_COMMAND.search(tests):
         failures.append(
-            _failure(
+            _shape_failure(
                 "targeted_tests",
-                "acceptance_criteria",
-                "targeted tests",
                 "must include an exact targeted test command in backticks",
             )
         )
@@ -238,6 +344,73 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     return ReadinessReport(
         issue_id=issue_id, exempt=False, failures=tuple(unique.values())
     )
+
+
+def _example(pattern: re.Pattern[str], example: str) -> str:
+    """An illustrative token, proven against the rule it teaches."""
+
+    if not pattern.search(example):
+        raise ValueError(f"spec example {example!r} violates {pattern.pattern!r}")
+    return example
+
+
+def _shape_rules() -> tuple[str, ...]:
+    """Rules that a present section must satisfy, keyed to the enforcing regex."""
+
+    return (
+        f"`## {_section('readiness_schema').heading}` — the body is exactly "
+        f"`{READINESS_SCHEMA_VERSION}` and nothing else.",
+        f"`## {_section('concrete_locations').heading}` — names at least one "
+        f"file path ({_example(_LOCATION, '`src/pkg/module.py`')}) and at least "
+        f"one symbol or interface ({_example(_SYMBOL, '`Runner.apply()`')}).",
+        f"`## {_section('ordered_steps').heading}` — numbered steps, one per "
+        f"line ({_example(_ORDERED_STEP, '1. Parse the flag.')}).",
+        f"`## {_section('observable_criteria').heading}` — every criterion "
+        f"carries a unique identifier ({_example(_CRITERION_ID, '`AC-1`')}, "
+        "`AC-2`, ...).",
+        f"`## {_section('criterion_mapped_checks').heading}` — repeats every "
+        "criterion identifier exactly once, each with an exact command or "
+        "deterministic check in backticks "
+        f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}).",
+        f"`## {_section('targeted_tests').heading}` — at least one exact test "
+        "command in backticks "
+        f"({_example(_TEST_COMMAND, '`uv run pytest tests/test_demo.py -q`')}).",
+    )
+
+
+def spec_markdown() -> str:
+    """Render readiness schema v1 exactly as ``validate_issue`` enforces it."""
+
+    lines = [
+        f"## Readiness schema {READINESS_SCHEMA_VERSION} for executable leaves",
+        "",
+        "Use these exact Markdown headings inside the existing bd fields. Every "
+        "section must contain concrete information. `TODO`, `TBD`, `N/A`, an "
+        "empty heading, and template text are invalid. When something is "
+        "intentionally absent, write `None — <why that is safe>`.",
+    ]
+    fields: list[str] = []
+    for section in _REQUIRED_SECTIONS:
+        if section.field not in fields:
+            fields.append(section.field)
+    for field in fields:
+        lines.extend(("", f"`{field}`:", ""))
+        lines.extend(
+            f"- `## {section.heading}` — {section.guidance}"
+            for section in _REQUIRED_SECTIONS
+            if section.field == field
+        )
+    lines.extend(("", "### Shape rules", ""))
+    lines.extend(f"- {rule}" for rule in _shape_rules())
+    lines.extend(
+        (
+            "",
+            "Epics are containers and are exempt from these sections; every "
+            "non-epic issue must satisfy all of them. Notes may carry "
+            "supplementary evidence only, never required readiness content.",
+        )
+    )
+    return "\n".join(lines) + "\n"
 
 
 def validate_issues(issues: Iterable[dict[str, Any]]) -> tuple[ReadinessReport, ...]:
