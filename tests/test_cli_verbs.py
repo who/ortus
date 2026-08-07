@@ -15,14 +15,40 @@ from ortus.core.repo import FR003_NO_BEADS_ERROR
 
 runner = CliRunner()
 
-VERBS = ["init", "plan", "grind", "interview", "tail", "triage", "human", "check"]
+VERBS = ["init", "plan", "grind", "interview", "tail", "triage", "human", "check", "spec"]
 
 
-def test_top_help_lists_all_eight_verbs() -> None:
+def test_top_help_lists_all_verbs() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for verb in VERBS:
         assert verb in result.stdout, f"--help missing verb {verb!r}"
+
+
+def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
+    """Adding a verb must append; existing verbs keep their listing order."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    # Rich draws the command table inside a box, so drop the border glyphs
+    # and keep the first token of each row that names a verb.
+    known = set(VERBS) | {"unlock"}
+    listed = []
+    for line in result.stdout.splitlines():
+        tokens = [t for t in line.replace("│", " ").split() if t]
+        if tokens and tokens[0] in known:
+            listed.append(tokens[0])
+    assert listed == [
+        "init",
+        "plan",
+        "grind",
+        "interview",
+        "tail",
+        "triage",
+        "human",
+        "check",
+        "unlock",
+        "spec",
+    ]
 
 
 @pytest.mark.parametrize("verb", VERBS)

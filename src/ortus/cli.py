@@ -10,6 +10,7 @@ from ortus.commands.human import human
 from ortus.commands.init import init
 from ortus.commands.interview import interview
 from ortus.commands.plan import plan
+from ortus.commands.spec import spec
 from ortus.commands.tail import tail
 from ortus.commands.triage import triage
 from ortus.commands.unlock import unlock
@@ -64,3 +65,7 @@ app.command(
     name="unlock",
     help="Clear a stuck grind flock; optionally revert in-progress claims.",
 )(unlock)
+app.command(
+    name="spec",
+    help="Print the readiness schema issue-authoring contract.",
+)(spec)

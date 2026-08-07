@@ -721,3 +721,4 @@
 {"id":"int-8aef5e11","kind":"field_change","created_at":"2026-08-07T16:18:05.088867758Z","actor":"who","issue_id":"ortus-xhrj.1","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-fdd2f35d","kind":"field_change","created_at":"2026-08-07T16:18:13.51254658Z","actor":"who","issue_id":"ortus-xhrj.1","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-44c21eae","kind":"field_change","created_at":"2026-08-07T16:42:11.76138838Z","actor":"who","issue_id":"ortus-xhrj.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-c2b69a0a","kind":"field_change","created_at":"2026-08-07T16:43:05.403471721Z","actor":"who","issue_id":"ortus-xhrj.2","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
