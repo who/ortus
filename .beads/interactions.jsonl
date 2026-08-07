@@ -728,3 +728,4 @@
 {"id":"int-b7f9db2a","kind":"field_change","created_at":"2026-08-07T17:34:41.876050294Z","actor":"who","issue_id":"ortus-xhrj.3","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-c89b2bbd","kind":"field_change","created_at":"2026-08-07T18:09:35.985276943Z","actor":"who","issue_id":"ortus-xhrj.3","extra":{"field":"status","new_value":"open","old_value":"in_progress"}}
 {"id":"int-10537757","kind":"field_change","created_at":"2026-08-07T18:09:43.930023659Z","actor":"who","issue_id":"ortus-xhrj.3","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-08ed8c37","kind":"field_change","created_at":"2026-08-07T18:35:27.333899298Z","actor":"who","issue_id":"ortus-xhrj.3","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Verified: AC-1/AC-2/AC-3 pass on independent re-run; targeted 39 passed, fast+integration 429 passed"}}
