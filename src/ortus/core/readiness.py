@@ -239,7 +239,9 @@ def _shape_failure(code: str, message: str) -> ReadinessFailure:
     """A defect in a section that is present but malformed."""
 
     section = _section(code)
-    return _failure(code, section.field, section.heading, message)
+    # Diagnostics report the normalised heading, not the display one, so the
+    # strings grind and the repair prompt already match stay byte-identical.
+    return _failure(code, section.field, section.key, message)
 
 
 def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
@@ -264,7 +266,7 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
                 _failure(
                     section.code,
                     section.field,
-                    section.heading,
+                    section.key,
                     "missing, empty, or placeholder section",
                 )
             )

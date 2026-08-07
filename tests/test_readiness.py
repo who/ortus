@@ -155,6 +155,22 @@ def test_spec_markdown_names_every_field_and_heading_in_validator_order() -> Non
     assert spec_markdown() == rendered  # stable across runs, no churn
 
 
+def test_failures_report_normalised_headings_not_display_headings() -> None:
+    # grind diagnostics and the repair prompt match these strings; attaching
+    # display headings to the section table must not reword them.
+    report = validate_issue({"id": "old-1", "issue_type": "task", "description": "do it"})
+    sections = {failure.section for failure in report.failures}
+    assert {"scope", "non goals", "plan gap guidance"} <= sections
+    assert "design/scope" in report.diagnostic()
+    assert not any(section != section.lower() for section in sections)
+
+
+def test_spec_markdown_records_the_epic_exemption() -> None:
+    # validate_issue() exempts epics; authors pad them needlessly if the
+    # rendered contract stays silent about it.
+    assert "epic" in spec_markdown().lower()
+
+
 def test_rendered_spec_round_trip_passes_validation() -> None:
     report = validate_issue(_packet_from_spec(spec_markdown()))
     assert report.failures == ()
