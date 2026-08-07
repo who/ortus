@@ -164,6 +164,78 @@ def test_failed_git_status_is_not_treated_as_clean(tmp_path: Path) -> None:
     assert not git.is_clean()
 
 
+def _with_remote(repo: Path, tmp_path: Path) -> Path:
+    """Give `repo` an origin that already carries its baseline commit."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", remote], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo, check=True)
+    return remote
+
+
+def _move_origin_ahead(remote: Path, tmp_path: Path) -> None:
+    """Land a commit on origin from a different checkout."""
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", str(remote), str(other)], check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=other,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=other, check=True)
+    (other / "elsewhere.py").write_text("REMOTE = True\n")
+    subprocess.run(["git", "add", "-A"], cwd=other, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "remote moved"], cwd=other, check=True, capture_output=True
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=other, check=True)
+
+
+def test_pull_rebase_replays_a_rejected_push_onto_the_moved_remote(
+    tmp_path: Path,
+) -> None:
+    """The finalization sync path: origin moved while the transaction held the
+    flock, so the push is rejected, the rebase replays the local commit, and the
+    retried push lands both."""
+    repo = _repo(tmp_path)
+    remote = _with_remote(repo, tmp_path)
+    _move_origin_ahead(remote, tmp_path)
+    (repo / "candidate.py").write_text("CANDIDATE = True\n")
+    subprocess.run(["git", "add", "candidate.py"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "verified candidate"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    git = GitClient(repo)
+
+    assert not git.push("main"), "a non-fast-forward push must be reported as failed"
+    assert git.pull_rebase("main")
+    assert git.push("main")
+
+    subjects = _subjects(repo)
+    assert subjects[0] == "verified candidate"
+    assert "remote moved" in subjects, "the remote commit survives the rebase"
+    assert git.local_ahead_of_remote("main") == 0
+
+
+def test_pull_rebase_refuses_to_rebase_over_a_dirty_worktree(tmp_path: Path) -> None:
+    """Conservative branch: unrelated operator edits must never be rebased over.
+
+    Returning False here is what leaves grind holding a recoverable journal
+    instead of rewriting someone else's uncommitted work.
+    """
+    repo = _repo(tmp_path)
+    remote = _with_remote(repo, tmp_path)
+    _move_origin_ahead(remote, tmp_path)
+    (repo / "source.py").write_text("OPERATOR_EDIT = True\n")
+    git = GitClient(repo)
+
+    assert not git.pull_rebase("main")
+    assert (repo / "source.py").read_text() == "OPERATOR_EDIT = True\n"
+
+
 def test_failed_housekeeping_push_halts_before_work() -> None:
     class PushFailingGit:
         def is_git_repo(self) -> bool:

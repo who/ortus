@@ -23,7 +23,6 @@ from typing import Callable, Iterable, Optional
 from ortus.core.readiness import ReadinessReport, validate_issue
 
 
-CLOSE_ONE_CONDITION_FILE = "close-one.txt"
 # Per-iteration condition for the harness-selects-and-claims flow: the loop
 # picks + claims the next ready issue itself and injects its id + details here,
 # so the worker never runs `bd ready` or transcribes a hash-like id (the
@@ -36,8 +35,7 @@ CONDITIONS_PACKAGE = "ortus.prompts.conditions"
 
 # Labels whose presence on an issue makes it un-claimable by the agent loop.
 # Applied to both the queue-drained check and the orphan-detection diff so
-# escalated issues don't make the orchestrator spin (ortus-9db5). The
-# close-one prompt mirrors this filter on its own `bd ready` call.
+# escalated issues don't make the orchestrator spin (ortus-9db5).
 EXCLUDED_LABELS: tuple[str, ...] = ("human",)
 
 
@@ -137,26 +135,13 @@ def queue_drained(snapshot: StateSnapshot) -> bool:
     return snapshot.open == 0 and snapshot.in_progress == 0
 
 
-def read_close_one_condition() -> str:
-    """Load the canonical per-task condition body shipped in the package.
-
-    Mirrors `grind_logic._read_canonical` but for the close-one variant.
-    """
-    res = files(CONDITIONS_PACKAGE).joinpath(CLOSE_ONE_CONDITION_FILE)
-    if not res.is_file():
-        raise FileNotFoundError(f"close-one condition missing in {CONDITIONS_PACKAGE}")
-    text = res.read_text(encoding="utf-8")
-    if text.lstrip().startswith("TODO PLACEHOLDER"):
-        raise FileNotFoundError("close-one condition is still a TODO placeholder")
-    return text
-
-
 def read_work_issue_condition() -> str:
     """Load the per-iteration work-this-issue condition template.
 
-    Mirrors :func:`read_close_one_condition` but for the variant whose issue
-    SELECTION is done by the harness (not the worker). Still carries the two
-    placeholders; call :func:`inject_issue` to fill them per iteration.
+    Issue SELECTION is done by the harness, not the worker, and the worker is
+    forbidden from closing, committing, or pushing — Ortus owns every bd and
+    Git mutation once a verdict passes. Still carries the two placeholders;
+    call :func:`inject_issue` to fill them per iteration.
     """
     res = files(CONDITIONS_PACKAGE).joinpath(WORK_ISSUE_CONDITION_FILE)
     if not res.is_file():

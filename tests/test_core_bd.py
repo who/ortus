@@ -154,6 +154,50 @@ def test_in_progress_ids_honors_exclude_labels(bd_workspace: Path) -> None:
     assert client.in_progress_ids(exclude_labels=("human",)) == {plain}
 
 
+def test_status_tracks_the_lifecycle_and_is_empty_when_unreadable(
+    bd_workspace: Path,
+) -> None:
+    """Finalization re-validates issue identity through `status`, so an
+    unreadable issue must read as "" rather than raising."""
+    client = BdClient(bd_workspace)
+    issue_id = client.create(title="lifecycle", issue_type="task", priority=2)
+    assert client.status(issue_id) == "open"
+    client.update_status(issue_id, "in_progress")
+    assert client.status(issue_id) == "in_progress"
+    client.close(issue_id)
+    assert client.status(issue_id) == "closed"
+    assert client.status("ortus-no-such-issue-id-anywhere") == ""
+
+
+def test_has_comment_matches_only_the_requested_marker(bd_workspace: Path) -> None:
+    """The marker is what makes a replayed report idempotent when the journal
+    boundary never got written."""
+    client = BdClient(bd_workspace)
+    issue_id = client.create(title="commented", issue_type="task", priority=2)
+    marker = "## Ortus finalization record"
+
+    assert not client.has_comment(issue_id, marker)
+    client.add_comment(issue_id, "## Independent verification — VERDICT: PASS")
+    assert not client.has_comment(issue_id, marker), "a different comment is not a match"
+    client.add_comment(issue_id, f"{marker}\n\nIssue: {issue_id}\n")
+    assert client.has_comment(issue_id, marker)
+    assert not client.has_comment("ortus-no-such-issue-id-anywhere", marker)
+
+
+def test_close_once_is_idempotent_and_keeps_the_original_reason(
+    bd_workspace: Path,
+) -> None:
+    """A restart after a close that landed must not issue a second `bd close`,
+    which would overwrite the recorded reason."""
+    client = BdClient(bd_workspace)
+    issue_id = client.create(title="closed once", issue_type="task", priority=2)
+
+    assert client.close_once(issue_id, reason="verified candidate")
+    assert client.status(issue_id) == "closed"
+    assert not client.close_once(issue_id, reason="replayed close")
+    assert client.show(issue_id)["close_reason"] == "verified candidate"
+
+
 def test_create_with_all_optional_fields(bd_workspace: Path) -> None:
     """Exercise design/acceptance/notes/labels code paths."""
     client = BdClient(bd_workspace)

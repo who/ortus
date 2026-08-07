@@ -12,9 +12,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-JOURNAL_SCHEMA = 2
+JOURNAL_SCHEMA = 3
 JOURNAL_RELATIVE_PATH = Path("logs") / "grind-transaction.json"
 _MAX_EVIDENCE_CHARS = 16_000
+
+#: Ordered finalization boundaries. Each one is journaled *after* it lands, so a
+#: restart replays only the steps that never completed and can never duplicate a
+#: comment, close, commit, or push.
+FINALIZATION_STEPS: tuple[str, ...] = ("report", "close", "commit", "sync")
 
 
 def _now() -> str:
@@ -31,10 +36,44 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+#: Keys `bd show --json` reports that are lifecycle bookkeeping rather than
+#: authoritative packet content. ``comments`` is the load-bearing one: Ortus
+#: appends a verifier report to the issue on *every* attempt, so hashing it
+#: would make the packet guard reject each correction's re-verification by
+#: construction — no retry could ever pass. The rest bd rewrites on its own as
+#: the claim moves, and none of them is something a verdict should be bound to.
+VOLATILE_PACKET_FIELDS: frozenset[str] = frozenset(
+    {
+        "assignee",
+        "close_reason",
+        "closed_at",
+        "comments",
+        "started_at",
+        "status",
+        "updated_at",
+    }
+)
+
+
+def authoritative_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    """The packet fields a verdict is legitimately bound to.
+
+    Status is deliberately excluded: it is re-checked directly against bd at
+    each lifecycle boundary, where a stale-status failure can be reported
+    precisely instead of hiding inside an opaque hash mismatch.
+    """
+
+    return {
+        key: value
+        for key, value in packet.items()
+        if key not in VOLATILE_PACKET_FIELDS
+    }
+
+
 def issue_packet_hash(packet: dict[str, Any]) -> str:
     """Bind verification to the exact authoritative issue packet."""
 
-    return sha256_bytes(canonical_json(packet))
+    return sha256_bytes(canonical_json(authoritative_packet(packet)))
 
 
 def _path_fingerprint(repo: Path, relative: str) -> str:
@@ -129,6 +168,9 @@ class CandidateJournal:
     profiles: dict[str, str] = field(default_factory=dict)
     evidence: tuple[dict[str, Any], ...] = ()
     verifier_refs: tuple[str, ...] = ()
+    corrections: int = 0
+    plan_gap_routed: bool = False
+    finalization: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     implementation_started_at: str = ""
@@ -223,6 +265,62 @@ class CandidateJournal:
             updated_at=_now(),
         )
 
+    def begin_correction(self, *, findings: Iterable[str] = ()) -> CandidateJournal:
+        """Record one bounded correction attempt before a fresh worker starts.
+
+        The retry transition is journaled *before* the worker runs so a crash
+        mid-correction still spends the attempt; an unbounded retry loop is the
+        failure mode the cap exists to prevent.
+        """
+
+        now = _now()
+        number = self.attempt + 1
+        return replace(
+            self,
+            phase="correction",
+            attempt=number,
+            corrections=self.corrections + 1,
+            attempts=(
+                *self.attempts,
+                {
+                    "number": number,
+                    "phase": "correction",
+                    "correction": self.corrections + 1,
+                    "findings": list(findings),
+                    "started_at": now,
+                },
+            ),
+            implementation_started_at=now,
+            updated_at=now,
+        )
+
+    def route_plan_gap(self) -> CandidateJournal:
+        """Mark the one planning route a plan gap is allowed to consume."""
+
+        return replace(
+            self, plan_gap_routed=True, phase="plan-gap-routed", updated_at=_now()
+        )
+
+    def with_finalization(self, step: str, value: Any = True) -> CandidateJournal:
+        """Journal one completed finalization boundary."""
+
+        if step not in FINALIZATION_STEPS:
+            raise ValueError(f"unknown finalization step {step!r}")
+        record = dict(self.finalization)
+        record[step] = value
+        record["at"] = _now()
+        return replace(
+            self,
+            finalization=record,
+            phase=f"finalized-{step}",
+            updated_at=_now(),
+        )
+
+    def finalized(self, step: str) -> bool:
+        """True when `step` already landed in a prior (possibly killed) run."""
+
+        return bool(self.finalization.get(step))
+
     def baseline_is_unchanged(self, repo: Path) -> bool:
         return (
             fingerprint_paths(repo, self.baseline_paths) == self.baseline_fingerprints
@@ -241,7 +339,7 @@ class JournalStore:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
             stored_schema = payload.get("schema")
-            if stored_schema not in {1, JOURNAL_SCHEMA}:
+            if stored_schema not in {1, 2, JOURNAL_SCHEMA}:
                 return None
             # Schema 1 was written by the parent process while an implementation
             # worker was upgrading this module to schema 2. Its path ownership
@@ -253,6 +351,11 @@ class JournalStore:
             payload["candidate_paths"] = tuple(payload.get("candidate_paths", ()))
             payload["evidence"] = tuple(payload.get("evidence", ()))
             payload["verifier_refs"] = tuple(payload.get("verifier_refs", ()))
+            # Schemas 1 and 2 predate correction accounting and finalization
+            # boundaries. Defaulting them to "nothing has landed yet" is the
+            # safe migration: a resumed run re-checks observable bd and git
+            # state before repeating any step.
+            payload["finalization"] = dict(payload.get("finalization", {}))
             if stored_schema == 1:
                 migrated_at = _now()
                 payload.setdefault("created_at", migrated_at)
@@ -282,7 +385,10 @@ class JournalStore:
         temporary.replace(self.path)
 
     def save_packet(self, issue_id: str, packet: dict[str, Any]) -> tuple[str, str]:
-        payload = canonical_json(packet)
+        # Normalized, so the artifact bytes and the advertised digest agree —
+        # and so the verifier is handed the packet without the prior attempts'
+        # reports, which it must not read as part of its own instructions.
+        payload = canonical_json(authoritative_packet(packet))
         digest = issue_packet_hash(packet)
         self.artifacts.mkdir(parents=True, exist_ok=True)
         path = self.artifacts / f"{issue_id}-{digest}.issue.json"

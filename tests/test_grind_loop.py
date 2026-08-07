@@ -7,10 +7,12 @@ orphan-policy dispatcher.
 
 from __future__ import annotations
 
+from importlib.resources import files
+
 import pytest
 
 from ortus.core.grind_loop import (
-    CLOSE_ONE_CONDITION_FILE,
+    CONDITIONS_PACKAGE,
     DEFAULT_INTEGRATION_BRANCH,
     EXCLUDED_LABELS,
     ISSUE_DETAILS_PLACEHOLDER,
@@ -27,7 +29,6 @@ from ortus.core.grind_loop import (
     format_issue_details,
     inject_issue,
     queue_drained,
-    read_close_one_condition,
     read_work_issue_condition,
     select_ready_issue,
 )
@@ -130,56 +131,52 @@ def test_queue_not_drained_when_in_progress_pending() -> None:
     assert not queue_drained(snapshot)
 
 
-# --- close-one condition --------------------------------------------------
+# --- worker condition lifecycle contract ----------------------------------
 
 
-def test_close_one_condition_is_packaged() -> None:
-    body = read_close_one_condition()
-    assert body.strip(), "close-one.txt should not be empty"
-    # Acceptance #2: the per-iteration condition is NARROW — close exactly
-    # one issue, NOT drive the queue to zero. The "you are done when ..."
-    # contract pins this scope.
+def test_work_issue_condition_is_packaged() -> None:
+    body = read_work_issue_condition()
+    assert body.strip(), "work-issue.txt should not be empty"
+    # The per-iteration condition is NARROW — one harness-claimed issue, NOT
+    # driving the queue to zero.
+    assert "drive the bd queue to zero" not in body.lower(), (
+        "work-issue condition should not include the queue-zero contract"
+    )
+
+
+def test_work_issue_condition_forbids_agent_owned_lifecycle_mutations() -> None:
+    """No shipped condition may tell a worker to close, commit, or push.
+
+    Ortus alone performs those steps, and only after a passing verdict bound
+    to the current candidate hash. A condition that re-granted them to the
+    worker would let a candidate land with no verification at all — the exact
+    failure the candidate transaction exists to prevent.
+    """
+    body = read_work_issue_condition()
+    for forbidden in ("bd close", "git commit", "git push", "git stash", "git reset"):
+        assert f"`{forbidden}`" in body, (
+            f"work-issue condition must name {forbidden!r} in its prohibition list"
+        )
     lowered = body.lower()
-    assert "close exactly one" in lowered, (
-        "close-one condition should mandate exactly-one scope"
-    )
-    # The condition must NOT instruct the model to drive the queue to zero.
-    # Look for the queue-zero contract phrase rather than the literal
-    # substring "queue to zero", which appears in our explanatory text
-    # explaining that the model is NOT doing it.
-    assert "drive the bd queue to zero" not in lowered, (
-        "close-one condition should not include the queue-zero contract"
-    )
+    assert "do not run" in lowered
+    assert "owns closing, committing, and pushing" in lowered
 
 
-def test_close_one_condition_file_constant_matches_filename() -> None:
-    assert CLOSE_ONE_CONDITION_FILE == "close-one.txt"
+def test_close_one_condition_is_retired() -> None:
+    """The legacy self-closing condition must stay deleted (ortus-pzfd.5).
+
+    `close-one.txt` instructed the agent to close the issue and then commit
+    and push it. Nothing reads it since Ortus took ownership of finalization,
+    but a shipped asset granting those permissions is one `--condition` away
+    from bypassing verification entirely.
+    """
+    assert not files(CONDITIONS_PACKAGE).joinpath("close-one.txt").is_file()
 
 
 def test_excluded_labels_includes_human() -> None:
     """The orchestrator's snapshot filter must skip human-flagged issues
     so escalations stop the spin loop (ortus-9db5)."""
     assert "human" in EXCLUDED_LABELS
-
-
-def test_close_one_condition_excludes_human_label_from_bd_ready() -> None:
-    """Issues labeled 'human' must be filtered out of the ready queue (ortus-9db5).
-
-    Orphan-policy ESCALATE adds the 'human' label to claims the agent couldn't
-    complete. Without --exclude-label=human, grind sessions keep re-picking
-    those issues, re-verifying, and exiting without progress.
-    """
-    body = read_close_one_condition()
-    # Every `bd ready` invocation in the condition must carry the filter.
-    import re
-
-    invocations = re.findall(r"bd ready[^\n`]*", body)
-    assert invocations, "close-one.txt should reference `bd ready`"
-    for inv in invocations:
-        assert "--exclude-label=human" in inv, (
-            f"`bd ready` invocation in close-one.txt is missing "
-            f"--exclude-label=human: {inv!r}"
-        )
 
 
 # --- apply_orphan_policy --------------------------------------------------

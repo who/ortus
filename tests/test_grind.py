@@ -237,7 +237,7 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
                 _repair_packet_into(repo, issue_id)
             elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
                 # The verifier is read-only: it emits a verdict rather than
-                # closing. Finalization is the dependent lifecycle issue's job.
+                # closing. Ortus finalizes on the strength of that verdict.
                 _emit_verdict(repo, log_path, criteria=("AC-1", "AC-2"))
             return 0
 
@@ -253,9 +253,8 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
     # The repair ran on the planning profile, ahead of the implement/verify pair.
     assert phases == [Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY]
     assert _issue_ids(repo) == ids_before, "repair must update in place, not create"
-    journal = JournalStore(repo).load()
-    assert journal is not None and journal.phase == "verified-pass"
-    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert JournalStore(repo).load() is None, "the passing candidate is finalized"
+    assert _issue(repo, issue_id)["status"] == "closed"
     log_text = _grind_log(repo)
     assert "readiness repair pass 1/2" in log_text
     assert f"readiness repair: {issue_id} now passes readiness" in log_text
@@ -587,7 +586,6 @@ def test_verifier_report_and_mutation_isolation(
 
     assert result.exit_code == 0, result.stdout + result.stderr
     journal = JournalStore(repo).load()
-    assert journal is not None and journal.phase == expected_phase
     comments = subprocess.run(
         ["bd", "comments", issue_id, "--json"],
         cwd=repo,
@@ -596,18 +594,24 @@ def test_verifier_report_and_mutation_isolation(
         text=True,
     ).stdout
     assert expected_text in comments
-    assert (
-        json.loads(
-            subprocess.run(
-                ["bd", "show", issue_id, "--json"],
-                cwd=repo,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
-        )[0]["status"]
-        == "in_progress"
-    )
+    status = json.loads(
+        subprocess.run(
+            ["bd", "show", issue_id, "--json"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )[0]["status"]
+    if expected_phase == "verified-pass":
+        # The untampered candidate passes, so Ortus finalizes it in the same
+        # iteration: the journal is consumed and the issue is closed by the
+        # parent, never by either agent.
+        assert journal is None, "a finalized transaction clears its journal"
+        assert status == "closed"
+    else:
+        assert journal is not None and journal.phase == expected_phase
+        assert status == "in_progress", "a rejected candidate keeps its claim"
 
 
 def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:

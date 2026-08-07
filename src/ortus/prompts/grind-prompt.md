@@ -12,6 +12,14 @@ The first existing file wins; the others are ignored.
 > CodeGraph phase contract from `ortus.core.codegraph`. This file remains for
 > legacy shell compatibility; its historical CodeGraph prose is not the active
 > availability probe or enforcement mechanism.
+>
+> **Not a worker contract under `ortus grind`.** No step below is handed to a
+> grind worker. Steps 8 and 9 (close, commit, push) describe the retired
+> agent-owned lifecycle only. Under `ortus grind` the worker leaves an
+> uncommitted candidate, a fresh read-only verifier judges it, and Ortus alone
+> reports, closes, commits owned paths, and pushes — see
+> `ortus/prompts/conditions/work-issue.txt` for the contract workers actually
+> receive.
 
 Read @AGENTS.md for session rules and landing-the-plane protocol.
 

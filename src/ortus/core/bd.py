@@ -143,6 +143,44 @@ class BdClient:
             args.extend(["--reason", reason])
         self._run(*args)
 
+    def status(self, issue_id: str) -> str:
+        """Current lifecycle status, or "" when the issue can't be read."""
+        try:
+            return str(self.show(issue_id).get("status") or "")
+        except (BdError, ValueError, KeyError):
+            return ""
+
+    def has_comment(self, issue_id: str, marker: str) -> bool:
+        """True when any existing comment body contains `marker`.
+
+        Grind restarts replay finalization from the journal, but a run killed
+        between writing a comment and journaling that boundary has no journal
+        evidence. Matching on the marker makes the replay idempotent anyway.
+        """
+        try:
+            existing = self.comments(issue_id)
+        except (BdError, ValueError):
+            return False
+        for comment in existing:
+            if not isinstance(comment, dict):
+                continue
+            for key in ("body", "text", "comment", "content"):
+                if marker in str(comment.get(key) or ""):
+                    return True
+        return False
+
+    def close_once(self, issue_id: str, *, reason: str | None = None) -> bool:
+        """Close `issue_id` unless it is already closed. Returns True if closed.
+
+        The observable status is checked first so a restart after a close that
+        landed — but whose journal boundary never got written — does not issue
+        a second `bd close`.
+        """
+        if self.status(issue_id) == "closed":
+            return False
+        self.close(issue_id, reason=reason)
+        return True
+
     def update_status(self, issue_id: str, status: str) -> None:
         """`bd update <id> --status <status>`. Used by orphan-policy=revert."""
         self._run("update", issue_id, "--status", status)

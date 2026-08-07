@@ -10,6 +10,13 @@ Each test:
 
 The outer loop is verified against observable bd state, not model
 claims or transcript content — that's the whole point of the pivot.
+
+Since ortus-pzfd.5 the close on the default path is performed by Ortus after a
+fresh verifier passes the candidate, not by the worker. The closed branch and
+the --tasks cap are therefore driven by a phase-aware fake runner that only
+edits and emits a verdict; a worker that closed its own issue would be
+rejected by the implementation isolation guard instead. The orphan branch,
+where a claim goes unclosed, now belongs to the legacy `--condition` path.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
+from ortus.core.transaction import JournalStore
 from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
 
 
@@ -103,43 +111,81 @@ def _read_log(repo: Path) -> str:
     return logs[-1].read_text(encoding="utf-8") if logs else ""
 
 
+class _VerifiedLifecycle:
+    """Phase-aware fake worker: implementation edits, verification passes.
+
+    `readonly=True` is the verification phase — the only phase grind runs with
+    a read-only posture. The fake never closes, commits, or pushes: those are
+    Ortus's, and a worker that performed them would trip the isolation guard.
+    """
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        self.spawns = 0
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        readonly: bool = False,
+        **kwargs: object,
+    ) -> int:
+        self.spawns += 1
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        if not readonly:
+            (repo / f"candidate-{self.spawns}.py").write_text(f"N = {self.spawns}\n")
+            return 0
+        journal = JournalStore(repo).load()
+        assert journal is not None
+        payload = {
+            "schema": 1,
+            "candidate_hash": journal.candidate_hash,
+            "decision": "pass",
+            "criteria": [{"id": "AC-1", "status": "pass", "evidence": "reviewed"}],
+            "commands": ["uv run pytest tests/test_grind_state_delta.py -q"],
+            "reviewed_files": ["candidate.py"],
+            "reviewed_interfaces": ["N"],
+            "risks": ["none"],
+            "findings": ["none"],
+            "codegraph": ["fallback recorded"],
+        }
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": "ORTUS_VERDICT: " + json.dumps(payload),
+                        },
+                    }
+                )
+                + "\n"
+            )
+        return 0
+
+
 # --- closed branch --------------------------------------------------------
 
 
-def test_closed_branch_when_subprocess_closes_an_issue(
+def test_closed_branch_when_ortus_finalizes_a_verified_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance #3: when CLOSED_DELTA >= 1, iteration logs 'closed +N'."""
+    """Acceptance #3: when CLOSED_DELTA >= 1, iteration logs 'closed +N'.
+
+    The close is Ortus's own, performed after the fresh verifier passed the
+    candidate, so the delta accounting must still attribute it to the
+    iteration.
+    """
     repo = _seed_repo(tmp_path, n_issues=1)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-
-    shim = _write_shim(
-        tmp_path,
-        "claude-closes-one",
-        textwrap.dedent(
-            """\
-            import json
-            import subprocess
-            # The harness already selected + claimed the issue (status
-            # in_progress) and injected its id into the prompt. A real /goal
-            # worker closes that claimed issue; we mirror it by closing the
-            # one in_progress issue rather than re-running `bd ready`.
-            inprog = json.loads(subprocess.run(
-                ["bd", "list", "--status", "in_progress", "--json"],
-                check=True, capture_output=True, text=True,
-            ).stdout)
-            first = next((i["id"] for i in inprog if i.get("issue_type") != "epic"), None)
-            if first:
-                subprocess.run(
-                    ["bd", "close", first, "--reason", "delta-test closed branch"],
-                    check=True, stdout=subprocess.DEVNULL,
-                )
-            print("fake-claude (closed-branch) done", flush=True)
-            """
-        ),
-    )
-    _install_shim(monkeypatch, shim)
+    backend = _VerifiedLifecycle()
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
 
     result = runner.invoke(
         app,
@@ -152,6 +198,7 @@ def test_closed_branch_when_subprocess_closes_an_issue(
     assert "closed +1" in log, f"expected closed-branch log entry; got:\n{log}"
     assert "WARN orphan" not in log
     assert "WARN no bd-state change" not in log
+    assert "(report, close, commit, sync)" in log, "Ortus must own the close"
 
 
 # --- orphan branch --------------------------------------------------------
@@ -160,7 +207,12 @@ def test_closed_branch_when_subprocess_closes_an_issue(
 def test_orphan_branch_when_subprocess_claims_without_closing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance #4: claim-without-close path logs WARN orphan and the id."""
+    """Acceptance #4: claim-without-close path logs WARN orphan and the id.
+
+    Driven through the legacy `--condition` path: on the default path the
+    harness owns the claim and an unclosed issue is a live transaction, not an
+    orphan.
+    """
     repo = _seed_repo(tmp_path, n_issues=1)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
@@ -198,6 +250,8 @@ def test_orphan_branch_when_subprocess_claims_without_closing(
             "0",
             "--orphan-policy",
             "warn",
+            "-c",
+            "Close exactly one bd issue you select yourself.",
         ],
     )
     log = _read_log(repo)
@@ -375,39 +429,16 @@ def test_queue_drained_exits_outer_loop_without_spawn(
 def test_tasks_cap_stops_outer_loop_after_n_closes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance #8: --tasks N exits cleanly after N bd-state-verified closes."""
+    """Acceptance #8: --tasks N exits cleanly after N bd-state-verified closes.
+
+    "Verified" is now literal: each close is Ortus finalizing a candidate a
+    fresh verifier passed, so the cap counts completed transactions.
+    """
     repo = _seed_repo(tmp_path, n_issues=3)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-
-    shim = _write_shim(
-        tmp_path,
-        "claude-closes-one-each",
-        textwrap.dedent(
-            """\
-            import json
-            import subprocess
-            # The harness selected + claimed an issue (status in_progress) and
-            # injected its id; a real worker closes THAT claimed issue. Closing
-            # a `bd ready` issue instead would leave the harness's claim an
-            # orphan and (under the default revert policy) spin the loop
-            # re-claiming it forever, so mirror the harness-select contract and
-            # close the in_progress issue.
-            inprog = json.loads(subprocess.run(
-                ["bd", "list", "--status", "in_progress", "--json"],
-                check=True, capture_output=True, text=True,
-            ).stdout)
-            first = next((i["id"] for i in inprog if i.get("issue_type") != "epic"), None)
-            if first:
-                subprocess.run(
-                    ["bd", "close", first, "--reason", "tasks-cap test"],
-                    check=True, stdout=subprocess.DEVNULL,
-                )
-                print(f"closed {first}", flush=True)
-            """
-        ),
-    )
-    _install_shim(monkeypatch, shim)
+    backend = _VerifiedLifecycle()
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
 
     result = runner.invoke(
         app,

@@ -112,6 +112,9 @@ Claude remains the default. Select Codex at project creation with `ortus init . 
 
 Claude workers run a narrow `claude -p '/goal …'` session. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`. In both cases the outer `ortus grind` scheduler trusts only observable bd state and starts a fresh process for the next issue.
 
+Neither backend's worker may close an issue, commit, or push. Workers leave
+uncommitted candidate edits; `ortus grind` itself owns the lifecycle.
+
 Codex grind can start from a dirty checkout. Existing changes are treated as an
 engineering handoff: the fresh worker receives the selected issue and current
 Git state, assesses which work is useful, and continues instead of requiring a
@@ -187,6 +190,58 @@ continue to a later ready leaf. If implementation discovers a repository
 contradiction or unresolved material choice, the worker records a `PLAN-GAP`
 comment, preserves candidate edits, flags the issue for human handling, and
 stops without committing or closing it.
+
+### Corrections, finalization, and recovery
+
+Each grind iteration is one candidate transaction: a fresh implementation
+worker edits, then a fresh read-only verifier reviews the exact candidate and
+returns a schema-validated verdict. Every verdict — pass or fail — is written
+to the issue as a criterion-by-criterion report before anything else happens.
+
+**Corrections.** A failed verdict starts a bounded retry loop. Each attempt
+spawns one fresh implementation worker that receives only the issue id, the
+current candidate SHA-256, the failed acceptance criteria, and the verifier's
+precise findings — not the transcript, and not the rendered report. Every
+correction gets its own fresh verifier. `--max-corrections` bounds the loop
+(default 2; `0` disables retries). When the attempts are spent, grind labels
+the issue `human`, records an escalation comment, and leaves the candidate
+uncommitted and the issue open.
+
+**Plan gaps.** A finding that names an unresolved product or architecture
+decision never reaches a correction worker — that would be improvisation. It
+routes once through the `plan` profile to repair the packet in place, then to
+human escalation. A routing pass may not create, close, or rename issues.
+
+**Finalization.** Only a passing verdict bound to the *current* candidate hash
+authorizes it. Grind re-validates issue identity and status, the authoritative
+packet, the base commit, the integration branch, report persistence, and the
+candidate hash, then performs — itself — four steps in order: write the final
+record, close exactly the assigned issue, commit the transaction-owned paths
+plus the generated tracker exports, and synchronize the integration branch (a
+rejected push retries once behind `git pull --rebase`). Staging is always
+path-scoped; grind never runs `git add -A`. Uncommitted work outside the
+transaction halts finalization with the exact path list rather than being
+swept into the commit.
+
+**Recovery.** Each boundary is journaled under `logs/grind-transaction.json`
+after it lands. A run killed between any two boundaries resumes on the next
+invocation: grind replays only the outstanding steps, before selecting any new
+work, and re-checks observable bd and git state first — so a replayed close,
+comment, commit, or push that already happened is a no-op. A blocked
+finalization stops the run and keeps the journal rather than moving to another
+issue — and it keeps holding the queue on every later run until the blocker is
+gone, so clearing the reported cause (say, committing or reverting the
+unrelated paths grind named) and re-running finishes the *same* transaction
+from the step it stopped at. Grind never abandons an outstanding finalization
+to pick up other work.
+
+**Cost.** The floor is two subprocesses per issue (implement + verify). Each
+correction adds two more, so `--max-corrections 2` bounds one issue at six;
+a plan gap adds one planning-profile pass. Verification runs on the `verify`
+profile, which is normally the slow, expensive one — lowering
+`--max-corrections` is the cheapest lever on a noisy queue, and
+`--verify-model` / `--verify-reasoning-effort` is the next. Omitting the
+profile tables entirely keeps every phase on its provider default.
 
 ### CodeGraph lifecycle
 

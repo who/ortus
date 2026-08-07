@@ -3,6 +3,14 @@
 Each test seeds a tiny bd workspace, installs a fake claude that CLAIMS
 an issue but doesn't close it, then verifies the configured policy is
 honored by inspecting bd state after the iteration.
+
+Since ortus-pzfd.5 the default harness-select path is a candidate transaction:
+the harness claims, a worker edits, a fresh verifier judges, and Ortus alone
+closes. A claimed-but-unclosed issue there is not an orphan — it is a
+transaction awaiting its verdict. The per-iteration orphan branch therefore
+belongs to the legacy `--condition` path, where the worker still owns
+selection and lifecycle; those tests pass `-c` for exactly that reason. The
+startup sweep is lifecycle-independent and still runs on the default path.
 """
 
 from __future__ import annotations
@@ -148,6 +156,8 @@ def test_orphan_policy_warn_leaves_issue_in_progress(
             "0",
             "--orphan-policy",
             "warn",
+            "-c",
+            "Close exactly one bd issue you select yourself.",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -184,6 +194,8 @@ def test_orphan_policy_revert_returns_issue_to_open(
             "0",
             "--orphan-policy",
             "revert",
+            "-c",
+            "Close exactly one bd issue you select yourself.",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -219,6 +231,8 @@ def test_orphan_policy_escalate_labels_issue_human(
             "0",
             "--orphan-policy",
             "escalate",
+            "-c",
+            "Close exactly one bd issue you select yourself.",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -285,11 +299,6 @@ def test_startup_sweep_reverts_cross_restart_orphan_under_revert_policy(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    issue = _bd_show(repo, issue_id)
-    assert issue["status"] == "open", (
-        f"startup sweep + revert should restore status to open; "
-        f"got status={issue['status']}"
-    )
     log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
     assert "startup orphan sweep" in log, (
         "sweep should log distinctly so operators can see the cross-restart "
@@ -297,6 +306,12 @@ def test_startup_sweep_reverts_cross_restart_orphan_under_revert_policy(
     )
     assert issue_id in log
     assert f"revert: {issue_id}" in log
+    # The sweep's effect is observable in the post-sweep re-snapshot: the leaked
+    # claim is gone before any worker runs. The run then legitimately re-claims
+    # the now-open issue as a fresh candidate transaction, which is the point —
+    # recovery hands the work back to the loop instead of stranding it.
+    assert "post-sweep state: open=1 in_progress=0" in log
+    assert _bd_show(repo, issue_id)["status"] == "in_progress"
 
 
 def test_startup_sweep_warn_logs_orphan_without_mutating(
@@ -405,8 +420,8 @@ def test_default_orphan_policy_is_revert_for_cross_restart_recovery(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    issue = _bd_show(repo, issue_id)
-    assert issue["status"] == "open", (
-        f"default policy should revert cross-restart orphans; "
-        f"got status={issue['status']}"
+    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
+    assert f"revert: {issue_id}" in log, (
+        f"default policy should revert cross-restart orphans; got log:\n{log}"
     )
+    assert "post-sweep state: open=1 in_progress=0" in log

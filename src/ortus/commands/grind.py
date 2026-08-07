@@ -36,9 +36,9 @@ import json
 import re
 import subprocess
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import typer
 
@@ -65,9 +65,14 @@ from ortus.core.codegraph import (
 from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.readiness import ReadinessReport
-from ortus.core.transaction import CandidateJournal, JournalStore
+from ortus.core.transaction import (
+    FINALIZATION_STEPS,
+    CandidateJournal,
+    JournalStore,
+)
 from ortus.core.transaction import candidate_diff, issue_packet_hash, sha256_bytes
 from ortus.core.verdict import (
+    Verdict,
     VerdictError,
     bound_report,
     parse_verdict,
@@ -405,6 +410,673 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "to pass; a fail requires at least one failed criterion. Bind candidate_hash to "
         "the supplied SHA-256 exactly.\n" + probe_text
     )
+
+
+@dataclass
+class _VerificationResult:
+    """What one fresh verifier attempt produced, for the retry controller."""
+
+    journal: CandidateJournal
+    summary: Any
+    verdict: Verdict | None = None
+    failure: str | None = None
+    timed_out: bool = False
+
+    @property
+    def passed(self) -> bool:
+        return (
+            self.failure is None
+            and self.verdict is not None
+            and self.verdict.passed
+            and not self.timed_out
+        )
+
+
+def _verify_candidate(
+    *,
+    runner: ClaudeRunner,
+    bd: BdClient,
+    git: GitClient,
+    store: JournalStore,
+    journal: CandidateJournal,
+    repo: Path,
+    log: Path,
+    write_log: Callable[[str], None],
+    backend: str,
+    issue_id: str,
+    packet: dict,
+    profile: AgentProfile,
+    worker_timeout: int,
+    probe: CodeGraphProbe,
+    mode: CodeGraphMode,
+    configure_codegraph: Callable[[Any], None] | None,
+    baseline: frozenset[str],
+    freshness: str,
+    sync_ms: int,
+    iteration: int,
+) -> _VerificationResult:
+    """Run one fresh read-only verifier over the current candidate.
+
+    Extracted from `grind()` so the initial attempt and every bounded
+    correction attempt run the *identical* verification, isolation, and report
+    persistence path — a correction that got a weaker verifier would defeat the
+    whole transaction.
+    """
+
+    expected_criteria = dict.fromkeys(
+        re.findall(r"\bAC-\d+\b", str(packet.get("acceptance_criteria", "")))
+    )
+    journal = journal.begin_verification()
+    store.save(journal)
+    if configure_codegraph is not None:
+        configure_codegraph(probe.capability)
+    try:
+        verification_probe = (
+            _codex_codegraph_handshake(
+                runner,
+                repo=repo,
+                log_path=log,
+                phase=CodeGraphPhase.VERIFICATION,
+                probe=probe,
+                profile=profile,
+                timeout=(worker_timeout if worker_timeout > 0 else None),
+            )
+            if backend == "codex"
+            else probe
+        )
+    except CodeGraphUnavailable as exc:
+        bd.update_status(issue_id, "open")
+        output.error(str(exc))
+        raise typer.Exit(code=1)
+    if configure_codegraph is not None:
+        configure_codegraph(verification_probe.capability)
+    verifier_prompt = _verifier_prompt(
+        journal, phase_contract(CodeGraphPhase.VERIFICATION, verification_probe)
+    )
+    verify_offset = log.stat().st_size if log.exists() else 0
+    output.progress(
+        "grind",
+        "verification CodeGraph handshake "
+        + ("requested" if probe.available else "fallback active"),
+    )
+    timed_out = False
+    try:
+        rc = runner.run(
+            verifier_prompt,
+            repo=repo,
+            log_path=log,
+            fast=False,
+            profile=profile,
+            timeout=(worker_timeout if worker_timeout > 0 else None),
+            readonly=True,
+        )
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        rc = 143
+        write_log(f"iter {iteration}: verifier TIMEOUT after {worker_timeout}s")
+
+    def _summarize() -> Any:
+        summary = parse_transcript(
+            log,
+            phase=CodeGraphPhase.VERIFICATION,
+            probe=verification_probe,
+            start_offset=verify_offset,
+        )
+        summary.freshness = freshness
+        summary.sync_duration_ms = sync_ms
+        append_normalized(log, summary)
+        return summary
+
+    def _reject(reason: str, *, phase: str, summary: Any) -> _VerificationResult:
+        report = render_rejection_report(
+            issue_id=issue_id,
+            candidate_hash=journal.candidate_hash,
+            failure=reason,
+            expected_criteria=expected_criteria,
+            base_head=journal.base_head,
+            issue_packet_hash=journal.issue_packet_hash,
+            attempt=journal.attempt,
+            profiles=journal.profiles,
+        )
+        report = bound_report(report + "\n" + summary.report())
+        report_ref = store.save_report(
+            journal.candidate_hash, report, attempt=journal.attempt
+        )
+        bd.add_comment(issue_id, report)
+        updated = journal.finish_verification(report_ref, phase=phase)
+        store.save(updated)
+        _append_verdict_event(
+            log,
+            decision="rejected",
+            candidate_hash=updated.candidate_hash,
+            reason=reason,
+        )
+        return _VerificationResult(
+            journal=updated,
+            summary=summary,
+            failure=reason,
+            timed_out=timed_out,
+        )
+
+    if timed_out:
+        timeout_failure = f"verifier timed out after {worker_timeout}s without a verdict"
+        timeout_phase = "verification-timeout"
+        if git.is_git_repo():
+            post_dirty = git.dirty_paths()
+            if post_dirty is None:
+                timeout_failure += "; could not inspect the candidate after timeout"
+                timeout_phase = "verification-rejected"
+            else:
+                post_paths = post_dirty - baseline - _TRACKER_EXPORT_PATHS
+                if post_paths != frozenset(journal.candidate_paths):
+                    timeout_failure += "; verifier mutated the candidate path set"
+                    timeout_phase = "verification-rejected"
+                else:
+                    try:
+                        post_diff = candidate_diff(repo, post_paths)
+                    except RuntimeError as exc:
+                        timeout_failure += f"; could not hash the candidate: {exc}"
+                        timeout_phase = "verification-rejected"
+                    else:
+                        if sha256_bytes(post_diff) != journal.candidate_hash:
+                            timeout_failure += "; verifier mutated the candidate"
+                            timeout_phase = "verification-rejected"
+        current_packet = bd.show(issue_id)
+        if issue_packet_hash(current_packet) != journal.issue_packet_hash:
+            timeout_failure += (
+                "; authoritative issue packet changed during verification"
+            )
+            timeout_phase = "verification-rejected"
+            if current_packet.get("status") != "in_progress":
+                bd.update_status(issue_id, "in_progress")
+        result = _reject(timeout_failure, phase=timeout_phase, summary=_summarize())
+        write_log(
+            f"iter {iteration}: preserved verifier-timeout candidate for "
+            f"{result.journal.issue_id}: {list(result.journal.candidate_paths)}"
+        )
+        output.progress(
+            "grind",
+            f"preserved timed-out candidate {result.journal.issue_id}; "
+            "re-run grind to resume",
+        )
+        return result
+
+    if backend == "claude":
+        rejection = _claude_goal_rejection(log, start_offset=verify_offset)
+        if rejection is not None:
+            bd.update_status(issue_id, "open")
+            write_log(
+                f"iter {iteration}: HALT — Claude rejected verifier /goal before "
+                f"running a worker turn: {rejection}"
+            )
+            output.error(
+                "grind: Claude rejected the verifier /goal condition before worker work",
+                hint=rejection,
+            )
+            raise typer.Exit(code=1)
+
+    summary = _summarize()
+    if summary.capability_observed:
+        output.progress("grind", "verification CodeGraph handshake succeeded")
+    elif mode is not CodeGraphMode.OFF:
+        output.progress(
+            "grind",
+            "verification CodeGraph fallback: " + "; ".join(summary.fallbacks[:3]),
+        )
+    try:
+        require_handshake(summary)
+    except CodeGraphUnavailable as exc:
+        bd.update_status(issue_id, "open")
+        output.error(str(exc))
+        raise typer.Exit(code=1)
+
+    failure: str | None = None
+    verdict: Verdict | None = None
+    try:
+        verdict = parse_verdict(
+            log,
+            start_offset=verify_offset,
+            expected_hash=journal.candidate_hash,
+            expected_criteria=expected_criteria,
+        )
+        if git.is_git_repo():
+            post_dirty = git.dirty_paths()
+            if post_dirty is None:
+                raise VerdictError(
+                    "could not inspect the candidate after verification"
+                )
+            post_paths = post_dirty - baseline - _TRACKER_EXPORT_PATHS
+            if post_paths != frozenset(journal.candidate_paths):
+                raise VerdictError(
+                    "verifier mutated the candidate path set during read-only review"
+                )
+            post_diff = candidate_diff(repo, post_paths)
+            if sha256_bytes(post_diff) != journal.candidate_hash:
+                raise VerdictError(
+                    "verifier mutated the candidate during read-only review"
+                )
+        current_packet = bd.show(issue_id)
+        if issue_packet_hash(current_packet) != journal.issue_packet_hash:
+            raise VerdictError(
+                "authoritative issue packet changed during verification"
+            )
+    except (VerdictError, RuntimeError) as exc:
+        failure = str(exc)
+    if rc != 0 and failure is None:
+        failure = f"verifier exited with status {rc}"
+
+    if verdict is None or failure is not None:
+        assert failure is not None
+        # A verifier is observational only. A fake/misconfigured runner that
+        # changed lifecycle state cannot make its own output authoritative;
+        # restore the claim before persisting the rejection.
+        if bd.show(issue_id).get("status") != "in_progress":
+            bd.update_status(issue_id, "in_progress")
+        result = _reject(failure, phase="verification-rejected", summary=summary)
+        write_log(f"iter {iteration}: verifier rejected: {failure}")
+        output.error(f"grind: verifier rejected candidate: {failure}")
+        return result
+
+    report = render_report(
+        verdict,
+        issue_id=issue_id,
+        base_head=journal.base_head,
+        issue_packet_hash=journal.issue_packet_hash,
+        attempt=journal.attempt,
+        profiles=journal.profiles,
+    )
+    report = bound_report(report + "\n" + summary.report())
+    report_ref = store.save_report(
+        journal.candidate_hash, report, attempt=journal.attempt
+    )
+    # AC-1: the complete failed report is durable BEFORE any correction runs.
+    bd.add_comment(issue_id, report)
+    journal = journal.finish_verification(
+        report_ref, phase=("verified-pass" if verdict.passed else "verified-fail")
+    )
+    store.save(journal)
+    _append_verdict_event(
+        log, decision=verdict.decision, candidate_hash=journal.candidate_hash
+    )
+    write_log(
+        f"iter {iteration}: verifier verdict={verdict.decision} "
+        f"candidate={journal.candidate_hash}"
+    )
+    return _VerificationResult(journal=journal, summary=summary, verdict=verdict)
+
+
+_PLAN_GAP_MARKER = re.compile(r"(?i)plan[\s_-]?gap")
+_CORRECTION_ENTRY_CHARS = 400
+_CORRECTION_MAX_FINDINGS = 6
+
+
+def _plan_gap_findings(verdict: Verdict) -> tuple[str, ...]:
+    """Findings the verifier attributed to an unresolved planning decision.
+
+    A fast correction worker may not invent product or architecture answers,
+    so these route once to the planning profile (or a human) instead of
+    spending a correction attempt on improvisation.
+    """
+
+    return tuple(
+        finding for finding in verdict.findings if _PLAN_GAP_MARKER.search(finding)
+    )
+
+
+def _failed_criteria(verdict: Verdict) -> tuple[dict[str, str], ...]:
+    return tuple(item for item in verdict.criteria if item["status"] == "fail")
+
+
+def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict) -> str:
+    """The minimal correction packet: issue, hash, failed criteria, findings.
+
+    Deliberately excludes the verifier transcript and the full report. The
+    worker re-reads the authoritative packet from bd; everything else here is
+    the precise delta it has to close.
+    """
+
+    criteria = "\n".join(
+        f"- {item['id']}: {item['evidence'][:_CORRECTION_ENTRY_CHARS]}"
+        for item in _failed_criteria(verdict)
+    ) or "- (the verifier recorded no criterion-level failure)"
+    findings = [
+        f"- {finding[:_CORRECTION_ENTRY_CHARS]}"
+        for finding in verdict.findings[:_CORRECTION_MAX_FINDINGS]
+    ] or ["- (no findings recorded)"]
+    header = (
+        f"CORRECTION ATTEMPT {journal.corrections} for bd issue {issue_id}. A fresh "
+        "read-only verifier rejected the current candidate. Ortus already claimed this "
+        "issue; do not run bd ready, do not select other work, and use only the id "
+        f"{issue_id}. Read `bd show {issue_id} --json` for the authoritative packet, "
+        "then correct ONLY the failures below.\n\n"
+        f"Current candidate SHA-256: {journal.candidate_hash}\n\n"
+        f"Failed acceptance criteria:\n{criteria}\n\n"
+    )
+    footer = (
+        "\n\nKeep the existing candidate edits and correct them in place. Do not close "
+        "the issue, do not run git commit, git push, git stash, or git reset, do not "
+        "switch branches, and do not add a verification comment — a fresh verifier "
+        "reviews your corrected candidate and Ortus alone finalizes it. If a finding "
+        "needs a product or architecture decision the packet does not resolve, do not "
+        "improvise: report it as a PLAN-GAP and stop."
+    )
+    # Claude's /goal condition is hard-capped, so drop the least-severe findings
+    # (verifiers order them most-severe-first) rather than truncating mid-word
+    # into an unreadable instruction.
+    while findings:
+        task = header + "Verifier findings:\n" + "\n".join(findings) + footer
+        if len(task) <= _CLAUDE_GOAL_CONDITION_LIMIT - 200 or len(findings) == 1:
+            return task
+        findings.pop()
+    return header + footer
+
+
+def _compose_correction_prompt(
+    issue_id: str, journal: CandidateJournal, verdict: Verdict, backend: str
+) -> str:
+    return compose_worker_prompt(  # type: ignore[arg-type]
+        backend, _correction_task(issue_id, journal, verdict)
+    )
+
+
+def _plan_gap_task(issue_id: str, findings: tuple[str, ...]) -> str:
+    rendered = "\n".join(f"- {finding[:_CORRECTION_ENTRY_CHARS]}" for finding in findings)
+    return (
+        "PLAN-GAP ROUTING PASS (one pass only).\n\n"
+        f"Verification of bd issue {issue_id} surfaced findings that need a product or "
+        "architecture decision the issue packet never resolved. An implementation "
+        "worker is not allowed to improvise them.\n\n"
+        f"Unresolved findings:\n{rendered}\n\n"
+        f"Read `bd show {issue_id} --json`, resolve each gap against repository "
+        "reality, and update ONLY that issue in place with `bd update` so its "
+        "description, design, and acceptance criteria state the resolved decision. "
+        "Do not run `bd create`, do not close, replace, or rename any issue, do not "
+        "change dependencies, do not edit source files, and do not commit or push. If "
+        "the decision genuinely requires a human, leave the packet unchanged and say "
+        "so plainly."
+    )
+
+
+def _run_plan_gap_pass(
+    bd: BdClient,
+    *,
+    repo: Path,
+    log: Path,
+    write_log: Callable[[str], None],
+    backend: str,
+    profile: AgentProfile,
+    probe: CodeGraphProbe,
+    timeout: int | None,
+    issue_id: str,
+    findings: tuple[str, ...],
+) -> int:
+    """Route one plan gap through the planning profile; return its exit code.
+
+    Mirrors the readiness-repair guard: a pass that grows the queue instead of
+    updating the named issue is a hard error, not a silent skip.
+    """
+
+    gap_log = log.with_name(f"{log.stem}-plan-gap{log.suffix}")
+    # Mirror the factory call shape the readiness-repair pass uses so the
+    # zero-argument Claude seam existing test overrides rely on keeps working.
+    runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    configure = getattr(runner, "configure_codegraph", None)
+    if callable(configure):
+        configure(probe.capability)
+    prompt = compose_worker_prompt(  # type: ignore[arg-type]
+        backend,
+        _plan_gap_task(issue_id, findings)
+        + phase_contract(CodeGraphPhase.PLANNING, probe),
+    )
+    ids_before = {issue["id"] for issue in bd.list_all()}
+    try:
+        if timeout is None:
+            rc = runner.run(prompt, repo=repo, log_path=gap_log, profile=profile)
+        else:
+            rc = runner.run(
+                prompt, repo=repo, log_path=gap_log, profile=profile, timeout=timeout
+            )
+    except subprocess.TimeoutExpired:
+        write_log(f"plan-gap routing: TIMEOUT after {timeout}s; see {gap_log}")
+        return 143
+    guard_no_replacements(ids_before, {issue["id"] for issue in bd.list_all()})
+    if rc != 0:
+        write_log(f"plan-gap routing: failed ({backend} exit {rc}); see {gap_log}")
+    return rc
+
+
+_FINALIZATION_MARKER = "## Ortus finalization record"
+_FINALIZATION_BLOCKED_PHASE = "finalization-blocked"
+#: Journal phases whose transaction still owes finalization work. A restart at
+#: any of these resumes the remaining steps instead of selecting new work.
+#:
+#: ``finalization-blocked`` belongs here too. A blocker is usually transient —
+#: an operator edit outside the transaction, a tree left on the wrong branch —
+#: and the outstanding steps are tracked by `journal.finalized(step)`, not by
+#: this label, so replaying is safe and resumes exactly where it stopped. Left
+#: out, a transaction blocked after its close would never commit: the operator
+#: would clear the blocker, re-run, and grind would silently skip the pending
+#: work and pick up another issue, stranding verified work behind a closed
+#: issue (AC-5 requires the opposite — hold the queue until it finishes).
+_FINALIZABLE_PHASES = frozenset(
+    {
+        "verified-pass",
+        _FINALIZATION_BLOCKED_PHASE,
+        *(f"finalized-{step}" for step in FINALIZATION_STEPS[:-1]),
+    }
+)
+
+
+def _finalization_report(issue_id: str, journal: CandidateJournal) -> str:
+    return (
+        f"{_FINALIZATION_MARKER}\n\n"
+        f"Issue: {issue_id}\n"
+        f"Candidate: `{journal.candidate_hash}`\n"
+        f"Base commit: `{journal.base_head}`\n"
+        f"Issue packet: `{journal.issue_packet_hash}`\n"
+        f"Verifier attempts: {len(journal.verifier_refs)}\n"
+        f"Correction attempts: {journal.corrections}\n"
+        f"Plan-gap routed: {'yes' if journal.plan_gap_routed else 'no'}\n"
+        f"Verifier reports: {', '.join(journal.verifier_refs) or 'none'}\n"
+        f"Owned paths: {', '.join(journal.candidate_paths) or 'none'}\n\n"
+        "A fresh read-only verifier passed this exact candidate. Ortus — not the "
+        "agent — wrote this record, closed the issue, committed the owned paths, and "
+        "synchronized the integration branch.\n"
+    )
+
+
+def _finalization_blocker(
+    bd: BdClient,
+    git: GitClient,
+    journal: CandidateJournal,
+    *,
+    repo: Path,
+    issue_id: str,
+    integration_branch: str,
+    baseline: frozenset[str],
+) -> str | None:
+    """Re-validate every precondition a passing verdict is allowed to assume.
+
+    Runs before the first *un-journaled* step, and re-checks only what a
+    partially-finalized transaction can still assert: once the commit landed,
+    HEAD legitimately differs from the recorded base and the candidate is no
+    longer in the worktree.
+    """
+
+    if journal.issue_id != issue_id:
+        return (
+            f"journal owns {journal.issue_id} but the iteration claimed {issue_id}"
+        )
+    if not journal.verifier_refs:
+        return "no verifier report was persisted for this candidate"
+    if not journal.candidate_hash:
+        return "candidate transaction has no recorded hash"
+    # Identity and status only: the verifier already bound its verdict to the
+    # authoritative packet hash, and grind's own report comment legitimately
+    # moves the issue's `bd show` bytes between that check and this one.
+    status = bd.status(issue_id)
+    if not journal.finalized("close") and status != "in_progress":
+        return f"issue is {status or 'unreadable'}, not the claimed in_progress state"
+    if journal.finalized("close") and status != "closed":
+        return f"issue was closed by this transaction but now reads {status or 'unreadable'}"
+    if not git.is_git_repo():
+        return None
+    branch = git.current_branch()
+    # An unborn branch (bd-only fixture, freshly `ortus init`'d repo) has no
+    # resolvable name and nothing stranded; branch discipline skips it for the
+    # same reason, so finalization must not read it as a detached HEAD.
+    if git.has_commits() and branch != integration_branch:
+        return (
+            f"working tree is on {branch or 'a detached HEAD'}, "
+            f"not {integration_branch}"
+        )
+    if journal.finalized("commit"):
+        return None
+    if git.head_oid() != journal.base_head:
+        return (
+            f"base commit {journal.base_head} is no longer HEAD; the candidate was "
+            "verified against a different tree"
+        )
+    dirty = git.dirty_paths()
+    if dirty is None:
+        return "could not read the worktree before finalization"
+    owned = dirty - baseline - _TRACKER_EXPORT_PATHS
+    if owned != frozenset(journal.candidate_paths):
+        drifted = sorted(owned.symmetric_difference(journal.candidate_paths))
+        return (
+            "candidate path set changed after the passing verdict: "
+            + ", ".join(drifted)
+        )
+    try:
+        if sha256_bytes(candidate_diff(repo, owned)) != journal.candidate_hash:
+            return "candidate changed after the passing verdict"
+    except RuntimeError as exc:
+        return f"could not re-hash the candidate ({exc})"
+    return None
+
+
+def _finalize_candidate(
+    bd: BdClient,
+    git: GitClient,
+    store: JournalStore,
+    journal: CandidateJournal,
+    *,
+    repo: Path,
+    issue_id: str,
+    integration_branch: str,
+    baseline: frozenset[str],
+    write_log: Callable[[str], None],
+) -> tuple[CandidateJournal, str | None]:
+    """Ortus-owned report → close → commit → sync, journaled step by step.
+
+    Returns the updated journal and a blocker string when finalization could
+    not complete. Every step is skipped when its boundary is already journaled
+    OR when observable state already shows it landed, so a restart at any
+    boundary produces no duplicate comment, close, commit, or push.
+    """
+
+    blocker = _finalization_blocker(
+        bd,
+        git,
+        journal,
+        repo=repo,
+        issue_id=issue_id,
+        integration_branch=integration_branch,
+        baseline=baseline,
+    )
+    if blocker is not None:
+        journal = replace(journal, phase=_FINALIZATION_BLOCKED_PHASE)
+        store.save(journal)
+        return journal, blocker
+
+    owned_paths = frozenset(journal.candidate_paths)
+
+    if not journal.finalized("report"):
+        try:
+            if not bd.has_comment(issue_id, _FINALIZATION_MARKER):
+                bd.add_comment(issue_id, _finalization_report(issue_id, journal))
+        except Exception as exc:
+            return journal, f"final report could not be persisted ({exc})"
+        journal = journal.with_finalization("report")
+        store.save(journal)
+        write_log(f"finalization: report persisted for {issue_id}")
+
+    if not journal.finalized("close"):
+        try:
+            closed = bd.close_once(
+                issue_id,
+                reason=(
+                    "verified by a fresh read-only Ortus verifier "
+                    f"(candidate {journal.candidate_hash[:12]}, "
+                    f"{journal.corrections} correction attempt(s))"
+                ),
+            )
+        except Exception as exc:
+            return journal, f"bd close failed ({exc})"
+        journal = journal.with_finalization("close")
+        store.save(journal)
+        write_log(
+            f"finalization: {issue_id} "
+            + ("closed by Ortus" if closed else "was already closed; close skipped")
+        )
+
+    if not journal.finalized("commit"):
+        if not git.is_git_repo():
+            journal = journal.with_finalization("commit", "not-a-git-repo")
+            store.save(journal)
+        else:
+            dirty = git.dirty_paths()
+            if dirty is None:
+                return journal, "could not read the worktree before committing"
+            # Closing the issue rewrites the generated tracker exports; they are
+            # Ortus-owned output of this transaction, so they ride along. Nothing
+            # else does — never `git add -A` over an operator's unrelated work.
+            stage = (owned_paths | (dirty & _TRACKER_EXPORT_PATHS)) & dirty
+            unrelated = dirty - stage - _TRACKER_EXPORT_PATHS
+            if unrelated:
+                write_log(
+                    "finalization: leaving unrelated worktree paths untouched: "
+                    + ", ".join(sorted(unrelated))
+                )
+            subject = f"{issue_id}: verified candidate"
+            if not git.commit_paths(stage, subject):
+                return journal, "path-scoped commit of the owned candidate failed"
+            journal = journal.with_finalization("commit", git.head_oid())
+            store.save(journal)
+            write_log(
+                f"finalization: committed owned paths for {issue_id}: "
+                + (", ".join(sorted(stage)) or "none")
+            )
+
+    if not journal.finalized("sync"):
+        if not git.is_git_repo() or not git.has_remote():
+            journal = journal.with_finalization("sync", "no-remote")
+            store.save(journal)
+            write_log("finalization: no remote configured; nothing to push")
+        else:
+            pushed = git.push(integration_branch)
+            if not pushed:
+                write_log(
+                    "finalization: push rejected; pulling --rebase and retrying once"
+                )
+                if git.pull_rebase(integration_branch):
+                    pushed = git.push(integration_branch)
+            if not pushed:
+                return journal, (
+                    f"push of {integration_branch} to origin failed; the close and "
+                    "commit are recorded locally but are NOT on origin"
+                )
+            if git.local_ahead_of_remote(integration_branch):
+                return journal, (
+                    f"{integration_branch} is still ahead of origin after a "
+                    "successful push"
+                )
+            journal = journal.with_finalization("sync", "pushed")
+            store.save(journal)
+            write_log(f"finalization: {integration_branch} synchronized with origin")
+
+    store.clear()
+    return journal, None
 
 
 def _enforce_branch_discipline(
@@ -750,7 +1422,11 @@ def grind(
         None,
         "-c",
         "--condition",
-        help="Custom per-iteration /goal condition (overrides bundled close-one.txt).",
+        help=(
+            "Legacy: custom per-iteration /goal condition whose worker also "
+            "selects its own issue (replaces the harness-claimed work-issue.txt "
+            "flow and its verified-close transaction)."
+        ),
     ),
     orphan_policy: OrphanPolicy = typer.Option(
         OrphanPolicy.REVERT,
@@ -772,6 +1448,16 @@ def grind(
             "bd/dolt/build processes and releasing their locks). Codex preserves the "
             "claimed candidate for restart; Claude runs bd-state/orphan-policy "
             "recovery. 0 disables the watchdog (workers may then hang indefinitely)."
+        ),
+    ),
+    max_corrections: int = typer.Option(
+        2,
+        "--max-corrections",
+        help=(
+            "Bounded fresh correction attempts after a failed verification "
+            "(0 disables retries). Each attempt spawns one fresh implementation "
+            "worker with only the failed criteria and findings, then one fresh "
+            "verifier. Exhaustion flags the issue for a human and never commits."
         ),
     ),
     integration_branch: str = typer.Option(
@@ -914,6 +1600,14 @@ def grind(
         output.info(f"tasks:          {tasks}")
         output.info(f"iterations:     {iterations}")
         output.info(f"orphan-policy:  {orphan_policy.value}")
+        output.info(
+            "corrections:    "
+            + (
+                f"up to {max_corrections} fresh attempt(s), each re-verified"
+                if max_corrections > 0
+                else "off (a failed verdict escalates immediately)"
+            )
+        )
         output.info(f"integration:    {integration_branch}")
         output.info(f"idle-sleep:     {idle_sleep}s")
         output.info(
@@ -994,6 +1688,55 @@ def grind(
                 git, integration_branch, write_log, phase="startup"
             )
             transaction_store = JournalStore(target)
+            # AC-6: a run killed between any two finalization boundaries left a
+            # journal that still owes work. Replay it BEFORE selecting anything,
+            # and never select another issue while one is outstanding. Each step
+            # re-checks observable bd/git state, so a replay of a boundary that
+            # actually landed is a no-op rather than a duplicate.
+            pending_finalization = transaction_store.load()
+            if (
+                pending_finalization is not None
+                and pending_finalization.phase in _FINALIZABLE_PHASES
+            ):
+                write_log(
+                    "finalization resume: journal for "
+                    f"{pending_finalization.issue_id} stopped at "
+                    f"{pending_finalization.phase}; replaying remaining boundaries"
+                )
+                output.progress(
+                    "grind",
+                    f"resuming finalization of {pending_finalization.issue_id}",
+                )
+                pending_finalization, blocker = _finalize_candidate(
+                    bd,
+                    git,
+                    transaction_store,
+                    pending_finalization,
+                    repo=target,
+                    issue_id=pending_finalization.issue_id,
+                    integration_branch=integration_branch,
+                    # The operator baseline this transaction started from, not
+                    # an empty set: grind supports resuming into a dirty tree,
+                    # so pre-existing unrelated edits must stay excluded from
+                    # the owned-path comparison or every such resume would
+                    # block as a phantom "candidate path set changed".
+                    baseline=frozenset(pending_finalization.baseline_paths),
+                    write_log=write_log,
+                )
+                if blocker is not None:
+                    write_log(f"finalization resume: HALT — {blocker}")
+                    output.error(
+                        f"grind: could not finish the pending finalization — {blocker}",
+                        hint=(
+                            "the transaction journal under logs/ retains the "
+                            "recoverable state; resolve the blocker and re-run grind"
+                        ),
+                    )
+                    raise typer.Exit(code=1)
+                write_log(
+                    "finalization resume: completed for "
+                    f"{pending_finalization.issue_id}"
+                )
             active_journal: CandidateJournal | None = None
             codex_baseline = frozenset[str]()
             startup_handoff_paths = frozenset[str]()
@@ -1215,7 +1958,10 @@ def grind(
                 _rollover_exhausted_epics(bd, write_log)
                 before = _snapshot(bd)
                 implementation_probe = codegraph_probe
-                verification_probe = codegraph_probe
+                # True once Ortus itself completed report/close/commit/sync for
+                # this iteration, so the legacy worker-owned commit path stays
+                # out of the way.
+                finalized = False
                 if queue_drained(before):
                     write_log(
                         f"queue drained; exiting outer loop. tasks_completed={tasks_completed}"
@@ -1890,334 +2636,274 @@ def grind(
                     if active_journal is None:
                         output.error("grind: verifier has no candidate transaction")
                         raise typer.Exit(code=1)
-                    active_journal = active_journal.begin_verification()
-                    transaction_store.save(active_journal)
-                    if callable(configure_codegraph):
-                        configure_codegraph(codegraph_probe.capability)
-                    try:
-                        verification_probe = (
-                            _codex_codegraph_handshake(
-                                runner,
+                    verify_kwargs = dict(
+                        runner=runner,
+                        bd=bd,
+                        git=git,
+                        store=transaction_store,
+                        repo=target,
+                        log=log,
+                        write_log=write_log,
+                        backend=resolved_backend,
+                        issue_id=issue_id,
+                        packet=target_issue,
+                        profile=verify_profile,
+                        worker_timeout=worker_timeout,
+                        probe=codegraph_probe,
+                        mode=codegraph_mode,
+                        configure_codegraph=(
+                            configure_codegraph
+                            if callable(configure_codegraph)
+                            else None
+                        ),
+                        baseline=codex_baseline,
+                        iteration=iters_run,
+                    )
+                    verification = _verify_candidate(
+                        journal=active_journal,
+                        freshness=freshness,
+                        sync_ms=sync_ms,
+                        **verify_kwargs,
+                    )
+                    active_journal = verification.journal
+                    verification_summary = verification.summary
+
+                    # --- bounded correction retries (AC-1..AC-3) --------------
+                    # Every failed verdict is already persisted as a bd comment
+                    # by _verify_candidate before this loop can spend an
+                    # attempt, so a correction worker always follows a durable
+                    # report and never a transcript-only finding.
+                    halt: str | None = None
+                    halt_phase: str | None = None
+                    escalate = False
+                    while halt is None:
+                        if verification.timed_out or verification.failure is not None:
+                            halt = verification.failure or "verifier produced no verdict"
+                            # A rejection on the FIRST attempt is ordinary
+                            # transaction failure: the candidate keeps its claim
+                            # and the next grind resumes it. A rejection after a
+                            # correction was already spent means the retry budget
+                            # is being burned on something a fresh worker cannot
+                            # fix, so flag it rather than leaving a silently
+                            # stalled in_progress claim behind.
+                            if active_journal.corrections > 0:
+                                halt_phase = "correction-rejected"
+                                escalate = True
+                            break
+                        verdict = verification.verdict
+                        assert verdict is not None
+                        if verdict.passed:
+                            break
+                        gaps = _plan_gap_findings(verdict)
+                        if gaps and active_journal.plan_gap_routed:
+                            halt = "plan gap persists after one planning-profile pass"
+                            halt_phase = "plan-gap-escalated"
+                            escalate = True
+                            break
+                        if gaps:
+                            # AC-3: a material planning gap is never handed to a
+                            # fast implementer to improvise; it gets exactly one
+                            # planning route, then a human.
+                            write_log(
+                                f"iter {iters_run}: plan gap in verifier findings; "
+                                "routing once through the planning profile"
+                            )
+                            output.progress(
+                                "grind",
+                                f"routing plan gap for {issue_id} to the planning "
+                                "profile (one pass)",
+                            )
+                            active_journal = active_journal.route_plan_gap()
+                            transaction_store.save(active_journal)
+                            try:
+                                gap_rc = _run_plan_gap_pass(
+                                    bd,
+                                    repo=target,
+                                    log=log,
+                                    write_log=write_log,
+                                    backend=resolved_backend,
+                                    profile=plan_profile,
+                                    probe=codegraph_probe,
+                                    timeout=(
+                                        worker_timeout if worker_timeout > 0 else None
+                                    ),
+                                    issue_id=issue_id,
+                                    findings=gaps,
+                                )
+                            except RepairCreatedReplacements as exc:
+                                write_log(f"plan-gap routing: HALT — {exc}")
+                                output.error(str(exc))
+                                raise typer.Exit(code=1)
+                            halt = (
+                                "routed one plan gap to the planning profile"
+                                if gap_rc == 0
+                                else f"plan-gap routing pass failed (exit {gap_rc})"
+                            )
+                            halt_phase = "plan-gap-routed"
+                            escalate = True
+                            break
+                        if active_journal.corrections >= max_corrections:
+                            halt = (
+                                "bounded correction attempts exhausted "
+                                f"({active_journal.corrections}/{max_corrections})"
+                            )
+                            halt_phase = "corrections-exhausted"
+                            escalate = True
+                            break
+
+                        active_journal = active_journal.begin_correction(
+                            findings=verdict.findings[:_CORRECTION_MAX_FINDINGS]
+                        )
+                        transaction_store.save(active_journal)
+                        write_log(
+                            f"iter {iters_run}: correction attempt "
+                            f"{active_journal.corrections}/{max_corrections} for "
+                            f"{issue_id} (candidate {active_journal.candidate_hash})"
+                        )
+                        output.progress(
+                            "grind",
+                            f"correction attempt {active_journal.corrections}/"
+                            f"{max_corrections} for {issue_id}",
+                        )
+                        correction_offset = log.stat().st_size if log.exists() else 0
+                        correction_timed_out = False
+                        try:
+                            rc = runner.run(
+                                _compose_correction_prompt(
+                                    issue_id,
+                                    active_journal,
+                                    verdict,
+                                    resolved_backend,
+                                ),
                                 repo=target,
                                 log_path=log,
-                                phase=CodeGraphPhase.VERIFICATION,
-                                probe=codegraph_probe,
-                                profile=verify_profile,
+                                fast=fast,
+                                profile=implement_profile,
                                 timeout=(
                                     worker_timeout if worker_timeout > 0 else None
                                 ),
                             )
-                            if resolved_backend == "codex"
-                            else codegraph_probe
-                        )
-                    except CodeGraphUnavailable as exc:
-                        bd.update_status(issue_id, "open")
-                        output.error(str(exc))
-                        raise typer.Exit(code=1)
-                    if callable(configure_codegraph):
-                        configure_codegraph(verification_probe.capability)
-                    verifier_prompt = _verifier_prompt(
-                        active_journal,
-                        phase_contract(CodeGraphPhase.VERIFICATION, verification_probe),
-                    )
-                    verify_offset = log.stat().st_size if log.exists() else 0
-                    output.progress(
-                        "grind",
-                        "verification CodeGraph handshake "
-                        + (
-                            "requested"
-                            if codegraph_probe.available
-                            else "fallback active"
-                        ),
-                    )
-                    verification_timed_out = False
-                    try:
-                        rc = runner.run(
-                            verifier_prompt,
-                            repo=target,
-                            log_path=log,
-                            fast=False,
-                            profile=verify_profile,
-                            timeout=(worker_timeout if worker_timeout > 0 else None),
-                            readonly=True,
-                        )
-                    except subprocess.TimeoutExpired:
-                        verification_timed_out = True
-                        rc = 143
-                        write_log(
-                            f"iter {iters_run}: verifier TIMEOUT after {worker_timeout}s"
-                        )
-                    if verification_timed_out and active_journal is not None:
-                        timeout_failure = (
-                            f"verifier timed out after {worker_timeout}s without a verdict"
-                        )
-                        timeout_phase = "verification-timeout"
-                        if git.is_git_repo():
-                            post_dirty = git.dirty_paths()
-                            if post_dirty is None:
-                                timeout_failure += (
-                                    "; could not inspect the candidate after timeout"
-                                )
-                                timeout_phase = "verification-rejected"
-                            else:
-                                post_paths = (
-                                    post_dirty - codex_baseline - _TRACKER_EXPORT_PATHS
-                                )
-                                if post_paths != frozenset(
-                                    active_journal.candidate_paths
-                                ):
-                                    timeout_failure += (
-                                        "; verifier mutated the candidate path set"
-                                    )
-                                    timeout_phase = "verification-rejected"
-                                else:
-                                    try:
-                                        post_diff = candidate_diff(target, post_paths)
-                                    except RuntimeError as exc:
-                                        timeout_failure += (
-                                            f"; could not hash the candidate: {exc}"
-                                        )
-                                        timeout_phase = "verification-rejected"
-                                    else:
-                                        if (
-                                            sha256_bytes(post_diff)
-                                            != active_journal.candidate_hash
-                                        ):
-                                            timeout_failure += (
-                                                "; verifier mutated the candidate"
-                                            )
-                                            timeout_phase = "verification-rejected"
-                        current_packet = bd.show(issue_id)
-                        if (
-                            issue_packet_hash(current_packet)
-                            != active_journal.issue_packet_hash
-                        ):
-                            timeout_failure += (
-                                "; authoritative issue packet changed during verification"
-                            )
-                            timeout_phase = "verification-rejected"
-                            if current_packet.get("status") != "in_progress":
-                                bd.update_status(issue_id, "in_progress")
-                        verification_summary = parse_transcript(
-                            log,
-                            phase=CodeGraphPhase.VERIFICATION,
-                            probe=verification_probe,
-                            start_offset=verify_offset,
-                        )
-                        verification_summary.freshness = freshness
-                        verification_summary.sync_duration_ms = sync_ms
-                        append_normalized(log, verification_summary)
-                        report = render_rejection_report(
-                            issue_id=issue_id,
-                            candidate_hash=active_journal.candidate_hash,
-                            failure=timeout_failure,
-                            expected_criteria=dict.fromkeys(
-                                re.findall(
-                                    r"\bAC-\d+\b",
-                                    str(target_issue.get("acceptance_criteria", "")),
-                                )
-                            ),
-                            base_head=active_journal.base_head,
-                            issue_packet_hash=active_journal.issue_packet_hash,
-                            attempt=active_journal.attempt,
-                            profiles=active_journal.profiles,
-                        )
-                        report = bound_report(
-                            report + "\n" + verification_summary.report()
-                        )
-                        report_ref = transaction_store.save_report(
-                            active_journal.candidate_hash,
-                            report,
-                            attempt=active_journal.attempt,
-                        )
-                        bd.add_comment(issue_id, report)
-                        active_journal = active_journal.finish_verification(
-                            report_ref, phase=timeout_phase
-                        )
-                        transaction_store.save(active_journal)
-                        _append_verdict_event(
-                            log,
-                            decision="rejected",
-                            candidate_hash=active_journal.candidate_hash,
-                            reason=timeout_failure,
-                        )
-                        write_log(
-                            f"iter {iters_run}: preserved verifier-timeout candidate "
-                            f"for {active_journal.issue_id}: "
-                            f"{list(active_journal.candidate_paths)}"
-                        )
-                        output.progress(
-                            "grind",
-                            f"preserved timed-out candidate {active_journal.issue_id}; "
-                            "re-run grind to resume",
-                        )
-                        break
-                    if resolved_backend == "claude":
-                        rejection = _claude_goal_rejection(
-                            log, start_offset=verify_offset
-                        )
-                        if rejection is not None:
-                            bd.update_status(issue_id, "open")
+                        except subprocess.TimeoutExpired:
+                            correction_timed_out = True
+                            rc = 143
                             write_log(
-                                f"iter {iters_run}: HALT — Claude rejected verifier /goal "
-                                f"before running a worker turn: {rejection}"
+                                f"iter {iters_run}: correction worker TIMEOUT after "
+                                f"{worker_timeout}s"
                             )
-                            output.error(
-                                "grind: Claude rejected the verifier /goal condition "
-                                "before worker work",
-                                hint=rejection,
-                            )
-                            raise typer.Exit(code=1)
-                    verification_summary = parse_transcript(
-                        log,
-                        phase=CodeGraphPhase.VERIFICATION,
-                        probe=verification_probe,
-                        start_offset=verify_offset,
-                    )
-                    verification_summary.freshness = freshness
-                    verification_summary.sync_duration_ms = sync_ms
-                    append_normalized(log, verification_summary)
-                    if verification_summary.capability_observed:
-                        output.progress(
-                            "grind", "verification CodeGraph handshake succeeded"
-                        )
-                    elif codegraph_mode is not CodeGraphMode.OFF:
-                        output.progress(
-                            "grind",
-                            "verification CodeGraph fallback: "
-                            + "; ".join(verification_summary.fallbacks[:3]),
-                        )
-                    try:
-                        require_handshake(verification_summary)
-                    except CodeGraphUnavailable as exc:
-                        bd.update_status(issue_id, "open")
-                        output.error(str(exc))
-                        raise typer.Exit(code=1)
-                    failure: str | None = None
-                    verdict = None
-                    try:
-                        verdict = parse_verdict(
-                            log,
-                            start_offset=verify_offset,
-                            expected_hash=active_journal.candidate_hash,
-                            expected_criteria=dict.fromkeys(
-                                re.findall(
-                                    r"\bAC-\d+\b",
-                                    str(target_issue.get("acceptance_criteria", "")),
-                                )
-                            ),
-                        )
                         if git.is_git_repo():
-                            post_dirty = git.dirty_paths()
-                            if post_dirty is None:
-                                raise VerdictError(
-                                    "could not inspect the candidate after verification"
-                                )
-                            post_paths = (
-                                post_dirty - codex_baseline - _TRACKER_EXPORT_PATHS
+                            active_journal = _capture_codex_candidate(
+                                git,
+                                transaction_store,
+                                active_journal,
+                                codex_baseline,
+                                phase=(
+                                    "correction-timeout"
+                                    if correction_timed_out
+                                    else "candidate-captured"
+                                ),
                             )
-                            if post_paths != frozenset(active_journal.candidate_paths):
-                                raise VerdictError(
-                                    "verifier mutated the candidate path set during "
-                                    "read-only review"
-                                )
-                            post_diff = candidate_diff(target, post_paths)
-                            if sha256_bytes(post_diff) != active_journal.candidate_hash:
-                                raise VerdictError(
-                                    "verifier mutated the candidate during read-only review"
-                                )
-                        current_packet = bd.show(issue_id)
-                        if (
-                            issue_packet_hash(current_packet)
-                            != active_journal.issue_packet_hash
-                        ):
-                            raise VerdictError(
-                                "authoritative issue packet changed during verification"
-                            )
-                    except (VerdictError, RuntimeError) as exc:
-                        failure = str(exc)
-                    if rc != 0 and failure is None:
-                        failure = f"verifier exited with status {rc}"
-
-                    if verdict is not None and failure is None:
-                        report = render_report(
-                            verdict,
-                            issue_id=issue_id,
-                            base_head=active_journal.base_head,
-                            issue_packet_hash=active_journal.issue_packet_hash,
-                            attempt=active_journal.attempt,
-                            profiles=active_journal.profiles,
-                        )
-                        report = bound_report(
-                            report + "\n" + verification_summary.report()
-                        )
-                        report_ref = transaction_store.save_report(
-                            active_journal.candidate_hash,
-                            report,
-                            attempt=active_journal.attempt,
-                        )
-                        bd.add_comment(issue_id, report)
-                        active_journal = active_journal.finish_verification(
-                            report_ref,
-                            phase=(
-                                "verified-pass" if verdict.passed else "verified-fail"
-                            ),
-                        )
-                        transaction_store.save(active_journal)
-                        _append_verdict_event(
+                        active_journal = _capture_evidence(
+                            transaction_store,
+                            active_journal,
                             log,
-                            decision=verdict.decision,
-                            candidate_hash=active_journal.candidate_hash,
+                            start_offset=correction_offset,
+                            returncode=rc,
+                            timed_out=correction_timed_out,
+                        )
+                        if correction_timed_out:
+                            halt = (
+                                f"correction worker timed out after {worker_timeout}s"
+                            )
+                            break
+                        # A correction worker that violated the phase contract
+                        # cannot hand itself a close; restore the claim so the
+                        # fresh verifier still owns the decision.
+                        if bd.status(issue_id) != "in_progress":
+                            bd.update_status(issue_id, "in_progress")
+                        freshness, sync_ms = codegraph_adapter.refresh(
+                            target, codegraph_probe
                         )
                         write_log(
-                            f"iter {iters_run}: verifier verdict={verdict.decision} "
-                            f"candidate={active_journal.candidate_hash}"
+                            f"CodeGraph refresh: result={freshness} "
+                            f"duration_ms={sync_ms}"
                         )
-                    else:
-                        assert failure is not None
-                        # A verifier is observational only. A fake/misconfigured
-                        # runner that changed lifecycle state cannot make its
-                        # own output authoritative; restore the claim before
-                        # persisting the rejection.
-                        if bd.show(issue_id).get("status") != "in_progress":
-                            bd.update_status(issue_id, "in_progress")
-                        report = render_rejection_report(
-                            issue_id=issue_id,
-                            candidate_hash=active_journal.candidate_hash,
-                            failure=failure,
-                            expected_criteria=dict.fromkeys(
-                                re.findall(
-                                    r"\bAC-\d+\b",
-                                    str(target_issue.get("acceptance_criteria", "")),
+                        # AC-2: every correction gets its own fresh verifier.
+                        verification = _verify_candidate(
+                            journal=active_journal,
+                            freshness=freshness,
+                            sync_ms=sync_ms,
+                            **verify_kwargs,
+                        )
+                        active_journal = verification.journal
+                        verification_summary = verification.summary
+
+                    if halt is not None:
+                        if escalate:
+                            # Exhaustion and unresolved plan gaps leave the issue
+                            # human-flagged and OPEN work: no close, no commit.
+                            try:
+                                bd.add_comment(
+                                    issue_id,
+                                    "## Ortus correction escalation\n\n"
+                                    f"{halt}.\n\n"
+                                    f"Candidate: `{active_journal.candidate_hash}`\n"
+                                    f"Correction attempts: "
+                                    f"{active_journal.corrections}/{max_corrections}\n"
+                                    f"Verifier reports: "
+                                    f"{', '.join(active_journal.verifier_refs) or 'none'}"
+                                    "\n\nThe candidate was NOT committed and the issue "
+                                    "was NOT closed. A human decision is required.\n",
                                 )
-                            ),
-                            base_head=active_journal.base_head,
-                            issue_packet_hash=active_journal.issue_packet_hash,
-                            attempt=active_journal.attempt,
-                            profiles=active_journal.profiles,
+                                bd.add_label(issue_id, "human")
+                            except Exception as exc:
+                                write_log(f"escalation: bd update failed ({exc})")
+                        if halt_phase is not None:
+                            active_journal = replace(
+                                active_journal, phase=halt_phase
+                            )
+                            transaction_store.save(active_journal)
+                        write_log(
+                            f"iter {iters_run}: {halt}; candidate left uncommitted"
                         )
-                        report = bound_report(
-                            report + "\n" + verification_summary.report()
-                        )
-                        report_ref = transaction_store.save_report(
-                            active_journal.candidate_hash,
-                            report,
-                            attempt=active_journal.attempt,
-                        )
-                        bd.add_comment(issue_id, report)
-                        active_journal = active_journal.finish_verification(
-                            report_ref, phase="verification-rejected"
-                        )
-                        transaction_store.save(active_journal)
-                        _append_verdict_event(
-                            log,
-                            decision="rejected",
-                            candidate_hash=active_journal.candidate_hash,
-                            reason=failure,
-                        )
-                        write_log(f"iter {iters_run}: verifier rejected: {failure}")
-                        output.error(f"grind: verifier rejected candidate: {failure}")
+                        output.error(f"grind: {halt}; candidate left uncommitted")
                         break
+
+                    # --- Ortus-owned finalization (AC-4..AC-6) ---------------
+                    active_journal, blocker = _finalize_candidate(
+                        bd,
+                        git,
+                        transaction_store,
+                        active_journal,
+                        repo=target,
+                        issue_id=issue_id,
+                        integration_branch=integration_branch,
+                        baseline=codex_baseline,
+                        write_log=write_log,
+                    )
+                    if blocker is not None:
+                        write_log(
+                            f"iter {iters_run}: finalization blocked — {blocker}"
+                        )
+                        output.error(
+                            f"grind: finalization blocked — {blocker}",
+                            hint=(
+                                "the transaction journal under logs/ retains the "
+                                "recoverable state; re-run grind to resume this "
+                                "exact issue"
+                            ),
+                        )
+                        break
+                    finalized = True
+                    active_journal = None
+                    codex_baseline = frozenset()
+                    startup_handoff_paths = frozenset()
+                    recovery_handoff = False
+                    resume_candidate_ready = False
+                    write_log(
+                        f"iter {iters_run}: Ortus finalized {issue_id} "
+                        "(report, close, commit, sync)"
+                    )
+                    output.progress("grind", f"finalized {issue_id}")
                 else:
                     # Compatibility/safety: if an implementation worker closed
                     # despite the phase contract, still leave durable evidence.
@@ -2233,29 +2919,21 @@ def grind(
                 after = _snapshot(bd)
                 delta = compute_delta(before, after)
 
-                if (
-                    active_journal is not None
-                    and active_journal.phase in {"verified-pass", "verified-fail"}
-                    and active_journal.issue_id in after.in_progress_ids
-                ):
-                    write_log(
-                        f"iter {iters_run}: candidate transaction ended in "
-                        f"{active_journal.phase}; finalization is a later lifecycle step"
-                    )
-                    output.progress(
-                        "grind",
-                        f"candidate {active_journal.candidate_hash} "
-                        f"{active_journal.phase}; awaiting finalization",
-                    )
-                    break
-
                 if delta.closed_one_or_more:
                     tasks_completed += delta.closed_delta
                     write_log(
                         f"iter {iters_run}: closed +{delta.closed_delta} "
                         f"(tasks_completed={tasks_completed}, rc={rc})"
                     )
-                    if resolved_backend == "codex" and git.is_git_repo():
+                    # `finalized` means Ortus already reported, closed, committed
+                    # the owned paths, and synchronized. Only the legacy
+                    # --condition path, where the worker owns its own close,
+                    # still needs the outer commit below.
+                    if (
+                        not finalized
+                        and resolved_backend == "codex"
+                        and git.is_git_repo()
+                    ):
                         commit_subject = (
                             f"{issue_id}: complete Codex grind task"
                             if harness_select

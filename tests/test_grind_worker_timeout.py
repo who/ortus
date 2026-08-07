@@ -426,16 +426,14 @@ def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
     )
 
     assert second.exit_code == 0, second.stdout + second.stderr
-    assert _bd_show(repo, issue_id)["status"] == "in_progress"
-    journal = JournalStore(repo).load()
-    assert journal is not None and journal.phase == "verified-pass"
-    assert (
-        subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "--", "prior-work.txt"], cwd=repo
-        ).returncode
-        == 1
-    )
+    # The recovered candidate passed a fresh verifier, so Ortus finalized it:
+    # the issue is closed by the parent and the journal is consumed.
+    assert _bd_show(repo, issue_id)["status"] == "closed"
+    assert JournalStore(repo).load() is None
     assert (repo / "candidate.py").read_text() == "RECOVERED = True\n"
+    # The prior engineer's staged work was adopted into the handoff candidate,
+    # so the verifier reviewed it and it lands in the same path-scoped commit —
+    # preserved, never discarded, and never committed unreviewed.
     prior_work_commits = subprocess.run(
         ["git", "log", "--format=%H", "--", "prior-work.txt"],
         cwd=repo,
@@ -443,7 +441,13 @@ def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
         capture_output=True,
         text=True,
     ).stdout.splitlines()
-    assert not prior_work_commits
+    assert len(prior_work_commits) == 1
+    assert (
+        subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "prior-work.txt"], cwd=repo
+        ).returncode
+        == 0
+    ), "the finalization commit consumed the staged handoff work"
 
 
 def test_codex_resume_adopts_head_mismatch_for_handoff(

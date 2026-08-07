@@ -1,16 +1,18 @@
 """Thin wrapper over the `git` CLI for grind's branch discipline.
 
-grind workers commit + push the work that closes their issue. A worker that
-drifts onto a feature branch (e.g. ``git checkout -b feature``) commits there
-and pushes that branch, leaving origin/main — where deploys come from — stale.
-Every "closed" issue then sits off the deploy path and the operator keeps
-seeing supposedly-fixed bugs.
+Workers no longer commit or push: `ortus grind` itself commits the verified
+candidate and synchronizes the integration branch. Branch discipline predates
+that split and still guards the same failure — work that ends up somewhere
+other than the integration branch (e.g. a worker or operator left the tree on
+``feature``) leaves origin/main, where deploys come from, stale, so every
+"closed" issue sits off the deploy path.
 
 The outer loop uses this client to read the working tree's branch state, pin
-it back to the integration branch each iteration, and push the integration
-branch so a close is always deployable. This module is IO only; the branch
-state is classified by :func:`ortus.core.grind_loop.classify_branch_state`
-(pure logic, unit-test surface).
+it back to the integration branch each iteration, commit exactly the
+transaction-owned paths, and push the integration branch so a close is always
+deployable. This module is IO only; the branch state is classified by
+:func:`ortus.core.grind_loop.classify_branch_state` (pure logic, unit-test
+surface).
 
 Every method is tolerant: if `git` is missing, the directory is not a git
 repo, or a ref can't be resolved, we return a conservative value (False / "" /
@@ -202,6 +204,16 @@ class GitClient:
         exists to make visible.
         """
         return self._run("push", "origin", branch).returncode == 0
+
+    def pull_rebase(self, branch: str) -> bool:
+        """`git pull --rebase origin <branch>`. Returns True on success.
+
+        Only reached after a push was rejected: origin moved while the
+        transaction held the flock. It fails (returning False) on a dirty
+        worktree, which is the conservative answer — grind then halts with a
+        recoverable journal rather than rebasing over an operator's own edits.
+        """
+        return self._run("pull", "--rebase", "origin", branch).returncode == 0
 
     def commit_paths(self, paths: frozenset[str], message: str) -> bool:
         """Commit only explicitly owned paths, preserving everything else.
