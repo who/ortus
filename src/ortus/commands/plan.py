@@ -31,6 +31,11 @@ from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.prompts import resolve_prompt
 from ortus.core.readiness import ReadinessReport, failed_reports, validate_issues
+from ortus.core.repair import (
+    RepairCreatedReplacements,
+    guard_no_replacements,
+    repair_readiness,
+)
 from ortus.core.repo import resolve_repo
 
 
@@ -98,59 +103,6 @@ def _expand_idea(
         log_path=log_path,
         profile=profile,
     )
-
-
-def _readiness_repair_prompt(reports: tuple[ReadinessReport, ...]) -> str:
-    """Build a bounded repair request that can only update named issues."""
-
-    diagnostics = "\n".join(f"- {report.diagnostic()}" for report in reports)
-    ids = ", ".join(report.issue_id for report in reports)
-    return f"""READINESS REPAIR PASS (one pass only).
-
-The planning run created executable issues that fail readiness schema v1.
-Repair ONLY these existing issue IDs: {ids}
-
-Exact failures:
-{diagnostics}
-
-Use `bd show <id> --json` and `bd update <id>` to fill the existing
-description, design, and acceptance-criteria fields. Do not run `bd create`,
-do not close, replace, supersede, or rename an issue, and do not change issue
-dependencies. Preserve all sound detail already present. Every repaired leaf
-must use readiness schema v1 with these exact field headings:
-
-- description: `## Objective`, `## Behavioral context`
-- design: `## Readiness schema` (body `v1`), `## Scope`, `## Non-goals`,
-  `## Concrete locations`, `## Resolved decisions`,
-  `## Compatibility constraints`, `## Ordered steps` (numbered),
-  `## Dependencies`, `## Edge cases`, `## Plan-gap guidance`
-- acceptance criteria: `## Observable criteria` with unique AC-N identifiers,
-  `## Criterion checks` mapping every AC-N exactly once to an exact command or
-  deterministic check, and `## Targeted tests` with exact bounded test commands
-
-End immediately after updating the named IDs.
-"""
-
-
-def _repair_readiness(
-    repo: Path,
-    reports: tuple[ReadinessReport, ...],
-    *,
-    log_path: Path,
-    backend: str,
-    profile: AgentProfile,
-    contract: str,
-    capability: CodeGraphCapability | None,
-) -> int:
-    """Run one fresh planning-profile subprocess to repair existing packets."""
-
-    runner = _make_runner() if backend == "claude" else _make_runner("codex")
-    configure = getattr(runner, "configure_codegraph", None)
-    if callable(configure):
-        configure(capability)
-    prompt = resolve_prompt("plan-prompt", repo=repo).text
-    prompt += "\n\n" + _readiness_repair_prompt(reports) + contract
-    return runner.run(prompt, repo=repo, log_path=log_path, profile=profile)
 
 
 def _issue_reports(
@@ -328,7 +280,7 @@ def plan(
             "repairing incomplete packets via one fresh planning pass "
             "(this typically takes 1-3 min)",
         )
-        repair_rc = _repair_readiness(
+        repair_rc = repair_readiness(
             target,
             defects,
             log_path=repair_log,
@@ -336,6 +288,7 @@ def plan(
             profile=profile,
             contract=phase_contract(CodeGraphPhase.PLANNING, probe),
             capability=probe.capability,
+            runner_factory=_make_runner,
         )
         if repair_rc != 0:
             output.error(
@@ -355,12 +308,10 @@ def plan(
             raise typer.Exit(code=1)
 
         ids_after_repair = {issue["id"] for issue in client.list_all()}
-        unexpected = sorted(ids_after_repair - ids_before_repair)
-        if unexpected:
-            output.error(
-                "readiness repair created replacement issue(s), which is forbidden: "
-                + ", ".join(unexpected)
-            )
+        try:
+            guard_no_replacements(ids_before_repair, ids_after_repair)
+        except RepairCreatedReplacements as exc:
+            output.error(str(exc))
             raise typer.Exit(code=1)
 
         output.progress("plan", "revalidating repaired issue packets")
