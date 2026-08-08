@@ -712,6 +712,37 @@ def test_verification_preflight_covers_the_repo_agent_dir(
         assert not (repo / ".claude" / claude_mod._PREFLIGHT_SCRATCH).exists()
 
 
+def test_candidate_paths_exclude_tool_state_written_during_review() -> None:
+    """ortus-v8fn: the inverted posture lets the inner sandbox write for real.
+
+    A repo that does not ignore `<repo>/.claude/hooks` reports the placeholder as
+    untracked, which moved the candidate path set and had the mutation guard
+    reject a sound verdict — observed on two repos. Tool state is carved out for
+    the same reason the bd exports are: written by the machinery, never code
+    under test.
+    """
+    dirty = frozenset(
+        {
+            "src/app.py",
+            "tests/test_app.py",
+            ".claude/hooks",
+            ".git/config.lock",
+            ".gitconfig",
+            ".beads/issues.jsonl",
+            "docs/pre-existing.md",
+        }
+    )
+    baseline = frozenset({"docs/pre-existing.md"})
+
+    assert grind_mod._candidate_paths(dirty, baseline) == frozenset(
+        {"src/app.py", "tests/test_app.py"}
+    )
+    # A path that merely starts with a tool-state name is still candidate content.
+    assert grind_mod._candidate_paths(frozenset({".gitignore-ish/x"}), frozenset()) == (
+        frozenset({".gitignore-ish/x"})
+    )
+
+
 def _blocked_verifier_grind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> tuple[object, Path, str, list[str]]:

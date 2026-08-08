@@ -378,7 +378,7 @@ def _repo_agent_dir_tmpfs(repo: Path) -> list[str]:
 # metadata and lock files, the agent CLI's project config and deny-rule
 # placeholders, and the bd export. None of it is code under test, and all of it
 # gets written during an ordinary read-only review.
-_REPO_TOOL_STATE: frozenset[str] = frozenset(
+REPO_TOOL_STATE: frozenset[str] = frozenset(
     {".git", ".gitconfig", ".claude", ".codex", ".beads", ".ortus"}
 )
 
@@ -413,7 +413,7 @@ def _repo_source_readonly(repo: Path) -> list[str]:
         # a caller that has not created the repo yet.
         return []
     entries = sorted(
-        entry for entry in repo.iterdir() if entry.name not in _REPO_TOOL_STATE
+        entry for entry in repo.iterdir() if entry.name not in REPO_TOOL_STATE
     )
     args = ["--bind", str(repo), str(repo)]
     for entry in entries:

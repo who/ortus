@@ -213,3 +213,26 @@ def test_ralph_prompt_marked_superseded() -> None:
     body = RALPH_PROMPT.read_text(encoding="utf-8")
     assert "SUPERSEDED" in body or "superseded" in body.lower(), body[:400]
     assert "grind-prompt.md" in body
+
+
+def test_verifier_must_emit_before_optional_investigation() -> None:
+    """ortus-pzfd.6: a verifier passed all seven criteria, then ended while
+    waiting on a sweep it chose to start, emitting no verdict envelope. Grind
+    rejected a candidate it had already approved."""
+    from ortus.commands.grind import _verifier_prompt
+    from ortus.core.transaction import CandidateJournal
+
+    journal = CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        issue_packet_ref="logs/packet.json",
+        issue_packet_hash="b" * 64,
+        candidate_hash="a" * 64,
+    )
+    prompt = _verifier_prompt(journal, "probe contract")
+
+    assert "EMIT THE VERDICT AS SOON AS EVERY CRITERION CHECK HAS RUN" in prompt
+    assert "never a reason to withhold one" in prompt
+    assert "do not restart the review" in prompt

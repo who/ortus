@@ -50,7 +50,11 @@ from ortus.core.agent import (
     resolve_backend,
 )
 from ortus.core.bd import BdClient
-from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
+from ortus.core.claude import (
+    REPO_TOOL_STATE,
+    ClaudeRunner,
+    ReadOnlyExecutionBlocked,
+)
 from ortus.core.codegraph import (
     CodeGraphAdapter,
     CodeGraphMode,
@@ -120,6 +124,33 @@ _TRACKER_EXPORT_PATHS = frozenset(
         ".beads/interactions.jsonl",
     }
 )
+
+
+def _is_tool_state(path: str) -> bool:
+    """Whether a dirty path is tool state rather than candidate content.
+
+    The verifier's repo is writable under the inverted posture (ortus-v8fn), so
+    the agent CLI's inner sandbox materialises its deny-rule placeholders for
+    real — `<repo>/.claude/hooks` and friends. A repo that does not ignore those
+    reports them as untracked, which moves the candidate path set and has the
+    mutation guard reject an otherwise sound verdict. Observed on two repos.
+
+    Carved out for the same reason `_TRACKER_EXPORT_PATHS` is: written by the
+    machinery during a run, never code under test. The set is the one the mount
+    leaves writable, imported rather than restated so the two cannot drift.
+    """
+
+    return path.split("/", 1)[0] in REPO_TOOL_STATE
+
+
+def _candidate_paths(dirty: frozenset[str], baseline: frozenset[str]) -> frozenset[str]:
+    """The dirty paths a verdict is legitimately about."""
+
+    return frozenset(
+        path
+        for path in dirty - baseline - _TRACKER_EXPORT_PATHS
+        if not _is_tool_state(path)
+    )
 _EVIDENCE_SECRET = re.compile(
     r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)([^\r\n]+)"
 )
@@ -347,7 +378,7 @@ def _capture_codex_candidate(
     if dirty is None:
         output.error("grind: could not capture Codex candidate paths")
         raise typer.Exit(code=1)
-    paths = dirty - baseline - _TRACKER_EXPORT_PATHS
+    paths = _candidate_paths(dirty, baseline)
     try:
         diff = candidate_diff(git.repo, paths)
     except RuntimeError as exc:
@@ -684,7 +715,7 @@ def _prepare_handoff(
         )
         moved.append("previously unrelated work was edited: " + ", ".join(readopted))
     baseline = _candidate_baseline(journal, frozenset())
-    candidate = dirty - baseline - _TRACKER_EXPORT_PATHS
+    candidate = _candidate_paths(dirty, baseline)
     if prior_phase in _SEALED_PHASES and candidate != frozenset(journal.candidate_paths):
         moved.append("the candidate path set changed since the prior worker")
     try:
@@ -817,6 +848,15 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "below, run bounded read-only checks (disable pytest cache writes), and emit "
         "exactly one final assistant line beginning ORTUS_VERDICT: followed by one JSON "
         "object. Do not emit that prefix anywhere else.\n\n"
+        "EMIT THE VERDICT AS SOON AS EVERY CRITERION CHECK HAS RUN. Investigating "
+        "further is welcome only while a verdict is already safe to write, and a "
+        "wider sweep you chose to start is never a reason to withhold one. A "
+        "session that ends without the line throws away everything it learned: "
+        "the run is rejected for reporting no verdict, and a candidate whose "
+        "criteria all passed is left uncommitted. If a check could not be run, "
+        "fail that criterion and say so in its evidence — that is a verdict too. "
+        "If new information arrives after you have decided, fold it into the "
+        "evidence and emit; do not restart the review.\n\n"
         f"Issue: {journal.issue_id}\n"
         f"Issue packet: {journal.issue_packet_ref}\n"
         f"Issue packet SHA-256: {journal.issue_packet_hash}\n"
@@ -1017,7 +1057,7 @@ def _verify_candidate(
                 timeout_failure += "; could not inspect the candidate after timeout"
                 timeout_phase = "verification-rejected"
             else:
-                post_paths = post_dirty - baseline - _TRACKER_EXPORT_PATHS
+                post_paths = _candidate_paths(post_dirty, baseline)
                 if post_paths != frozenset(journal.candidate_paths):
                     timeout_failure += "; verifier mutated the candidate path set"
                     timeout_phase = "verification-rejected"
@@ -1095,7 +1135,7 @@ def _verify_candidate(
                 raise VerdictError(
                     "could not inspect the candidate after verification"
                 )
-            post_paths = post_dirty - baseline - _TRACKER_EXPORT_PATHS
+            post_paths = _candidate_paths(post_dirty, baseline)
             if post_paths != frozenset(journal.candidate_paths):
                 raise VerdictError(
                     "verifier mutated the candidate path set during read-only review"
@@ -1390,7 +1430,7 @@ def _finalization_blocker(
     dirty = git.dirty_paths()
     if dirty is None:
         return "could not read the worktree before finalization"
-    owned = dirty - baseline - _TRACKER_EXPORT_PATHS
+    owned = _candidate_paths(dirty, baseline)
     if owned != frozenset(journal.candidate_paths):
         drifted = sorted(owned.symmetric_difference(journal.candidate_paths))
         return (
