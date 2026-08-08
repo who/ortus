@@ -132,6 +132,17 @@ class CodexRunner(ClaudeRunner):
 
         return argv
 
+    def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
+        """No read-only posture to probe: nothing wraps the Codex process.
+
+        Mirrors `_readonly_argv`. Codex verifies under its own ``--sandbox
+        read-only``, which leaves its runtime directories writable, so the
+        blocked-execution failure the Claude preflight guards cannot arise
+        here — and probing would only write to the host on its behalf.
+        """
+
+        return None
+
 
 def resolve_backend(
     requested: str | None = None,

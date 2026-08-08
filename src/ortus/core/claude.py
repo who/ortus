@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import signal
 import subprocess
 import sys
@@ -35,6 +36,16 @@ STANDARD_FLAGS = (
     "stream-json",
     "--verbose",
 )
+
+
+class ReadOnlyExecutionBlocked(RuntimeError):
+    """The read-only posture cannot execute a trivial command.
+
+    Raised by the verification preflight. A verifier launched into this
+    condition cannot run a single check, so every criterion it reports comes
+    back blocked — a verdict shaped like a judgement of the code that is
+    nothing of the kind (ortus-dyio).
+    """
 
 
 @dataclass
@@ -140,6 +151,51 @@ class ClaudeRunner:
 
         return _readonly_wrapper(argv, repo)
 
+    def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
+        """Assert the read-only posture can still execute a trivial command.
+
+        Runs the probe through the *same* wrapper the verifier will get, so a
+        posture that cannot execute is caught before a worker is dispatched
+        rather than after it has produced an all-blocked report. Raises
+        `ReadOnlyExecutionBlocked` naming the probe, its error, and the agent
+        session-env path; returns None when the posture is healthy.
+        """
+
+        home = Path.home()
+        script = _preflight_script(home)
+        argv = self._readonly_argv(["/bin/sh", "-c", script], repo)
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=str(repo) if repo.is_dir() else None,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        else:
+            # The marker, not the exit status, is the assertion: a command that
+            # legitimately exits nonzero is not the failure being guarded
+            # against, and a posture that cannot execute never prints it.
+            if PREFLIGHT_MARKER in proc.stdout:
+                return
+            stderr = (proc.stderr or "").strip()
+            detail = (
+                stderr.splitlines()[-1]
+                if stderr
+                else f"exited {proc.returncode} without printing the probe marker"
+            )
+        raise ReadOnlyExecutionBlocked(
+            f"{PREFLIGHT_PROBE} failed: {detail}\n"
+            f"  probe: /bin/sh -c {script!r}\n"
+            f"  agent session-env: {home / '.claude' / 'session-env'}\n"
+            "  The verification sandbox cannot execute commands, so no verdict "
+            "it produced would be a judgement of the code."
+        )
+
 
 def _kill_group(proc: subprocess.Popen) -> None:
     """Terminate the child (and on POSIX, its process group)."""
@@ -195,6 +251,32 @@ _AGENT_SCRATCH_DIRS: tuple[str, ...] = (
 )
 
 
+PREFLIGHT_PROBE = "read-only verifier execution probe"
+PREFLIGHT_MARKER = "ortus-readonly-probe-ok"
+_PREFLIGHT_SCRATCH = "ortus-preflight"
+
+
+def _preflight_script(home: Path) -> str:
+    """The trivial command the verification preflight runs in the sandbox.
+
+    `echo ok` alone would not have caught the failure this guards: the sandbox
+    ran `echo` fine and the agent CLI still could not open a shell, because the
+    read-only root left its per-session dirs unwritable. So the probe first
+    writes what the CLI writes to start, then prints its marker.
+    """
+
+    steps = []
+    for relative in _AGENT_SCRATCH_DIRS:
+        if not (home / relative).is_dir():
+            continue
+        # Created and removed in the same breath: on Linux this lands in a
+        # discarded tmpfs, but the macOS posture writes the real directory, and
+        # a probe has no business leaving anything behind.
+        probe_dir = shlex.quote(str(home / relative / _PREFLIGHT_SCRATCH))
+        steps.append(f"mkdir -p {probe_dir} && rmdir {probe_dir}")
+    return " && ".join([*steps, f"echo {PREFLIGHT_MARKER}"])
+
+
 def _agent_scratch_tmpfs(home: Path) -> list[str]:
     """`--tmpfs` args for agent scratch dirs that exist on this host.
 
@@ -209,6 +291,48 @@ def _agent_scratch_tmpfs(home: Path) -> list[str]:
         if candidate.is_dir():
             args.extend(["--tmpfs", str(candidate)])
     return args
+
+
+# Config the agent CLI reads out of the repo's .claude/ and must keep seeing
+# once that directory is made writable below.
+_REPO_AGENT_CONFIG: tuple[str, ...] = ("settings.json", "settings.local.json")
+
+
+def _repo_agent_dir_tmpfs(repo: Path) -> list[str]:
+    """Make the repo's `.claude/` writable without losing its config.
+
+    The agent CLI runs its own inner sandbox, which materialises bind-mount
+    placeholders under `<repo>/.claude` for every deny-within-allow rule it
+    carries (`hooks`, `skills`, `.cc-writes`, ...). Those paths need not exist
+    on disk, and `--ro-bind / /` leaves the repo tree read-only, so the inner
+    sandbox cannot create them and refuses to start:
+
+        bwrap: Can't create file at <repo>/.claude/hooks: Read-only file system
+
+    An empty tmpfs over the directory lets the inner sandbox create whatever it
+    needs, and the config files are re-bound read-only on top so the CLI still
+    reads the project's real settings. Pre-creating individual placeholders was
+    the alternative and loses to this: the deny list is a moving target owned by
+    the CLI, not by ortus. The source tree outside `.claude/` stays read-only,
+    so the candidate is as protected as before (ortus-dyio).
+    """
+
+    claude_dir = repo / ".claude"
+    if not claude_dir.is_dir():
+        return []
+    args = ["--tmpfs", str(claude_dir)]
+    for name in _REPO_AGENT_CONFIG:
+        config = claude_dir / name
+        if config.is_file():
+            # Target sits inside the tmpfs, so bwrap creates the mountpoint.
+            args.extend(["--ro-bind", str(config), str(config)])
+    return args
+
+
+def _seatbelt_literal(path: Path) -> str:
+    """Escape a path for a Seatbelt string literal."""
+
+    return str(path.resolve()).replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
@@ -231,6 +355,7 @@ def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
             *_agent_scratch_tmpfs(Path.home()),
         ]
         resolved_repo = repo.resolve()
+        wrapper.extend(_repo_agent_dir_tmpfs(resolved_repo))
         try:
             relative_to_tmp = resolved_repo.relative_to("/tmp")
         except ValueError:
@@ -243,11 +368,19 @@ def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
             wrapper.extend(["--ro-bind", str(resolved_repo), str(resolved_repo)])
         return [*wrapper, "--chdir", str(resolved_repo), "--", *argv]
     if system == "Darwin":
-        repo_literal = str(repo.resolve()).replace("\\", "\\\\").replace('"', '\\"')
+        repo_literal = _seatbelt_literal(repo)
+        # Seatbelt is last-match-wins, so the agent scratch dirs are allowed
+        # before the candidate is denied: the CLI gets the per-session dirs it
+        # needs to start (the same ones Linux hands a tmpfs) and the candidate
+        # stays unwritable regardless of where $HOME sits.
+        scratch = " ".join(
+            f'(subpath "{_seatbelt_literal(Path.home() / relative)}")'
+            for relative in _AGENT_SCRATCH_DIRS
+        )
         profile = (
             "(version 1) (allow default) (deny file-write*) "
             '(allow file-write* (subpath "/tmp") (subpath "/private/tmp") '
-            '(subpath "/dev")) '
+            f'(subpath "/dev") {scratch}) '
             f'(deny file-write* (subpath "{repo_literal}"))'
         )
         return ["sandbox-exec", "-p", profile, *argv]

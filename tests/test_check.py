@@ -73,6 +73,13 @@ def _fake_sandbox_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         "smoke_test",
         lambda: SandboxInfo(platform="Linux", binary="bwrap"),
     )
+    # The verifier preflight shells out; these tests replace subprocess.run
+    # wholesale, so a healthy posture has to be stated rather than executed.
+    monkeypatch.setattr(
+        check_mod.ClaudeRunner,
+        "preflight_readonly",
+        lambda self, repo, **kwargs: None,
+    )
 
 
 # --- acceptance tests ------------------------------------------------------
@@ -130,6 +137,56 @@ def test_check_fails_on_missing_sandbox(
     assert result.exit_code == 1
     assert "sandbox" in result.stdout
     assert "FAIL" in result.stdout
+
+
+def test_check_reports_a_verifier_sandbox_that_cannot_execute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-dyio AC-2: the blocked-execution condition is visible before a run."""
+    from ortus.core.claude import ReadOnlyExecutionBlocked
+
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+
+    def _blocked(self, repo: Path, **kwargs: object) -> None:
+        raise ReadOnlyExecutionBlocked(
+            "read-only verifier execution probe failed: mkdir: cannot create "
+            "directory: Read-only file system\n  agent session-env: /nowhere"
+        )
+
+    monkeypatch.setattr(check_mod.ClaudeRunner, "preflight_readonly", _blocked)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    # The table wraps long cells across rows, so drop the borders too.
+    compact = "".join(c for c in result.stdout if not c.isspace() and c != "│")
+    assert "verifiersandbox" in compact
+    assert "executionprobefailed" in compact
+    assert "Read-onlyfilesystem" in compact
+
+
+def test_check_skips_the_verifier_probe_for_codex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Codex verifier is unwrapped, so there is no posture to probe."""
+    repo = tmp_path / "codex-probe"
+    (repo / ".beads").mkdir(parents=True)
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text(
+        'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
+    )
+    (repo / ".ortusrc").write_text('backend = "codex"\n')
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+
+    def _never(self, repo: Path, **kwargs: object) -> None:
+        raise AssertionError("the Codex backend must not run the Claude preflight")
+
+    monkeypatch.setattr(check_mod.ClaudeRunner, "preflight_readonly", _never)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "verifier sandbox" not in result.stdout
 
 
 def _snapshot_mtimes(root: Path) -> dict[str, tuple[float, int]]:

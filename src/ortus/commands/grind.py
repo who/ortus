@@ -50,7 +50,7 @@ from ortus.core.agent import (
     resolve_backend,
 )
 from ortus.core.bd import BdClient
-from ortus.core.claude import ClaudeRunner
+from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import (
     CodeGraphAdapter,
     CodeGraphMode,
@@ -467,6 +467,25 @@ def _verify_candidate(
     persistence path — a correction that got a weaker verifier would defeat the
     whole transaction.
     """
+
+    # Preflight before anything is journaled or dispatched. A sandbox that
+    # cannot execute commands is not something a correction worker or a
+    # planning pass can fix, and both were observed spending attempts on
+    # exactly that, so this aborts the run instead of producing a report that
+    # reads like a judgement of the code (ortus-dyio).
+    preflight = getattr(runner, "preflight_readonly", None)
+    if callable(preflight):
+        try:
+            preflight(repo)
+        except ReadOnlyExecutionBlocked as exc:
+            bd.update_status(issue_id, "open")
+            lines = str(exc).splitlines()
+            write_log(f"iter {iteration}: HALT — {lines[0]}")
+            output.error(
+                f"grind: {lines[0]}",
+                hint="\n".join(lines[1:]) or None,
+            )
+            raise typer.Exit(code=1)
 
     expected_criteria = dict.fromkeys(
         re.findall(r"\bAC-\d+\b", str(packet.get("acceptance_criteria", "")))
@@ -1445,7 +1464,14 @@ def grind(
         help="Seconds to sleep after a no-change iteration (suspected evaluator false-positive).",
     ),
     worker_timeout: int = typer.Option(
-        1800,
+        # 1800 predated the candidate transaction, when a worker implemented and
+        # stopped. A worker now runs the packet's targeted suite during
+        # implementation and a fresh verifier runs it again, and bd costs about
+        # a second per invocation, so the changed-surface suites here take 10-15
+        # minutes each. Real workers were killed mid-verification at 30 minutes
+        # holding finished work (ortus-6ur4), which strands a candidate rather
+        # than bounding a hang. 5400 still bounds a genuine hang.
+        5400,
         "--worker-timeout",
         help=(
             "Hard cap (secs) on a single iteration's worker subprocess. On exceed, "

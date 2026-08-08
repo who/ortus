@@ -127,6 +127,48 @@ def test_readonly_wrapper_gives_agent_scratch_dirs_a_writable_tmpfs(
     assert argv[:4] == ["bwrap", "--ro-bind", "/", "/"]
 
 
+def test_readonly_wrapper_makes_repo_claude_dir_writable_keeping_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-dyio: the agent's inner sandbox materialises bind-mount
+    placeholders under <repo>/.claude, which a read-only repo tree blocks."""
+    monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    repo = tmp_path / "repo"
+    (repo / ".claude").mkdir(parents=True)
+    (repo / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+
+    argv = _readonly_wrapper(["claude", "-p", "verify"], repo)
+
+    claude_dir = str((repo / ".claude").resolve())
+    settings = str((repo / ".claude" / "settings.json").resolve())
+    tmpfs = {argv[i + 1] for i, tok in enumerate(argv) if tok == "--tmpfs"}
+    assert claude_dir in tmpfs, "the repo .claude dir must be writable"
+    # Re-bound on top of the tmpfs, so the CLI still reads project settings.
+    assert any(
+        tok == "--ro-bind" and argv[i + 1 : i + 3] == [settings, settings]
+        for i, tok in enumerate(argv)
+    ), f"settings.json not re-exposed in {argv}"
+    assert argv.index("--tmpfs" ) < argv.index(settings), "tmpfs must precede the bind"
+    # Absent optional config is skipped rather than bound from nowhere.
+    assert str((repo / ".claude" / "settings.local.json").resolve()) not in argv
+    # The candidate outside .claude/ is still read-only.
+    assert argv[:4] == ["bwrap", "--ro-bind", "/", "/"]
+
+
+def test_readonly_wrapper_skips_repo_claude_dir_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    argv = _readonly_wrapper(["claude", "-p", "verify"], repo)
+
+    assert str((repo / ".claude").resolve()) not in argv
+
+
 # --- tee-to-log-not-terminal -----------------------------------------------
 
 

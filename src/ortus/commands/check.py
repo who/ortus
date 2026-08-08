@@ -18,6 +18,7 @@ import typer
 
 from ortus.core import output, sandbox
 from ortus.core.agent import BackendError, resolve_backend
+from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.config import load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.prompts import (
@@ -77,6 +78,23 @@ def check_sandbox() -> CheckResult:
     except sandbox.SandboxUnavailable as exc:
         return CheckResult("sandbox", False, str(exc).splitlines()[0])
     return CheckResult("sandbox", True, f"{info.platform} → {info.binary}")
+
+
+def check_verifier_execution(repo: Path) -> CheckResult:
+    """Run the verification preflight so a blocked sandbox is visible up front.
+
+    `check_sandbox` only proves the sandbox *binary* is installed. A posture
+    that launches but cannot execute a command is the condition that made
+    verifiers report every criterion blocked, and it is worth catching before
+    a run rather than mid-run (ortus-dyio).
+    """
+
+    name = "verifier sandbox"
+    try:
+        ClaudeRunner().preflight_readonly(repo)
+    except ReadOnlyExecutionBlocked as exc:
+        return CheckResult(name, False, str(exc).splitlines()[0])
+    return CheckResult(name, True, "read-only posture executed a command")
 
 
 def check_beads_dir(repo: Path) -> CheckResult:
@@ -237,6 +255,9 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     ]
     if backend == "claude":
         repo_checks.append((check_hooks, "hooks"))
+        # Claude-only: the Codex verifier is not wrapped, so it has no
+        # read-only posture to probe.
+        repo_checks.append((check_verifier_execution, "verifier sandbox"))
     repo_checks.extend(
         [
             (check_ortusrc, ".ortusrc"),

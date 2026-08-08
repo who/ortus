@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
+from ortus.core import claude as claude_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import Phase
@@ -634,6 +636,155 @@ def test_verifier_report_and_mutation_isolation(
     else:
         assert journal is not None and journal.phase == expected_phase
         assert status == "in_progress", "a rejected candidate keeps its claim"
+
+
+def test_verification_can_execute_a_trivial_command_on_this_host() -> None:
+    """ortus-dyio AC-1: the read-only verifier posture still runs commands.
+
+    Exercises the real wrapper, not a stand-in: the failure this covers was a
+    posture that launched fine and then could not open a shell, which only a
+    genuine sandbox launch reproduces.
+    """
+    system = platform.system()
+    if system not in {"Linux", "Darwin"}:
+        pytest.skip(f"no read-only verifier posture on {system}")
+    if system == "Linux" and shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap not installed")
+    ClaudeRunner().preflight_readonly(Path.cwd())
+
+
+def test_verification_preflight_catches_an_unwritable_agent_scratch_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe asserts on what the agent CLI needs, not just on `echo`.
+
+    A bare `echo ok` succeeded throughout the incident; what failed was the
+    CLI's own per-session directory write, so that is what the probe drives.
+    """
+    if platform.system() != "Linux" or shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap posture required")
+    home = tmp_path / "home"
+    (home / ".claude" / "session-env").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    # The pre-fix posture: a read-only root with no tmpfs over the scratch dirs.
+    monkeypatch.setattr(claude_mod, "_agent_scratch_tmpfs", lambda _home: [])
+
+    with pytest.raises(claude_mod.ReadOnlyExecutionBlocked) as caught:
+        ClaudeRunner().preflight_readonly(tmp_path)
+
+    message = str(caught.value)
+    assert claude_mod.PREFLIGHT_PROBE in message
+    assert "Read-only file system" in message
+    assert str(home / ".claude" / "session-env") in message
+
+
+def _blocked_verifier_grind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> tuple[object, Path, str, list[str]]:
+    """Run one grind whose verification preflight reports a blocked sandbox."""
+    repo = _bd_repo(tmp_path, name)
+    issue_id = _create_ready_issue(repo, "candidate awaiting a working verifier")
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    prompts: list[str] = []
+
+    class BlockedVerifierRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            assert not readonly, "the verifier must not launch once the probe fails"
+            prompts.append(prompt)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            (repo / "candidate.py").write_text("VALUE = 1\n")
+            return 0
+
+        def preflight_readonly(self, repo: Path, **kwargs: object) -> None:
+            raise claude_mod.ReadOnlyExecutionBlocked(
+                f"{claude_mod.PREFLIGHT_PROBE} failed: mkdir: cannot create "
+                "directory: Read-only file system\n"
+                "  agent session-env: /home/nobody/.claude/session-env"
+            )
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: BlockedVerifierRunner())
+
+    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1"])
+    return result, repo, issue_id, prompts
+
+
+def test_verification_preflight_aborts_the_run_naming_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-dyio AC-2: a sandbox that cannot execute stops the run outright."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    result, repo, issue_id, _ = _blocked_verifier_grind(
+        tmp_path, monkeypatch, "preflightabort"
+    )
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert claude_mod.PREFLIGHT_PROBE in combined
+    assert "Read-only file system" in combined
+    assert "session-env" in combined
+    log = _grind_log(repo)
+    assert f"HALT — {claude_mod.PREFLIGHT_PROBE} failed" in log
+    assert _issue(repo, issue_id)["status"] == "open", "the issue stays claimable"
+
+
+def test_blocked_verification_spends_no_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-dyio AC-3: no correction attempt, no plan-gap route, no commit."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    result, repo, issue_id, prompts = _blocked_verifier_grind(
+        tmp_path, monkeypatch, "noblockedbudget"
+    )
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    journal = JournalStore(repo).load()
+    assert journal is not None, "the candidate transaction is preserved"
+    assert journal.corrections == 0
+    assert journal.plan_gap_routed is False
+    assert journal.verifier_refs == ()
+    # One implementation worker ran; no correction or plan-gap worker followed.
+    assert len(prompts) == 1, prompts
+    comments = subprocess.run(
+        ["bd", "comments", issue_id, "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Ortus correction escalation" not in comments
+    assert "ORTUS_VERDICT" not in comments
+    head = subprocess.run(
+        ["git", "log", "--oneline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert head.splitlines()[0].endswith(
+        "fixture baseline"
+    ), f"the abort must not commit the candidate: {head}"
 
 
 def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
