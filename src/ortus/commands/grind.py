@@ -3434,11 +3434,15 @@ def grind(
                                 "grind: closed Codex issue has no ownership journal"
                             )
                             raise typer.Exit(code=1)
+                        # The disowned set belongs in this baseline like every
+                        # other ownership check: the paths are still dirty
+                        # because grind honored the declaration, and the commit
+                        # below takes exactly what this capture calls owned.
                         active_journal = _capture_codex_candidate(
                             git,
                             transaction_store,
                             active_journal,
-                            codex_baseline,
+                            _candidate_baseline(active_journal, codex_baseline),
                             phase="finalizing",
                         )
                         owned_paths = frozenset(active_journal.candidate_paths)

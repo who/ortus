@@ -858,6 +858,152 @@ def test_disown_refusal_is_not_fatal_and_costs_no_correction_attempt(
 
 
 # ---------------------------------------------------------------------------
+# ortus-8nzp — a disowned path is never candidate drift, on any route
+# ---------------------------------------------------------------------------
+
+
+STRANDED = "stranded-notes.txt"
+
+
+def _resume_with_a_stranded_inherited_path(repo: Path, issue_id: str) -> None:
+    """Set up a resume whose inherited work includes one foreign leftover.
+
+    The journal attributes `INHERITED` to the claimed issue, so only `STRANDED`
+    — dirty since before the resume and attributed to nobody — is disownable.
+    """
+    (repo / STRANDED).write_text("left behind by somebody else\n")
+    (repo / INHERITED).write_text("the prior attempt at this issue\n")
+    _stage_journal(
+        repo, issue_id, phase="corrections-exhausted", paths=frozenset({INHERITED})
+    )
+
+
+def test_resume_with_disowned_reaches_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed run that disowns inherited work is judged on its merits.
+
+    Grind honors the declaration and leaves the path dirty, so every later
+    ownership re-check must subtract the same disowned set. One that does not
+    sees the untouched leftover as a path the read-only verifier added, and
+    rejects a sound verdict as candidate drift.
+    """
+    repo, issue_id = _seed(tmp_path, "rec18")
+    _resume_with_a_stranded_inherited_path(repo, issue_id)
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(
+            implement=_shipped_and_declares(STRANDED), verify=_pass_verdict
+        ),
+    )
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert "mutated the candidate" not in log, (
+        "the disowned leftover must not read as verifier tampering"
+    )
+    assert "candidate path set changed" not in log
+    assert _issue(repo, issue_id)["status"] == "closed"
+    committed = _committed_paths(repo)
+    assert {CANDIDATE, INHERITED} <= committed
+    assert STRANDED not in committed
+    assert (repo / STRANDED).read_text() == "left behind by somebody else\n"
+    dirty = GitClient(repo=repo).dirty_paths()
+    assert dirty is not None and STRANDED in dirty
+
+
+def test_resume_with_disowned_still_rejects_a_real_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: subtracting the disowned set must not blunt the
+    guard. A verifier that genuinely edits the candidate is still rejected, and
+    nothing is closed or committed."""
+    repo, issue_id = _seed(tmp_path, "rec19")
+    _resume_with_a_stranded_inherited_path(repo, issue_id)
+
+    def verify(repo: Path, log_path: Path) -> int:
+        (repo / CANDIDATE).write_text("SHIPPED = True\n# the verifier edited this\n")
+        return _pass_verdict(repo, log_path)
+
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(implement=_shipped_and_declares(STRANDED), verify=verify),
+    )
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert "mutated the candidate" in _log(repo)
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert CANDIDATE not in _committed_paths(repo)
+    assert (repo / STRANDED).read_text() == "left behind by somebody else\n"
+
+
+def test_legacy_codex_commit_never_takes_disowned_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy `--condition` Codex route commits whatever its capture calls
+    owned, so that capture must subtract the disowned set like every other
+    ownership check — otherwise the one route that skips the verifier is also
+    the one that commits work a worker declared was not its own."""
+    repo, issue_id = _seed(tmp_path, "rec20")
+    _resume_with_a_stranded_inherited_path(repo, issue_id)
+
+    class ClosingCodex:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self, prompt: str, *, repo: Path, log_path: Path, **kwargs: object
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            (repo / CANDIDATE).write_text("SHIPPED = True\n")
+            (repo / DECLARATION).parent.mkdir(parents=True, exist_ok=True)
+            (repo / DECLARATION).write_text(f"{STRANDED}\n")
+            subprocess.run(
+                ["bd", "close", issue_id, "--reason", "legacy codex completed it"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            return 0
+
+    _install(monkeypatch, tmp_path, ClosingCodex())
+
+    result = _grind(
+        repo,
+        "--backend",
+        "codex",
+        "--condition",
+        "Finish the claimed issue.",
+        "--iterations",
+        "1",
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert _issue(repo, issue_id)["status"] == "closed"
+    # The owned commit is not HEAD here: a tracker-export checkpoint follows it.
+    committed = set(
+        subprocess.run(
+            ["git", "log", "--name-only", "--format=", "-3"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+    )
+    assert {CANDIDATE, INHERITED} <= committed
+    assert STRANDED not in committed
+    assert (repo / STRANDED).read_text() == "left behind by somebody else\n"
+    dirty = GitClient(repo=repo).dirty_paths()
+    assert dirty is not None and STRANDED in dirty
+
+
+# ---------------------------------------------------------------------------
 # AC-6 — each failure phase resumes, and only real ambiguity needs a human
 # ---------------------------------------------------------------------------
 
