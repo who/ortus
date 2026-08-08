@@ -14,13 +14,17 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import inspect
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from typer.models import OptionInfo
+
 from ortus.commands import dashboard as dash
-from ortus.core.runstate import RunSnapshot
+from ortus.core.runstate import RunSnapshot, RunWarning
 from ortus.core.transaction import CandidateJournal, JournalStore
 
 _MODULE_SOURCE = Path(dash.__file__).read_text(encoding="utf-8")
@@ -346,8 +350,11 @@ def test_shell_names_every_region_of_the_layout(tmp_path: Path) -> None:
         assert titles[spec.key][0] == spec.title
         assert titles[spec.key][1]
     # Panel content belongs to the panel leaves; the shell only reserves space.
-    for key in ("current-action", "candidate", "verdict", "warnings"):
+    for key in ("current-action", "candidate", "verdict"):
         assert titles[key][1] == dash.PLACEHOLDER
+    # Warnings is filled by this leaf, so it states a finding rather than
+    # holding space: a quiet region must read as "nothing fired".
+    assert titles["warnings"][1] == dash.NO_WARNINGS
 
 
 def test_refresh_carries_the_offset_between_ticks(tmp_path: Path) -> None:
@@ -486,6 +493,383 @@ def test_visual_contract_pulse_advances_every_tick() -> None:
 
     snapshot = RunSnapshot()
     assert dash.pulse_line(snapshot, 1) != dash.pulse_line(snapshot, 2)
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.7 AC-1/AC-2: warnings, with the ortus line as evidence
+# ---------------------------------------------------------------------------
+
+#: The line grind writes when the watchdog kills a worker mid-flight, copied
+#: from its own `write_log` call so the fixture cannot drift from reality.
+_WATCHDOG_LINE = "iter 1: worker TIMEOUT after 1800s, killed (rc=143)"
+
+
+def _warned_repo(tmp_path: Path, name: str, body: str) -> Path:
+    """A repository whose grind log is exactly `body`."""
+
+    repo = tmp_path / name
+    (repo / "logs").mkdir(parents=True)
+    JournalStore(repo).save(
+        CandidateJournal(
+            issue_id="ortus-0udo.7",
+            base_head="abc1234def",
+            baseline_paths=(),
+            baseline_fingerprints={},
+            phase="implementation",
+            attempt=1,
+        )
+    )
+    (repo / "logs" / "grind-20260808-221000.log").write_text(body, encoding="utf-8")
+    return repo
+
+
+def test_warning_real_timeout_shows_one_warning_with_its_ortus_line(
+    tmp_path: Path,
+) -> None:
+    """AC-1: a real watchdog kill is one warning, carrying the line that said so."""
+
+    repo = _warned_repo(
+        tmp_path,
+        "killed",
+        "[2026-08-08 22:10:00] iter 1: worker started\n"
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"text","text":"running the suite"}]}}\n'
+        f"[2026-08-08 22:40:00] {_WATCHDOG_LINE}\n",
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().warnings
+
+    assert app.snapshot.warning_counts == {"timeout": 1}
+    # A count alone is what made the stopgap script untrustworthy, so the line
+    # an operator would judge the claim by is on screen with it.
+    assert "timeout 1" in panel
+    assert _WATCHDOG_LINE in panel
+    assert "22:40:00" in panel
+    assert dash.region_state("warnings", app.snapshot) == "state-failed"
+
+
+def test_warning_appears_live_rather_than_only_at_the_end_of_a_run(
+    tmp_path: Path,
+) -> None:
+    """Step 2: the warning shows on the tick after it is written, run still live."""
+
+    repo = _warned_repo(
+        tmp_path, "live-warning", "[2026-08-08 22:10:00] iter 1: worker started\n"
+    )
+    log = repo / "logs" / "grind-20260808-221000.log"
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+
+    assert app.advance().warnings == dash.NO_WARNINGS
+    assert dash.region_state("warnings", app.snapshot) == "state-idle"
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(f"[2026-08-08 22:40:00] {_WATCHDOG_LINE}\n")
+
+    panel = app.advance().warnings
+    assert _WATCHDOG_LINE in panel
+    # The run has not ended: the point is seeing the failure develop.
+    assert not app.snapshot.terminal
+    assert dash.region_state("warnings", app.snapshot) == "state-failed"
+
+
+def test_warning_no_false_positive_when_agent_content_quotes_the_vocabulary(
+    tmp_path: Path,
+) -> None:
+    """AC-2: a worker editing the recovery code produces no warnings at all.
+
+    This is the exact failure the stopgap script had: it matched the transcript
+    rather than the ortus lines and reported seven timeouts that never
+    happened. The discrimination lives in the model; this asserts the panel
+    inherits it rather than re-deriving it.
+    """
+
+    repo = _warned_repo(
+        tmp_path,
+        "quoting",
+        "[2026-08-08 22:10:00] iter 1: worker started\n"
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"text","text":"editing recovery code: '
+        f'{_WATCHDOG_LINE}"}}]}}}}\n'
+        '{"type":"assistant","message":{"role":"assistant","content":'
+        '[{"type":"tool_use","name":"Edit","input":'
+        '{"file_path":"grind.py","description":"correction escalation, '
+        'attempts exhausted, plan gap, HALT"}}]}}\n'
+        '{"type":"user","message":{"role":"user","content":"rejected"}}\n',
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+
+    assert app.snapshot.warnings == ()
+    assert app.snapshot.warning_counts == {}
+    assert frame.warnings == dash.NO_WARNINGS
+    assert dash.region_state("warnings", app.snapshot) == "state-idle"
+
+
+def test_warning_panel_counts_every_kind_and_elides_the_oldest_evidence() -> None:
+    """Counts cover the run; the evidence window shows the newest and says so."""
+
+    warnings = tuple(
+        RunWarning(kind="timeout", text=f"iter {i}: worker TIMEOUT after 1800s")
+        for i in range(dash.WARNING_EVIDENCE_LINES + 3)
+    ) + (RunWarning(kind="escalation", text="correction escalation recorded"),)
+    snapshot = RunSnapshot(journal_present=True, warnings=warnings)
+
+    panel = dash.warnings_panel(snapshot)
+    assert dash.warning_summary(snapshot) == (
+        f"escalation 1   timeout {dash.WARNING_EVIDENCE_LINES + 3}"
+    )
+    elided = len(warnings) - dash.WARNING_EVIDENCE_LINES
+    assert f"({elided} earlier not shown)" in panel
+    # Nothing is dropped silently: the elided ones are still in the counts.
+    assert len(dash.warning_evidence(snapshot)) == dash.WARNING_EVIDENCE_LINES
+    assert "correction escalation recorded" in panel
+    assert "iter 0:" not in panel
+
+    long_line = "x" * (dash.WARNING_TEXT_CHARS * 2)
+    clipped = dash.warnings_panel(
+        RunSnapshot(warnings=(RunWarning(kind="halt", text=long_line),))
+    )
+    assert all(len(line) < dash.WARNING_TEXT_CHARS + 40 for line in clipped.splitlines())
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.7 AC-3: replay of a finished run
+# ---------------------------------------------------------------------------
+
+
+def _finished_run(
+    tmp_path: Path,
+    name: str,
+    *,
+    phase: str = "finalized-verified",
+    log_name: str = "grind-20260808-221000.log",
+    body: str | None = None,
+) -> tuple[Path, Path]:
+    """A repository holding one finished run; returns the repo and its log."""
+
+    repo = tmp_path / name
+    (repo / "logs").mkdir(parents=True)
+    JournalStore(repo).save(
+        CandidateJournal(
+            issue_id="ortus-0udo.7",
+            base_head="abc1234def",
+            baseline_paths=(),
+            baseline_fingerprints={},
+            candidate_paths=("src/ortus/commands/dashboard.py",),
+            candidate_hash="deadbeefcafe",
+            phase=phase,
+            attempt=1,
+        )
+    )
+    log = repo / "logs" / log_name
+    log.write_text(
+        body
+        if body is not None
+        else (
+            "[2026-08-08 22:10:00] iter 1: worker started\n"
+            f"[2026-08-08 22:40:00] {_WATCHDOG_LINE}\n"
+        ),
+        encoding="utf-8",
+    )
+    return repo, log
+
+
+def test_replay_finished_run_renders_the_same_panels_and_how_it_ended(
+    tmp_path: Path,
+) -> None:
+    """AC-3: replay is the live view pointed at a finished run, plus its ending."""
+
+    repo, log = _finished_run(tmp_path, "done", phase="corrections-exhausted")
+    before = _fingerprint(repo)
+    source = dash.resolve_replay(log)
+    assert source.repo == repo
+
+    app = dash.DashboardApp(source.repo, refresh_seconds=3600, replay=source)
+    seen: dict[str, Any] = {}
+
+    async def _steps(pilot: Any) -> None:
+        app.refresh_run()
+        await pilot.pause()
+        seen["regions"] = {
+            region.spec.key: (region.border_title, region.body)
+            for region in app.query(dash.Region)
+        }
+        seen["screen"] = _screen_text(app)
+
+    _drive(app, _steps)
+
+    # The same panels, titled the same way: one renderer, two sources.
+    assert set(seen["regions"]) == {spec.key for spec in dash.REGIONS}
+    for spec in dash.REGIONS:
+        assert seen["regions"][spec.key][0] == spec.title
+
+    header = seen["regions"]["header"][1]
+    assert "replay" in header
+    assert "ortus-0udo.7" in header
+    # Two runs share a log directory, so the filename is what names this one.
+    assert log.name in header
+    # How it ended, and at which phase.
+    assert "correction attempts exhausted" in header
+    assert "corrections-exhausted" in header
+
+    assert _WATCHDOG_LINE in seen["regions"]["warnings"][1]
+    assert app.snapshot.terminal
+    assert dash.region_state("header", app.snapshot) == "state-ended"
+    # A replayed run must never write to the repository, exactly as live does not.
+    assert _fingerprint(repo) == before
+
+
+def test_replay_of_a_clean_run_does_not_invent_a_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    """A run that ended cleanly says so rather than being given a failure."""
+
+    repo, log = _finished_run(
+        tmp_path,
+        "clean",
+        body="[2026-08-08 22:10:00] iter 1: worker started\n"
+        "[2026-08-08 22:40:00] iter 1: verified\n",
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
+    frame = app.advance()
+
+    assert dash.CLEAN_OUTCOME in frame.header
+    assert "finalized-verified" in frame.header
+    assert frame.warnings == dash.NO_WARNINGS
+    for failed in dash.OUTCOMES.values():
+        assert failed not in frame.header
+
+
+def test_replay_renders_an_unknown_terminal_phase_verbatim(tmp_path: Path) -> None:
+    """An older run whose vocabulary has since changed renders what it can."""
+
+    repo, log = _finished_run(tmp_path, "old", phase="retired-phase-name")
+    app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
+    assert "retired-phase-name" in app.advance().header
+
+
+def test_replay_of_a_run_whose_journal_is_gone_renders_from_the_log_alone(
+    tmp_path: Path,
+) -> None:
+    """The log outlives the journal, and is still worth reading on its own."""
+
+    repo, log = _finished_run(tmp_path, "orphan-log")
+    JournalStore(repo).path.unlink()
+
+    app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
+    frame = app.advance()
+
+    assert app.snapshot.idle
+    assert dash.NO_JOURNAL_OUTCOME in frame.header
+    assert log.name in frame.header
+    # The warnings still come off the log, which is the point of replaying it.
+    assert _WATCHDOG_LINE in frame.warnings
+
+
+def test_replay_distinguishes_two_runs_sharing_one_log_directory(
+    tmp_path: Path,
+) -> None:
+    """Filename is what tells two runs in one logs/ tree apart."""
+
+    repo, first = _finished_run(tmp_path, "pair", log_name="grind-20260808-100000.log")
+    second = repo / "logs" / "grind-20260808-220000.log"
+    second.write_text(
+        "[2026-08-08 22:00:00] iter 1: correction attempts exhausted\n",
+        encoding="utf-8",
+    )
+
+    headers = {}
+    panels = {}
+    for log in (first, second):
+        app = dash.DashboardApp(
+            repo, refresh_seconds=3600, replay=dash.resolve_replay(log)
+        )
+        frame = app.advance()
+        headers[log.name] = frame.header
+        panels[log.name] = frame.warnings
+
+    assert first.name in headers[first.name]
+    assert second.name in headers[second.name]
+    assert headers[first.name] != headers[second.name]
+    assert "timeout" in panels[first.name]
+    assert "exhausted" in panels[second.name]
+
+
+def test_replay_follows_a_log_that_is_still_being_written(tmp_path: Path) -> None:
+    """A run still in flight replays up to its current end and keeps up."""
+
+    repo, log = _finished_run(
+        tmp_path,
+        "growing",
+        phase="implementation",
+        body="[2026-08-08 22:10:00] iter 1: worker started\n",
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
+
+    frame = app.advance()
+    assert "no terminal state recorded" in frame.header
+    assert frame.warnings == dash.NO_WARNINGS
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(f"[2026-08-08 22:40:00] {_WATCHDOG_LINE}\n")
+    assert _WATCHDOG_LINE in app.advance().warnings
+
+
+def test_replay_resolves_the_journal_from_the_log_directory(tmp_path: Path) -> None:
+    """Step 3: the journal comes from the log's own tree, not the caller's cwd."""
+
+    repo, log = _finished_run(tmp_path, "resolve")
+    assert dash.resolve_replay(log) == dash.ReplaySource(log_path=log, repo=repo)
+
+    # A log copied somewhere with no logs/ parent still resolves to a directory
+    # rather than raising; the journal is simply absent there.
+    loose = tmp_path / "elsewhere" / "grind-copy.log"
+    loose.parent.mkdir()
+    loose.write_text("[2026-08-08 22:10:00] iter 1: worker started\n", encoding="utf-8")
+    assert dash.resolve_replay(loose).repo == loose.parent
+
+    app = dash.DashboardApp(
+        loose.parent, refresh_seconds=3600, replay=dash.resolve_replay(loose)
+    )
+    assert app.advance().header.splitlines()[1] == dash.NO_JOURNAL_OUTCOME
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.7 AC-4: live mode is unchanged by the presence of replay
+# ---------------------------------------------------------------------------
+
+
+def test_live_mode_is_unchanged_by_the_presence_of_the_replay_flag(
+    tmp_path: Path,
+) -> None:
+    """AC-4: no replay means the newest log, an unadorned header, as before."""
+
+    repo = _live_repo(tmp_path)
+    # A second, older log proves live mode still chooses rather than being
+    # pinned: replay is the only thing that pins a log.
+    older = repo / "logs" / "grind-20260808-090000.log"
+    older.write_text("[2026-08-08 09:00:00] iter 1: HALT stale\n", encoding="utf-8")
+    os.utime(older, (0, 0))
+
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    assert app.replay is None
+    frame = app.advance()
+
+    assert app.snapshot.log_path == repo / "logs" / "grind-20260808-221000.log"
+    assert "replay" not in frame.header
+    assert frame.header == dash.header_line(app.snapshot)
+    assert "\n" not in frame.header
+    assert frame.warnings == dash.NO_WARNINGS
+
+
+def test_replay_option_is_registered_on_the_verb() -> None:
+    """AC-4: replay is a flag on this verb rather than a verb of its own."""
+
+    params = inspect.signature(dash.dashboard).parameters
+    assert list(params) == ["repo", "replay"]
+    default = params["replay"].default
+    assert isinstance(default, OptionInfo)
+    assert "--replay" in default.param_decls
 
 
 def test_visual_contract_colour_carries_meaning() -> None:

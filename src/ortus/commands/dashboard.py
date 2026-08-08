@@ -20,6 +20,22 @@ is the pulse: one element that advances on every tick, so a healthy run looks
 alive and a stalled one is obvious by its stillness. An operator once watched a
 silent tail for hours unable to tell progress from death.
 
+The warnings region and replay are ortus-0udo.7. Three conditions ended runs
+repeatedly in one session — a watchdog killing a worker mid-flight, correction
+attempts exhausting into a human label, and a verifier unable to execute any
+command — and each was diagnosed only afterwards by reading logs by hand. The
+region therefore shows each warning with the ortus line that produced it rather
+than a bare count: the stopgap script that reported seven phantom timeouts is
+why a count alone is not something an operator can act on, and the evidence is
+what lets them judge the claim. Which lines count is decided in
+`ortus.core.runstate`, so live and replay cannot disagree about the vocabulary.
+
+Replay (`--replay <log>`) points the same panels at a finished run and resolves
+that run's journal from the log's own directory, so a run explains itself the
+same way whether it is live or finished and there is one renderer to keep
+correct. It is a flag on this verb rather than a verb of its own because only
+the source differs.
+
 Refresh is a timer over the incremental snapshot rather than a filesystem
 watcher: a watcher on a repo under active test churn wakes constantly for paths
 nothing here displays. Colour carries meaning rather than decoration — one
@@ -33,6 +49,7 @@ pictograph.
 
 from __future__ import annotations
 
+import datetime as _dt
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +62,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from ortus.core import output
-from ortus.core.runstate import RunSnapshot, read_snapshot
+from ortus.core.runstate import TERMINAL_PHASES, RunSnapshot, read_snapshot
 
 #: Seconds between refreshes. A tick reads only the bytes the log grew by, so
 #: this is cheap even against the megabyte logs a long session produces.
@@ -64,6 +81,36 @@ _PULSE_RULE = "─"  # box-drawing horizontal
 
 #: What a region shows before its own leaf fills it.
 PLACEHOLDER = "panel pending"
+
+#: How many evidence lines the warnings region shows at once. Warnings
+#: accumulate for the life of a run, and the newest are the ones being
+#: diagnosed; anything older is counted in the summary and named as elided
+#: rather than dropped silently.
+WARNING_EVIDENCE_LINES = 6
+#: Longest evidence line rendered. An ortus line is not clipped by the model,
+#: and one long line must not push the rest of the region off screen.
+WARNING_TEXT_CHARS = 120
+#: The warnings region when the run has produced none. Stated as a finding
+#: rather than left blank, so a quiet region reads as "nothing fired" instead
+#: of "this panel is broken".
+NO_WARNINGS = "none - no ortus warning line in this run"
+
+#: Terminal phases the model names, in the words an operator would use. A phase
+#: absent from this map is rendered verbatim: a log from an older run whose
+#: vocabulary has since changed must render what it can rather than raise.
+OUTCOMES: dict[str, str] = {
+    "corrections-exhausted": "correction attempts exhausted",
+    "correction-rejected": "correction rejected",
+    "plan-gap-escalated": "escalated as a plan gap",
+    "orphaned-candidate": "candidate left orphaned",
+    "incomplete-candidate": "candidate left incomplete",
+}
+#: A `finalized-*` phase is the run reaching a finalization boundary, which is
+#: the only clean ending there is. Replay must say so rather than invent a
+#: failure for a run that simply finished.
+CLEAN_OUTCOME = "finished cleanly"
+#: A replayed run whose journal is gone: the log alone is still worth reading.
+NO_JOURNAL_OUTCOME = "no journal - replayed from the log alone"
 
 KEY_HINT = "q  quit     read-only: never writes the repository, bd, or git"
 
@@ -215,14 +262,119 @@ def pulse_line(snapshot: RunSnapshot, tick: int, *, width: int = PULSE_WIDTH) ->
     return f"{pulse(tick, width=width)}  refresh {tick}  {stamp}"
 
 
-def header_line(snapshot: RunSnapshot) -> str:
-    """The shell's own one-line run state, until the header leaf fills it.
+@dataclass(frozen=True)
+class ReplaySource:
+    """A finished run to render: its log, and the repository holding its journal."""
+
+    log_path: Path
+    repo: Path
+
+
+def resolve_replay(log: Path) -> ReplaySource:
+    """Pair a grind log with the journal that sits alongside it.
+
+    Grind writes both under one `logs/` tree, so the repository is the log's
+    grandparent and the journal is found by the same store live mode uses. That
+    is the whole resolution: it means replaying a log copied out of a run whose
+    journal is gone still renders, from the log alone.
+    """
+
+    log = Path(log)
+    parent = log.parent
+    repo = parent.parent if parent.name == "logs" else parent
+    return ReplaySource(log_path=log, repo=repo)
+
+
+def clip(text: str, limit: int = WARNING_TEXT_CHARS) -> str:
+    """One flattened line, bounded so a long entry cannot own the region."""
+
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "..."
+
+
+def stamp_of(moment: _dt.datetime | None) -> str:
+    """Wall-clock time of an event, or a blank of the same width when unknown."""
+
+    return moment.strftime("%H:%M:%S") if moment is not None else "--:--:--"
+
+
+def warning_summary(snapshot: RunSnapshot) -> str:
+    """The counts line: every warning kind seen, with how many times.
+
+    Kinds are ordered by name so the line does not reshuffle between refreshes
+    and an operator can read a changing number rather than a changing layout.
+    """
+
+    counts = snapshot.warning_counts
+    if not counts:
+        return ""
+    return "   ".join(f"{kind} {count}" for kind, count in sorted(counts.items()))
+
+
+def warning_evidence(
+    snapshot: RunSnapshot, *, limit: int = WARNING_EVIDENCE_LINES
+) -> tuple[str, ...]:
+    """The ortus line behind each recent warning, oldest of the window first."""
+
+    return tuple(
+        f"{stamp_of(warning.at)}  {warning.kind:<10} {clip(warning.text)}"
+        for warning in snapshot.warnings[-limit:]
+    )
+
+
+def warnings_panel(
+    snapshot: RunSnapshot, *, limit: int = WARNING_EVIDENCE_LINES
+) -> str:
+    """The warnings region: what fired, how often, and the line that said so.
+
+    A bare count is what made the stopgap script untrustworthy — it claimed
+    seven timeouts that never happened — so every count here is backed by the
+    ortus line an operator can judge it by. Which lines are warnings at all is
+    decided by the model, so live and replay share one vocabulary.
+    """
+
+    if not snapshot.warnings:
+        return NO_WARNINGS
+    elided = len(snapshot.warnings) - limit
+    lines = [warning_summary(snapshot)]
+    if elided > 0:
+        lines.append(f"({elided} earlier not shown)")
+    lines.extend(warning_evidence(snapshot, limit=limit))
+    return "\n".join(lines)
+
+
+def outcome_line(snapshot: RunSnapshot) -> str:
+    """How the run ended and at which phase, in the operator's words.
+
+    A run that ended cleanly has no terminal failure, and a run still in flight
+    has no ending at all; both say so rather than being given one.
+    """
+
+    if snapshot.idle:
+        return NO_JOURNAL_OUTCOME
+    if not snapshot.terminal:
+        return f"no terminal state recorded - last phase {snapshot.phase}"
+    if snapshot.phase in TERMINAL_PHASES:
+        ended = OUTCOMES.get(snapshot.phase, snapshot.phase)
+    else:
+        ended = CLEAN_OUTCOME
+    return f"{ended}   phase {snapshot.phase}"
+
+
+def header_line(snapshot: RunSnapshot, replay: ReplaySource | None = None) -> str:
+    """The shell's own run state, until the header leaf fills it.
 
     An absent journal is a valid state, not an error, so a repository with no
     run in flight opens idle. A run that ended while the view was open reports
     its terminal phase rather than freezing on the last live frame.
+
+    Replay names the log it is reading, because two runs share a log directory
+    and the filename is what tells them apart, and adds how the run ended.
     """
 
+    if replay is not None:
+        issue = snapshot.issue_id or "unknown issue"
+        return f"replay {issue}   {replay.log_path.name}\n{outcome_line(snapshot)}"
     if snapshot.idle:
         return "idle - no transaction in flight"
     issue = snapshot.issue_id or "unknown issue"
@@ -244,15 +396,26 @@ def region_state(key: str, snapshot: RunSnapshot) -> str:
     return "state-idle"
 
 
-def frame(snapshot: RunSnapshot, tick: int, *, width: int = PULSE_WIDTH) -> Frame:
-    """Build the frame for `snapshot` at `tick`. Pure: reads nothing, writes nothing."""
+def frame(
+    snapshot: RunSnapshot,
+    tick: int,
+    *,
+    width: int = PULSE_WIDTH,
+    replay: ReplaySource | None = None,
+) -> Frame:
+    """Build the frame for `snapshot` at `tick`. Pure: reads nothing, writes nothing.
+
+    Replay builds the same frame from the same snapshot; only the header names
+    its source. One renderer means a finished run is explained exactly as the
+    live run was, and there is a single path to keep correct.
+    """
 
     return Frame(
-        header=header_line(snapshot),
+        header=header_line(snapshot, replay),
         current_action=PLACEHOLDER,
         candidate=PLACEHOLDER,
         verdict=PLACEHOLDER,
-        warnings=PLACEHOLDER,
+        warnings=warnings_panel(snapshot),
         pulse=pulse_line(snapshot, tick, width=width),
         states=tuple((spec.key, region_state(spec.key, snapshot)) for spec in REGIONS),
     )
@@ -315,13 +478,23 @@ class DashboardApp(App[None]):
     #: is the one surface that would put a mutating verb on screen.
     ENABLE_COMMAND_PALETTE = False
 
-    def __init__(self, repo: Path, *, refresh_seconds: float = REFRESH_SECONDS) -> None:
+    def __init__(
+        self,
+        repo: Path,
+        *,
+        refresh_seconds: float = REFRESH_SECONDS,
+        replay: ReplaySource | None = None,
+    ) -> None:
         super().__init__()
         self.repo = Path(repo)
         self.refresh_seconds = refresh_seconds
+        #: The finished run being rendered, or None for live mode. Live mode is
+        #: the default and reads the newest log, exactly as before replay
+        #: existed; replay only pins which log the same reader follows.
+        self.replay = replay
         self.snapshot = RunSnapshot()
         self.tick = 0
-        self.last_frame = frame(self.snapshot, self.tick)
+        self.last_frame = frame(self.snapshot, self.tick, replay=replay)
 
     def compose(self) -> ComposeResult:
         yield Region(REGIONS[0])
@@ -345,12 +518,15 @@ class DashboardApp(App[None]):
         operator can tell the dashboard is alive.
         """
 
+        log_path = self.replay.log_path if self.replay is not None else None
         try:
-            self.snapshot = read_snapshot(self.repo, previous=self.snapshot)
+            self.snapshot = read_snapshot(
+                self.repo, previous=self.snapshot, log_path=log_path
+            )
         except OSError:
             pass
         self.tick += 1
-        self.last_frame = frame(self.snapshot, self.tick)
+        self.last_frame = frame(self.snapshot, self.tick, replay=self.replay)
         return self.last_frame
 
     def refresh_run(self) -> None:
@@ -379,6 +555,11 @@ def dashboard(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
     ),
+    replay: Optional[Path] = typer.Option(
+        None,
+        "--replay",
+        help="Replay a finished run from its grind log instead of watching live.",
+    ),
 ) -> None:
     """Watch one grind run live: phase, current action, candidate, verdict, warnings.
 
@@ -386,7 +567,20 @@ def dashboard(
     write into a worktree a worker owns becomes that worker's candidate. Needs
     no bd workspace and no run in flight — a quiet repository opens idle. Press
     q to exit.
+
+    `--replay <log>` renders a finished run through the same panels, including
+    how it ended, and takes its journal from the log's own directory rather
+    than from the repo argument, so replaying a log names one run without
+    ambiguity. A log still being written replays too, up to its current end.
     """
+
+    if replay is not None:
+        source = resolve_replay(replay.resolve())
+        if not source.log_path.is_file():
+            output.error(f"no such run log: {source.log_path}")
+            raise typer.Exit(code=1)
+        DashboardApp(source.repo, replay=source).run()
+        return
 
     target = (repo if repo is not None else Path.cwd()).resolve()
     if not target.is_dir():
