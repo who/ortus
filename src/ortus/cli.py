@@ -5,6 +5,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 import typer
 
 from ortus.commands.check import check
+from ortus.commands.dashboard import dashboard
 from ortus.commands.grind import grind
 from ortus.commands.human import human
 from ortus.commands.init import init
@@ -69,3 +70,7 @@ app.command(
     name="spec",
     help="Print the readiness schema issue-authoring contract.",
 )(spec)
+app.command(
+    name="dashboard",
+    help="Watch one grind run in a read-only live view.",
+)(dashboard)

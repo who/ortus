@@ -16,7 +16,18 @@ from ortus.core.repo import FR003_NO_BEADS_ERROR
 
 runner = CliRunner()
 
-VERBS = ["init", "plan", "grind", "interview", "tail", "triage", "human", "check", "spec"]
+VERBS = [
+    "init",
+    "plan",
+    "grind",
+    "interview",
+    "tail",
+    "triage",
+    "human",
+    "check",
+    "spec",
+    "dashboard",
+]
 
 
 def test_top_help_lists_all_verbs() -> None:
@@ -64,6 +75,7 @@ def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
         "check",
         "unlock",
         "spec",
+        "dashboard",
     ]
 
 
