@@ -18,6 +18,28 @@ bd close <id> --reason "..."          # close
 ```
 {% endraw %}
 
+### Issue authoring contract (readiness v1)
+
+Every non-epic issue must satisfy Ortus readiness schema v1 to be workable:
+`ortus grind` skips an unready issue rather than running it. Epics are
+containers and are exempt. Three bd fields carry the contract, each under the
+exact Markdown headings readiness v1 requires:
+
+- `description` — the objective, and the behavior before and after.
+- `design` — the schema version, scope and non-goals, concrete file and symbol
+  locations, resolved decisions, compatibility constraints, ordered steps,
+  dependencies, edge cases, and plan-gap guidance.
+- `acceptance_criteria` — observable criteria with stable identifiers, one
+  exact check per identifier, and the targeted test commands.
+
+Every section needs concrete content: `TODO`, `TBD`, `N/A`, and empty or
+template text are rejected. When something is genuinely absent, write
+`None — <why that is safe>`.
+
+Run `ortus spec` for the authoritative heading list and shape rules. It prints
+the contract generated from the installed Ortus, so it cannot drift from what
+grind enforces; this file only points at it.
+
 ## Orchestrator (ortus grind)
 
 Drive the queue to zero via Ortus's subprocess-per-task loop. This project

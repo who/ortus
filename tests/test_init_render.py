@@ -11,6 +11,7 @@ import pytest
 
 from ortus.core.init_render import (
     BUNDLED_TEMPLATES,
+    PROJECT_TYPES,
     RenderContext,
     list_bundled,
     render_all,
@@ -153,6 +154,48 @@ def test_raw_blocks_in_agents_md_preserve_bash_braces() -> None:
     assert "bd update <id>" in text
     assert "{% " not in text  # the raw markers themselves are stripped
     assert "{{ " not in text
+
+
+# ortus-xhrj.5 — the always-loaded instructions must state the readiness v1
+# authoring contract, or an agent following them faithfully still writes issues
+# that `ortus grind` skips as unready. The section is a pointer plus the field
+# split, not a copy of `ortus spec` output, so it cannot drift into a stale spec.
+AUTHORING_CONTRACT_HEADING = "### Issue authoring contract (readiness v1)"
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_agents_md_carries_authoring_contract_for_backend(backend: str) -> None:
+    ctx = RenderContext(prefix="p", project_type="polyglot", backend=backend)
+    text = render_template("AGENTS.md", ctx)
+    # Exactly once: `ortus init --force` re-renders the file, and a duplicated
+    # section would double the always-on context cost.
+    assert text.count(AUTHORING_CONTRACT_HEADING) == 1
+    # The three bd fields that carry the contract, plus the epic exemption.
+    for field in ("`description`", "`design`", "`acceptance_criteria`"):
+        assert field in text
+    assert "Epics" in text
+    # The full contract stays generated; the template only names the printer.
+    assert "`ortus spec`" in text
+
+
+def test_agents_md_authoring_contract_sits_with_the_bd_guidance() -> None:
+    """Authoring fails when the issue is written, not when grind runs it."""
+    text = render_template("AGENTS.md", RenderContext(prefix="p"))
+    assert (
+        text.index("## Issue tracking with bd")
+        < text.index(AUTHORING_CONTRACT_HEADING)
+        < text.index("## Orchestrator (ortus grind)")
+    )
+
+
+@pytest.mark.parametrize("project_type", PROJECT_TYPES)
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_agents_md_renders_across_the_matrix(project_type: str, backend: str) -> None:
+    """StrictUndefined still satisfied for every rendered combination."""
+    ctx = RenderContext(prefix="p", project_type=project_type, backend=backend)
+    text = render_template("AGENTS.md", ctx)
+    assert AUTHORING_CONTRACT_HEADING in text
+    assert "{{" not in text and "{%" not in text
 
 
 # Acceptance #1 (broader) — render_all produces every file on disk.

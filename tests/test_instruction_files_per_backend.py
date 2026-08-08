@@ -139,3 +139,20 @@ def test_agents_md_renders_under_strict_undefined(rendered):
     """A missing copier answer must fail the test suite, not the user's generation."""
     for backend, text in rendered.items():
         assert "{{" not in text and "{%" not in text, f"unrendered Jinja in {backend}"
+
+
+# ortus-xhrj.5 — the same "nothing load-bearing may live only in CLAUDE.md" rule
+# applied to the bundled template that `ortus init` actually renders today. The
+# readiness v1 authoring contract is load-bearing: without it a Codex session,
+# which never reads CLAUDE.md, authors issues that `ortus grind` skips.
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_bundled_agents_md_carries_the_authoring_contract(backend):
+    from ortus.core.init_render import RenderContext, render_template
+
+    text = render_template(
+        "AGENTS.md", RenderContext(prefix="acme", project_type="python", backend=backend)
+    )
+    assert "### Issue authoring contract (readiness v1)" in text, (
+        f"readiness contract missing from bundled AGENTS.md for {backend}"
+    )
+    assert "`ortus spec`" in text
