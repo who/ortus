@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import io
+import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -60,6 +63,49 @@ def test_progress_writes_to_stderr_with_canonical_prefix(monkeypatch: pytest.Mon
     output.progress("init", "creating .beads/ workspace")
     rendered = err.getvalue()
     assert "[ortus init] creating .beads/ workspace" in rendered
+    assert out.getvalue() == ""
+
+
+def test_progress_timestamp_prefix_precedes_verb_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A progress line opens with a bracketed 14-digit stamp, then the verb tag."""
+    out, err = _patched_consoles(monkeypatch)
+    output.progress("grind", "picking next issue")
+    rendered = err.getvalue().strip()
+    assert re.fullmatch(r"\[\d{14}\] \[ortus grind\] picking next issue", rendered), rendered
+
+
+def test_progress_timestamp_is_local_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stamp is the local wall clock — the clock the grind log file prints."""
+    out, err = _patched_consoles(monkeypatch)
+    before = dt.datetime.now().replace(microsecond=0)
+    output.progress("grind", "picking next issue")
+    after = dt.datetime.now()
+    stamp = re.match(r"\[(\d{14})\]", err.getvalue().strip())
+    assert stamp, err.getvalue()
+    parsed = dt.datetime.strptime(stamp.group(1), "%Y%m%d%H%M%S")
+    assert before <= parsed <= after
+
+    # And it is taken from a naive local `now()`, never `now(timezone.utc)`.
+    tz_args: list[object] = []
+
+    class _FakeDatetime:
+        @staticmethod
+        def now(tz: object = None) -> dt.datetime:
+            tz_args.append(tz)
+            return dt.datetime(2026, 8, 8, 13, 28, 45)
+
+    out2, err2 = _patched_consoles(monkeypatch)
+    monkeypatch.setattr(output, "_dt", SimpleNamespace(datetime=_FakeDatetime))
+    output.progress("grind", "picking next issue")
+    assert "[20260808132845] [ortus grind] picking next issue" in err2.getvalue()
+    assert tz_args == [None]
+
+
+def test_progress_goes_to_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Progress stays on stderr so machine-readable stdout is untouched."""
+    out, err = _patched_consoles(monkeypatch)
+    output.progress("grind", "picking next issue")
+    assert "[ortus grind] picking next issue" in err.getvalue()
     assert out.getvalue() == ""
 
 

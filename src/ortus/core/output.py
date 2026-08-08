@@ -6,6 +6,7 @@ through these helpers so styling stays consistent across verbs.
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Iterable
 
 from rich.console import Console
@@ -37,13 +38,19 @@ def error(message: str, *, hint: str | None = None) -> None:
 def progress(verb: str, phase: str) -> None:
     """Emit a per-phase progress line to stderr in the canonical CLI format.
 
-    Format: `[ortus <verb>] <phase>`. See AGENTS.md "CLI output convention" —
-    silence-equals-hung is the perceived default, so every non-trivial phase
-    of a non-interactive verb must call this so the operator sees motion.
+    Format: `[yyyymmddhhmmss] [ortus <verb>] <phase>`. See AGENTS.md "CLI
+    output convention" — silence-equals-hung is the perceived default, so
+    every non-trivial phase of a non-interactive verb must call this so the
+    operator sees motion. The timestamp is local time, matching the clock the
+    grind log file prints, so console and log can be read side by side.
     """
+    stamp = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
     safe_verb = _escape_markup(verb)
     safe_phase = _escape_markup(phase)
-    _err.print(f"[dim]\\[ortus {safe_verb}][/dim] {safe_phase}", highlight=False)
+    _err.print(
+        f"[dim]\\[{stamp}] \\[ortus {safe_verb}][/dim] {safe_phase}",
+        highlight=False,
+    )
 
 
 def table(headers: Iterable[str], rows: Iterable[Iterable[str]]) -> None:

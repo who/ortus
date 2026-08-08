@@ -134,9 +134,9 @@ def test_repo_arg_with_beads_dir_proceeds_past_fr003(tmp_path: Path) -> None:
 
 # --- CLI output convention (ortus-s60a) -------------------------------------
 #
-# Every non-interactive verb must emit `[ortus <verb>] <phase>` lines to
-# stderr so the operator can tell "running" from "hung." These tests guard
-# the convention per-verb. See AGENTS.md "CLI output convention".
+# Every non-interactive verb must emit `[yyyymmddhhmmss] [ortus <verb>] <phase>`
+# lines to stderr so the operator can tell "running" from "hung." These tests
+# guard the convention per-verb. See AGENTS.md "CLI output convention".
 
 
 def _bd_repo(tmp_path: Path) -> Path:
@@ -162,6 +162,19 @@ def test_init_emits_progress_lines(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "[ortus init]" in result.stderr
     assert "[ortus init] done" in result.stderr
+
+
+def test_verb_progress_lines_open_with_timestamp_then_verb_tag(tmp_path: Path) -> None:
+    """Every progress line a real verb emits carries the stamp ahead of the tag."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    target = tmp_path / "stamped"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    tagged = [line for line in result.stderr.splitlines() if "[ortus init]" in line]
+    assert tagged, result.stderr
+    for line in tagged:
+        assert re.match(r"^\[\d{14}\] \[ortus init\] ", line), line
 
 
 def test_check_emits_progress_lines(tmp_path: Path) -> None:
