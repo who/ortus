@@ -419,7 +419,8 @@ def _absorb_unrelated_declaration(
     only the worker can judge which of it belongs to this issue. Declaring a
     path here keeps it in the worktree and out of the candidate, so it is
     neither reset, stashed, deleted, nor committed. The declaration is honored
-    for handoff paths only: work this attempt produced cannot be disowned.
+    for handoff paths only: work this attempt produced cannot be disowned, and
+    neither can inherited work the journal attributes to the claimed issue.
     """
 
     declaration = repo / _UNRELATED_DECLARATION
@@ -430,6 +431,13 @@ def _absorb_unrelated_declaration(
     declared = {line.strip() for line in raw.splitlines()} - {""}
     honored = declared & set(journal.handoff_paths)
     ignored = sorted(declared - honored)
+    # The resume exists to carry the prior attempt at *this* issue forward, so
+    # its own inherited candidate is not disownable: a worker that declares it
+    # would abandon exactly the work it was handed. Refusing is non-fatal — the
+    # paths stay in the candidate and the verifier judges the whole of it —
+    # because a hard abort turns a recoverable misjudgement into a stopped run.
+    own_work = sorted(honored & journal.own_inherited_work())
+    honored -= set(own_work)
     try:
         declaration.unlink()
     except OSError:
@@ -438,6 +446,12 @@ def _absorb_unrelated_declaration(
         write_log(
             "handoff: ignoring unrelated declaration outside the inherited work: "
             + ", ".join(ignored[:_HANDOFF_PROMPT_PATHS])
+        )
+    if own_work:
+        write_log(
+            "handoff: ignoring unrelated declaration for inherited work belonging "
+            f"to {journal.issue_id}; kept in the candidate: "
+            + ", ".join(own_work[:_HANDOFF_PROMPT_PATHS])
         )
     if not honored:
         return journal
@@ -569,10 +583,12 @@ def _prepare_handoff(
     journal, notes = store.load_state()
     for note in notes:
         write_log(f"transaction handoff: {note}")
+    rebuilt = False
     if journal is None and store.path.exists():
         journal = _rebuild_journal_from_claim(
             bd, git, store, repo=repo, write_log=write_log
         )
+        rebuilt = journal is not None
         if journal is None:
             notes = (
                 *notes,
@@ -714,6 +730,13 @@ def _prepare_handoff(
             ),
         )
         moved.append("previously unrelated work was edited: " + ", ".join(readopted))
+    # What the prior worker on this issue actually owned, read before the live
+    # candidate is recomputed below. Only this recorded set is attributable: the
+    # recomputed one sweeps in whatever else went dirty since — a stranded file
+    # from another issue among it — and that must stay disownable. A rebuilt
+    # journal inferred its candidate from the worktree rather than recording it,
+    # so it attributes nothing.
+    recorded_candidate = frozenset() if rebuilt else frozenset(journal.candidate_paths)
     baseline = _candidate_baseline(journal, frozenset())
     candidate = _candidate_paths(dirty, baseline)
     if prior_phase in _SEALED_PHASES and candidate != frozenset(journal.candidate_paths):
@@ -739,6 +762,8 @@ def _prepare_handoff(
         paths=candidate | frozenset(journal.unrelated_paths),
         notes=moved,
         base_head=current_head,
+        owner=journal.issue_id,
+        owned=recorded_candidate,
     )
     store.save(journal)
     if backend == "codex":

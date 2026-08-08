@@ -178,6 +178,11 @@ class CandidateJournal:
     handoff_paths: tuple[str, ...] = ()
     handoff_fingerprints: dict[str, str] = field(default_factory=dict)
     handoffs: tuple[dict[str, Any], ...] = ()
+    #: Which issue produced the inherited work, and which of it was that issue's
+    #: own candidate. Only the journal that handed work off knows this; an
+    #: unattributed handoff leaves both empty.
+    handoff_issue_id: str = ""
+    handoff_owned_paths: tuple[str, ...] = ()
     #: Handoff paths a worker judged unrelated to this issue. They stay in the
     #: worktree and out of the candidate, so finalization never commits them.
     unrelated_paths: tuple[str, ...] = ()
@@ -312,6 +317,8 @@ class CandidateJournal:
         paths: Iterable[str],
         notes: Iterable[str] = (),
         base_head: str | None = None,
+        owner: str = "",
+        owned: Iterable[str] = (),
     ) -> CandidateJournal:
         """Record one engineer handoff to a fresh worker.
 
@@ -320,15 +327,24 @@ class CandidateJournal:
         journal schema). Both are context: a mismatch is something the model
         assesses, never a startup failure. The fingerprints are what later lets
         Ortus tell adopted work from work the worker never touched.
+
+        `owner` is the issue that produced `owned`, the subset of `paths` a
+        prior journal recorded as that issue's own candidate. Attribution is
+        recorded here because this is the only moment it is known; inherited
+        work nobody can attribute is handed over unattributed rather than
+        guessed at from the path strings.
         """
 
         selected = tuple(sorted(set(paths)))
+        attributed = tuple(sorted(set(owned) & set(selected))) if owner else ()
         head = self.base_head if base_head is None else base_head
         record = {
             "at": _now(),
             "resumed_phase": self.phase,
             "base_head": head,
             "paths": list(selected),
+            "owner": owner,
+            "owned": list(attributed),
             "notes": list(notes),
         }
         return replace(
@@ -336,9 +352,27 @@ class CandidateJournal:
             base_head=head,
             handoff_paths=selected,
             handoff_fingerprints=fingerprint_paths(repo, selected),
+            handoff_issue_id=owner,
+            handoff_owned_paths=attributed,
             handoffs=(*self.handoffs, record)[-_MAX_HANDOFFS:],
             updated_at=_now(),
         )
+
+    def own_inherited_work(self) -> frozenset[str]:
+        """Inherited paths the claimed issue itself produced.
+
+        Disowning exists for foreign leftovers, so the resumed issue's own prior
+        attempt must not be declarable as somebody else's. Attribution keys on
+        the recorded owner rather than the path string, because only the journal
+        that handed the work off knows which issue produced it — a repo whose
+        issues share a subsystem would misclassify on directory names alone.
+        Anything unattributed resolves to nothing, which leaves the judgement
+        with the worker exactly as before.
+        """
+
+        if not self.handoff_issue_id or self.handoff_issue_id != self.issue_id:
+            return frozenset()
+        return frozenset(self.handoff_owned_paths) - frozenset(self.unrelated_paths)
 
     def with_unrelated(self, paths: Iterable[str]) -> CandidateJournal:
         """Honor a worker's declaration that some handoff work is not ours.
@@ -436,7 +470,12 @@ class JournalStore:
         payload["schema"] = JOURNAL_SCHEMA
         for key in ("baseline_paths", "candidate_paths", "evidence", "verifier_refs"):
             payload[key] = tuple(payload.get(key, ()))
-        for key in ("handoff_paths", "unrelated_paths", "handoffs"):
+        for key in (
+            "handoff_paths",
+            "handoff_owned_paths",
+            "unrelated_paths",
+            "handoffs",
+        ):
             payload[key] = tuple(payload.get(key, ()))
         # Schemas 1 and 2 predate correction accounting and finalization
         # boundaries. Defaulting them to "nothing has landed yet" is the safe

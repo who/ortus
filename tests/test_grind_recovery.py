@@ -708,6 +708,156 @@ def test_moved_state_readopts_unrelated_work_a_worker_edited(
 
 
 # ---------------------------------------------------------------------------
+# ortus-9ljd — a resumed worker may not disown its own issue's candidate
+# ---------------------------------------------------------------------------
+
+
+def _shipped_and_declares(*declared: str) -> Callable[[Path, Path], int]:
+    """An implementation worker that adds a candidate and disowns `declared`."""
+
+    def implement(repo: Path, log_path: Path) -> int:
+        (repo / CANDIDATE).write_text("SHIPPED = True\n")
+        (repo / DECLARATION).parent.mkdir(parents=True, exist_ok=True)
+        (repo / DECLARATION).write_text("".join(f"{path}\n" for path in declared))
+        return 0
+
+    return implement
+
+
+def test_disown_same_issue_refused_and_the_inherited_work_still_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the resume exists to carry the prior attempt at this issue forward,
+    so declaring that attempt unrelated is refused and it stays in the
+    candidate — the alternative silently abandons the work being resumed."""
+    repo, issue_id = _seed(tmp_path, "rec14")
+    (repo / INHERITED).write_text("the prior attempt at this very issue\n")
+    _stage_journal(
+        repo, issue_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
+    )
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(
+            implement=_shipped_and_declares(INHERITED), verify=_pass_verdict
+        ),
+    )
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert {CANDIDATE, INHERITED} <= _committed_paths(repo), (
+        "the resumed issue's own inherited work must stay in the candidate"
+    )
+    log = _log(repo)
+    assert f"inherited work belonging to {issue_id}" in log
+    assert INHERITED in log
+    assert not (repo / DECLARATION).exists(), "the declaration is consumed"
+
+
+def test_disown_foreign_issue_honored_when_nothing_attributes_it_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: disowning stays available for genuinely foreign leftovers. Work
+    stranded by an issue that has since closed belongs to nobody here, so the
+    worker's declaration is honored and the file is left untouched."""
+    repo, stranding_id = _seed(tmp_path, "rec15")
+    claimed_id = _create_issue(repo, "the issue this run resumes", priority="2")
+    (repo / INHERITED).write_text("a file stranded by another issue\n")
+    _stage_journal(
+        repo, stranding_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
+    )
+    subprocess.run(
+        ["bd", "close", stranding_id], cwd=repo, check=True, capture_output=True
+    )
+    _claim(repo, claimed_id)
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(
+            implement=_shipped_and_declares(INHERITED), verify=_pass_verdict
+        ),
+    )
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert _issue(repo, claimed_id)["status"] == "closed"
+    committed = _committed_paths(repo)
+    assert CANDIDATE in committed and INHERITED not in committed
+    assert (repo / INHERITED).read_text() == "a file stranded by another issue\n"
+    dirty = GitClient(repo=repo).dirty_paths()
+    assert dirty is not None and INHERITED in dirty
+    assert "declared unrelated" in _log(repo)
+
+
+def test_disown_mixed_declaration_honors_only_the_foreign_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: one declaration, two kinds of path. The issue's own inherited
+    candidate is refused; a file that went dirty after the journal was written
+    is attributable to nobody, so that half of the declaration still stands."""
+    repo, issue_id = _seed(tmp_path, "rec16")
+    (repo / INHERITED).write_text("the prior attempt at this issue\n")
+    _stage_journal(
+        repo, issue_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
+    )
+    # Landed after the journal recorded its candidate, so nothing attributes it.
+    (repo / OPERATOR).write_text("someone else's stranded edit\n")
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(
+            implement=_shipped_and_declares(OPERATOR, INHERITED),
+            verify=_pass_verdict,
+        ),
+    )
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert _issue(repo, issue_id)["status"] == "closed"
+    committed = _committed_paths(repo)
+    assert {CANDIDATE, INHERITED} <= committed
+    assert OPERATOR not in committed
+    assert (repo / OPERATOR).read_text() == "someone else's stranded edit\n"
+    log = _log(repo)
+    assert f"inherited work belonging to {issue_id}" in log
+    assert "declared unrelated" in log
+
+
+def test_disown_refusal_is_not_fatal_and_costs_no_correction_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a worker that misjudges ownership must not be able to end the run.
+    Grind overrides the declaration, says so, and the same attempt carries on to
+    a verdict — no halt, no extra worker, no correction spent."""
+    repo, issue_id = _seed(tmp_path, "rec17")
+    (repo / INHERITED).write_text("the prior attempt at this issue\n")
+    _stage_journal(
+        repo, issue_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
+    )
+    backend = ScriptedRunner(
+        implement=_shipped_and_declares(INHERITED), verify=_pass_verdict
+    )
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    implementations = [
+        name for name, _ in backend.prompts if name == Phase.IMPLEMENT.value
+    ]
+    assert len(implementations) == 1, "the refusal must not trigger a correction"
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert JournalStore(repo).load() is None, "the transaction reached finalization"
+    log = _log(repo)
+    assert f"inherited work belonging to {issue_id}" in log
+    assert "candidate left uncommitted" not in log
+
+
+# ---------------------------------------------------------------------------
 # AC-6 — each failure phase resumes, and only real ambiguity needs a human
 # ---------------------------------------------------------------------------
 
@@ -818,10 +968,13 @@ def test_idempotent_repeated_handoffs_add_no_duplicate_finalization_or_commits(
     """AC-7: resuming the same failed transaction three times preserves the work
     once — no duplicate close, commit, finalization record, or disown entry."""
     repo, issue_id = _seed(tmp_path, "rec11")
-    (repo / OPERATOR).write_text("operator work nobody owns\n")
+    (repo / INHERITED).write_text("the prior attempt at this issue\n")
     _stage_journal(
-        repo, issue_id, phase="incomplete-candidate", paths=frozenset({OPERATOR})
+        repo, issue_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
     )
+    # Outside the recorded candidate, so it stays the worker's to disown — the
+    # issue's own inherited work is not declarable (ortus-9ljd).
+    (repo / OPERATOR).write_text("operator work nobody owns\n")
 
     def implement(repo: Path, log_path: Path) -> int:
         (repo / CANDIDATE).write_text("STILL_WIP = True\n")
@@ -841,6 +994,7 @@ def test_idempotent_repeated_handoffs_add_no_duplicate_finalization_or_commits(
     assert journal is not None and journal.issue_id == issue_id
     assert journal.unrelated_paths == (OPERATOR,), "a repeat disown is not a duplicate"
     assert OPERATOR not in journal.candidate_paths
+    assert INHERITED in journal.candidate_paths
     assert len(journal.handoffs) == 3
     assert _subjects(repo) == baseline_subjects
     assert _issue(repo, issue_id)["status"] == "in_progress"
