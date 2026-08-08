@@ -31,7 +31,7 @@ Exempt verbs:
 
 ## Acceptance-criteria convention
 
-When writing bd-issue acceptance criteria for code-changing work, prefer **"tests covering the changed surface must pass; CI catches regressions elsewhere"** over **"uv run pytest must pass"**. Follow `docs/testing.md`: implementation workers run directly affected modules or the bounded `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget` gate. Fresh verifiers expand by changed paths and risk; shared core or prompt changes use the broader hermetic `-m "fast or integration"` group. The GitHub Actions matrix owns comprehensive hermetic coverage across Linux/macOS and Python 3.10/3.11/3.12. Network/build and live-provider smoke are tagged-release gates, never local worker defaults.
+When writing bd-issue acceptance criteria for code-changing work, prefer **"tests covering the changed surface must pass; CI catches regressions elsewhere"** over **"uv run pytest must pass"**. Follow `docs/testing.md`: implementation workers run directly affected modules or the bounded `uv run pytest -m fast -n auto --test-timeout=30` gate. Fresh verifiers expand by changed paths and risk; shared core or prompt changes use the broader hermetic `-m "fast or integration"` group. Both phases pass `-n auto` and leave `--enforce-duration-budget` to CI, which runs the gate single-threaded and owns the duration verdict. The GitHub Actions matrix owns comprehensive hermetic coverage across Linux/macOS and Python 3.10/3.11/3.12. Network/build and live-provider smoke are tagged-release gates, never local worker defaults.
 
 ## Orchestrator
 

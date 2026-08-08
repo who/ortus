@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import ci_gate_flags
+from tests.conftest import ci_gate_command, ci_gate_flags
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -178,7 +179,64 @@ def test_testing_guide_documents_flag_parity() -> None:
 
 def test_worker_guidance_uses_bounded_hermetic_default() -> None:
     prompt = PROMPT.read_text(encoding="utf-8")
-    command = "uv run pytest -m fast --test-timeout=30 --enforce-duration-budget"
+    command = "uv run pytest -m fast -n auto --test-timeout=30"
     assert command in prompt
     assert "Never run `network` or `live_provider` by default" in prompt
     assert "full local `uv run pytest`" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Workers parallelise, CI does not (ortus-3ehq).
+# ---------------------------------------------------------------------------
+
+
+def test_ci_gate_stays_serial() -> None:
+    """AC-3: the comprehensive gate must keep running one test at a time.
+
+    The duration budget is a claim about a test on a quiet machine. Adding
+    xdist workers to this command would make every measured duration a function
+    of how many other tests happened to be running, which is why parallelism
+    lives in the worker and verifier commands instead of here (and never in
+    `addopts`, which this command inherits).
+    """
+    command = ci_gate_command()
+    assert "--enforce-duration-budget" in command, command
+    assert not re.search(r"(?:^|\s)(?:-n|--numprocesses)(?:[=\s]|$)", command), (
+        f"the CI gate acquired parallel workers, so its duration budget now "
+        f"measures contention rather than the test: {command!r}"
+    )
+
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    addopts = re.search(r'^addopts = "(.*)"$', pyproject, re.MULTILINE)
+    assert addopts is not None, "pyproject.toml no longer declares pytest addopts"
+    assert not re.search(
+        r"(?:^|\s)(?:-n|--numprocesses)(?:[=\s]|$)", addopts.group(1)
+    ), (
+        f"shared addopts must not force parallelism onto the CI gate: "
+        f"{addopts.group(1)!r}"
+    )
+
+
+def test_parallel_sweeps_have_their_dependency() -> None:
+    """The guidance tells both phases to pass `-n auto`; it must resolve."""
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "pytest-xdist" in pyproject, (
+        "worker and verifier guidance passes `-n auto`, so pytest-xdist has to "
+        "be a dev dependency"
+    )
+
+
+def test_testing_guide_documents_parallel_split() -> None:
+    """AC-4: the guide records the split and why the two cannot be combined."""
+    guide = TESTING_GUIDE.read_text(encoding="utf-8")
+
+    assert "-n auto" in guide
+    assert "pytest-xdist" in guide
+    # The split itself: parallel for workers, serial-with-budget for CI.
+    assert "single-threaded" in guide
+    for flag in ci_gate_flags():
+        assert flag in guide, f"docs/testing.md does not name the CI gate flag {flag!r}"
+    # The reason, not just the rule — an editor who only reads the rule will
+    # eventually "simplify" it by putting `-n auto` in addopts.
+    assert "mutually exclusive" in guide
+    assert "quiet machine" in guide

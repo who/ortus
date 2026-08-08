@@ -31,13 +31,11 @@ _CI_GATE_COMMAND_RE = re.compile(
 )
 
 
-def ci_gate_flags() -> tuple[str, ...]:
-    """Return the duration and timeout flags the comprehensive CI gate applies.
+def ci_gate_command() -> str:
+    """Return the comprehensive CI gate invocation, verbatim from the workflow.
 
-    Verification runs the sweep it already selected under these exact flags, so
-    a test that only breaches the budget on a bare runner is rejected at
-    verification time instead of on main (ortus-q3lh). Parsed out of the
-    workflow rather than restated here, so the two cannot drift apart.
+    Read out of `.github/workflows/test.yml` rather than restated here, so a
+    test asserting what the gate does cannot drift from what it actually runs.
     """
     body = _CI_GATE_WORKFLOW.read_text(encoding="utf-8")
     command = _CI_GATE_COMMAND_RE.search(body)
@@ -45,11 +43,25 @@ def ci_gate_flags() -> tuple[str, ...]:
         raise RuntimeError(
             f"no `fast or integration` gate command found in {_CI_GATE_WORKFLOW}"
         )
-    timeout = re.search(r"--test-timeout=\d+", command.group(0))
-    if timeout is None or "--enforce-duration-budget" not in command.group(0):
+    return command.group(0)
+
+
+def ci_gate_flags() -> tuple[str, ...]:
+    """Return the duration and timeout flags the comprehensive CI gate applies.
+
+    The per-test timeout is reproduced by every worker and verifier sweep, so a
+    hung test is caught before main (ortus-q3lh). The duration budget is
+    deliberately *not*: those sweeps run with `-n auto`, and contending workers
+    inflate durations enough to manufacture breaches, so CI stays the single
+    authority on how fast a test is (ortus-3ehq). Both flags are still parsed
+    out of the workflow, so a change to the gate cannot silently desync them.
+    """
+    command = ci_gate_command()
+    timeout = re.search(r"--test-timeout=\d+", command)
+    if timeout is None or "--enforce-duration-budget" not in command:
         raise RuntimeError(
             "the CI gate command no longer carries both a per-test timeout and "
-            f"the duration budget: {command.group(0)!r}"
+            f"the duration budget: {command!r}"
         )
     return (timeout.group(0), "--enforce-duration-budget")
 

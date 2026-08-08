@@ -12,35 +12,53 @@ Implementation workers start with the smallest reliable changed surface:
 
 ```bash
 # Standard inner loop: target under 60s on a typical development machine.
-uv run pytest -m fast --test-timeout=30 --enforce-duration-budget
+uv run pytest -m fast -n auto --test-timeout=30
 
 # A named changed surface (add each directly affected test module).
 uv run pytest tests/test_init.py tests/test_init_render.py \
-  --test-timeout=30 --enforce-duration-budget
+  -n auto --test-timeout=30
 
 # Hermetic subprocess integration for a risky command/orchestrator change.
-uv run pytest -m integration --test-timeout=60 --enforce-duration-budget
+uv run pytest -m integration -n auto --test-timeout=60
 
-# Fresh verification: the expanded sweep runs under the CI gate's flags.
-uv run pytest <expansion> --test-timeout=180 --enforce-duration-budget
+# Fresh verification: the expanded sweep, same selection rules.
+uv run pytest <expansion> -n auto --test-timeout=180
 ```
 
 Fresh verifiers expand from the changed paths and risk. They do not run
 `network` or `live_provider` locally unless the issue explicitly requires it.
 
-**Verification-to-CI flag parity.** Whatever a verifier selects, it runs that
-selection under the same `--test-timeout=180 --enforce-duration-budget` flags
-the comprehensive CI gate applies. The flags change only how durations and
-timeouts are judged, never which tests are selected, so a hermetic test that
-would breach the five-second budget on a bare runner is rejected at
-verification time instead of on main. `slow`-marked tests stay exempt from the
-budget under verification exactly as they are under CI. Narrowing the marker
-expression to get past these flags is never the fix; record a plan gap instead.
+**Workers parallelise; CI enforces the budget serially.** Most of this suite's
+wall clock is subprocess wait rather than computation — a grind-family test
+drives eight to twelve `bd` invocations at roughly a second each — so `-n auto`
+(pytest-xdist) returns the same answer several times sooner. It is not in
+`addopts`, because parallelism and the duration budget are mutually exclusive:
+contending workers make each individual test slower even as wall clock falls,
+so the same `fast or integration` gate run at `-n 16` reported 15 duration
+breaches that a serial run did not. The budget is a claim about how fast a test
+is on a quiet machine, and only CI is quiet. So CI keeps running the gate
+single-threaded with `--test-timeout=180 --enforce-duration-budget` and stays
+the authority on duration, while workers and verifiers run parallel without it
+and answer only whether the code is correct. `auto` rather than a fixed count,
+so a small host is not oversubscribed and two grinds can share a machine. On a
+host without pytest-xdist, drop `-n auto`; the identical selection still runs
+serially.
+
+**Verification-to-CI flag parity.** The flags above change how durations and
+timeouts are judged and how many processes run them, and
+never which tests are selected. Narrowing the marker expression to get past
+them is never the fix; record a plan gap instead. `slow`-marked tests stay
+exempt from the CI budget as before. A test that passes serially but fails
+under `-n auto` is a real finding about a shared resource that test depends
+on: fix or mark it rather than dropping the flag.
 
 Tests must also hold without an ambient global git identity, since a developer
 machine has one and a runner does not. `tests/conftest.py` points
 `GIT_CONFIG_GLOBAL` at an empty file for every test, so a fixture that shells
 out to `git commit` has to configure its own `user.name` and `user.email`.
+
+Every selection below runs with `-n auto` in both phases; only CI runs them
+serially with the duration budget.
 
 | Changed path | Implementation gate | Verifier expansion |
 | --- | --- | --- |
@@ -51,9 +69,9 @@ out to `git commit` has to configure its own `user.name` and `user.email`.
 | test policy or CI | `tests/test_test_policy.py` | collect-only marker probes plus the fast gate |
 
 The comprehensive main CI matrix runs `fast or integration` on Linux and
-macOS across every supported Python version. It records JUnit XML, reports the
-20 slowest tests, and rejects hermetic tests exceeding five seconds unless
-they carry `slow`. Per-test timeouts print the running node id and allow pytest
+macOS across every supported Python version, single-threaded and with the
+budget enforced. It records JUnit XML, reports the 20 slowest tests, and
+rejects hermetic tests exceeding five seconds unless they carry `slow`. Per-test timeouts print the running node id and allow pytest
 to finish the report, preserving JUnit and timing evidence.
 
 Only tagged release validation runs these external groups:

@@ -874,12 +874,21 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "id of your own. If a check could not be run at all, record that in the evidence "
         "of the criterion it blocks and fail that criterion; do not add a criterion to "
         "carry it.\n\n"
-        "Run every pytest sweep you select under the same flags the CI gate applies: "
-        "`--test-timeout=180 --enforce-duration-budget`. They judge duration and "
-        "timeouts only — select the same tests you would have selected without them, "
-        "and never narrow a marker expression to get past them. A hermetic test over "
-        "the five-second budget is a failure unless it is marked `slow`, which stays "
-        "exempt here exactly as it is under CI.\n" + probe_text
+        "Run every pytest sweep you select with `-n auto` so it is distributed across "
+        "this host's cores, under the CI gate's `--test-timeout=180`. Most of the wall "
+        "clock in this suite is subprocess wait, not computation, so a parallel sweep "
+        "returns the same answer several times sooner. Neither flag changes which tests "
+        "are selected — select the same tests you would have selected without them, and "
+        "never narrow a marker expression to get past them. If this host has no "
+        "pytest-xdist, drop `-n auto` and run the identical selection serially.\n\n"
+        "`--enforce-duration-budget` is the one CI gate flag you deliberately do not "
+        "reproduce. The five-second budget is a claim about how fast a test is on a "
+        "quiet machine, and contending workers inflate every duration, so enforcing it "
+        "alongside `-n auto` reports breaches that are an artifact of the parallelism. "
+        "CI runs the gate single-threaded with the budget enforced and stays the "
+        "authority on duration, `slow`-marked tests exempt there exactly as before. "
+        "Judge whether the candidate is correct; leave how fast a test is to CI.\n"
+        + probe_text
     )
 
 

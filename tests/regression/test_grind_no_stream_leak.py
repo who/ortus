@@ -101,7 +101,15 @@ app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0'])
         [sys.executable, str(driver)],
         capture_output=True,
         text=True,
-        timeout=30,
+        # This driver runs a whole grind iteration, `bd` subprocesses included,
+        # and worker/verifier sweeps now run under `-n auto` (ortus-3ehq). The
+        # timeout only exists so a hung grind fails instead of wedging the
+        # suite; sized for a host running dozens of contending workers, because
+        # at 30s this test failed under `-n auto` while passing serially —
+        # which said nothing about stream leaks, the only thing it asserts.
+        # Kept under the 180s `--test-timeout` this test runs with so the
+        # explicit TimeoutExpired wins the race and names the driver.
+        timeout=120,
     )
     # The driver script may exit non-zero from typer.Exit; we care about the
     # streams, not the rc.

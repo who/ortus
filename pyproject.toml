@@ -39,6 +39,11 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "pytest-subprocess>=1.5.0",
+    # Worker and verifier sweeps run with `-n auto`. Most of a grind-family
+    # test's wall clock is spent waiting on bd subprocesses, so distributing
+    # them across cores is nearly all upside. Not in `addopts`: contention
+    # inflates individual durations, which would break the CI duration budget.
+    "pytest-xdist>=3.5.0",
     "build>=1.2.0",
     # The M5 backend-acceptance test generates a project per backend, so CI
     # needs the template engine itself, not just the rendering library.

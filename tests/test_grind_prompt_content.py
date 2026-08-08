@@ -196,6 +196,48 @@ def test_verification_flags_match_ci() -> None:
     assert "never narrow a marker expression" in verifier.lower()
 
 
+def test_both_phases_instruct_a_parallel_sweep() -> None:
+    """AC-2: worker and verifier guidance must both ask for `-n auto`.
+
+    A grind turn spends the majority of its wall clock blocked on pytest, and
+    almost all of that is subprocess wait rather than computation, so both
+    phases distribute their sweep across cores (ortus-3ehq). The budget stays
+    behind: it cannot be enforced while workers contend, so each phase is also
+    told that CI — which runs serially — remains the authority on duration.
+    """
+    from ortus.commands.grind import _verifier_prompt
+    from ortus.core.transaction import CandidateJournal
+
+    journal = CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        issue_packet_ref="logs/packet.json",
+        issue_packet_hash="b" * 64,
+        candidate_hash="a" * 64,
+    )
+    verifier = _verifier_prompt(journal, "probe contract")
+    worker = _content()
+
+    for name, text in (("verifier contract", verifier), ("grind-prompt.md", worker)):
+        assert "-n auto" in text, f"{name} does not instruct a parallel sweep"
+        # Naming the budget is not enough; the guidance has to say it is CI's,
+        # or a reader reproduces the CI command verbatim and gets contention
+        # breaches instead of a verdict about the code.
+        assert "--enforce-duration-budget" in text
+        assert "single-threaded" in text, (
+            f"{name} does not say CI runs the budget serially"
+        )
+        assert "pytest-xdist" in text, (
+            f"{name} does not say what to do on a host without pytest-xdist"
+        )
+
+    # The worker's own bounded inner loop parallelises too, not just the
+    # verifier's expansion.
+    assert "uv run pytest -m fast -n auto --test-timeout=30" in worker
+
+
 # ---------------------------------------------------------------------------
 # (4) ralph-prompt superseded-by preamble
 # ---------------------------------------------------------------------------
