@@ -38,13 +38,14 @@ def error(message: str, *, hint: str | None = None) -> None:
 def progress(verb: str, phase: str) -> None:
     """Emit a per-phase progress line to stderr in the canonical CLI format.
 
-    Format: `[yyyymmddhhmmss] [ortus <verb>] <phase>`. See AGENTS.md "CLI
+    Format: `[YYYY-MM-DD HH:MM:SS] [ortus <verb>] <phase>`. See AGENTS.md "CLI
     output convention" — silence-equals-hung is the perceived default, so
     every non-trivial phase of a non-interactive verb must call this so the
-    operator sees motion. The timestamp is local time, matching the clock the
-    grind log file prints, so console and log can be read side by side.
+    operator sees motion. The timestamp is local time in the same shape the
+    grind log file writes, so console and log lines can be compared without
+    mental reformatting.
     """
-    stamp = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+    stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     safe_verb = _escape_markup(verb)
     safe_phase = _escape_markup(phase)
     _err.print(

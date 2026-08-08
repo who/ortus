@@ -134,7 +134,7 @@ def test_repo_arg_with_beads_dir_proceeds_past_fr003(tmp_path: Path) -> None:
 
 # --- CLI output convention (ortus-s60a) -------------------------------------
 #
-# Every non-interactive verb must emit `[yyyymmddhhmmss] [ortus <verb>] <phase>`
+# Every non-interactive verb must emit `[YYYY-MM-DD HH:MM:SS] [ortus <verb>] <phase>`
 # lines to stderr so the operator can tell "running" from "hung." These tests
 # guard the convention per-verb. See AGENTS.md "CLI output convention".
 
@@ -174,7 +174,9 @@ def test_verb_progress_lines_open_with_timestamp_then_verb_tag(tmp_path: Path) -
     tagged = [line for line in result.stderr.splitlines() if "[ortus init]" in line]
     assert tagged, result.stderr
     for line in tagged:
-        assert re.match(r"^\[\d{14}\] \[ortus init\] ", line), line
+        assert re.match(
+            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[ortus init\] ", line
+        ), line
 
 
 def test_check_emits_progress_lines(tmp_path: Path) -> None:

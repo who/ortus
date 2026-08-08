@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -66,12 +67,43 @@ def test_progress_writes_to_stderr_with_canonical_prefix(monkeypatch: pytest.Mon
     assert out.getvalue() == ""
 
 
-def test_progress_timestamp_prefix_precedes_verb_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A progress line opens with a bracketed 14-digit stamp, then the verb tag."""
+def test_progress_timestamp_format_precedes_verb_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A line opens with `[YYYY-MM-DD HH:MM:SS]`, zero-padded, then the verb tag."""
     out, err = _patched_consoles(monkeypatch)
     output.progress("grind", "picking next issue")
     rendered = err.getvalue().strip()
-    assert re.fullmatch(r"\[\d{14}\] \[ortus grind\] picking next issue", rendered), rendered
+    assert re.fullmatch(
+        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[ortus grind\] picking next issue",
+        rendered,
+    ), rendered
+
+
+def test_progress_timestamp_matches_log_format(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The console stamp is byte-identical to the one the grind log file writes."""
+    from ortus.commands import grind as grind_cmd
+
+    # A single-digit month/day/hour instant, so a missing zero-pad shows up.
+    frozen = dt.datetime(2026, 8, 8, 1, 2, 3)
+
+    class _FakeDatetime:
+        @staticmethod
+        def now(tz: object = None) -> dt.datetime:
+            return frozen
+
+    out, err = _patched_consoles(monkeypatch)
+    monkeypatch.setattr(output, "_dt", SimpleNamespace(datetime=_FakeDatetime))
+    monkeypatch.setattr(grind_cmd, "_dt", SimpleNamespace(datetime=_FakeDatetime))
+
+    output.progress("grind", "picking next issue")
+    log_path = tmp_path / "grind.log"
+    grind_cmd._log_writer(log_path)("picking next issue")
+
+    console_stamp = re.match(r"\[[^\]]+\]", err.getvalue().strip())
+    log_stamp = re.match(r"\[[^\]]+\]", log_path.read_text(encoding="utf-8"))
+    assert console_stamp and log_stamp
+    assert console_stamp.group(0) == log_stamp.group(0) == "[2026-08-08 01:02:03]"
 
 
 def test_progress_timestamp_is_local_time(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,9 +112,9 @@ def test_progress_timestamp_is_local_time(monkeypatch: pytest.MonkeyPatch) -> No
     before = dt.datetime.now().replace(microsecond=0)
     output.progress("grind", "picking next issue")
     after = dt.datetime.now()
-    stamp = re.match(r"\[(\d{14})\]", err.getvalue().strip())
+    stamp = re.match(r"\[([\d\-: ]+)\]", err.getvalue().strip())
     assert stamp, err.getvalue()
-    parsed = dt.datetime.strptime(stamp.group(1), "%Y%m%d%H%M%S")
+    parsed = dt.datetime.strptime(stamp.group(1), "%Y-%m-%d %H:%M:%S")
     assert before <= parsed <= after
 
     # And it is taken from a naive local `now()`, never `now(timezone.utc)`.
@@ -97,7 +129,7 @@ def test_progress_timestamp_is_local_time(monkeypatch: pytest.MonkeyPatch) -> No
     out2, err2 = _patched_consoles(monkeypatch)
     monkeypatch.setattr(output, "_dt", SimpleNamespace(datetime=_FakeDatetime))
     output.progress("grind", "picking next issue")
-    assert "[20260808132845] [ortus grind] picking next issue" in err2.getvalue()
+    assert "[2026-08-08 13:28:45] [ortus grind] picking next issue" in err2.getvalue()
     assert tz_args == [None]
 
 
@@ -109,7 +141,7 @@ def test_progress_goes_to_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out.getvalue() == ""
 
 
-def test_progress_does_not_apply_rich_markup_to_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_progress_escapes_markup_in_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     """A phase containing `[` must not be interpreted as a rich tag."""
     out, err = _patched_consoles(monkeypatch)
     output.progress("plan", "writing [1/3] of N issues")
