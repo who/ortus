@@ -22,6 +22,7 @@ from ortus.core.claude import ClaudeRunner
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
+from tests._platform import skip_unless_bwrap_usable
 from tests._shims import make_inline_python_shim, normalize_git_branch, shim_path
 from tests.test_readiness import ready_issue
 
@@ -638,6 +639,7 @@ def test_verifier_report_and_mutation_isolation(
         assert status == "in_progress", "a rejected candidate keeps its claim"
 
 
+@skip_unless_bwrap_usable
 def test_verification_can_execute_a_trivial_command_on_this_host() -> None:
     """ortus-dyio AC-1: the read-only verifier posture still runs commands.
 
@@ -653,6 +655,7 @@ def test_verification_can_execute_a_trivial_command_on_this_host() -> None:
     ClaudeRunner().preflight_readonly(Path.cwd())
 
 
+@skip_unless_bwrap_usable
 def test_verification_preflight_catches_an_unwritable_agent_scratch_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -678,6 +681,7 @@ def test_verification_preflight_catches_an_unwritable_agent_scratch_dir(
     assert str(home / ".claude" / "session-env") in message
 
 
+@skip_unless_bwrap_usable
 def test_verification_preflight_covers_the_repo_agent_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

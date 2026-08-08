@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,4 +35,38 @@ skip_on_windows_bash_shim = pytest.mark.skipif(
 skip_unless_bd = pytest.mark.skipif(
     shutil.which("bd") is None,
     reason="bd binary not on PATH",
+)
+
+
+def _bwrap_can_build_a_namespace() -> bool:
+    """Whether bwrap can actually start here, not merely whether it exists.
+
+    GitHub runners, hardened kernels and some containers deny unprivileged user
+    namespaces, so bwrap is on PATH and fails with `setting up uid map:
+    Permission denied`. Tests that assert on a live sandbox posture have to
+    skip there rather than fail (ortus-dyio).
+    """
+
+    if shutil.which("bwrap") is None:
+        return False
+    try:
+        probe = subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--", "true"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+BWRAP_USABLE = _bwrap_can_build_a_namespace()
+
+skip_unless_bwrap_usable = pytest.mark.skipif(
+    not BWRAP_USABLE,
+    reason=(
+        "bwrap cannot build a namespace here (no unprivileged user namespaces); "
+        "the live read-only posture cannot be exercised"
+    ),
 )

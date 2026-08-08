@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shlex
 import signal
 import subprocess
@@ -183,6 +184,16 @@ class ClaudeRunner:
             if PREFLIGHT_MARKER in proc.stdout:
                 return
             stderr = (proc.stderr or "").strip()
+            if _SANDBOX_UNSUPPORTED.search(stderr):
+                # A host that cannot create the sandbox at all is a different
+                # condition from one whose posture is unwritable, and not the
+                # one this guard exists to catch. It is pre-existing, it is
+                # `sandbox.smoke_test()`'s to police, and the verifier launch
+                # goes through this same wrapper — so it still fails loudly a
+                # moment later as a nonzero verifier exit. Blocking here
+                # instead took down every grind run on a host without
+                # unprivileged user namespaces, CI runners included.
+                return
             detail = (
                 stderr.splitlines()[-1]
                 if stderr
@@ -253,6 +264,14 @@ _AGENT_SCRATCH_DIRS: tuple[str, ...] = (
 
 PREFLIGHT_PROBE = "read-only verifier execution probe"
 PREFLIGHT_MARKER = "ortus-readonly-probe-ok"
+# bwrap failing to build the namespace itself — no unprivileged user namespaces
+# (GitHub runners, hardened kernels, some containers). Distinct from a sandbox
+# that starts and then cannot write, which is what this guard is for.
+_SANDBOX_UNSUPPORTED = re.compile(
+    r"(setting up uid map|setting up gid map|Creating new namespace|"
+    r"clone failed|Operation not permitted.*namespace|unshare)",
+    re.IGNORECASE,
+)
 _PREFLIGHT_SCRATCH = "ortus-preflight"
 
 

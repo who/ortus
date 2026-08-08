@@ -14,7 +14,10 @@ import pytest
 
 from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group, _readonly_wrapper
 from ortus.core.profiles import AgentProfile, Phase
-from tests._platform import skip_unless_tmp_is_canonical
+from tests._platform import (
+    skip_unless_bwrap_usable,
+    skip_unless_tmp_is_canonical,
+)
 from tests._shims import shim_path
 
 FAKE_CLAUDE = shim_path("fake-claude")
@@ -159,6 +162,7 @@ def test_readonly_wrapper_makes_repo_claude_dir_writable_keeping_config(
 
 
 @skip_unless_tmp_is_canonical
+@skip_unless_bwrap_usable
 def test_readonly_wrapper_keeps_repo_claude_writable_under_tmp(
     tmp_path: Path,
 ) -> None:
