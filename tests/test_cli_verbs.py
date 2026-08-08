@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,18 +26,33 @@ def test_top_help_lists_all_verbs() -> None:
         assert verb in result.stdout, f"--help missing verb {verb!r}"
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# Every glyph rich may draw a table border with, across its box styles and the
+# ASCII fallback it substitutes when the output encoding can't carry them.
+_BORDERS = "│┃|╎┆┊╽╿"
+
+
 def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
     """Adding a verb must append; existing verbs keep their listing order."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    # Rich draws the command table inside a box, so drop the border glyphs
-    # and keep the first token of each row that names a verb.
+    # Rich draws the command table inside a box, so drop the border glyphs and
+    # keep the first token of each row that names a verb. On a runner there is
+    # no TTY, but typer's rich_utils sets force_terminal whenever GITHUB_ACTIONS
+    # (or FORCE_COLOR / PY_COLORS) is set, so every row arrives wrapped in SGR
+    # escapes. Strip those first — otherwise each row's first token is an escape
+    # sequence, the inventory parses empty, and the order assertion fails for a
+    # reason that has nothing to do with verb order.
     known = set(VERBS) | {"unlock"}
     listed = []
-    for line in result.stdout.splitlines():
-        tokens = [t for t in line.replace("│", " ").split() if t]
+    for raw in result.stdout.splitlines():
+        line = _ANSI.sub("", raw)
+        for border in _BORDERS:
+            line = line.replace(border, " ")
+        tokens = line.split()
         if tokens and tokens[0] in known:
             listed.append(tokens[0])
+    assert listed, f"parsed no verbs out of --help output:\n{result.stdout!r}"
     assert listed == [
         "init",
         "plan",
@@ -64,18 +80,25 @@ def test_version_flag_prints_version() -> None:
     assert result.stdout.startswith("ortus ")
 
 
-@pytest.mark.parametrize(
-    "verb",
-    # All Phase 1+2 verbs (init/check/grind/plan) are implemented; remaining
-    # stubs (interview/tail/triage/human) hit resolve_repo first and exit 1
-    # on missing .beads/, not 2. So no top-level verb currently emits the
-    # canonical 'not implemented' message on a path without .beads/.
-    [],
-)
-def test_stub_verbs_exit_two_with_message(verb: str) -> None:  # pragma: no cover
-    result = runner.invoke(app, [verb, "/tmp/no-such-dir-stub-test"])
-    assert result.exit_code == 2
-    assert "not implemented" in result.stderr
+def test_no_verb_is_wired_to_the_stub() -> None:
+    """No top-level verb may still route to the exit-2 'not implemented' stub.
+
+    This used to be a parametrized drive of the stub verbs, but every verb has
+    a real implementation now, so its parameter list emptied out and pytest
+    reported the case as a skip — an empty parameter set asserts nothing while
+    reading like coverage. Checking the registered callbacks directly keeps the
+    invariant enforced on every run without invoking verbs that would block on
+    a real claude or a tail poll.
+    """
+    import ortus.commands._stub as _stub
+
+    stubbed = [
+        command.name
+        for command in app.registered_commands
+        if command.callback is _stub.not_implemented
+    ]
+    assert not stubbed, f"verbs still routed to the stub: {stubbed}"
+    assert {command.name for command in app.registered_commands} >= set(VERBS)
 
 
 def test_all_verbs_have_real_implementations(tmp_path: Path) -> None:

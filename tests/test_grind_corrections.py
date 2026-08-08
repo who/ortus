@@ -69,6 +69,15 @@ def _seed(tmp_path: Path, prefix: str) -> tuple[Path, str]:
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    # Ortus finalizes a verified candidate with a real `git commit`, which
+    # aborts without an author identity. Runners have no global one, so the
+    # fixture states its own rather than inheriting a developer machine's.
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
     issue_id = subprocess.run(
         [
             "bd",

@@ -112,6 +112,15 @@ def _bd_repo(tmp_path: Path, prefix: str) -> Path:
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    # Ortus finalizes a verified candidate with a real `git commit`, which
+    # aborts without an author identity. Runners have no global one, so the
+    # fixture states its own rather than inheriting a developer machine's.
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
     return repo
 
 
@@ -451,6 +460,19 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     assert [call["fast"] for call in calls] == [True, False]
 
 
+# Marked slow rather than optimized (ortus-6ur4). Profiling the setup below in
+# isolation puts it at 3.4s (bd init 1.3s, branch + bd create 1.1s, the git
+# baseline commit 1.0s) against 17-26s for a whole case, so setup is under a
+# fifth of the cost and the grind run itself is the rest. Only the bd init and
+# create pair could be shared across cases — each case mutates its repo, so the
+# baseline commit stays per-case — which on the CI numbers that failed the gate
+# (5.14s to 8.07s) would still leave the slowest case around 7s. Cutting the
+# remainder means cutting grind's own subprocess traffic, i.e. changing the
+# finalization code this test exists to pin. A slow marker keeps every case in
+# the CI gate — this module is already `integration`, so `-m "fast or
+# integration"` still selects it — and only waives the 5s hermetic budget,
+# which is precisely what pyproject documents the marker for.
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "mutation,expected_phase,expected_text",
     [
