@@ -104,6 +104,29 @@ def test_linux_readonly_wrapper_keeps_repo_under_tmp_visible_and_read_only(
     ]
 
 
+def test_readonly_wrapper_gives_agent_scratch_dirs_a_writable_tmpfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-dyio: `--ro-bind / /` leaves $HOME read-only, and the agent CLI
+    cannot start a shell without writing its per-session dirs."""
+    monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
+    home = tmp_path / "home"
+    (home / ".claude" / "session-env").mkdir(parents=True)
+    (home / ".claude" / "sessions").mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    argv = _readonly_wrapper(["claude", "-p", "verify"], tmp_path / "repo")
+
+    mounted = {argv[i + 1] for i, tok in enumerate(argv) if tok == "--tmpfs"}
+    assert str(home / ".claude" / "session-env") in mounted
+    assert str(home / ".claude" / "sessions") in mounted
+    # Absent dirs are skipped: the root is bound read-only, so bwrap cannot
+    # create a missing mountpoint and would fail to launch.
+    assert str(home / ".claude" / "projects") not in mounted
+    # The read-only posture that protects the candidate is unchanged.
+    assert argv[:4] == ["bwrap", "--ro-bind", "/", "/"]
+
+
 # --- tee-to-log-not-terminal -----------------------------------------------
 
 

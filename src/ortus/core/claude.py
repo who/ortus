@@ -178,6 +178,39 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+# Directories the agent CLI writes under $HOME on every run: a per-session env
+# dir, shell snapshots, session transcripts, per-project state. `--ro-bind / /`
+# makes all of them read-only, and the CLI then fails to start a shell at all
+# ("EROFS: read-only file system, mkdir .../session-env/<uuid>"), so every
+# verification returns each criterion BLOCKED instead of judged (ortus-dyio).
+# Each gets an empty tmpfs: writable, discarded with the sandbox, and carrying
+# nothing from the host session into the verifier.
+_AGENT_SCRATCH_DIRS: tuple[str, ...] = (
+    ".claude/session-env",
+    ".claude/shell-snapshots",
+    ".claude/sessions",
+    ".claude/projects",
+    ".claude/file-history",
+    ".claude/paste-cache",
+)
+
+
+def _agent_scratch_tmpfs(home: Path) -> list[str]:
+    """`--tmpfs` args for agent scratch dirs that exist on this host.
+
+    A tmpfs needs its mountpoint to already exist: the root is bound read-only,
+    so bwrap cannot create a missing one. Skipping absent paths keeps the
+    wrapper working across CLI versions that add or drop a directory.
+    """
+
+    args: list[str] = []
+    for relative in _AGENT_SCRATCH_DIRS:
+        candidate = home / relative
+        if candidate.is_dir():
+            args.extend(["--tmpfs", str(candidate)])
+    return args
+
+
 def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
     """Apply a source-read-only OS posture while leaving /tmp writable."""
 
@@ -195,6 +228,7 @@ def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
             "/proc",
             "--tmpfs",
             "/tmp",
+            *_agent_scratch_tmpfs(Path.home()),
         ]
         resolved_repo = repo.resolve()
         try:
