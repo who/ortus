@@ -162,7 +162,7 @@ class ClaudeRunner:
         """
 
         home = Path.home()
-        script = _preflight_script(home)
+        script = _preflight_script(home, repo)
         argv = self._readonly_argv(["/bin/sh", "-c", script], repo)
         try:
             proc = subprocess.run(
@@ -256,7 +256,28 @@ PREFLIGHT_MARKER = "ortus-readonly-probe-ok"
 _PREFLIGHT_SCRATCH = "ortus-preflight"
 
 
-def _preflight_script(home: Path) -> str:
+def _preflight_targets(home: Path, repo: Path) -> list[Path]:
+    """Every directory the agent CLI must be able to write to start.
+
+    Exactly the set `_readonly_wrapper` opens up, and for the same reasons.
+    Probing more than that would fail a healthy posture; probing less is how
+    this guard grew a blind spot — its first version covered only $HOME and
+    reported a clean posture to a verifier that could not run a single command
+    because `<repo>/.claude` was unwritable (ortus-dyio).
+    """
+
+    targets = [home / relative for relative in _AGENT_SCRATCH_DIRS]
+    targets = [target for target in targets if target.is_dir()]
+    if platform.system() == "Linux":
+        # Only the Linux posture nests a bwrap sandbox that materialises
+        # bind-mount placeholders under the repo's .claude/. Seatbelt denies
+        # writes there deliberately and the CLI does not need them, so probing
+        # it on macOS would report every healthy posture as blocked.
+        targets.append(repo.resolve() / ".claude")
+    return targets
+
+
+def _preflight_script(home: Path, repo: Path) -> str:
     """The trivial command the verification preflight runs in the sandbox.
 
     `echo ok` alone would not have caught the failure this guards: the sandbox
@@ -266,13 +287,12 @@ def _preflight_script(home: Path) -> str:
     """
 
     steps = []
-    for relative in _AGENT_SCRATCH_DIRS:
-        if not (home / relative).is_dir():
-            continue
+    for target in _preflight_targets(home, repo):
         # Created and removed in the same breath: on Linux this lands in a
         # discarded tmpfs, but the macOS posture writes the real directory, and
-        # a probe has no business leaving anything behind.
-        probe_dir = shlex.quote(str(home / relative / _PREFLIGHT_SCRATCH))
+        # a probe has no business leaving anything behind. `mkdir -p` is what
+        # makes a missing parent count as a failure rather than a skip.
+        probe_dir = shlex.quote(str(target / _PREFLIGHT_SCRATCH))
         steps.append(f"mkdir -p {probe_dir} && rmdir {probe_dir}")
     return " && ".join([*steps, f"echo {PREFLIGHT_MARKER}"])
 
@@ -315,6 +335,12 @@ def _repo_agent_dir_tmpfs(repo: Path) -> list[str]:
     the alternative and loses to this: the deny list is a moving target owned by
     the CLI, not by ortus. The source tree outside `.claude/` stays read-only,
     so the candidate is as protected as before (ortus-dyio).
+
+    A repo with no `.claude/` at all gets no mount: bwrap cannot create a tmpfs
+    mountpoint under a read-only root, and ortus will not write into a candidate
+    to make one. That posture genuinely cannot start the inner sandbox, and
+    `_preflight_targets` includes the path so the run aborts naming the probe
+    rather than handing back a report whose every criterion is blocked.
     """
 
     claude_dir = repo / ".claude"
@@ -355,7 +381,6 @@ def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
             *_agent_scratch_tmpfs(Path.home()),
         ]
         resolved_repo = repo.resolve()
-        wrapper.extend(_repo_agent_dir_tmpfs(resolved_repo))
         try:
             relative_to_tmp = resolved_repo.relative_to("/tmp")
         except ValueError:
@@ -366,6 +391,12 @@ def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
                 current /= part
                 wrapper.extend(["--dir", str(current)])
             wrapper.extend(["--ro-bind", str(resolved_repo), str(resolved_repo)])
+        # Last, so it lands on top: bwrap applies mounts in order, and a repo
+        # under /tmp is restored by the ro-bind above after `--tmpfs /tmp` wiped
+        # it. Staging the agent-dir tmpfs before that ro-bind lets the ro-bind
+        # mask it, which puts <repo>/.claude back to read-only — the very
+        # failure this mount exists to prevent (ortus-dyio).
+        wrapper.extend(_repo_agent_dir_tmpfs(resolved_repo))
         return [*wrapper, "--chdir", str(resolved_repo), "--", *argv]
     if system == "Darwin":
         repo_literal = _seatbelt_literal(repo)

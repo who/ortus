@@ -678,6 +678,39 @@ def test_verification_preflight_catches_an_unwritable_agent_scratch_dir(
     assert str(home / ".claude" / "session-env") in message
 
 
+def test_verification_preflight_covers_the_repo_agent_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-dyio: the probe covers `<repo>/.claude`, not just $HOME.
+
+    The verifier's own inner sandbox materialises bind-mount placeholders there,
+    and a repo with no `.claude/` gets no tmpfs to hold them — total blockage,
+    which a $HOME-only probe reported as a healthy posture. Both directions are
+    asserted, so the probe is pinned to the condition rather than to a failure.
+    """
+    if platform.system() != "Linux" or shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap posture required")
+    # No agent scratch dirs under this $HOME, so the repo is the only target and
+    # the verdict cannot come from some other unwritable path.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    blocked = tmp_path / "no-agent-dir"
+    (blocked / "src").mkdir(parents=True)
+
+    with pytest.raises(claude_mod.ReadOnlyExecutionBlocked) as caught:
+        ClaudeRunner().preflight_readonly(blocked)
+
+    message = str(caught.value)
+    assert claude_mod.PREFLIGHT_PROBE in message
+    assert "Read-only file system" in message
+    assert str((blocked / ".claude").resolve()) in message
+
+    healthy = tmp_path / "with-agent-dir"
+    (healthy / ".claude").mkdir(parents=True)
+    ClaudeRunner().preflight_readonly(healthy)
+    assert not (healthy / ".claude" / claude_mod._PREFLIGHT_SCRATCH).exists()
+
+
 def _blocked_verifier_grind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> tuple[object, Path, str, list[str]]:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -154,6 +156,41 @@ def test_readonly_wrapper_makes_repo_claude_dir_writable_keeping_config(
     assert str((repo / ".claude" / "settings.local.json").resolve()) not in argv
     # The candidate outside .claude/ is still read-only.
     assert argv[:4] == ["bwrap", "--ro-bind", "/", "/"]
+
+
+@skip_unless_tmp_is_canonical
+def test_readonly_wrapper_keeps_repo_claude_writable_under_tmp(
+    tmp_path: Path,
+) -> None:
+    """ortus-dyio: the agent-dir tmpfs has to outrank the /tmp repo re-bind.
+
+    A repo under /tmp is wiped by `--tmpfs /tmp` and restored by a read-only
+    bind. bwrap applies mounts in order, so a `.claude` tmpfs staged before that
+    bind is masked by it and the inner sandbox is back to the read-only
+    `<repo>/.claude` that stopped verifiers dead. Executed rather than asserted
+    on argv, because the argv carried both mounts while the posture did not.
+    """
+    if platform.system() != "Linux" or shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap posture required")
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / ".claude").mkdir()
+
+    argv = _readonly_wrapper(
+        [
+            "/bin/sh",
+            "-c",
+            "mkdir -p .claude/hooks && echo PLACEHOLDER_OK; "
+            "touch src/mutated 2>/dev/null || echo CANDIDATE_READONLY",
+        ],
+        repo,
+    )
+    proc = subprocess.run(argv, capture_output=True, text=True)
+
+    combined = proc.stdout + proc.stderr
+    assert "PLACEHOLDER_OK" in combined, combined
+    assert "CANDIDATE_READONLY" in combined, combined
+    assert not (repo / ".claude" / "hooks").exists(), "the tmpfs must be discarded"
 
 
 def test_readonly_wrapper_skips_repo_claude_dir_when_absent(
