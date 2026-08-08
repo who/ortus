@@ -157,6 +157,51 @@ def test_dirty_source_becomes_preserved_codex_baseline(tmp_path: Path) -> None:
     )
 
 
+def test_commit_paths_leaves_unrelated_dirty_paths_untouched(tmp_path: Path) -> None:
+    """A path-scoped commit is the mechanism that lets grind hand a worker a
+    dirty tree: work outside the owned set stays exactly as the operator left
+    it — staged, unstaged, and untracked alike."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+    (repo / "staged-unrelated.txt").write_text("staged operator work\n")
+    subprocess.run(["git", "add", "staged-unrelated.txt"], cwd=repo, check=True)
+    (repo / "untracked-unrelated.txt").write_text("untracked operator work\n")
+    git = GitClient(repo)
+
+    assert git.commit_paths(frozenset({"owned.py"}), "repo-1: verified candidate")
+
+    committed = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert committed == ["owned.py"]
+    assert (repo / "staged-unrelated.txt").read_text() == "staged operator work\n"
+    assert (repo / "untracked-unrelated.txt").read_text() == "untracked operator work\n"
+    dirty = git.dirty_paths()
+    assert dirty == frozenset({"staged-unrelated.txt", "untracked-unrelated.txt"})
+    assert git.status_text().splitlines() == [
+        "A  staged-unrelated.txt",
+        "?? untracked-unrelated.txt",
+    ]
+
+
+def test_status_text_is_bounded_and_empty_outside_a_repo(tmp_path: Path) -> None:
+    """The handoff prompt shares Claude's 4,000-character /goal budget, so the
+    status it carries is truncated rather than unbounded."""
+    repo = _repo(tmp_path)
+    for index in range(40):
+        (repo / f"file-{index:02d}.txt").write_text("dirty\n")
+
+    text = GitClient(repo).status_text(limit=120)
+
+    assert len(text) <= 120 + len("\n[truncated]")
+    assert text.endswith("[truncated]")
+    assert GitClient(tmp_path).status_text() == "", "outside a repo there is no status"
+
+
 def test_failed_git_status_is_not_treated_as_clean(tmp_path: Path) -> None:
     git = GitClient(tmp_path, binary="false")
 

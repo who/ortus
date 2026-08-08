@@ -124,6 +124,24 @@ class GitClient:
                 index += 1
         return frozenset(paths)
 
+    def status_text(self, *, limit: int = 1_200) -> str:
+        """Bounded porcelain status for handoff context and operator logs.
+
+        A fresh worker resuming someone else's uncommitted work needs to see the
+        shape of the worktree — staged vs unstaged vs untracked — not just the
+        path set `dirty_paths` returns. Bounded because it also goes into a
+        prompt with a hard size budget.
+        """
+        proc = self._run(
+            "status", "--porcelain=v1", "--untracked-files=all", "--", *_WORKER_PATHSPECS
+        )
+        if proc.returncode != 0:
+            return ""
+        text = proc.stdout.strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "\n[truncated]"
+
     def current_branch(self) -> str:
         """Checked-out branch name, or "" for a detached HEAD / on error.
 

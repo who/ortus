@@ -208,6 +208,86 @@ def test_journal_records_each_finalization_boundary(tmp_path: Path) -> None:
         journal.with_finalization("publish")
 
 
+def test_journal_records_handoffs_and_deduplicates_disowned_paths(
+    tmp_path: Path,
+) -> None:
+    """A repeatedly-resumed transaction accumulates audit records, not state: the
+    disowned set stays deduplicated and the handoff log stays bounded."""
+    (tmp_path / "inherited.txt").write_text("prior engineer work\n")
+    journal = CandidateJournal.start(
+        repo=tmp_path,
+        issue_id="repo-handoff",
+        base_head="abc123",
+        baseline_paths=(),
+    )
+
+    resumed = journal.with_handoff(
+        repo=tmp_path,
+        paths={"inherited.txt"},
+        notes=("HEAD moved from abc123 to def456",),
+        base_head="def456",
+    )
+
+    assert resumed.base_head == "def456"
+    assert resumed.handoff_paths == ("inherited.txt",)
+    assert resumed.handoff_fingerprints["inherited.txt"]
+    assert resumed.handoffs[-1]["notes"] == ["HEAD moved from abc123 to def456"]
+    assert resumed.handoffs[-1]["resumed_phase"] == "implementation"
+
+    disowned = resumed.with_unrelated({"inherited.txt"}).with_unrelated(
+        {"inherited.txt"}
+    )
+    assert disowned.unrelated_paths == ("inherited.txt",)
+
+    for _ in range(12):
+        disowned = disowned.with_handoff(repo=tmp_path, paths={"inherited.txt"})
+    assert len(disowned.handoffs) == 8
+
+    store = JournalStore(tmp_path)
+    store.save(disowned)
+    assert store.load() == disowned
+
+
+def test_newer_or_corrupt_journal_reports_context_instead_of_blocking(
+    tmp_path: Path,
+) -> None:
+    """AC-4: a journal a newer Ortus wrote still names the issue that owns the
+    uncommitted work, so it loads with notes; only a journal with no usable
+    identity at all loads as None."""
+    store = JournalStore(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "schema": JOURNAL_SCHEMA + 5,
+                "issue_id": "repo-future",
+                "base_head": "abc123",
+                "baseline_paths": [],
+                "baseline_fingerprints": {},
+                "candidate_paths": ["candidate.py"],
+                "phase": "incomplete-candidate",
+                "field_from_the_future": {"unreadable": True},
+            }
+        )
+    )
+
+    journal, notes = store.load_state()
+
+    assert journal is not None and journal.issue_id == "repo-future"
+    assert journal.candidate_paths == ("candidate.py",)
+    rendered = " ".join(notes)
+    assert f"journal schema {JOURNAL_SCHEMA + 5}" in rendered
+    assert "field_from_the_future" in rendered
+
+    store.path.write_text("{not json at all")
+    unusable, why = store.load_state()
+    assert unusable is None
+    assert "not valid JSON" in " ".join(why)
+
+    store.clear()
+    assert store.load_state() == (None, ())
+
+
 def test_schema_two_journal_loads_without_finalization_state(tmp_path: Path) -> None:
     """A journal written before finalization existed resumes as "nothing landed
     yet"; observable bd and git state is what actually gates each replay."""

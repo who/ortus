@@ -70,7 +70,12 @@ from ortus.core.transaction import (
     CandidateJournal,
     JournalStore,
 )
-from ortus.core.transaction import candidate_diff, issue_packet_hash, sha256_bytes
+from ortus.core.transaction import (
+    candidate_diff,
+    fingerprint_paths,
+    issue_packet_hash,
+    sha256_bytes,
+)
 from ortus.core.verdict import (
     Verdict,
     VerdictError,
@@ -117,6 +122,27 @@ _TRACKER_EXPORT_PATHS = frozenset(
 )
 _EVIDENCE_SECRET = re.compile(
     r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)([^\r\n]+)"
+)
+#: Where a recovery worker declares which inherited changes are not this issue's
+#: work. It lives under the already-ignored logs/ tree, so the declaration is
+#: never itself a candidate path, and Ortus consumes it into the journal after
+#: the worker returns.
+_UNRELATED_DECLARATION = Path("logs") / "grind-unrelated-paths.txt"
+#: The recovery block shares Claude's 4,000-character /goal budget with the base
+#: task and the CodeGraph contract, so it is bounded on both axes.
+_HANDOFF_PROMPT_PATHS = 12
+_HANDOFF_PROMPT_CHARS = 1_200
+#: Journal phases whose candidate was already sealed for review. A path-set
+#: difference against one of these is real drift worth reporting to the worker;
+#: for an in-flight phase it is just the prior worker's unfinished edits.
+_SEALED_PHASES = frozenset(
+    {
+        "implementation-timeout",
+        "verification-timeout",
+        "correction-timeout",
+        "orphaned-candidate",
+        "incomplete-candidate",
+    }
 )
 
 
@@ -333,6 +359,400 @@ def _capture_codex_candidate(
     )
     store.save(updated)
     return updated
+
+
+def _candidate_baseline(
+    journal: CandidateJournal | None, baseline: frozenset[str]
+) -> frozenset[str]:
+    """Paths a candidate must never absorb: operator baseline plus disowned work.
+
+    Everything that computes or re-checks candidate ownership — capture,
+    finalization, the finalization blocker — must subtract the same set, or a
+    path a worker declared unrelated would read as candidate drift.
+    """
+
+    if journal is None:
+        return baseline
+    return baseline | frozenset(journal.unrelated_paths)
+
+
+def _absorb_unrelated_declaration(
+    repo: Path,
+    store: JournalStore,
+    journal: CandidateJournal,
+    write_log: Callable[[str], None],
+) -> CandidateJournal:
+    """Consume the worker's "this inherited change is not mine" declaration.
+
+    A recovery worker inherits whatever the previous engineer left behind, and
+    only the worker can judge which of it belongs to this issue. Declaring a
+    path here keeps it in the worktree and out of the candidate, so it is
+    neither reset, stashed, deleted, nor committed. The declaration is honored
+    for handoff paths only: work this attempt produced cannot be disowned.
+    """
+
+    declaration = repo / _UNRELATED_DECLARATION
+    try:
+        raw = declaration.read_text(encoding="utf-8")
+    except OSError:
+        return journal
+    declared = {line.strip() for line in raw.splitlines()} - {""}
+    honored = declared & set(journal.handoff_paths)
+    ignored = sorted(declared - honored)
+    try:
+        declaration.unlink()
+    except OSError:
+        pass
+    if ignored:
+        write_log(
+            "handoff: ignoring unrelated declaration outside the inherited work: "
+            + ", ".join(ignored[:_HANDOFF_PROMPT_PATHS])
+        )
+    if not honored:
+        return journal
+    updated = journal.with_unrelated(honored)
+    store.save(updated)
+    write_log(
+        "handoff: worker declared unrelated; left untouched and never committed: "
+        + ", ".join(sorted(honored))
+    )
+    output.progress(
+        "grind", f"{len(honored)} inherited path(s) declared unrelated; left untouched"
+    )
+    return updated
+
+
+@dataclass
+class _HandoffState:
+    """What this run inherited: the goal, the work on disk, and what moved.
+
+    An unsuccessful run leaves two things behind — the assigned issue and the
+    uncommitted worktree — and together they are the handoff artifact. This
+    carries both to the iteration that resumes them, plus the drift notes that
+    are context for the model rather than startup failures.
+    """
+
+    journal: CandidateJournal | None = None
+    handoff_paths: frozenset[str] = frozenset()
+    disowned: frozenset[str] = frozenset()
+    resume_issue_id: str | None = None
+    candidate_ready: bool = False
+    active: bool = False
+    prior_phase: str = ""
+    diff_ref: str = ""
+    notes: tuple[str, ...] = ()
+
+    def instruction(self) -> str:
+        """The bounded recovery contract appended to the worker's phase rules."""
+
+        listed = sorted(self.handoff_paths)[:_HANDOFF_PROMPT_PATHS]
+        hidden = len(self.handoff_paths) - len(listed)
+        rendered = ", ".join(listed) + (f", +{hidden} more" if hidden > 0 else "")
+        text = (
+            " RECOVERY HANDOFF: a prior engineer left uncommitted work"
+            + (f" and stopped at {self.prior_phase}" if self.prior_phase else "")
+            + ". Run `git status` and `git diff HEAD` for the live state"
+            + (f"; the captured diff is {self.diff_ref}" if self.diff_ref else "")
+            + ". Inherited paths: "
+            + (rendered or "none")
+            + ". Assess every change against the issue packet: keep and finish what "
+            "advances it, correct what is wrong, and leave unrelated work untouched — "
+            f"list each unrelated path in {_UNRELATED_DECLARATION.as_posix()}, one per "
+            "line, and Ortus will never commit it. Continue from this state instead of "
+            "restarting."
+        )
+        if self.disowned:
+            text += (
+                " Already declared unrelated by an earlier worker; leave exactly as they "
+                "are: " + ", ".join(sorted(self.disowned)[:_HANDOFF_PROMPT_PATHS]) + "."
+            )
+        if self.notes:
+            text += " Prior state: " + "; ".join(self.notes[:3]) + "."
+        if len(text) > _HANDOFF_PROMPT_CHARS:
+            text = text[:_HANDOFF_PROMPT_CHARS].rstrip() + " [truncated]"
+        return text
+
+
+def _rebuild_journal_from_claim(
+    bd: BdClient,
+    git: GitClient,
+    store: JournalStore,
+    *,
+    repo: Path,
+    write_log: Callable[[str], None],
+) -> CandidateJournal | None:
+    """Recover the goal from bd when the journal itself is unreadable.
+
+    A single in-progress issue identifies the work well enough to resume it; the
+    worktree supplies the rest. Genuine ambiguity about which issue owns the
+    handoff is the one case that needs a human, and it is handled by the caller.
+    """
+
+    dirty = git.dirty_paths() if git.is_git_repo() else frozenset()
+    claimed = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+    if dirty is None or len(claimed) != 1:
+        return None
+    issue_hint = next(iter(claimed))
+    paths = dirty - _TRACKER_EXPORT_PATHS
+    try:
+        digest, diff_ref = store.save_diff(candidate_diff(repo, paths))
+    except RuntimeError as exc:
+        write_log(f"transaction handoff: could not diff the inherited work ({exc})")
+        return None
+    journal = CandidateJournal.start(
+        repo=repo,
+        issue_id=issue_hint,
+        base_head=git.head_oid(),
+        baseline_paths=(),
+    ).with_candidate(
+        paths, phase="handoff", candidate_hash=digest, diff_ref=diff_ref
+    )
+    store.save(journal)
+    write_log(
+        "transaction handoff: rebuilt unusable journal from claimed issue "
+        f"{issue_hint} and the current worktree"
+    )
+    return journal
+
+
+def _prepare_handoff(
+    bd: BdClient,
+    git: GitClient,
+    store: JournalStore,
+    *,
+    repo: Path,
+    backend: str,
+    integration_branch: str,
+    write_log: Callable[[str], None],
+) -> _HandoffState:
+    """Resume the prior goal and hand the current worktree to a fresh worker.
+
+    Any unsuccessful run — nonzero exit, kill, verifier failure, malformed
+    verdict — can return with its issue still assigned and its edits still
+    uncommitted. Startup therefore prefers that issue over selecting new work,
+    and treats every historical mismatch (journal schema, prior HEAD, path set,
+    candidate hash) as context to report rather than a reason to refuse. Nothing
+    here resets, stashes, or discards anything.
+    """
+
+    journal, notes = store.load_state()
+    for note in notes:
+        write_log(f"transaction handoff: {note}")
+    if journal is None and store.path.exists():
+        journal = _rebuild_journal_from_claim(
+            bd, git, store, repo=repo, write_log=write_log
+        )
+        if journal is None:
+            notes = (
+                *notes,
+                "the prior journal was unusable and no single claimed issue named the goal",
+            )
+            write_log(
+                "transaction handoff: journal is unusable and no single claimed issue "
+                "identifies the work; continuing with the current worktree as context"
+            )
+        else:
+            notes = (*notes, "the prior journal was rebuilt from bd and the worktree")
+
+    if journal is not None:
+        # Finalization replay already ran, so a journal still here owes work. If
+        # its issue is finished or gone, the goal it names is not resumable:
+        # reopening closed work — or looping on an id bd cannot read — is worse
+        # than losing the routing hint, so the tree becomes plain context.
+        status = bd.status(journal.issue_id)
+        unroutable = (
+            "is already closed"
+            if status == "closed"
+            else "cannot be read from bd"
+            if not status
+            else ""
+        )
+        if unroutable:
+            write_log(
+                f"transaction handoff: {journal.issue_id} {unroutable}; not resuming "
+                "it. Its uncommitted work is presented as context instead"
+            )
+            notes = (
+                *notes,
+                f"{journal.issue_id} {unroutable} while its candidate was still pending",
+            )
+            store.clear()
+            journal = None
+
+    if journal is None:
+        # No routable transaction. Uncommitted work is still an engineering
+        # handoff rather than a reason to fence the next worker away from
+        # potentially useful code, so it is preserved and presented.
+        if backend == "codex":
+            inherited = _checkpoint_codex_preflight(
+                git, integration_branch, write_log, accept_baseline=True
+            )
+        else:
+            dirty = git.dirty_paths() if git.is_git_repo() else frozenset()
+            if dirty is None:
+                write_log("transaction handoff: git status failed; assuming clean tree")
+                dirty = frozenset()
+            inherited = dirty - _TRACKER_EXPORT_PATHS
+        if not inherited:
+            return _HandoffState(notes=notes)
+        state = _HandoffState(handoff_paths=inherited, active=True, notes=notes)
+        claimed = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+        if len(claimed) == 1:
+            # The claim and the uncommitted work together are the handoff, so
+            # prefer that issue over selecting anything new.
+            state.resume_issue_id = next(iter(claimed))
+            write_log(
+                "transaction handoff: resuming the single claimed issue "
+                f"{state.resume_issue_id}"
+            )
+        elif len(claimed) > 1:
+            # Genuine ambiguity — several claims could own this work and neither
+            # bd nor the worktree decides between them. Preserve everything and
+            # ask for routing instead of guessing a goal.
+            #
+            # This halt deliberately precedes the startup orphan sweep: the
+            # sweep would revert or escalate both claims, erasing the very
+            # evidence the operator needs to decide which one owns the
+            # uncommitted paths. `ortus grind --orphan-policy` is still the way
+            # to clear multiple stale claims — but only once the work in the
+            # tree has an owner, which is what the hint below asks for.
+            rendered = ", ".join(sorted(claimed))
+            write_log(
+                "transaction handoff: HALT — uncommitted work cannot be routed; "
+                f"claimed issues: {rendered}; paths: {', '.join(sorted(inherited))}"
+            )
+            output.error(
+                "grind: uncommitted work with no journal and more than one claimed "
+                f"issue ({rendered}); nothing was changed",
+                hint=(
+                    "decide which issue owns these paths, leave only that one "
+                    "in_progress, then re-run grind: "
+                    + ", ".join(sorted(inherited))
+                ),
+            )
+            raise typer.Exit(code=1)
+        if git.is_git_repo():
+            try:
+                _, state.diff_ref = store.save_diff(candidate_diff(repo, inherited))
+            except RuntimeError as exc:
+                write_log(
+                    f"transaction handoff: could not capture the inherited diff ({exc})"
+                )
+        write_log(
+            "transaction handoff: presenting existing uncommitted changes to the next "
+            "worker for relevance assessment: " + ", ".join(sorted(inherited))
+        )
+        write_log("transaction handoff: git status\n" + (git.status_text() or "(none)"))
+        output.progress(
+            "grind",
+            f"handing {len(inherited)} uncommitted path(s) to the next worker",
+        )
+        return state
+
+    prior_phase = journal.phase
+    dirty = git.dirty_paths() if git.is_git_repo() else frozenset()
+    if dirty is None:
+        output.error("grind: could not read the worktree for recovery handoff")
+        raise typer.Exit(code=1)
+    current_head = git.head_oid() if git.is_git_repo() else ""
+    moved = list(notes)
+    if current_head != journal.base_head:
+        moved.append(
+            f"HEAD moved from {journal.base_head[:12] or 'nothing'} to "
+            f"{current_head[:12] or 'nothing'}"
+        )
+    if not journal.baseline_is_unchanged(repo):
+        moved.append("the recorded operator baseline changed")
+    # The recorded baseline and HEAD are audit evidence from here on, not
+    # preconditions: the current tree is what the worker will actually see.
+    journal = replace(journal, baseline_paths=(), baseline_fingerprints={})
+    # A disowned path that changed since it was disowned has been taken back:
+    # someone edited it deliberately, so it belongs to the candidate again
+    # rather than being excluded from review forever.
+    current_fingerprints = fingerprint_paths(repo, journal.unrelated_paths)
+    readopted = sorted(
+        path
+        for path, digest in journal.handoff_fingerprints.items()
+        if path in journal.unrelated_paths and current_fingerprints.get(path) != digest
+    )
+    if readopted:
+        journal = replace(
+            journal,
+            unrelated_paths=tuple(
+                path for path in journal.unrelated_paths if path not in readopted
+            ),
+        )
+        moved.append("previously unrelated work was edited: " + ", ".join(readopted))
+    baseline = _candidate_baseline(journal, frozenset())
+    candidate = dirty - baseline - _TRACKER_EXPORT_PATHS
+    if prior_phase in _SEALED_PHASES and candidate != frozenset(journal.candidate_paths):
+        moved.append("the candidate path set changed since the prior worker")
+    try:
+        diff = candidate_diff(repo, candidate) if git.is_git_repo() else b""
+    except RuntimeError as exc:
+        moved.append(f"the candidate could not be re-diffed ({exc})")
+        diff = b""
+    if sha256_bytes(diff) != journal.candidate_hash:
+        digest, diff_ref = store.save_diff(diff)
+        journal = journal.with_candidate(
+            candidate, phase=prior_phase, candidate_hash=digest, diff_ref=diff_ref
+        )
+        moved.append(f"the candidate changed; refreshed to {digest[:12]}")
+    else:
+        journal = journal.with_candidate(candidate, phase=prior_phase)
+    # Fingerprint the disowned paths too, not just the candidate: that record is
+    # the only thing that can later tell "still nobody's work" from "a worker
+    # picked it back up", so dropping it would make a disown permanent.
+    journal = journal.with_handoff(
+        repo=repo,
+        paths=candidate | frozenset(journal.unrelated_paths),
+        notes=moved,
+        base_head=current_head,
+    )
+    store.save(journal)
+    if backend == "codex":
+        # The recorded candidate is the accepted context now, so ownership must
+        # not re-litigate it; tracker exports stay uncommitted for finalization.
+        _checkpoint_codex_preflight(
+            git,
+            integration_branch,
+            write_log,
+            allowed_dirty=dirty,
+            checkpoint_tracker=False,
+        )
+    drift = moved[len(notes) :]
+    if drift:
+        write_log(
+            "transaction handoff: repository state moved since the prior worker; "
+            "adopting the current worktree for model review"
+        )
+    for note in drift:
+        write_log(f"transaction handoff: {note}")
+    write_log(
+        f"transaction resume: issue={journal.issue_id} phase={prior_phase} "
+        f"candidate_paths={sorted(candidate)} "
+        f"unrelated={sorted(journal.unrelated_paths)}"
+    )
+    write_log("transaction handoff: git status\n" + (git.status_text() or "(none)"))
+    output.progress(
+        "grind",
+        f"resuming {journal.issue_id} from {prior_phase} with "
+        f"{len(candidate)} inherited path(s)",
+    )
+    return _HandoffState(
+        journal=journal,
+        handoff_paths=candidate,
+        disowned=frozenset(journal.unrelated_paths),
+        resume_issue_id=journal.issue_id,
+        # Implementation already produced a reviewable candidate for these
+        # phases, so the resume goes straight to a fresh verifier.
+        candidate_ready=prior_phase
+        in {"candidate-captured", "verification", "verification-timeout"},
+        active=True,
+        prior_phase=prior_phase,
+        diff_ref=journal.candidate_diff_ref,
+        notes=tuple(moved),
+    )
 
 
 def _packet_artifact_intact(repo: Path, journal: CandidateJournal) -> bool:
@@ -1757,7 +2177,10 @@ def grind(
                     # so pre-existing unrelated edits must stay excluded from
                     # the owned-path comparison or every such resume would
                     # block as a phantom "candidate path set changed".
-                    baseline=frozenset(pending_finalization.baseline_paths),
+                    baseline=_candidate_baseline(
+                        pending_finalization,
+                        frozenset(pending_finalization.baseline_paths),
+                    ),
                     write_log=write_log,
                 )
                 if blocker is not None:
@@ -1774,145 +2197,30 @@ def grind(
                     "finalization resume: completed for "
                     f"{pending_finalization.issue_id}"
                 )
-            active_journal: CandidateJournal | None = None
+            # Any unsuccessful exit after a claim leaves the assigned issue and
+            # its uncommitted edits behind. Resume that pair — for either
+            # backend — before considering new work (AC-1, AC-2).
+            handoff = _prepare_handoff(
+                bd,
+                git,
+                transaction_store,
+                repo=target,
+                backend=resolved_backend,
+                integration_branch=integration_branch,
+                write_log=write_log,
+            )
+            active_journal: CandidateJournal | None = handoff.journal
             codex_baseline = frozenset[str]()
-            startup_handoff_paths = frozenset[str]()
-            resume_issue_id: str | None = None
-            resume_candidate_ready = False
-            recovery_handoff = False
-            if resolved_backend == "codex":
-                active_journal = transaction_store.load()
-                if active_journal is None and transaction_store.path.exists():
-                    dirty = git.dirty_paths()
-                    claimed = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
-                    if dirty is not None and len(claimed) == 1:
-                        issue_hint = next(iter(claimed))
-                        handoff_paths = dirty - _TRACKER_EXPORT_PATHS
-                        handoff_diff = candidate_diff(target, handoff_paths)
-                        handoff_hash, handoff_ref = transaction_store.save_diff(
-                            handoff_diff
-                        )
-                        active_journal = CandidateJournal.start(
-                            repo=target,
-                            issue_id=issue_hint,
-                            base_head=git.head_oid(),
-                            baseline_paths=(),
-                        ).with_candidate(
-                            handoff_paths,
-                            phase="handoff",
-                            candidate_hash=handoff_hash,
-                            diff_ref=handoff_ref,
-                        )
-                        transaction_store.save(active_journal)
-                        write_log(
-                            "transaction handoff: rebuilt unusable journal from "
-                            f"claimed issue {issue_hint} and current worktree"
-                        )
-                if active_journal is None:
-                    if transaction_store.path.exists():
-                        write_log(
-                            "transaction handoff: journal is unusable and no single "
-                            "claimed issue identifies the work; continuing with the "
-                            "current worktree as worker context"
-                        )
-                    startup_changes = _checkpoint_codex_preflight(
-                        git,
-                        integration_branch,
-                        write_log,
-                        accept_baseline=True,
-                    )
-                    if startup_changes:
-                        # Existing work is an engineering handoff, not a reason
-                        # to fence the worker away from potentially useful code.
-                        # The worker receives the complete diff and decides what
-                        # advances the selected issue.
-                        codex_baseline = frozenset()
-                        startup_handoff_paths = startup_changes
-                        recovery_handoff = True
-                        write_log(
-                            "transaction handoff: presenting existing uncommitted "
-                            "changes to the next worker for relevance assessment"
-                        )
-                else:
-                    recovery_handoff = True
-                    resumed_phase = active_journal.phase
-                    dirty = git.dirty_paths()
-                    current_head = git.head_oid()
-                    if dirty is None:
-                        output.error(
-                            "grind: could not read the worktree for recovery handoff"
-                        )
-                        raise typer.Exit(code=1)
-                    baseline_changed = not active_journal.baseline_is_unchanged(target)
-                    if current_head != active_journal.base_head or baseline_changed:
-                        write_log(
-                            "transaction handoff: repository state moved since the "
-                            "prior worker; adopting the current worktree for model review"
-                        )
-                    active_journal = replace(
-                        active_journal,
-                        base_head=current_head,
-                        baseline_paths=(),
-                        baseline_fingerprints={},
-                    )
-                    codex_baseline = frozenset()
-                    current_candidate = dirty - codex_baseline - _TRACKER_EXPORT_PATHS
-                    recorded_candidate = frozenset(active_journal.candidate_paths)
-                    sealed_phases = {
-                        "implementation-timeout",
-                        "verification-timeout",
-                        "orphaned-candidate",
-                        "incomplete-candidate",
-                    }
-                    if (
-                        active_journal.phase in sealed_phases
-                        and current_candidate != recorded_candidate
-                    ):
-                        write_log(
-                            "transaction handoff: candidate path set changed since "
-                            "the prior worker; the next worker will assess the current diff"
-                        )
-                    current_diff = candidate_diff(target, current_candidate)
-                    current_hash = sha256_bytes(current_diff)
-                    if active_journal.candidate_hash != current_hash:
-                        migrated_hash, migrated_ref = transaction_store.save_diff(
-                            current_diff
-                        )
-                        active_journal = active_journal.with_candidate(
-                            current_candidate,
-                            phase=resumed_phase,
-                            candidate_hash=migrated_hash,
-                            diff_ref=migrated_ref,
-                        )
-                        transaction_store.save(active_journal)
-                        write_log(
-                            "transaction handoff: refreshed candidate for model review "
-                            f"hash={migrated_hash}"
-                        )
-                    resume_candidate_ready = resumed_phase in {
-                        "candidate-captured",
-                        "verification",
-                        "verification-timeout",
-                    }
-                    active_journal = active_journal.with_candidate(
-                        current_candidate, phase=resumed_phase
-                    )
-                    transaction_store.save(active_journal)
-                    resume_issue_id = active_journal.issue_id
-                    _checkpoint_codex_preflight(
-                        git,
-                        integration_branch,
-                        write_log,
-                        allowed_dirty=dirty,
-                        checkpoint_tracker=False,
-                    )
-                    write_log(
-                        f"transaction resume: issue={resume_issue_id} "
-                        f"candidate_paths={sorted(current_candidate)}"
-                    )
-                    output.progress(
-                        "grind", f"resuming preserved Codex candidate {resume_issue_id}"
-                    )
+            startup_handoff_paths = handoff.handoff_paths
+            resume_issue_id = handoff.resume_issue_id
+            resume_candidate_ready = handoff.candidate_ready
+            recovery_handoff = handoff.active
+            # Run-scoped, because a disowned path outlives the transaction that
+            # disowned it: it is still in the tree, and the next issue's
+            # candidate must not absorb and commit it either.
+            disowned_paths = frozenset(
+                handoff.journal.unrelated_paths if handoff.journal else ()
+            )
             initial_snapshot = _snapshot(bd)
             write_log(
                 f"initial state: open={initial_snapshot.open} "
@@ -1932,8 +2240,18 @@ def grind(
             # (compute_delta on the before/after diff) can never see these
             # because they sit in `before.in_progress_ids` and get subtracted
             # out of every later delta.
+            #
+            # A journal-backed transaction is the one exemption: Ortus owns
+            # that claim, knows exactly which candidate it covers, and is about
+            # to resume it, so --orphan-policy is not what governs its bd
+            # lifecycle. A bare claim with no journal is precisely the
+            # cross-restart orphan the policy exists for, and it stays under
+            # the policy even when the handoff resumes its goal — the routing
+            # hint was captured above before any sweep runs, so `revert` costs
+            # nothing (the loop re-claims the same issue) and the operator
+            # keeps warn|revert|escalate on the state grind cannot explain.
             orphan_ids = initial_snapshot.in_progress_ids - (
-                {resume_issue_id} if resume_issue_id is not None else set()
+                {handoff.journal.issue_id} if handoff.journal is not None else set()
             )
             if orphan_ids:
                 write_log(
@@ -1948,6 +2266,21 @@ def grind(
                 )
                 for line in action.actions_taken:
                     write_log(f"  orphan-policy: {line}")
+                if (
+                    action.policy is OrphanPolicy.ESCALATE
+                    and resume_issue_id is not None
+                    and resume_issue_id in orphan_ids
+                ):
+                    # Escalation hands the issue to a human, so resuming it
+                    # here would walk straight back into the agent loop the
+                    # operator just took it out of. Drop only the routing hint:
+                    # the uncommitted work stays in the tree, untouched.
+                    write_log(
+                        f"startup orphan sweep: {resume_issue_id} was escalated to the "
+                        "human queue; not resuming it. Its uncommitted work stays in "
+                        "the worktree untouched"
+                    )
+                    resume_issue_id = None
                 # Re-snapshot so the queue_drained check below — and the
                 # loop's first `before` — see post-sweep state (revert
                 # moves in_progress → open; escalate trims it from the
@@ -2017,9 +2350,12 @@ def grind(
                 # iterations. Checkpoint that state while preserving the dirty
                 # current handoff and any active candidate context.
                 if resolved_backend == "codex":
-                    allowed = codex_baseline | startup_handoff_paths
+                    allowed = codex_baseline | startup_handoff_paths | disowned_paths
                     if active_journal is not None:
                         allowed |= frozenset(active_journal.candidate_paths)
+                        # Disowned work is deliberately outside the candidate; it
+                        # is still expected to sit in the tree untouched.
+                        allowed |= frozenset(active_journal.unrelated_paths)
                         allowed |= _TRACKER_EXPORT_PATHS
                     _checkpoint_codex_preflight(
                         git,
@@ -2248,25 +2584,49 @@ def grind(
                     # Freeze the post-claim authoritative packet. Verification
                     # is bound to this exact JSON identity, including status.
                     target_issue = bd.show(issue_id)
-                    if resolved_backend == "codex":
-                        phase_profiles = {
-                            "implementation": implement_profile.display_name,
-                            "verification": verify_profile.display_name,
-                        }
-                        packet_digest, packet_ref = transaction_store.save_packet(
-                            issue_id, target_issue
-                        )
-                        if active_journal is None:
-                            active_journal = CandidateJournal.start(
-                                repo=target,
-                                issue_id=issue_id,
-                                base_head=git.head_oid(),
-                                baseline_paths=codex_baseline,
-                                packet_hash=packet_digest,
-                                packet_ref=packet_ref,
-                                profiles=phase_profiles,
+                    phase_profiles = {
+                        "implementation": implement_profile.display_name,
+                        "verification": verify_profile.display_name,
+                    }
+                    packet_digest, packet_ref = transaction_store.save_packet(
+                        issue_id, target_issue
+                    )
+                    # A resumed transaction keeps its journal: it carries the
+                    # inherited work, the disowned paths, and the prior evidence
+                    # this iteration is continuing from. Anything else — a first
+                    # claim, or a journal that owns a different issue — starts
+                    # fresh.
+                    if active_journal is None or active_journal.issue_id != issue_id:
+                        if active_journal is not None:
+                            write_log(
+                                "transaction handoff: journal owned "
+                                f"{active_journal.issue_id} but this iteration claimed "
+                                f"{issue_id}; starting a new transaction"
                             )
-                        elif not active_journal.issue_packet_hash:
+                        active_journal = CandidateJournal.start(
+                            repo=target,
+                            issue_id=issue_id,
+                            base_head=git.head_oid(),
+                            baseline_paths=codex_baseline,
+                            packet_hash=packet_digest,
+                            packet_ref=packet_ref,
+                            profiles=phase_profiles,
+                        )
+                        if recovery_handoff and startup_handoff_paths:
+                            # Inherited work with no routable journal: record what
+                            # the worker is being shown so it can disown any of it.
+                            active_journal = active_journal.with_handoff(
+                                repo=target,
+                                paths=startup_handoff_paths | disowned_paths,
+                                notes=handoff.notes,
+                            )
+                        if disowned_paths:
+                            active_journal = active_journal.with_unrelated(
+                                disowned_paths
+                            )
+                        transaction_store.save(active_journal)
+                    else:
+                        if not active_journal.issue_packet_hash:
                             active_journal = replace(
                                 active_journal,
                                 issue_packet_hash=packet_digest,
@@ -2296,35 +2656,20 @@ def grind(
                                 active_journal, profiles=phase_profiles
                             )
                             transaction_store.save(active_journal)
-                        dirty_after_claim = git.dirty_paths()
-                        if dirty_after_claim is None:
-                            output.error(
-                                "grind: could not record Codex candidate ownership"
-                            )
-                            raise typer.Exit(code=1)
-                        active_journal = active_journal.with_candidate(
-                            dirty_after_claim - codex_baseline - _TRACKER_EXPORT_PATHS,
-                            phase="implementation",
-                        )
-                        transaction_store.save(active_journal)
-                        resume_issue_id = None
-                    else:
-                        packet_digest, packet_ref = transaction_store.save_packet(
-                            issue_id, target_issue
-                        )
-                        active_journal = CandidateJournal.start(
-                            repo=target,
-                            issue_id=issue_id,
-                            base_head=git.head_oid(),
-                            baseline_paths=(),
-                            packet_hash=packet_digest,
-                            packet_ref=packet_ref,
-                            profiles={
-                                "implementation": implement_profile.display_name,
-                                "verification": verify_profile.display_name,
-                            },
-                        )
-                        transaction_store.save(active_journal)
+                    dirty_after_claim = git.dirty_paths()
+                    if dirty_after_claim is None:
+                        output.error("grind: could not record candidate ownership")
+                        raise typer.Exit(code=1)
+                    active_journal = active_journal.with_candidate(
+                        dirty_after_claim
+                        - _candidate_baseline(active_journal, codex_baseline)
+                        - _TRACKER_EXPORT_PATHS,
+                        phase=active_journal.phase
+                        if resume_candidate_ready
+                        else "implementation",
+                    )
+                    transaction_store.save(active_journal)
+                    resume_issue_id = None
                     configure_codegraph = getattr(runner, "configure_codegraph", None)
                     if callable(configure_codegraph):
                         configure_codegraph(codegraph_probe.capability)
@@ -2361,13 +2706,7 @@ def grind(
                         "candidate."
                     )
                     if recovery_handoff and not resume_candidate_ready:
-                        implementation_instruction += (
-                            " RECOVERY HANDOFF: A prior engineer left uncommitted work. "
-                            "Inspect `git status`, the complete current diff, and the issue "
-                            "packet. Decide which existing changes advance this issue, keep "
-                            "useful work, correct or complete it, and leave unrelated changes "
-                            "untouched. Continue from the current state instead of restarting."
-                        )
+                        implementation_instruction += handoff.instruction()
                     try:
                         iteration_prompt = _compose_work_prompt(
                             work_template,
@@ -2445,6 +2784,16 @@ def grind(
                         f"killed (rc={rc})"
                     )
 
+                # A recovery worker may have judged some inherited work unrelated
+                # to this issue. Honor that before any ownership snapshot, so a
+                # declared path never enters the candidate and can never be
+                # committed (AC-5).
+                if active_journal is not None and not resume_candidate_ready:
+                    active_journal = _absorb_unrelated_declaration(
+                        target, transaction_store, active_journal, write_log
+                    )
+                    disowned_paths |= frozenset(active_journal.unrelated_paths)
+
                 if (
                     resolved_backend == "claude"
                     and implementation_timed_out
@@ -2456,7 +2805,7 @@ def grind(
                             git,
                             transaction_store,
                             active_journal,
-                            frozenset(),
+                            _candidate_baseline(active_journal, codex_baseline),
                             phase="implementation-timeout",
                         )
                     active_journal = _capture_evidence(
@@ -2486,7 +2835,7 @@ def grind(
                         git,
                         transaction_store,
                         active_journal,
-                        codex_baseline,
+                        _candidate_baseline(active_journal, codex_baseline),
                         phase="implementation-timeout",
                     )
                     active_journal = _capture_evidence(
@@ -2520,7 +2869,7 @@ def grind(
                             git,
                             transaction_store,
                             active_journal,
-                            codex_baseline,
+                            _candidate_baseline(active_journal, codex_baseline),
                             phase="candidate-captured",
                         )
                     else:
@@ -2693,7 +3042,7 @@ def grind(
                             if callable(configure_codegraph)
                             else None
                         ),
-                        baseline=codex_baseline,
+                        baseline=_candidate_baseline(active_journal, codex_baseline),
                         iteration=iters_run,
                     )
                     verification = _verify_candidate(
@@ -2827,12 +3176,29 @@ def grind(
                                 f"iter {iters_run}: correction worker TIMEOUT after "
                                 f"{worker_timeout}s"
                             )
+                        # A correction worker inherits the same tree, so it can
+                        # disown inherited work too. Honor that here, before the
+                        # capture below snapshots ownership, or the declaration
+                        # would sit unread until some later resume — and the
+                        # path it disowned would be committed in the meantime.
+                        active_journal = _absorb_unrelated_declaration(
+                            target, transaction_store, active_journal, write_log
+                        )
+                        disowned_paths |= frozenset(active_journal.unrelated_paths)
+                        # The re-verify below subtracts this baseline to decide
+                        # whether the read-only verifier moved anything. Leaving
+                        # it at the pre-disown value would read the newly
+                        # excluded path as verifier tampering and reject a
+                        # candidate the correction worker just cleaned up.
+                        verify_kwargs["baseline"] = _candidate_baseline(
+                            active_journal, codex_baseline
+                        )
                         if git.is_git_repo():
                             active_journal = _capture_codex_candidate(
                                 git,
                                 transaction_store,
                                 active_journal,
-                                codex_baseline,
+                                _candidate_baseline(active_journal, codex_baseline),
                                 phase=(
                                     "correction-timeout"
                                     if correction_timed_out
@@ -2914,7 +3280,7 @@ def grind(
                         repo=target,
                         issue_id=issue_id,
                         integration_branch=integration_branch,
-                        baseline=codex_baseline,
+                        baseline=_candidate_baseline(active_journal, codex_baseline),
                         write_log=write_log,
                     )
                     if blocker is not None:
@@ -2933,9 +3299,22 @@ def grind(
                     finalized = True
                     active_journal = None
                     codex_baseline = frozenset()
-                    startup_handoff_paths = frozenset()
-                    recovery_handoff = False
                     resume_candidate_ready = False
+                    # Whatever an earlier worker disowned is still uncommitted in
+                    # the tree, so the next iteration inherits it as context it
+                    # must leave alone rather than as ownerless drift.
+                    handoff = _HandoffState(
+                        handoff_paths=disowned_paths,
+                        disowned=disowned_paths,
+                        active=bool(disowned_paths),
+                        notes=(
+                            ("work declared unrelated earlier in this run",)
+                            if disowned_paths
+                            else ()
+                        ),
+                    )
+                    startup_handoff_paths = handoff.handoff_paths
+                    recovery_handoff = handoff.active
                     write_log(
                         f"iter {iters_run}: Ortus finalized {issue_id} "
                         "(report, close, commit, sync)"
@@ -3015,12 +3394,15 @@ def grind(
                         f"iter {iters_run}: WARN orphan claim "
                         f"(in_progress +{delta.in_progress_delta}, ids={sorted(delta.orphan_ids)}, rc={rc})"
                     )
-                    if resolved_backend == "codex" and active_journal is not None:
+                    # Either backend: a claim that outlived its worker keeps its
+                    # issue association and its edits, so the next grind resumes
+                    # the same goal instead of abandoning the work (AC-1).
+                    if active_journal is not None and git.is_git_repo():
                         active_journal = _capture_codex_candidate(
                             git,
                             transaction_store,
                             active_journal,
-                            codex_baseline,
+                            _candidate_baseline(active_journal, codex_baseline),
                             phase="orphaned-candidate",
                         )
                         source_candidate = (
@@ -3050,28 +3432,41 @@ def grind(
                         write_log(f"  orphan-policy: {line}")
                 else:
                     if (
-                        resolved_backend == "codex"
-                        and active_journal is not None
+                        active_journal is not None
+                        and git.is_git_repo()
                         and active_journal.issue_id in after.in_progress_ids
                     ):
                         active_journal = _capture_codex_candidate(
                             git,
                             transaction_store,
                             active_journal,
-                            codex_baseline,
+                            _candidate_baseline(active_journal, codex_baseline),
                             phase="incomplete-candidate",
                         )
+                        if (
+                            frozenset(active_journal.candidate_paths)
+                            - _TRACKER_EXPORT_PATHS
+                        ):
+                            write_log(
+                                f"iter {iters_run}: preserving incomplete candidate "
+                                f"for {active_journal.issue_id}"
+                            )
+                            output.progress(
+                                "grind",
+                                f"preserved candidate {active_journal.issue_id}; "
+                                "re-run grind to resume",
+                            )
+                            break
+                        # Nothing was produced, so there is no handoff to hold
+                        # the queue for; drop the transaction and fall through.
+                        transaction_store.clear()
+                        active_journal = None
                         write_log(
-                            f"iter {iters_run}: preserving incomplete candidate for "
-                            f"{active_journal.issue_id}"
+                            f"iter {iters_run}: WARN no bd-state change and no "
+                            f"candidate to preserve (rc={rc})"
                         )
-                        output.progress(
-                            "grind",
-                            f"preserved candidate {active_journal.issue_id}; "
-                            "re-run grind to resume",
-                        )
-                        break
-                    write_log(f"iter {iters_run}: WARN no bd-state change (rc={rc})")
+                    else:
+                        write_log(f"iter {iters_run}: WARN no bd-state change (rc={rc})")
 
                 # Cap checks BEFORE the idle-sleep so we don't burn idle time
                 # when the loop is about to exit anyway.
@@ -3096,7 +3491,7 @@ def grind(
                     git,
                     integration_branch,
                     write_log,
-                    allowed_dirty=codex_baseline,
+                    allowed_dirty=codex_baseline | disowned_paths,
                 )
             write_log(
                 f"=== ortus grind ended; closed {tasks_completed} "

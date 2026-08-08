@@ -7,14 +7,17 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Iterable
 
 
-JOURNAL_SCHEMA = 3
+JOURNAL_SCHEMA = 4
 JOURNAL_RELATIVE_PATH = Path("logs") / "grind-transaction.json"
 _MAX_EVIDENCE_CHARS = 16_000
+#: Handoff records are audit context, not state. Keep the recent ones so a
+#: repeatedly-resumed transaction cannot grow its journal without bound.
+_MAX_HANDOFFS = 8
 
 #: Ordered finalization boundaries. Each one is journaled *after* it lands, so a
 #: restart replays only the steps that never completed and can never duplicate a
@@ -170,6 +173,14 @@ class CandidateJournal:
     verifier_refs: tuple[str, ...] = ()
     corrections: int = 0
     plan_gap_routed: bool = False
+    #: What an engineer handoff inherited: the uncommitted paths a fresh worker
+    #: was shown, their state at that moment, and one record per resume.
+    handoff_paths: tuple[str, ...] = ()
+    handoff_fingerprints: dict[str, str] = field(default_factory=dict)
+    handoffs: tuple[dict[str, Any], ...] = ()
+    #: Handoff paths a worker judged unrelated to this issue. They stay in the
+    #: worktree and out of the candidate, so finalization never commits them.
+    unrelated_paths: tuple[str, ...] = ()
     finalization: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
@@ -294,6 +305,54 @@ class CandidateJournal:
             updated_at=now,
         )
 
+    def with_handoff(
+        self,
+        *,
+        repo: Path,
+        paths: Iterable[str],
+        notes: Iterable[str] = (),
+        base_head: str | None = None,
+    ) -> CandidateJournal:
+        """Record one engineer handoff to a fresh worker.
+
+        `paths` is the uncommitted work the worker is about to be shown, and
+        `notes` is what moved since the prior worker (HEAD, baseline, candidate,
+        journal schema). Both are context: a mismatch is something the model
+        assesses, never a startup failure. The fingerprints are what later lets
+        Ortus tell adopted work from work the worker never touched.
+        """
+
+        selected = tuple(sorted(set(paths)))
+        head = self.base_head if base_head is None else base_head
+        record = {
+            "at": _now(),
+            "resumed_phase": self.phase,
+            "base_head": head,
+            "paths": list(selected),
+            "notes": list(notes),
+        }
+        return replace(
+            self,
+            base_head=head,
+            handoff_paths=selected,
+            handoff_fingerprints=fingerprint_paths(repo, selected),
+            handoffs=(*self.handoffs, record)[-_MAX_HANDOFFS:],
+            updated_at=_now(),
+        )
+
+    def with_unrelated(self, paths: Iterable[str]) -> CandidateJournal:
+        """Honor a worker's declaration that some handoff work is not ours.
+
+        Declarations accumulate: a later resume must not silently re-adopt a
+        path an earlier worker already disowned.
+        """
+
+        return replace(
+            self,
+            unrelated_paths=tuple(sorted(set(self.unrelated_paths) | set(paths))),
+            updated_at=_now(),
+        )
+
     def route_plan_gap(self) -> CandidateJournal:
         """Mark the one planning route a plan gap is allowed to consume."""
 
@@ -336,44 +395,85 @@ class JournalStore:
         self.artifacts = repo / "logs" / "grind-transactions"
 
     def load(self) -> CandidateJournal | None:
+        journal, _ = self.load_state()
+        return journal
+
+    def load_state(self) -> tuple[CandidateJournal | None, tuple[str, ...]]:
+        """Load the journal plus whatever about it is worth handing to a worker.
+
+        A journal is routing context, not a cryptographic gate: an older, newer,
+        or partly-unreadable one still names the issue that owns the uncommitted
+        work. So anything unexpected becomes a note the fresh worker (and the
+        operator log) sees, and only a journal with no usable identity at all
+        loads as `None`.
+        """
+
+        notes: list[str] = []
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-            stored_schema = payload.get("schema")
-            if stored_schema not in {1, 2, JOURNAL_SCHEMA}:
-                return None
-            # Schema 1 was written by the parent process while an implementation
-            # worker was upgrading this module to schema 2. Its path ownership
-            # and baseline fingerprints remain authoritative; the outer grind
-            # migrates the missing candidate and issue-packet hashes before
-            # verification resumes.
-            payload["schema"] = JOURNAL_SCHEMA
-            payload["baseline_paths"] = tuple(payload.get("baseline_paths", ()))
-            payload["candidate_paths"] = tuple(payload.get("candidate_paths", ()))
-            payload["evidence"] = tuple(payload.get("evidence", ()))
-            payload["verifier_refs"] = tuple(payload.get("verifier_refs", ()))
-            # Schemas 1 and 2 predate correction accounting and finalization
-            # boundaries. Defaulting them to "nothing has landed yet" is the
-            # safe migration: a resumed run re-checks observable bd and git
-            # state before repeating any step.
-            payload["finalization"] = dict(payload.get("finalization", {}))
-            if stored_schema == 1:
-                migrated_at = _now()
-                payload.setdefault("created_at", migrated_at)
-                payload.setdefault("updated_at", migrated_at)
-                payload.setdefault("implementation_started_at", migrated_at)
-                payload["attempts"] = (
-                    {
-                        "number": 1,
-                        "phase": str(payload.get("phase", "implementation")),
-                        "started_at": migrated_at,
-                        "migration": "schema-v1",
-                    },
-                )
-            else:
-                payload["attempts"] = tuple(payload.get("attempts", ()))
-            return CandidateJournal(**payload)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            return None
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None, ()
+        except OSError as exc:
+            return None, (f"transaction journal could not be read ({exc})",)
+        try:
+            payload = json.loads(raw)
+        except (ValueError, json.JSONDecodeError):
+            return None, ("transaction journal is not valid JSON",)
+        if not isinstance(payload, dict):
+            return None, ("transaction journal is not a JSON object",)
+
+        stored_schema = payload.get("schema")
+        if stored_schema != JOURNAL_SCHEMA:
+            notes.append(
+                f"journal schema {stored_schema!r} is not the supported "
+                f"{JOURNAL_SCHEMA}; its ownership record is still used"
+            )
+        # Schema 1 was written by the parent process while an implementation
+        # worker was upgrading this module to schema 2. Its path ownership and
+        # baseline fingerprints remain authoritative; the outer grind migrates
+        # the missing candidate and issue-packet hashes before verification
+        # resumes.
+        payload["schema"] = JOURNAL_SCHEMA
+        for key in ("baseline_paths", "candidate_paths", "evidence", "verifier_refs"):
+            payload[key] = tuple(payload.get(key, ()))
+        for key in ("handoff_paths", "unrelated_paths", "handoffs"):
+            payload[key] = tuple(payload.get(key, ()))
+        # Schemas 1 and 2 predate correction accounting and finalization
+        # boundaries. Defaulting them to "nothing has landed yet" is the safe
+        # migration: a resumed run re-checks observable bd and git state before
+        # repeating any step.
+        payload["finalization"] = dict(payload.get("finalization", {}))
+        if stored_schema == 1:
+            migrated_at = _now()
+            payload.setdefault("created_at", migrated_at)
+            payload.setdefault("updated_at", migrated_at)
+            payload.setdefault("implementation_started_at", migrated_at)
+            payload["attempts"] = (
+                {
+                    "number": 1,
+                    "phase": str(payload.get("phase", "implementation")),
+                    "started_at": migrated_at,
+                    "migration": "schema-v1",
+                },
+            )
+        else:
+            payload["attempts"] = tuple(payload.get("attempts", ()))
+
+        # A newer writer can add fields this build has never heard of. Dropping
+        # them with a note keeps the shared identity usable instead of throwing
+        # the whole handoff away over a key we do not need.
+        known = {declared.name for declared in fields(CandidateJournal)}
+        unknown = sorted(set(payload) - known)
+        if unknown:
+            notes.append(
+                "journal carries unknown fields ignored on load: "
+                + ", ".join(unknown[:5])
+            )
+            payload = {key: payload[key] for key in payload if key in known}
+        try:
+            return CandidateJournal(**payload), tuple(notes)
+        except (TypeError, ValueError, KeyError) as exc:
+            return None, (*notes, f"transaction journal is unusable ({exc})")
 
     def save(self, journal: CandidateJournal) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

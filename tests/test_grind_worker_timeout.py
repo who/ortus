@@ -450,7 +450,7 @@ def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
     ), "the finalization commit consumed the staged handoff work"
 
 
-def test_codex_resume_adopts_head_mismatch_for_handoff(
+def test_codex_resume_adopts_moved_state_head_mismatch_for_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, issue_id = _seed_repo(tmp_path)
@@ -501,5 +501,7 @@ def test_codex_resume_adopts_head_mismatch_for_handoff(
     assert _bd_show(repo, issue_id)["status"] == "in_progress"
     assert any("RECOVERY HANDOFF" in prompt for prompt in prompts)
     assert (repo / "recovered.py").read_text() == "RECOVERED = True\n"
-    assert "resuming preserved Codex candidate" in (result.stdout + result.stderr)
+    assert f"resuming {issue_id} from implementation" in (
+        result.stdout + result.stderr
+    )
     assert "repository state moved" in _grind_log(repo)
