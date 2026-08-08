@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group, _readonly_wrapper
+from ortus.core.claude import (
+    STANDARD_FLAGS,
+    ClaudeRunner,
+    _kill_group,
+    _readonly_wrapper,
+    _repo_source_readonly,
+)
 from ortus.core.profiles import AgentProfile, Phase
 from tests._platform import (
     skip_unless_bwrap_usable,
@@ -80,33 +86,27 @@ def test_readonly_argv_denies_provider_write_tools() -> None:
 
 
 @skip_unless_tmp_is_canonical
-def test_linux_readonly_wrapper_keeps_repo_under_tmp_visible_and_read_only(
-    monkeypatch: pytest.MonkeyPatch,
+def test_linux_readonly_wrapper_keeps_a_repo_under_tmp_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A repo under /tmp survives `--tmpfs /tmp` and keeps the inverted posture.
+
+    `--tmpfs /tmp` wipes the mount, so the repo has to be restored after it or
+    the verifier chdirs into an empty directory. The repo mounts then have to
+    land after *that*, or the restore masks them (ortus-dyio, ortus-v8fn).
+    """
     monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
-    # The repo must be under a canonical /tmp or the wrapper's
-    # `relative_to("/tmp")` guard fails and no --ro-bind pair is emitted at
-    # all. `tmp_path` does not guarantee that — on macOS it lands in
-    # /var/folders — so name the path directly. The wrapper only reads it,
-    # never touches the filesystem, so it need not exist.
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
     repo = Path("/tmp/ortus-readonly-wrapper/nested/repo")
-    resolved = str(repo.resolve())
-    assert resolved.startswith("/tmp/"), resolved
 
     argv = _readonly_wrapper(["claude", "-p", "verify"], repo)
 
+    resolved = str(repo.resolve())
     assert argv[:5] == ["bwrap", "--ro-bind", "/", "/", "--dev-bind"]
-    # Find the pair by its flag. Indexing on the bare path instead silently
-    # matches the `--chdir` occurrence when the pair was never emitted, so a
-    # skipped branch read as a wrong-order argv rather than a missing bind.
-    assert any(
-        token == "--ro-bind" and argv[i + 1 : i + 3] == [resolved, resolved]
-        for i, token in enumerate(argv)
-    ), f"no --ro-bind pair for {resolved} in {argv}"
-    assert argv[argv.index("--chdir") + 1] == resolved
     assert ["--tmpfs", "/tmp"] == argv[
         argv.index("--tmpfs") : argv.index("--tmpfs") + 2
     ]
+    assert argv[argv.index("--chdir") + 1] == resolved
 
 
 def test_readonly_wrapper_gives_agent_scratch_dirs_a_writable_tmpfs(
@@ -132,36 +132,48 @@ def test_readonly_wrapper_gives_agent_scratch_dirs_a_writable_tmpfs(
     assert argv[:4] == ["bwrap", "--ro-bind", "/", "/"]
 
 
-def test_readonly_wrapper_makes_repo_claude_dir_writable_keeping_config(
+def test_readonly_wrapper_binds_the_repo_writable_and_re_binds_source_readonly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ortus-dyio: the agent's inner sandbox materialises bind-mount
-    placeholders under <repo>/.claude, which a read-only repo tree blocks."""
+    """ortus-v8fn: tool state under the repo is writable, source is not."""
     monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
     repo = tmp_path / "repo"
-    (repo / ".claude").mkdir(parents=True)
-    (repo / ".claude" / "settings.json").write_text("{}", encoding="utf-8")
+    for name in ("src", "tests", ".git", ".claude"):
+        (repo / name).mkdir(parents=True)
+    (repo / "README.md").write_text("readme", encoding="utf-8")
 
     argv = _readonly_wrapper(["claude", "-p", "verify"], repo)
 
-    claude_dir = str((repo / ".claude").resolve())
-    settings = str((repo / ".claude" / "settings.json").resolve())
-    tmpfs = {argv[i + 1] for i, tok in enumerate(argv) if tok == "--tmpfs"}
-    assert claude_dir in tmpfs, "the repo .claude dir must be writable"
-    # Re-bound on top of the tmpfs, so the CLI still reads project settings.
+    resolved = repo.resolve()
+    # The repo itself is bound writable...
     assert any(
-        tok == "--ro-bind" and argv[i + 1 : i + 3] == [settings, settings]
+        tok == "--bind" and argv[i + 1 : i + 3] == [str(resolved), str(resolved)]
         for i, tok in enumerate(argv)
-    ), f"settings.json not re-exposed in {argv}"
-    assert argv.index("--tmpfs" ) < argv.index(settings), "tmpfs must precede the bind"
-    # Absent optional config is skipped rather than bound from nowhere.
-    assert str((repo / ".claude" / "settings.local.json").resolve()) not in argv
-    # The candidate outside .claude/ is still read-only.
-    assert argv[:4] == ["bwrap", "--ro-bind", "/", "/"]
+    ), f"repo not bound writable in {argv}"
+    # ...and every non-tool entry is re-bound read-only on top of it.
+    readonly = {
+        argv[i + 1] for i, tok in enumerate(argv) if tok == "--ro-bind"
+    }
+    for name in ("src", "tests", "README.md"):
+        assert str(resolved / name) in readonly, f"{name} must stay read-only"
+    # Tool state is deliberately left writable: git lock files, the agent CLI's
+    # deny-rule placeholders and its project config all get written by an
+    # ordinary review, and none of them are code under test.
+    for name in (".git", ".claude"):
+        assert str(resolved / name) not in readonly, f"{name} must stay writable"
 
 
-@skip_unless_tmp_is_canonical
+def test_readonly_wrapper_tolerates_a_repo_that_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """bwrap refuses to launch on a missing bind source, so emit no repo mounts."""
+    monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+
+    assert _repo_source_readonly(tmp_path / "absent") == []
+
+
 @skip_unless_bwrap_usable
 def test_readonly_wrapper_keeps_repo_claude_writable_under_tmp(
     tmp_path: Path,
@@ -194,7 +206,11 @@ def test_readonly_wrapper_keeps_repo_claude_writable_under_tmp(
     combined = proc.stdout + proc.stderr
     assert "PLACEHOLDER_OK" in combined, combined
     assert "CANDIDATE_READONLY" in combined, combined
-    assert not (repo / ".claude" / "hooks").exists(), "the tmpfs must be discarded"
+    # The placeholder persists: under the inverted posture (ortus-v8fn) tool
+    # state is a real bind, not a discarded tmpfs, because a lock file the
+    # sandbox cannot see is a lock file git cannot take. Mutation of the
+    # candidate is caught by the post-verdict hashes, not by the mount.
+    assert (repo / ".claude" / "hooks").exists()
 
 
 def test_readonly_wrapper_skips_repo_claude_dir_when_absent(

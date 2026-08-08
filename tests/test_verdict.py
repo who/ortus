@@ -216,7 +216,7 @@ def test_fail_verdict_duplicate_id_is_not_double_counted() -> None:
 
 
 def test_regression_extra_id_on_fail(tmp_path: Path) -> None:
-    """logicfirst 2026-08-07: an EROFS sandbox forced an extra AC-TESTS row.
+    """Observed 2026-08-07: an EROFS sandbox forced an extra AC-TESTS row.
 
     AC-5: that fail verdict must reach the correction loop as a recorded
     failure rather than killing the run with a schema error.
@@ -243,7 +243,7 @@ def test_regression_extra_id_on_fail(tmp_path: Path) -> None:
     assert not verdict.passed
     assert verdict.unexpected_criteria == ("AC-TESTS",)
     assert verdict.missing_criteria == ()
-    assert "AC-TESTS" in render_report(verdict, issue_id="lf-pelf")
+    assert "AC-TESTS" in render_report(verdict, issue_id="demo-1a2b")
 
 
 def test_empty_expected_criteria_still_bypasses_the_id_check() -> None:

@@ -685,34 +685,31 @@ def test_verification_preflight_catches_an_unwritable_agent_scratch_dir(
 def test_verification_preflight_covers_the_repo_agent_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ortus-dyio: the probe covers `<repo>/.claude`, not just $HOME.
+    """ortus-v8fn: the repo agent dir is writable whether or not it exists.
 
-    The verifier's own inner sandbox materialises bind-mount placeholders there,
-    and a repo with no `.claude/` gets no tmpfs to hold them — total blockage,
-    which a $HOME-only probe reported as a healthy posture. Both directions are
-    asserted, so the probe is pinned to the condition rather than to a failure.
+    Under the old posture a repo with no `.claude/` was unrecoverable: bwrap
+    cannot mount a tmpfs on a missing directory under a read-only root, so the
+    inner sandbox could never create its placeholders. Binding the repo writable
+    removes the whole condition — the CLI makes the directory itself. The probe
+    still covers the path, so a repo that genuinely cannot be written is caught.
     """
     if platform.system() != "Linux" or shutil.which("bwrap") is None:
         pytest.skip("bubblewrap posture required")
-    # No agent scratch dirs under this $HOME, so the repo is the only target and
-    # the verdict cannot come from some other unwritable path.
+    # No agent scratch dirs under this $HOME, so the repo is the only target.
     (tmp_path / "home").mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
-    blocked = tmp_path / "no-agent-dir"
-    (blocked / "src").mkdir(parents=True)
 
-    with pytest.raises(claude_mod.ReadOnlyExecutionBlocked) as caught:
-        ClaudeRunner().preflight_readonly(blocked)
+    without = tmp_path / "no-agent-dir"
+    (without / "src").mkdir(parents=True)
+    ClaudeRunner().preflight_readonly(without)
 
-    message = str(caught.value)
-    assert claude_mod.PREFLIGHT_PROBE in message
-    assert "Read-only file system" in message
-    assert str((blocked / ".claude").resolve()) in message
+    with_dir = tmp_path / "with-agent-dir"
+    (with_dir / ".claude").mkdir(parents=True)
+    ClaudeRunner().preflight_readonly(with_dir)
 
-    healthy = tmp_path / "with-agent-dir"
-    (healthy / ".claude").mkdir(parents=True)
-    ClaudeRunner().preflight_readonly(healthy)
-    assert not (healthy / ".claude" / claude_mod._PREFLIGHT_SCRATCH).exists()
+    # A probe has no business leaving anything behind in either case.
+    for repo in (without, with_dir):
+        assert not (repo / ".claude" / claude_mod._PREFLIGHT_SCRATCH).exists()
 
 
 def _blocked_verifier_grind(

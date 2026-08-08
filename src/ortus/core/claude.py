@@ -374,6 +374,53 @@ def _repo_agent_dir_tmpfs(repo: Path) -> list[str]:
     return args
 
 
+# Repo-level state that belongs to the tools, not to the candidate: git's own
+# metadata and lock files, the agent CLI's project config and deny-rule
+# placeholders, and the bd export. None of it is code under test, and all of it
+# gets written during an ordinary read-only review.
+_REPO_TOOL_STATE: frozenset[str] = frozenset(
+    {".git", ".gitconfig", ".claude", ".codex", ".beads", ".ortus"}
+)
+
+
+def _repo_source_readonly(repo: Path) -> list[str]:
+    """Bind the repo writable, then re-bind its source entries read-only.
+
+    Inverts the posture (ortus-v8fn). `--ro-bind / /` alone forbids every write
+    under the repo, and the tools a verifier runs need several just to start —
+    each fix revealed the next path:
+
+        ~/.claude/session-env/<uuid>            <repo>/.git/config.lock
+        <repo>/.claude/hooks                    <repo>/.gitconfig
+        <repo>/.git/worktrees/*/config.worktree
+
+    That set cannot be enumerated: it belongs to git and to the agent CLI, it
+    grows with their versions, and a lock file specifically *must not* exist
+    for git to take it. So enumerate ours instead. The repo goes writable, then
+    every top-level entry that is not tool state is re-bound read-only — bwrap
+    applies mounts in order, so the later read-only binds win.
+
+    The result states the property directly: the verifier cannot modify the code
+    under test. It is also not the only guard. `_verify_candidate` re-hashes the
+    candidate diff, the candidate path set and the issue packet after the verdict
+    and discards any verdict where a byte moved, so mutation is caught even where
+    the mount is not.
+    """
+
+    if not repo.is_dir():
+        # Nothing to bind and nothing to protect. bwrap would refuse to launch
+        # on a missing source, so returning empty keeps the wrapper usable for
+        # a caller that has not created the repo yet.
+        return []
+    entries = sorted(
+        entry for entry in repo.iterdir() if entry.name not in _REPO_TOOL_STATE
+    )
+    args = ["--bind", str(repo), str(repo)]
+    for entry in entries:
+        args.extend(["--ro-bind", str(entry), str(entry)])
+    return args
+
+
 def _seatbelt_literal(path: Path) -> str:
     """Escape a path for a Seatbelt string literal."""
 
@@ -412,10 +459,10 @@ def _readonly_wrapper(argv: list[str], repo: Path) -> list[str]:
             wrapper.extend(["--ro-bind", str(resolved_repo), str(resolved_repo)])
         # Last, so it lands on top: bwrap applies mounts in order, and a repo
         # under /tmp is restored by the ro-bind above after `--tmpfs /tmp` wiped
-        # it. Staging the agent-dir tmpfs before that ro-bind lets the ro-bind
-        # mask it, which puts <repo>/.claude back to read-only — the very
-        # failure this mount exists to prevent (ortus-dyio).
-        wrapper.extend(_repo_agent_dir_tmpfs(resolved_repo))
+        # it. Staging the repo mounts before that ro-bind lets the ro-bind mask
+        # them, which puts the repo back to read-only — the very failure they
+        # exist to prevent (ortus-dyio).
+        wrapper.extend(_repo_source_readonly(resolved_repo))
         return [*wrapper, "--chdir", str(resolved_repo), "--", *argv]
     if system == "Darwin":
         repo_literal = _seatbelt_literal(repo)
