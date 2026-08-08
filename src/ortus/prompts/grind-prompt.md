@@ -57,7 +57,7 @@ You are invoked in a `ortus grind` loop. Each invocation = one task. The loop re
 
    If **not** `codegraph_available`: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
 5. **Implement**: Make the code changes described in the issue
-6. **Verify**: Follow `docs/testing.md`. Implementation workers run the smallest changed-surface modules, or the bounded default `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget`. Fresh verifiers expand by changed path and risk; core/prompt changes use the broader hermetic `-m "fast or integration"` group. Neither phase runs `network` or `live_provider` unless the issue explicitly requires external validation. Main CI owns the comprehensive hermetic platform/Python matrix, and tagged release validation owns external smoke. If checks fail, fix and re-verify — this is backpressure, not a reason to stop.
+6. **Verify**: Follow `docs/testing.md`. Implementation workers run the smallest changed-surface modules, or the bounded default `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget`. Fresh verifiers expand by changed path and risk; core/prompt changes use the broader hermetic `-m "fast or integration"` group, run under the CI gate's `--test-timeout=180 --enforce-duration-budget` flags. Neither phase runs `network` or `live_provider` unless the issue explicitly requires external validation. Main CI owns the comprehensive hermetic platform/Python matrix, and tagged release validation owns external smoke. If checks fail, fix and re-verify — this is backpressure, not a reason to stop.
 
 **6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, skip silently — do not mention it in the completion comment.
 
@@ -207,6 +207,8 @@ If you cannot complete the claimed issue (dependency, technical blocker, persist
 Run tests scoped to the changed surface using `docs/testing.md`. The standard bounded inner loop is `uv run pytest -m fast --test-timeout=30 --enforce-duration-budget`; name directly affected test modules when that is smaller. When acceptance criteria say "tests must pass" without qualification, interpret that as **tests covering the changed surface must pass; CI catches regressions elsewhere**.
 
 Fresh verification expands according to changed paths and risk. Core or prompt changes select the broader hermetic `-m "fast or integration"` group, not network/build or live-provider smoke. Never run `network` or `live_provider` by default; tagged release validation owns those external groups.
+
+Whatever the verifier selects, it runs under the CI gate's flags: `uv run pytest <selection> --test-timeout=180 --enforce-duration-budget`. The flags change only how durations and timeouts are judged, never which tests are selected, so a hermetic test that would breach the five-second budget on a bare runner fails at verification time instead of on main. Tests marked `slow` stay exempt from the budget here exactly as they are under CI. Never narrow the marker expression to get past these flags.
 
 If verification fails, fix the issue and re-verify. This is backpressure — keep iterating until it passes or you determine the issue is a blocker outside your task's scope.
 

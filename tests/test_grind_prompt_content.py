@@ -155,6 +155,47 @@ def test_verifier_states_criterion_ids_come_from_the_packet() -> None:
     assert "evidence of the criterion" in body
 
 
+def test_verification_flags_match_ci() -> None:
+    """Verification guidance must name the CI gate's own duration/timeout flags.
+
+    Verification used to run its expanded sweep with developer-loop flags, so a
+    hermetic test over the budget was invisible until CI rejected it on main
+    (ortus-q3lh). Both the verifier contract and the worker prompt now state
+    the parity rule, and the expected flags are read out of the workflow so a
+    change to the gate cannot silently desync them.
+    """
+    from tests.conftest import ci_gate_flags
+
+    from ortus.commands.grind import _verifier_prompt
+    from ortus.core.transaction import CandidateJournal
+
+    journal = CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        issue_packet_ref="logs/packet.json",
+        issue_packet_hash="b" * 64,
+        candidate_hash="a" * 64,
+    )
+    verifier = _verifier_prompt(journal, "probe contract")
+    worker = _content()
+
+    for flag in ci_gate_flags():
+        assert flag in verifier, (
+            f"the verifier contract does not name the CI gate flag {flag!r}; "
+            f"verification would judge durations by developer-machine rules."
+        )
+        assert flag in worker, (
+            f"grind-prompt.md verification guidance does not name {flag!r}."
+        )
+
+    # The flags judge durations and timeouts; they must not be read as a
+    # licence to change which tests are selected.
+    assert "slow" in verifier
+    assert "never narrow a marker expression" in verifier.lower()
+
+
 # ---------------------------------------------------------------------------
 # (4) ralph-prompt superseded-by preamble
 # ---------------------------------------------------------------------------

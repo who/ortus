@@ -413,7 +413,13 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "acceptance criteria — every one of them, each used exactly once, and no invented "
         "id of your own. If a check could not be run at all, record that in the evidence "
         "of the criterion it blocks and fail that criterion; do not add a criterion to "
-        "carry it.\n" + probe_text
+        "carry it.\n\n"
+        "Run every pytest sweep you select under the same flags the CI gate applies: "
+        "`--test-timeout=180 --enforce-duration-budget`. They judge duration and "
+        "timeouts only — select the same tests you would have selected without them, "
+        "and never narrow a marker expression to get past them. A hermetic test over "
+        "the five-second budget is a failure unless it is marked `slow`, which stays "
+        "exempt here exactly as it is under CI.\n" + probe_text
     )
 
 

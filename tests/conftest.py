@@ -11,6 +11,7 @@ generated .bat wrapper). See ortus-f4bu.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -23,6 +24,34 @@ from tests._shims import normalize_git_branch, ready_issue_args, shim_path
 
 _DEPENDENCY_MARKERS = ("fast", "integration", "network", "live_provider")
 _HERMETIC_TEST_BUDGET_SECONDS = 5.0
+_CI_GATE_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "test.yml"
+# The gate invocation, including its backslash-continued flag lines.
+_CI_GATE_COMMAND_RE = re.compile(
+    r'uv run pytest -m "fast or integration"(?:[^\n]*\\\n)*[^\n]*'
+)
+
+
+def ci_gate_flags() -> tuple[str, ...]:
+    """Return the duration and timeout flags the comprehensive CI gate applies.
+
+    Verification runs the sweep it already selected under these exact flags, so
+    a test that only breaches the budget on a bare runner is rejected at
+    verification time instead of on main (ortus-q3lh). Parsed out of the
+    workflow rather than restated here, so the two cannot drift apart.
+    """
+    body = _CI_GATE_WORKFLOW.read_text(encoding="utf-8")
+    command = _CI_GATE_COMMAND_RE.search(body)
+    if command is None:
+        raise RuntimeError(
+            f"no `fast or integration` gate command found in {_CI_GATE_WORKFLOW}"
+        )
+    timeout = re.search(r"--test-timeout=\d+", command.group(0))
+    if timeout is None or "--enforce-duration-budget" not in command.group(0):
+        raise RuntimeError(
+            "the CI gate command no longer carries both a per-test timeout and "
+            f"the duration budget: {command.group(0)!r}"
+        )
+    return (timeout.group(0), "--enforce-duration-budget")
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -103,6 +132,36 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
             f"{item.nodeid} took {report.duration:.2f}s; hermetic tests over "
             f"{_HERMETIC_TEST_BUDGET_SECONDS:.0f}s must be optimized or marked slow"
         )
+
+
+@pytest.fixture(scope="session")
+def _empty_git_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """An empty file to stand in for the operator's ~/.gitconfig."""
+    path = tmp_path_factory.mktemp("git-identity") / "gitconfig"
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+@pytest.fixture(autouse=True)
+def neutralized_git_identity(
+    monkeypatch: pytest.MonkeyPatch, _empty_git_config: Path
+) -> None:
+    """Hide the ambient global git identity from every test (ortus-q3lh).
+
+    A developer machine has `user.email` in ~/.gitconfig and a CI runner does
+    not, so a fixture that shells out to `git commit` without configuring its
+    own identity passes locally and fails on the runner — a class that landed
+    twelve failures through verification phases that all reported pass. Every
+    test now sees the runner's condition, so such a fixture fails loudly here
+    instead of on main.
+
+    `GIT_CONFIG_GLOBAL` is pointed at an empty file rather than HOME being
+    cleared, because clearing HOME breaks unrelated tooling the tests invoke.
+    Autouse so a new test cannot opt out by omission, which is exactly how the
+    gap was introduced. `monkeypatch` restores the previous environment even
+    when a test raises.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(_empty_git_config))
 
 
 # The canonical bash/Copier implementation is archived. Keep its historical

@@ -20,10 +20,27 @@ uv run pytest tests/test_init.py tests/test_init_render.py \
 
 # Hermetic subprocess integration for a risky command/orchestrator change.
 uv run pytest -m integration --test-timeout=60 --enforce-duration-budget
+
+# Fresh verification: the expanded sweep runs under the CI gate's flags.
+uv run pytest <expansion> --test-timeout=180 --enforce-duration-budget
 ```
 
 Fresh verifiers expand from the changed paths and risk. They do not run
 `network` or `live_provider` locally unless the issue explicitly requires it.
+
+**Verification-to-CI flag parity.** Whatever a verifier selects, it runs that
+selection under the same `--test-timeout=180 --enforce-duration-budget` flags
+the comprehensive CI gate applies. The flags change only how durations and
+timeouts are judged, never which tests are selected, so a hermetic test that
+would breach the five-second budget on a bare runner is rejected at
+verification time instead of on main. `slow`-marked tests stay exempt from the
+budget under verification exactly as they are under CI. Narrowing the marker
+expression to get past these flags is never the fix; record a plan gap instead.
+
+Tests must also hold without an ambient global git identity, since a developer
+machine has one and a runner does not. `tests/conftest.py` points
+`GIT_CONFIG_GLOBAL` at an empty file for every test, so a fixture that shells
+out to `git commit` has to configure its own `user.name` and `user.email`.
 
 | Changed path | Implementation gate | Verifier expansion |
 | --- | --- | --- |

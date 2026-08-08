@@ -761,6 +761,13 @@ def _blocked_verifier_grind(
     return result, repo, issue_id, prompts
 
 
+# Marked slow rather than optimized: the probe launches a real bwrap sandbox,
+# so the cost is process setup this test exists to exercise, not work it could
+# skip. Measured 5.58s on a CI runner and 15.23s on a loaded developer host,
+# either side of the 5s hermetic budget. The module is already `integration`,
+# so `-m "fast or integration"` still selects it; the marker waives only the
+# budget, exactly as it does for test_verifier_report_and_mutation_isolation.
+@pytest.mark.slow
 def test_verification_preflight_aborts_the_run_naming_the_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -781,6 +788,7 @@ def test_verification_preflight_aborts_the_run_naming_the_probe(
     assert _issue(repo, issue_id)["status"] == "open", "the issue stays claimable"
 
 
+@pytest.mark.slow  # real bwrap launch; see the note above
 def test_blocked_verification_spends_no_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
