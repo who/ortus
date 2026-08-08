@@ -12,6 +12,7 @@ import pytest
 
 from ortus.core.claude import STANDARD_FLAGS, ClaudeRunner, _kill_group, _readonly_wrapper
 from ortus.core.profiles import AgentProfile, Phase
+from tests._platform import skip_unless_tmp_is_canonical
 from tests._shims import shim_path
 
 FAKE_CLAUDE = shim_path("fake-claude")
@@ -73,20 +74,31 @@ def test_readonly_argv_denies_provider_write_tools() -> None:
     assert all(tool in denied for tool in ("Write", "Edit", "NotebookEdit"))
 
 
+@skip_unless_tmp_is_canonical
 def test_linux_readonly_wrapper_keeps_repo_under_tmp_visible_and_read_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("ortus.core.claude.platform.system", lambda: "Linux")
-    repo = tmp_path / "nested" / "repo"
-    repo.mkdir(parents=True)
+    # The repo must be under a canonical /tmp or the wrapper's
+    # `relative_to("/tmp")` guard fails and no --ro-bind pair is emitted at
+    # all. `tmp_path` does not guarantee that — on macOS it lands in
+    # /var/folders — so name the path directly. The wrapper only reads it,
+    # never touches the filesystem, so it need not exist.
+    repo = Path("/tmp/ortus-readonly-wrapper/nested/repo")
+    resolved = str(repo.resolve())
+    assert resolved.startswith("/tmp/"), resolved
 
     argv = _readonly_wrapper(["claude", "-p", "verify"], repo)
 
     assert argv[:5] == ["bwrap", "--ro-bind", "/", "/", "--dev-bind"]
-    assert ["--ro-bind", str(repo.resolve()), str(repo.resolve())] == argv[
-        argv.index(str(repo.resolve())) - 1 : argv.index(str(repo.resolve())) + 2
-    ]
-    assert argv[argv.index("--chdir") + 1] == str(repo.resolve())
+    # Find the pair by its flag. Indexing on the bare path instead silently
+    # matches the `--chdir` occurrence when the pair was never emitted, so a
+    # skipped branch read as a wrong-order argv rather than a missing bind.
+    assert any(
+        token == "--ro-bind" and argv[i + 1 : i + 3] == [resolved, resolved]
+        for i, token in enumerate(argv)
+    ), f"no --ro-bind pair for {resolved} in {argv}"
+    assert argv[argv.index("--chdir") + 1] == resolved
     assert ["--tmpfs", "/tmp"] == argv[
         argv.index("--tmpfs") : argv.index("--tmpfs") + 2
     ]
