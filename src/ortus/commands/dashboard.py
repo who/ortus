@@ -75,10 +75,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.widgets import Static
 
 from ortus.core import output
 from ortus.core.readiness import validate_issue
@@ -229,27 +225,20 @@ DARK_THEME = "textual-dark"
 #: State classes a region may carry. Exactly one is applied at a time.
 STATE_CLASSES = ("state-idle", "state-live", "state-ended", "state-failed")
 
+#: The message an operator sees when the terminal framework is not importable.
+#: Their environment predates the dependency — a `uv tool` install, a container
+#: image, a colleague's checkout — and what they need is the one command that
+#: repairs it, not the stack that names a missing module and nothing else.
+MISSING_TEXTUAL = (
+    "ortus dashboard needs the textual package, which is not importable here. "
+    "Install it with `pip install textual`, or reinstall ortus itself "
+    "(`uv tool install --force ortus`), then run the command again. "
+    "Every other ortus verb works without it."
+)
 
-class Region(Static):
-    """One bordered region of the layout, filled by its own leaf."""
 
-    def __init__(self, spec: RegionSpec) -> None:
-        super().__init__("", id=spec.key)
-        self.spec = spec
-        #: The plain text currently displayed, kept so the shell (and its
-        #: tests) can read back what was rendered.
-        self.body = ""
-
-    def on_mount(self) -> None:
-        self.border_title = self.spec.title
-
-    def set_body(self, text: str) -> None:
-        self.body = text
-        self.update(text)
-
-    def set_state(self, state: str) -> None:
-        self.remove_class(*STATE_CLASSES)
-        self.add_class(state)
+class TextualUnavailable(RuntimeError):
+    """textual is absent, or present but missing one of the submodules used."""
 
 
 @dataclass(frozen=True)
@@ -974,98 +963,164 @@ Region.state-failed {{ border: round {ACCENT_FAILURE}; border-title-color: {ACCE
 """
 
 
-class DashboardApp(App[None]):
-    """The shell: the region layout, the dark palette, and the refresh timer."""
+#: The shell classes, built on first use and reused after. They subclass
+#: textual's, so they cannot exist at module scope without pulling a terminal
+#: UI framework into every invocation of every verb — registration needs only
+#: the callback below, and a stale environment must lose this one command
+#: rather than the whole CLI.
+_SHELL: dict[str, type] | None = None
 
-    TITLE = "ortus dashboard"
-    CSS = _CSS
-    BINDINGS = [
-        Binding("q", "quit", "quit"),
-        Binding("ctrl+c", "quit", "quit", show=False),
-    ]
-    #: The dashboard takes no actions, so it offers none: the command palette
-    #: is the one surface that would put a mutating verb on screen.
-    ENABLE_COMMAND_PALETTE = False
 
-    def __init__(
-        self,
-        repo: Path,
-        *,
-        refresh_seconds: float = REFRESH_SECONDS,
-        replay: ReplaySource | None = None,
-    ) -> None:
-        super().__init__()
-        self.repo = Path(repo)
-        self.refresh_seconds = refresh_seconds
-        #: The finished run being rendered, or None for live mode. Live mode is
-        #: the default and reads the newest log, exactly as before replay
-        #: existed; replay only pins which log the same reader follows.
-        self.replay = replay
-        self.snapshot = RunSnapshot()
-        #: Carried between ticks: the log tail is incremental, and an envelope
-        #: is logged once, so the decision has to outlive the slice it arrived in.
-        self.verdict = VerdictState()
-        self.tick = 0
-        self.last_frame = frame(
-            self.snapshot, self.tick, replay=replay, verdict=self.verdict
-        )
+def _shell() -> dict[str, type]:
+    """Import textual and define the shell classes, once, on demand.
 
-    def compose(self) -> ComposeResult:
-        yield Region(REGIONS[0])
-        with VerticalScroll(id="body"):
-            for spec in REGIONS[1:]:
-                yield Region(spec)
-        yield Static("", id="pulse")
-        yield Static(KEY_HINT, id="hint")
+    Raises :class:`TextualUnavailable` when the framework cannot be imported.
+    A partial install — the package present but a submodule missing — raises
+    ``ImportError`` rather than ``ModuleNotFoundError`` and is reported the
+    same way, because to the operator it is the same broken environment.
+    """
 
-    def on_mount(self) -> None:
-        self.theme = DARK_THEME
-        self.refresh_run()
-        self.set_interval(self.refresh_seconds, self.refresh_run)
+    global _SHELL
+    if _SHELL is not None:
+        return _SHELL
 
-    def advance(self) -> Frame:
-        """Read the next snapshot and build its frame. Renders nothing.
+    try:
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import VerticalScroll
+        from textual.widgets import Static
+    except ImportError as exc:
+        raise TextualUnavailable(MISSING_TEXTUAL) from exc
 
-        Split from the paint so the refresh loop is testable headless, and so a
-        repository that becomes unreadable mid-run keeps the last frame instead
-        of taking the view down — the pulse still advances, which is how an
-        operator can tell the dashboard is alive.
-        """
+    class Region(Static):
+        """One bordered region of the layout, filled by its own leaf."""
 
-        log_path = self.replay.log_path if self.replay is not None else None
-        try:
-            self.snapshot = read_snapshot(
-                self.repo, previous=self.snapshot, log_path=log_path
+        def __init__(self, spec: RegionSpec) -> None:
+            super().__init__("", id=spec.key)
+            self.spec = spec
+            #: The plain text currently displayed, kept so the shell (and its
+            #: tests) can read back what was rendered.
+            self.body = ""
+
+        def on_mount(self) -> None:
+            self.border_title = self.spec.title
+
+        def set_body(self, text: str) -> None:
+            self.body = text
+            self.update(text)
+
+        def set_state(self, state: str) -> None:
+            self.remove_class(*STATE_CLASSES)
+            self.add_class(state)
+
+    class DashboardApp(App[None]):
+        """The shell: the region layout, the dark palette, and the refresh timer."""
+
+        TITLE = "ortus dashboard"
+        CSS = _CSS
+        BINDINGS = [
+            Binding("q", "quit", "quit"),
+            Binding("ctrl+c", "quit", "quit", show=False),
+        ]
+        #: The dashboard takes no actions, so it offers none: the command palette
+        #: is the one surface that would put a mutating verb on screen.
+        ENABLE_COMMAND_PALETTE = False
+
+        def __init__(
+            self,
+            repo: Path,
+            *,
+            refresh_seconds: float = REFRESH_SECONDS,
+            replay: ReplaySource | None = None,
+        ) -> None:
+            super().__init__()
+            self.repo = Path(repo)
+            self.refresh_seconds = refresh_seconds
+            #: The finished run being rendered, or None for live mode. Live mode is
+            #: the default and reads the newest log, exactly as before replay
+            #: existed; replay only pins which log the same reader follows.
+            self.replay = replay
+            self.snapshot = RunSnapshot()
+            #: Carried between ticks: the log tail is incremental, and an envelope
+            #: is logged once, so the decision has to outlive the slice it arrived in.
+            self.verdict = VerdictState()
+            self.tick = 0
+            self.last_frame = frame(
+                self.snapshot, self.tick, replay=replay, verdict=self.verdict
             )
-        except OSError:
-            pass
-        self.verdict = read_verdict(self.repo, self.snapshot, previous=self.verdict)
-        self.tick += 1
-        self.last_frame = frame(
-            self.snapshot, self.tick, replay=self.replay, verdict=self.verdict
-        )
-        return self.last_frame
 
-    def refresh_run(self) -> None:
-        """One tick: re-read the run, then repaint."""
+        def compose(self) -> ComposeResult:
+            yield Region(REGIONS[0])
+            with VerticalScroll(id="body"):
+                for spec in REGIONS[1:]:
+                    yield Region(spec)
+            yield Static("", id="pulse")
+            yield Static(KEY_HINT, id="hint")
 
-        self.advance()
-        self.paint()
+        def on_mount(self) -> None:
+            self.theme = DARK_THEME
+            self.refresh_run()
+            self.set_interval(self.refresh_seconds, self.refresh_run)
 
-    def paint(self) -> None:
-        """Push the current frame onto the widgets."""
+        def advance(self) -> Frame:
+            """Read the next snapshot and build its frame. Renders nothing.
 
-        bodies = self.last_frame.bodies()
-        states = dict(self.last_frame.states)
-        for region in self.query(Region):
-            text = bodies.get(region.spec.key)
-            if text is not None:
-                region.set_body(text)
-            state = states.get(region.spec.key)
-            if state is not None:
-                region.set_state(state)
-        for bar in self.query("#pulse"):
-            bar.update(self.last_frame.pulse)
+            Split from the paint so the refresh loop is testable headless, and so a
+            repository that becomes unreadable mid-run keeps the last frame instead
+            of taking the view down — the pulse still advances, which is how an
+            operator can tell the dashboard is alive.
+            """
+
+            log_path = self.replay.log_path if self.replay is not None else None
+            try:
+                self.snapshot = read_snapshot(
+                    self.repo, previous=self.snapshot, log_path=log_path
+                )
+            except OSError:
+                pass
+            self.verdict = read_verdict(self.repo, self.snapshot, previous=self.verdict)
+            self.tick += 1
+            self.last_frame = frame(
+                self.snapshot, self.tick, replay=self.replay, verdict=self.verdict
+            )
+            return self.last_frame
+
+        def refresh_run(self) -> None:
+            """One tick: re-read the run, then repaint."""
+
+            self.advance()
+            self.paint()
+
+        def paint(self) -> None:
+            """Push the current frame onto the widgets."""
+
+            bodies = self.last_frame.bodies()
+            states = dict(self.last_frame.states)
+            for region in self.query(Region):
+                text = bodies.get(region.spec.key)
+                if text is not None:
+                    region.set_body(text)
+                state = states.get(region.spec.key)
+                if state is not None:
+                    region.set_state(state)
+            for bar in self.query("#pulse"):
+                bar.update(self.last_frame.pulse)
+
+    _SHELL = {"Region": Region, "DashboardApp": DashboardApp}
+    return _SHELL
+
+
+def __getattr__(name: str) -> Any:
+    """Serve `Region` and `DashboardApp` as module attributes, built on access.
+
+    The classes read as module-level to every caller and every test, which is
+    what they were before the import moved; only the moment they come into
+    existence changed. PEP 562 is what keeps that true without a shim class.
+    """
+
+    if name in ("Region", "DashboardApp"):
+        return _shell()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def dashboard(
@@ -1091,16 +1146,22 @@ def dashboard(
     ambiguity. A log still being written replays too, up to its current end.
     """
 
+    try:
+        app_type = _shell()["DashboardApp"]
+    except TextualUnavailable as exc:
+        output.error(str(exc))
+        raise typer.Exit(code=1) from exc
+
     if replay is not None:
         source = resolve_replay(replay.resolve())
         if not source.log_path.is_file():
             output.error(f"no such run log: {source.log_path}")
             raise typer.Exit(code=1)
-        DashboardApp(source.repo, replay=source).run()
+        app_type(source.repo, replay=source).run()
         return
 
     target = (repo if repo is not None else Path.cwd()).resolve()
     if not target.is_dir():
         output.error(f"no such directory: {target}")
         raise typer.Exit(code=1)
-    DashboardApp(target).run()
+    app_type(target).run()

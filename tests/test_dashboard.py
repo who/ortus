@@ -18,6 +18,7 @@ import inspect
 import json
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -1387,3 +1388,139 @@ def test_visual_contract_colour_carries_meaning() -> None:
     for state in dash.STATE_CLASSES:
         assert f"Region.{state}" in dash._CSS, state
     assert len({dash.ACCENT_MOTION, dash.ACCENT_ATTENTION, dash.ACCENT_FAILURE}) == 3
+
+
+# ---------------------------------------------------------------------------
+# ortus-27uu: a missing textual costs this one verb, not the whole CLI
+# ---------------------------------------------------------------------------
+#
+# The property under test is "textual is never imported unless the dashboard
+# runs", and asserting where the import statement sits would not test it — the
+# statement can move back to module scope without such an assertion noticing.
+# So each case drives the real CLI in a child interpreter with textual made
+# unimportable, which is the stale environment the bug was reported from. A
+# child is also what keeps the block from leaking: this test session has
+# textual installed and every other test in this file depends on it.
+
+_BLOCK_TEXTUAL = """
+import sys
+
+
+class _BlockTextual:
+    \"\"\"Make textual unimportable, as a pre-dependency environment does.\"\"\"
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "textual" or name.startswith("textual."):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return None
+
+
+sys.meta_path.insert(0, _BlockTextual())
+for _stale in [m for m in sys.modules if m == "textual" or m.startswith("textual.")]:
+    del sys.modules[_stale]
+"""
+
+
+def _run_without_textual(body: str) -> subprocess.CompletedProcess:
+    """Run `body` in a child interpreter that cannot import textual."""
+
+    env = dict(os.environ)
+    # rich wraps stderr at the console width, and an assertion on a phrase in
+    # the message must not fail because the phrase straddled a wrap.
+    env["COLUMNS"] = "400"
+    return subprocess.run(
+        [sys.executable, "-c", _BLOCK_TEXTUAL + body],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+
+
+def test_cli_imports_without_textual(tmp_path: Path) -> None:
+    """AC-1: the CLI imports and a non-dashboard verb runs with textual absent."""
+
+    repo = tmp_path / "quiet-repo"
+    (repo / ".beads").mkdir(parents=True)
+    proc = _run_without_textual(
+        f"""
+from typer.testing import CliRunner
+
+from ortus.cli import app
+
+assert "textual" not in sys.modules, "importing the CLI pulled in textual"
+
+result = CliRunner().invoke(app, ["grind", {str(repo)!r}, "--dry-run"])
+assert result.exit_code == 0, (result.exit_code, result.output, result.exception)
+assert "/goal" in result.stdout, result.stdout
+assert "textual" not in sys.modules, "running grind pulled in textual"
+print("VERB-OK")
+"""
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "VERB-OK" in proc.stdout
+
+
+def test_dashboard_reports_missing_textual(tmp_path: Path) -> None:
+    """AC-2: the dashboard verb alone fails, with the install command, not a stack."""
+
+    repo = tmp_path / "quiet-repo"
+    repo.mkdir()
+    proc = _run_without_textual(
+        f"""
+from typer.testing import CliRunner
+
+from ortus.cli import app
+
+runner = CliRunner()
+
+# Argument parsing needs no framework, so --help still answers.
+helped = runner.invoke(app, ["dashboard", "--help"])
+assert helped.exit_code == 0, (helped.exit_code, helped.output)
+assert "--replay" in helped.stdout, helped.stdout
+
+result = runner.invoke(app, ["dashboard", {str(repo)!r}])
+assert result.exit_code == 1, (result.exit_code, result.output, result.exception)
+assert not isinstance(result.exception, ImportError), result.exception
+message = result.stderr
+assert "pip install textual" in message, message
+assert "Traceback" not in message, message
+assert "ModuleNotFoundError" not in message, message
+print("MESSAGE-OK")
+"""
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MESSAGE-OK" in proc.stdout
+    # The message the child printed is this module's, so an edit that drops the
+    # install command from it fails here too rather than only in the child.
+    assert "pip install textual" in dash.MISSING_TEXTUAL
+
+
+def test_partial_textual_install_reports_the_same_way() -> None:
+    """Edge case: a package that imports but lacks a submodule is not special.
+
+    It raises ImportError rather than ModuleNotFoundError, and to the operator
+    it is the same broken environment, so it must produce the same sentence.
+    """
+
+    proc = _run_without_textual(
+        """
+import types
+
+from ortus.commands import dashboard as dash
+
+# textual itself imports; textual.widgets does not.
+sys.modules["textual"] = types.ModuleType("textual")
+sys.modules["textual.app"] = types.ModuleType("textual.app")
+
+try:
+    dash._shell()
+except dash.TextualUnavailable as exc:
+    assert "pip install textual" in str(exc), str(exc)
+    print("PARTIAL-OK")
+else:
+    raise AssertionError("a partial textual install was accepted")
+"""
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "PARTIAL-OK" in proc.stdout
