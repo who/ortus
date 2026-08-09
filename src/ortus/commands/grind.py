@@ -35,6 +35,7 @@ import datetime as _dt
 import json
 import re
 import subprocess
+import textwrap
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -68,7 +69,7 @@ from ortus.core.codegraph import (
 )
 from ortus.core.config import load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
-from ortus.core.readiness import ReadinessReport
+from ortus.core.readiness import ReadinessReport, section_text
 from ortus.core.transaction import (
     FINALIZATION_STEPS,
     CandidateJournal,
@@ -1415,6 +1416,88 @@ _FINALIZABLE_PHASES = frozenset(
 )
 
 
+#: Conventional git subject ceiling. A longer issue title is truncated rather
+#: than folded into the body, so `git log --oneline`, `git shortlog` and forge
+#: UIs stay readable.
+_COMMIT_SUBJECT_LIMIT = 72
+#: Commit bodies are wrapped at the conventional width, and the quoted
+#: objective is bounded so a long one can't turn the message into an essay.
+_COMMIT_BODY_WIDTH = 72
+_MAX_COMMIT_OBJECTIVE_CHARS = 480
+#: What the subject degrades to when the packet — and therefore the title —
+#: cannot be read. Losing a verified candidate because a tracker lookup failed
+#: would be far worse than a terse message.
+_DEGRADED_COMMIT_SUBJECT = "verified candidate"
+
+
+def _truncated(text: str, limit: int) -> str:
+    """`text` bounded to `limit` characters, ellipsis included in the budget."""
+
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
+    """The authored packet for the commit message, or {} when unreadable.
+
+    Every failure mode collapses to the empty packet: finalization runs after a
+    passing verdict, so a tracker hiccup must degrade the message rather than
+    strand the candidate.
+    """
+
+    try:
+        packet = bd.show(issue_id)
+    except Exception:  # noqa: BLE001 - any read failure degrades the subject
+        return {}
+    return packet if isinstance(packet, dict) else {}
+
+
+def _commit_subject(issue_id: str, title: str) -> str:
+    """`<id>: <title>`, bounded to a conventional subject length.
+
+    The id stays first so existing habits — and any tooling that greps a
+    subject for an issue id — keep working. Whitespace is collapsed because a
+    title carrying a newline would otherwise split into a spurious body.
+    """
+
+    collapsed = " ".join(str(title or "").split())
+    return _truncated(
+        f"{issue_id}: {collapsed or _DEGRADED_COMMIT_SUBJECT}", _COMMIT_SUBJECT_LIMIT
+    )
+
+
+def _commit_message(
+    issue_id: str, journal: CandidateJournal, packet: dict[str, Any]
+) -> str:
+    """Subject plus provenance body for the one commit this transaction makes.
+
+    Everything here is recorded fact — the authored packet and the journal — so
+    the message cannot describe something other than what the verifier judged.
+    Summarising the diff was rejected for exactly that reason. An unreadable
+    packet still yields the journal-derived body under the degraded subject.
+    """
+
+    subject = _commit_subject(issue_id, str(packet.get("title") or ""))
+    lines: list[str] = []
+    objective = " ".join(section_text(packet.get("description"), "Objective").split())
+    if objective:
+        lines.append(
+            textwrap.fill(
+                _truncated(objective, _MAX_COMMIT_OBJECTIVE_CHARS),
+                width=_COMMIT_BODY_WIDTH,
+            )
+        )
+        lines.append("")
+    lines.append(f"Attempt: {journal.attempt}")
+    lines.append(f"Corrections: {journal.corrections}")
+    lines.append(
+        "Verifier report: "
+        + (journal.verifier_refs[-1] if journal.verifier_refs else "none")
+    )
+    return f"{subject}\n\n" + "\n".join(lines) + "\n"
+
+
 def _finalization_report(issue_id: str, journal: CandidateJournal) -> str:
     return (
         f"{_FINALIZATION_MARKER}\n\n"
@@ -1586,8 +1669,14 @@ def _finalize_candidate(
                     "finalization: leaving unrelated worktree paths untouched: "
                     + ", ".join(sorted(unrelated))
                 )
-            subject = f"{issue_id}: verified candidate"
-            if not git.commit_paths(stage, subject):
+            packet = _commit_packet(bd, issue_id)
+            if not packet:
+                write_log(
+                    "finalization: issue packet unreadable; committing "
+                    f"{issue_id} with a degraded subject"
+                )
+            message = _commit_message(issue_id, journal, packet)
+            if not git.commit_paths(stage, message):
                 return journal, "path-scoped commit of the owned candidate failed"
             journal = journal.with_finalization("commit", git.head_oid())
             store.save(journal)

@@ -24,6 +24,7 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
+from ortus.core.bd import BdClient, BdError
 from ortus.core.git import GitClient
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
@@ -124,6 +125,21 @@ def _subjects(repo: Path) -> list[str]:
     return subprocess.run(
         ["git", "log", "--format=%s"], cwd=repo, capture_output=True, text=True
     ).stdout.splitlines()
+
+
+def _finalization_commits(repo: Path, issue_id: str) -> list[str]:
+    """Subjects of the commits this transaction made.
+
+    Matched on the leading issue id rather than a fixed phrase: the subject now
+    carries the issue title, which each test is free to change.
+    """
+    return [line for line in _subjects(repo) if line.startswith(f"{issue_id}: ")]
+
+
+def _head_message(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "log", "-1", "--format=%B"], cwd=repo, capture_output=True, text=True
+    ).stdout
 
 
 class PassingRunner:
@@ -299,11 +315,11 @@ def test_pass_finalizes_report_close_commit_and_sync(
     assert CANDIDATE in committed
     # Path-scoped: only the transaction's own paths, never a `git add -A` sweep.
     assert committed <= {CANDIDATE, ".beads/issues.jsonl", ".beads/interactions.jsonl"}
-    assert _subjects(repo)[0] == f"{issue_id}: verified candidate"
+    assert _subjects(repo)[0] == f"{issue_id}: {_issue(repo, issue_id)['title']}"
 
     # Exactly one close and one commit, and the integration branch is on origin.
     assert len(_subjects(repo)) == baseline_commits + 1
-    assert _subjects(repo).count(f"{issue_id}: verified candidate") == 1
+    assert len(_finalization_commits(repo, issue_id)) == 1
     ahead = subprocess.run(
         ["git", "rev-list", "--count", "origin/main..main"],
         cwd=repo,
@@ -496,8 +512,7 @@ def test_restart_after_close_before_commit_commits_exactly_once(
     assert issue["close_reason"] == "already closed", (
         "the original close must not be overwritten by a replayed one"
     )
-    subjects = _subjects(repo)
-    assert subjects.count(f"{issue_id}: verified candidate") == 1
+    assert len(_finalization_commits(repo, issue_id)) == 1
     assert CANDIDATE in _committed_paths(repo)
     assert JournalStore(repo).load() is None
 
@@ -523,7 +538,7 @@ def test_restart_after_commit_before_push_only_pushes(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    assert _subjects(repo).count(f"{issue_id}: verified candidate") == 1
+    assert len(_finalization_commits(repo, issue_id)) == 1
     ahead = subprocess.run(
         ["git", "rev-list", "--count", "origin/main..main"],
         cwd=repo,
@@ -585,7 +600,7 @@ def test_restart_after_a_resolved_blocker_finalizes_exactly_once(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
     assert blocked.exit_code == 1, blocked.stdout + blocked.stderr
-    assert f"{issue_id}: verified candidate" not in _subjects(repo)
+    assert not _finalization_commits(repo, issue_id)
     journal = JournalStore(repo).load()
     assert journal is not None and journal.phase == "finalization-blocked"
     assert journal.finalized("close") and not journal.finalized("commit")
@@ -597,7 +612,7 @@ def test_restart_after_a_resolved_blocker_finalizes_exactly_once(
     )
     assert resumed.exit_code == 0, resumed.stdout + resumed.stderr
 
-    assert _subjects(repo).count(f"{issue_id}: verified candidate") == 1
+    assert len(_finalization_commits(repo, issue_id)) == 1
     assert CANDIDATE in _committed_paths(repo)
     assert _issue(repo, issue_id)["status"] == "closed"
     assert sum(
@@ -651,7 +666,122 @@ def test_blocked_finalization_never_selects_another_issue(
     )
     assert again.exit_code == 1, again.stdout + again.stderr
 
-    assert f"{issue_id}: verified candidate" not in _subjects(repo)
+    assert not _finalization_commits(repo, issue_id)
     assert (repo / "operator-notes.txt").read_text() == "unrelated local work\n"
     journal = JournalStore(repo).load()
     assert journal is not None and journal.issue_id == issue_id
+
+
+# ---------------------------------------------------------------------------
+# ortus-irbj — the commit message says what changed and where it came from
+# ---------------------------------------------------------------------------
+
+
+def _finalize_by_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    title: str | None = None,
+) -> tuple[Path, str, CandidateJournal]:
+    """Drive one finalization from a staged journal, with no agent spawn.
+
+    The message is built at the commit boundary, so the replay path exercises
+    it exactly as a fresh pass does while keeping the test off the worker.
+    """
+    repo, issue_id = _seed(tmp_path, name)
+    if title is not None:
+        subprocess.run(
+            ["bd", "update", issue_id, "--title", title],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    journal = _stage_pending_journal(repo, issue_id)
+    _install(monkeypatch, tmp_path, NeverRuns())
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    return repo, issue_id, journal
+
+
+def test_commit_subject_names_the_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the subject is the id plus the authored title, not a fixed phrase."""
+    repo, issue_id, _ = _finalize_by_replay(tmp_path, monkeypatch, "fin13")
+
+    subject = _subjects(repo)[0]
+    assert subject == f"{issue_id}: {_issue(repo, issue_id)['title']}"
+    assert "verified candidate" not in subject
+
+
+def test_commit_body_records_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: objective, attempt, corrections and verifier reference, from record."""
+    repo, _, journal = _finalize_by_replay(tmp_path, monkeypatch, "fin14")
+
+    subject, _, body = _head_message(repo).partition("\n\n")
+    assert subject and "\n" not in subject
+    assert "Exercise the behavior owned by this test." in body
+    assert f"Attempt: {journal.attempt}" in body
+    assert f"Corrections: {journal.corrections}" in body
+    assert f"Verifier report: {journal.verifier_refs[-1]}" in body
+
+
+def test_commit_degrades_without_packet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: an unreadable packet costs the title, never the commit."""
+    repo, issue_id = _seed(tmp_path, "fin15")
+    journal = _stage_pending_journal(repo, issue_id)
+    _install(monkeypatch, tmp_path, NeverRuns())
+
+    # Only the packet read fails. `status` keeps answering — a tracker that
+    # could not report the issue's status at all would block finalization long
+    # before the commit, which is a different failure than this one.
+    original_show = BdClient.show
+    monkeypatch.setattr(
+        BdClient,
+        "status",
+        lambda self, iid: str(original_show(self, iid).get("status") or ""),
+    )
+    monkeypatch.setattr(
+        BdClient,
+        "show",
+        lambda self, iid: (_ for _ in ()).throw(
+            BdError(["bd", "show", iid], 1, "tracker unavailable")
+        ),
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    subject, _, body = _head_message(repo).partition("\n\n")
+    assert subject == f"{issue_id}: verified candidate"
+    assert f"Verifier report: {journal.verifier_refs[-1]}" in body
+    assert CANDIDATE in _committed_paths(repo)
+    assert JournalStore(repo).load() is None
+
+
+def test_commit_subject_truncates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a long title is truncated, and the body stays a separate paragraph."""
+    long_title = "Rewrite " + "the finalization commit message machinery " * 4
+    repo, issue_id, _ = _finalize_by_replay(
+        tmp_path, monkeypatch, "fin16", title=long_title
+    )
+
+    lines = _head_message(repo).splitlines()
+    subject = lines[0]
+    assert len(long_title) > grind_mod._COMMIT_SUBJECT_LIMIT
+    assert len(subject) <= grind_mod._COMMIT_SUBJECT_LIMIT
+    assert subject.startswith(f"{issue_id}: Rewrite the finalization")
+    assert subject.endswith("...")
+    assert lines[1] == "", "the body must be separated by a blank line"
+    assert any(line.startswith("Attempt: ") for line in lines)

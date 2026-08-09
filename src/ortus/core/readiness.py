@@ -214,6 +214,17 @@ def _sections(value: Any) -> dict[str, str]:
     return {heading: "\n".join(lines).strip() for heading, lines in found.items()}
 
 
+def section_text(value: Any, heading: str) -> str:
+    """Body of one Markdown section of `value`, or "" when it has no such heading.
+
+    Exposed because the packet's authored sections are useful outside readiness
+    validation — the finalization commit message quotes the objective — and a
+    second heading parser would drift from the one that validates the packet.
+    """
+
+    return _sections(value).get(_normalise_heading(heading), "")
+
+
 def _is_placeholder(value: str) -> bool:
     stripped = value.strip().strip("`*_ ")
     if not stripped:

@@ -168,6 +168,15 @@ def _subjects(repo: Path) -> list[str]:
     ).stdout.splitlines()
 
 
+def _finalization_commits(repo: Path, issue_id: str) -> list[str]:
+    """Subjects of the commits finalization made for `issue_id`.
+
+    Matched on the leading issue id: the rest of the subject is the issue's
+    own title, which these tests don't pin.
+    """
+    return [line for line in _subjects(repo) if line.startswith(f"{issue_id}: ")]
+
+
 def _committed_paths(repo: Path) -> set[str]:
     out = subprocess.run(
         ["git", "show", "--name-only", "--format=", "HEAD"],
@@ -667,8 +676,10 @@ def test_unrelated_work_stays_disowned_for_the_next_issue_in_the_same_run(
     assert _issue(repo, first_id)["status"] == "closed"
     assert _issue(repo, second_id)["status"] == "closed"
     assert seen == ["candidate-0.py", "candidate-1.py"]
-    for subject in _subjects(repo)[:2]:
-        assert "verified candidate" in subject
+    assert {subject.split(":", 1)[0] for subject in _subjects(repo)[:2]} == {
+        first_id,
+        second_id,
+    }
     everything_committed = subprocess.run(
         ["git", "log", "--name-only", "--format=", "-2"],
         cwd=repo,
@@ -1025,7 +1036,7 @@ def test_failure_phase_malformed_verdict_resumes_and_then_finishes(
     assert first.exit_code == 0, first.stdout + first.stderr
     assert _issue(repo, issue_id)["status"] == "in_progress"
     assert JournalStore(repo).load() is not None
-    assert f"{issue_id}: verified candidate" not in _subjects(repo)
+    assert not _finalization_commits(repo, issue_id)
 
     resumed = ScriptedRunner(implement=implement, verify=_pass_verdict)
     _install(monkeypatch, tmp_path, resumed)
@@ -1034,7 +1045,7 @@ def test_failure_phase_malformed_verdict_resumes_and_then_finishes(
 
     assert "RECOVERY HANDOFF" in resumed.prompt_for(Phase.IMPLEMENT)
     assert _issue(repo, issue_id)["status"] == "closed"
-    assert _subjects(repo).count(f"{issue_id}: verified candidate") == 1
+    assert len(_finalization_commits(repo, issue_id)) == 1
     assert CANDIDATE in _committed_paths(repo)
     assert JournalStore(repo).load() is None
 
