@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable
 from typer.models import OptionInfo
 
 from ortus.commands import dashboard as dash
+from ortus.commands import grind
 from ortus.core.runstate import RunSnapshot, RunWarning, read_snapshot
 from ortus.core.transaction import CandidateJournal, JournalStore
 from ortus.core.verdict import Verdict, render_report
@@ -867,8 +868,12 @@ def test_live_mode_is_unchanged_by_the_presence_of_the_replay_flag(
 
     assert app.snapshot.log_path == repo / "logs" / "grind-20260808-221000.log"
     assert "replay" not in frame.header
-    assert frame.header == dash.header_line(app.snapshot)
-    assert "\n" not in frame.header
+    assert frame.header == dash.header_line(app.snapshot, identity=app.identity)
+    # Unadorned means no replay adornment: the header leaf (ortus-0udo.3) fills
+    # this region with several lines, and none of them names a log or an ending.
+    assert app.snapshot.log_path is not None
+    assert app.snapshot.log_path.name not in frame.header
+    assert dash.NO_JOURNAL_OUTCOME not in frame.header
     assert frame.warnings == dash.NO_WARNINGS
 
 
@@ -2087,3 +2092,290 @@ else:
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "PARTIAL-OK" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.3: the header region — issue, phase, iteration, budget, watchdog
+# ---------------------------------------------------------------------------
+#
+# Two failures in one session were invisible until they were fatal. A worker was
+# killed at the watchdog cap while holding finished work, stranding a candidate
+# a human then recovered by hand, and nothing on screen counted down to it.
+# Correction attempts were consumed silently, so escalation to a human label
+# arrived as a surprise after the budget was already spent. Both facts were on
+# disk the whole time, so these tests are about what the header makes visible.
+
+_HEADER_ISSUE = "ortus-0udo.3"
+_HEADER_TITLE = "Dashboard header: phase, iteration, correction budget and watchdog"
+_HEADER_NOW = _dt.datetime(2026, 8, 9, 5, 0, 0, tzinfo=_dt.timezone.utc)
+
+
+def _stamp(minutes_ago: float) -> str:
+    return (_HEADER_NOW - _dt.timedelta(minutes=minutes_ago)).isoformat()
+
+
+def _header_snapshot(**fields: Any) -> RunSnapshot:
+    """A live run thirty minutes in, on its first pass, with a worker running."""
+
+    base: dict[str, Any] = {
+        "issue_id": _HEADER_ISSUE,
+        "phase": "implementation",
+        "attempt": 1,
+        "journal_present": True,
+        "observed_at": _HEADER_NOW,
+        "created_at": _HEADER_NOW - _dt.timedelta(minutes=30),
+        "attempts": (
+            {"number": 1, "phase": "implementation", "started_at": _stamp(30)},
+        ),
+    }
+    base.update(fields)
+    return RunSnapshot(**base)
+
+
+def _header_repo(tmp_path: Path, name: str, **journal: Any) -> Path:
+    """A repository mid-run whose journal carries real phase timestamps.
+
+    Its stamps hang off the wall clock rather than off `_HEADER_NOW`, because
+    the app reads the run through `read_snapshot`, which observes at the real
+    now; a pinned journal would be compared against it and read as however long
+    ago the fixture was written.
+    """
+
+    repo = tmp_path / name
+    (repo / "logs").mkdir(parents=True)
+    started = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=30)
+    fields: dict[str, Any] = {
+        "issue_id": _HEADER_ISSUE,
+        "base_head": "abc1234def",
+        "baseline_paths": (),
+        "baseline_fingerprints": {},
+        "phase": "implementation",
+        "attempt": 1,
+        "corrections": 0,
+        "created_at": started.isoformat(),
+        "updated_at": started.isoformat(),
+        "implementation_started_at": started.isoformat(),
+        "attempts": (
+            {
+                "number": 1,
+                "phase": "implementation",
+                "started_at": started.isoformat(),
+            },
+        ),
+    }
+    fields.update(journal)
+    JournalStore(repo).save(CandidateJournal(**fields))
+    (repo / "logs" / "grind-20260809-043000.log").write_text(
+        "[2026-08-09 04:30:00] iter 1: spawning claude (single-issue worker)\n",
+        encoding="utf-8",
+    )
+    return repo
+
+
+def _no_bd(monkeypatch: Any) -> list[list[str]]:
+    """Make every bd query fail, and record what was asked."""
+
+    asked: list[list[str]] = []
+
+    def _fake(argv: list[str], **kwargs: Any) -> Any:
+        asked.append(list(argv))
+        raise OSError("bd is not installed")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+    return asked
+
+
+def test_header_live_run_shows_issue_phase_iteration_and_elapsed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """AC-1: the four facts that say which work is in flight, and for how long."""
+
+    _no_bd(monkeypatch)
+    repo = _header_repo(tmp_path, "live-header")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    header = app.advance().header
+
+    assert _HEADER_ISSUE in header
+    assert "phase implementation" in header
+    assert "iteration 1" in header
+    assert "elapsed 30m" in header
+    assert dash.region_state("header", app.snapshot) == "state-live"
+    # Phase and budget lead their own lines, so a narrow terminal clips the
+    # title before it clips either of the two fields an operator scans for.
+    lines = header.splitlines()
+    assert lines[1].startswith("phase ")
+    assert lines[2].startswith("corrections ")
+
+
+def test_header_idle_repository_shows_an_idle_header(tmp_path: Path) -> None:
+    """Compatibility: no transaction in flight is a state, not a blank panel."""
+
+    app = dash.DashboardApp(_quiet_repo(tmp_path), refresh_seconds=3600)
+    frame = app.advance()
+
+    assert frame.header == dash.HEADER_IDLE
+    assert dash.region_state("header", app.snapshot) == "state-idle"
+    # Nothing is fabricated: no phase, no iteration, no countdown.
+    for invented in ("phase ", "iteration ", "watchdog", "corrections"):
+        assert invented not in frame.header
+
+
+def test_header_correction_budget_is_shown_against_its_cap() -> None:
+    """AC-2: spent over the cap, so an escalation is visible before it lands.
+
+    The cap is read from grind's own `--max-corrections` declaration rather
+    than copied here, which is the same reason the watchdog cap is: a number
+    duplicated in the dashboard goes stale the first time the flag moves.
+    """
+
+    declared = dash.declared_cap(dash.MAX_CORRECTIONS_OPTION)
+    assert declared is not None
+    assert (
+        declared
+        == inspect.signature(grind.grind).parameters["max_corrections"].default.default
+    )
+
+    snapshot = _header_snapshot(corrections=1, attempt=2, phase="correction")
+    assert f"corrections 1/{declared}" in dash.header_line(snapshot)
+
+    # The last attempt spent is the one before escalation, and it reads as such
+    # rather than only becoming visible once the human label arrives.
+    spent = _header_snapshot(corrections=declared, attempt=3, phase="correction")
+    assert f"corrections {declared}/{declared}" in dash.header_line(spent)
+
+    # A run with retries disabled says so rather than showing a budget of zero
+    # that an operator would read as exhausted.
+    assert "retries disabled" in dash.header_line(snapshot, correction_cap=0)
+
+
+def test_header_watchdog_clamped_at_zero_when_a_worker_is_overdue() -> None:
+    """AC-3: the countdown drains, clamps at zero, and never goes negative."""
+
+    cap = dash.declared_cap(dash.WORKER_TIMEOUT_OPTION)
+    assert cap is not None
+    assert (
+        cap
+        == inspect.signature(grind.grind).parameters["worker_timeout"].default.default
+    )
+
+    live = _header_snapshot()
+    assert dash.watchdog_headroom(live, cap=3600) == 1800.0
+    assert "watchdog 30m 00s left of 1h 00m" in dash.header_line(live, worker_cap=3600)
+
+    # Draining: the same worker, ten minutes later, has ten minutes less.
+    later = _header_snapshot(observed_at=_HEADER_NOW + _dt.timedelta(minutes=10))
+    assert dash.watchdog_headroom(later, cap=3600) == 1200.0
+
+    # Past the cap: clamped at zero and rendered as overdue, which is the fact
+    # an operator acts on. A negative countdown would read as a bug.
+    overdue = _header_snapshot(observed_at=_HEADER_NOW + _dt.timedelta(minutes=45))
+    assert dash.watchdog_headroom(overdue, cap=3600) == 0.0
+    rendered = dash.header_line(overdue, worker_cap=3600)
+    assert "overdue by 15m 00s" in rendered
+    assert "-" not in rendered.splitlines()[-1]
+
+    # A cap of zero disables the watchdog: no limit, not an expired one.
+    assert dash.WATCHDOG_OFF in dash.header_line(live, worker_cap=0)
+    assert "overdue" not in dash.header_line(live, worker_cap=0)
+
+    # A resumed run: the transaction opened hours ago, but the worker being
+    # watched started at the newest attempt boundary, and the countdown follows
+    # the worker rather than the transaction.
+    resumed = _header_snapshot(
+        phase="verification",
+        attempt=2,
+        created_at=_HEADER_NOW - _dt.timedelta(hours=4),
+        implementation_started_at=_HEADER_NOW - _dt.timedelta(hours=4),
+        attempts=(
+            {"number": 1, "phase": "implementation", "started_at": _stamp(240)},
+            {"number": 2, "phase": "verification", "started_at": _stamp(5)},
+        ),
+    )
+    assert dash.watchdog_headroom(resumed, cap=3600) == 3300.0
+    assert dash.worker_started_at(resumed) == _HEADER_NOW - _dt.timedelta(minutes=5)
+
+    # A journal that records no start at all shows no countdown rather than one
+    # taken from a time it does not have.
+    blind = _header_snapshot(attempts=())
+    assert dash.watchdog_headroom(blind, cap=3600) is None
+    assert dash.WATCHDOG_NO_START in dash.header_line(blind, worker_cap=3600)
+
+    # A finished run is not being watched by anything, so it carries no
+    # countdown that would tick forever after the worker exited.
+    ended = _header_snapshot(phase="corrections-exhausted")
+    assert "watchdog" not in dash.header_line(ended, worker_cap=3600)
+    assert dash.HEADER_ENDED in dash.header_line(ended, worker_cap=3600)
+
+
+def test_header_degrades_without_bd_to_the_issue_id_alone(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """AC-4: a failed bd query costs the title, never the view."""
+
+    asked = _no_bd(monkeypatch)
+    repo = _header_repo(tmp_path, "no-bd")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+
+    assert asked and asked[0][:3] == ["bd", "--readonly", "--sandbox"]
+    assert app.identity == dash.IssueIdentity(issue_id=_HEADER_ISSUE, queried=True)
+    # Everything read off disk is still on screen; only the enrichment is gone.
+    assert _HEADER_ISSUE in frame.header
+    assert "phase implementation" in frame.header
+    assert "corrections 0/" in frame.header
+
+    # The question is asked once per issue rather than once per refresh: bd
+    # costs a subprocess and the loop ticks once a second.
+    for _ in range(3):
+        app.advance()
+    assert len(asked) == 1
+
+
+def test_header_enrichment_names_the_issue_when_bd_answers(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Step 4: title and priority come from one read-only bd query."""
+
+    payload = json.dumps(
+        [{"id": _HEADER_ISSUE, "title": _HEADER_TITLE, "priority": 2, "status": "open"}]
+    )
+    asked: list[list[str]] = []
+
+    def _fake(argv: list[str], **kwargs: Any) -> Any:
+        asked.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, payload, "")
+
+    monkeypatch.setattr(subprocess, "run", _fake)
+
+    repo = _header_repo(tmp_path, "with-bd")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    header = app.advance().header
+
+    assert asked[0] == [
+        "bd",
+        "--readonly",
+        "--sandbox",
+        "show",
+        _HEADER_ISSUE,
+        "--json",
+    ]
+    assert app.identity.priority == 2
+    assert _HEADER_ISSUE in header
+    assert "P2" in header
+    assert _HEADER_TITLE[:40] in header
+
+    # An answer that names a different issue is not this run's, and is refused
+    # rather than shown against the id the journal recorded.
+    other = json.dumps([{"id": "ortus-other", "title": "not this run", "priority": 0}])
+    assert dash.parse_identity(other, _HEADER_ISSUE) == dash.IssueIdentity(
+        issue_id=_HEADER_ISSUE, queried=True
+    )
+    assert dash.parse_identity("{not json", _HEADER_ISSUE).title == ""
+
+
+def test_header_renders_an_unrecognised_phase_verbatim() -> None:
+    """Edge case: a phase this model does not know is shown, not called unknown."""
+
+    snapshot = _header_snapshot(phase="some-future-phase")
+    assert "phase some-future-phase" in dash.header_line(snapshot)
+    assert "unknown" not in dash.header_line(snapshot)

@@ -20,6 +20,22 @@ that advances on every tick, so a healthy run looks alive and a stalled one is
 obvious by its stillness. An operator once watched a silent tail for hours
 unable to tell progress from death.
 
+The header region is ortus-0udo.3. Two failures in one session were invisible
+until they were fatal: a worker was killed at the watchdog cap while holding
+finished work, stranding a candidate a human then recovered by hand, and
+correction attempts were consumed silently until escalation to a human label
+arrived as a surprise. Both facts were already on disk. The header therefore
+names the claimed issue with its priority, the phase, the iteration, the
+elapsed run time, the corrections spent against their cap, and how much
+watchdog headroom is left — headroom rather than elapsed, because the decision
+it informs is whether to intervene before a kill. Both caps are read from
+grind's own option declarations rather than copied here, since `--worker-timeout`
+is a flag whose default has changed once already and a stale copy would count
+down against a number no run uses. Title and priority come from one read-only
+bd query per issue rather than from the journal, which stores only the id, and
+a query that does not answer degrades the header to the id rather than blanking
+it.
+
 The current-action region is ortus-0udo.4, and it answers the one question
 `ortus tail` cannot: whether a worker is thinking, blocked on a subprocess, or
 stalled. While a worker waits on a test suite it issues one blocking tool call
@@ -100,6 +116,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import getpass
+import inspect
 import json
 import os
 import re
@@ -275,6 +292,38 @@ OUTCOMES: dict[str, str] = {
 CLEAN_OUTCOME = "finished cleanly"
 #: A replayed run whose journal is gone: the log alone is still worth reading.
 NO_JOURNAL_OUTCOME = "no journal - replayed from the log alone"
+
+#: The header with no transaction in flight. An absent journal is a valid state
+#: rather than an error, so an idle repository says so instead of being given a
+#: fabricated phase.
+HEADER_IDLE = "idle - no transaction in flight"
+#: A journal in flight that names no issue, which an older journal can be.
+UNKNOWN_ISSUE = "unknown issue"
+#: Longest issue title the header renders. A title is free text and the header
+#: is one region among five, so the title is the field that gives way — never
+#: the phase or the budget, which are what an operator scans for.
+HEADER_TITLE_CHARS = 72
+#: Said once a run has reached a terminal phase, so a view left open on a
+#: finished run does not read as a live one.
+HEADER_ENDED = "ended"
+
+#: grind's own option names. Both caps are read from the declaration rather than
+#: copied here: `--worker-timeout`'s default has changed once already, and a
+#: stale copy would count down against a cap no run actually uses.
+WORKER_TIMEOUT_OPTION = "worker_timeout"
+MAX_CORRECTIONS_OPTION = "max_corrections"
+
+#: A cap of zero disables the watchdog. That is no limit, which is a different
+#: fact from a limit that has expired, and the header says which.
+WATCHDOG_OFF = "watchdog off - no cap on this worker"
+#: grind's declaration could not be read, so there is no cap to count against.
+#: Stated rather than guessed: a countdown against an invented number is worse
+#: than no countdown.
+WATCHDOG_UNKNOWN = "watchdog - cap not readable from the run"
+#: The journal records no start for the worker now running, so headroom cannot
+#: be computed. A resumed run whose journal predates attempt records is the
+#: case this covers.
+WATCHDOG_NO_START = "watchdog - no worker start recorded"
 
 KEY_HINT = "q  quit     read-only: never writes the repository, bd, or git"
 
@@ -1217,27 +1266,283 @@ def outcome_line(snapshot: RunSnapshot) -> str:
     return f"{ended}   phase {snapshot.phase}"
 
 
-def header_line(snapshot: RunSnapshot, replay: ReplaySource | None = None) -> str:
-    """The shell's own run state, until the header leaf fills it.
+# --- header ----------------------------------------------------------------
 
-    An absent journal is a valid state, not an error, so a repository with no
-    run in flight opens idle. A run that ended while the view was open reports
-    its terminal phase rather than freezing on the last live frame.
 
-    Replay names the log it is reading, because two runs share a log directory
-    and the filename is what tells them apart, and adds how the run ended.
+@dataclass(frozen=True)
+class IssueIdentity:
+    """What bd says the run's issue is, beyond the id the journal records."""
+
+    issue_id: str = ""
+    title: str = ""
+    priority: int | None = None
+    #: True once a query has been made for `issue_id`, whether or not it
+    #: answered. The refresh loop ticks once a second and a bd invocation costs
+    #: a subprocess, while an issue's title does not change under a run, so the
+    #: question is asked once per issue and the answer — including "bd did not
+    #: answer" — is carried between ticks.
+    queried: bool = False
+
+
+def parse_identity(payload: str, issue_id: str) -> IssueIdentity:
+    """Title and priority out of one `show --json` answer.
+
+    bd answers with a list of issues, so the entry for the id asked about is
+    taken by name rather than by position. Anything unparseable degrades to the
+    id, which is the same outcome as bd not answering at all.
     """
 
-    if replay is not None:
-        issue = snapshot.issue_id or "unknown issue"
-        return f"replay {issue}   {replay.log_path.name}\n{outcome_line(snapshot)}"
-    if snapshot.idle:
-        return "idle - no transaction in flight"
-    issue = snapshot.issue_id or "unknown issue"
-    line = f"{issue}   phase {snapshot.phase}"
+    try:
+        decoded = json.loads(payload)
+    except ValueError:
+        return IssueIdentity(issue_id=issue_id, queried=True)
+    entries = decoded if isinstance(decoded, list) else [decoded]
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("id") != issue_id:
+            continue
+        priority = entry.get("priority")
+        return IssueIdentity(
+            issue_id=issue_id,
+            title=str(entry.get("title", "")),
+            priority=priority if isinstance(priority, int) else None,
+            queried=True,
+        )
+    return IssueIdentity(issue_id=issue_id, queried=True)
+
+
+def read_identity(
+    repo: Path, snapshot: RunSnapshot, *, previous: IssueIdentity | None = None
+) -> IssueIdentity:
+    """Ask bd what the run's issue is, once per issue.
+
+    A failed query is remembered as a failed query rather than retried on the
+    next tick: bd being unavailable is a property of the environment, not of
+    this second, and re-spawning a subprocess once a second against it would
+    make the view stutter for an answer that is not coming.
+    """
+
+    issue = snapshot.issue_id
+    if not issue:
+        return IssueIdentity()
+    if previous is not None and previous.issue_id == issue and previous.queried:
+        return previous
+    payload = run_bd(repo, "show", issue, "--json")
+    if payload is None:
+        return IssueIdentity(issue_id=issue, queried=True)
+    return parse_identity(payload, issue)
+
+
+def declared_cap(option: str) -> int | None:
+    """grind's declared default for one of its cap options, or None.
+
+    Read from the declaration rather than copied, because the failure this
+    guards against is a copy going stale: `--worker-timeout` already moved once
+    (1800 to 5400) after real workers were killed mid-verification. A
+    declaration this cannot read yields None, and the header says the cap is
+    unknown rather than counting down against a number invented here.
+    """
+
+    try:
+        from ortus.commands import grind
+
+        declared = inspect.signature(grind.grind).parameters[option].default
+    except (ImportError, AttributeError, KeyError, TypeError, ValueError):
+        return None
+    value = getattr(declared, "default", declared)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def parse_stamp(value: Any) -> _dt.datetime | None:
+    """One journal timestamp, aware. Journals carry both naive and aware ones."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.astimezone()
+
+
+def worker_started_at(snapshot: RunSnapshot) -> _dt.datetime | None:
+    """When the worker now running started — not when the transaction did.
+
+    A resumed run inherits a journal whose transaction timestamps predate the
+    worker being watched, so a countdown taken from the transaction would be
+    wrong by however long the earlier attempt ran. Every phase boundary appends
+    an attempt record carrying its own start, so the newest of those is this
+    worker's. A journal written before attempts were kept falls back to the
+    later of the two phase timestamps, which each boundary rewrites for the
+    same reason.
+    """
+
+    for attempt in reversed(snapshot.attempts):
+        if not isinstance(attempt, dict):
+            continue
+        started = parse_stamp(attempt.get("started_at"))
+        if started is not None:
+            return started
+    phases = [
+        moment
+        for moment in (
+            snapshot.implementation_started_at,
+            snapshot.verification_started_at,
+        )
+        if moment is not None
+    ]
+    return max(phases) if phases else None
+
+
+def worker_seconds(snapshot: RunSnapshot) -> float | None:
+    """How long the worker now running has been running, or None if unknown."""
+
+    started = worker_started_at(snapshot)
+    if started is None or snapshot.observed_at is None:
+        return None
+    return max(0.0, (snapshot.observed_at - started).total_seconds())
+
+
+def watchdog_headroom(snapshot: RunSnapshot, *, cap: int) -> float | None:
+    """Seconds before the watchdog kills this worker, clamped at zero.
+
+    Zero is what a worker past its cap gets, never a negative number: the
+    header renders such a worker as overdue, which is a fact an operator can
+    act on, where a negative countdown would read as an arithmetic bug.
+    """
+
+    spent = worker_seconds(snapshot)
+    if spent is None:
+        return None
+    return max(0.0, float(cap) - spent)
+
+
+def run_elapsed(snapshot: RunSnapshot) -> float | None:
+    """How long the transaction has been open, or ran for once it ended."""
+
+    if snapshot.created_at is None:
+        return None
+    end = snapshot.updated_at if snapshot.terminal else snapshot.observed_at
+    if end is None:
+        end = snapshot.observed_at
+    if end is None:
+        return None
+    return max(0.0, (end - snapshot.created_at).total_seconds())
+
+
+def iteration(snapshot: RunSnapshot) -> int:
+    """Which pass over the issue this is.
+
+    The journal's counter starts at one and a journal in flight is always on at
+    least its first pass, so a journal that recorded a zero — an older schema,
+    or one saved before the first boundary — reads as one rather than as a run
+    that has not started.
+    """
+
+    return max(1, snapshot.attempt)
+
+
+def identity_line(snapshot: RunSnapshot, identity: IssueIdentity | None = None) -> str:
+    """Which issue the run claimed: its id, and its priority and title if known.
+
+    The id is always shown and always first, because it is the one field the
+    journal itself carries; everything else came from bd and may be missing.
+    """
+
+    issue = snapshot.issue_id or UNKNOWN_ISSUE
+    parts = [issue]
+    if identity is not None and identity.issue_id == snapshot.issue_id:
+        if identity.priority is not None:
+            parts.append(f"P{identity.priority}")
+        if identity.title:
+            parts.append(clip(printable(identity.title), HEADER_TITLE_CHARS))
+    return "   ".join(parts)
+
+
+def state_line(snapshot: RunSnapshot) -> str:
+    """Phase, iteration and elapsed run time. Phase leads, and is never clipped."""
+
+    parts = [f"phase {snapshot.phase}", f"iteration {iteration(snapshot)}"]
+    elapsed = run_elapsed(snapshot)
+    if elapsed is not None:
+        parts.append(f"elapsed {duration(elapsed)}")
     if snapshot.terminal:
-        line += "   ended"
-    return line
+        parts.append(HEADER_ENDED)
+    return "   ".join(parts)
+
+
+def budget_line(snapshot: RunSnapshot, *, cap: int | None = None) -> str:
+    """Correction attempts spent against the cap that will escalate the issue.
+
+    Spent silently is how the budget was consumed in the session this leaf
+    exists for, so it leads its own line and is never the field that gives way
+    to a narrow terminal.
+    """
+
+    limit = declared_cap(MAX_CORRECTIONS_OPTION) if cap is None else cap
+    if limit is None:
+        return f"corrections {snapshot.corrections}"
+    if limit <= 0:
+        return f"corrections {snapshot.corrections}/{limit} - retries disabled"
+    return f"corrections {snapshot.corrections}/{limit}"
+
+
+def watchdog_line(snapshot: RunSnapshot, *, cap: int | None = None) -> str:
+    """Watchdog headroom as a countdown, or why there is none to show."""
+
+    limit = declared_cap(WORKER_TIMEOUT_OPTION) if cap is None else cap
+    if limit is None:
+        return WATCHDOG_UNKNOWN
+    if limit <= 0:
+        return WATCHDOG_OFF
+    spent = worker_seconds(snapshot)
+    left = watchdog_headroom(snapshot, cap=limit)
+    if spent is None or left is None:
+        return WATCHDOG_NO_START
+    if left <= 0.0:
+        return f"watchdog overdue by {duration(spent - limit)} past {duration(limit)}"
+    return f"watchdog {duration(left)} left of {duration(limit)}"
+
+
+def header_line(
+    snapshot: RunSnapshot,
+    replay: ReplaySource | None = None,
+    *,
+    identity: IssueIdentity | None = None,
+    worker_cap: int | None = None,
+    correction_cap: int | None = None,
+) -> str:
+    """The header region: which issue, which phase, and how much budget is left.
+
+    An absent journal is a valid state, not an error, so a repository with no
+    run in flight opens idle rather than showing a fabricated phase. A run that
+    ended while the view was open reports its terminal phase rather than
+    freezing on the last live frame, and carries no countdown: a finished worker
+    is not being watched by anything.
+
+    Replay names the log it is reading, because two runs share a log directory
+    and the filename is what tells them apart, and adds how the run ended. Its
+    remaining lines are the live ones, so a finished run explains itself exactly
+    as it did while it was running.
+    """
+
+    lines: list[str] = []
+    if replay is not None:
+        issue = snapshot.issue_id or UNKNOWN_ISSUE
+        lines.append(f"replay {issue}   {replay.log_path.name}")
+        lines.append(outcome_line(snapshot))
+        if snapshot.idle:
+            return "\n".join(lines)
+    elif snapshot.idle:
+        return HEADER_IDLE
+    else:
+        lines.append(identity_line(snapshot, identity))
+
+    lines.append(state_line(snapshot))
+    budget = budget_line(snapshot, cap=correction_cap)
+    if replay is None and not snapshot.terminal:
+        budget = f"{budget}   {watchdog_line(snapshot, cap=worker_cap)}"
+    lines.append(budget)
+    return "\n".join(lines)
 
 
 def region_state(
@@ -1271,6 +1576,7 @@ def frame(
     replay: ReplaySource | None = None,
     verdict: VerdictState | None = None,
     workspaces: int | None = None,
+    identity: IssueIdentity | None = None,
 ) -> Frame:
     """Build the frame for `snapshot` at `tick`. Pure: reads nothing, writes nothing.
 
@@ -1278,14 +1584,14 @@ def frame(
     its source. One renderer means a finished run is explained exactly as the
     live run was, and there is a single path to keep correct.
 
-    The verdict state and the workspace count are passed in rather than read
-    here, because both come from disk and this stays a pure function of what it
-    is handed.
+    The verdict state, the workspace count and the issue identity are passed in
+    rather than read here, because all three come from disk or from bd and this
+    stays a pure function of what it is handed.
     """
 
     state = verdict if verdict is not None else VerdictState()
     return Frame(
-        header=header_line(snapshot, replay),
+        header=header_line(snapshot, replay, identity=identity),
         current_action=action_panel(snapshot, replay=replay, workspaces=workspaces),
         candidate=candidate_panel(snapshot),
         verdict=verdict_panel(snapshot, state),
@@ -1434,6 +1740,9 @@ def _shell() -> dict[str, type]:
             #: Carried between ticks: the log tail is incremental, and an envelope
             #: is logged once, so the decision has to outlive the slice it arrived in.
             self.verdict = VerdictState()
+            #: What bd says the claimed issue is. Carried between ticks because
+            #: it is asked once per issue rather than once per refresh.
+            self.identity = IssueIdentity()
             self.tick = 0
             self.last_frame = frame(
                 self.snapshot,
@@ -1441,6 +1750,7 @@ def _shell() -> dict[str, type]:
                 replay=replay,
                 verdict=self.verdict,
                 workspaces=self.workspaces,
+                identity=self.identity,
             )
 
         def compose(self) -> ComposeResult:
@@ -1473,6 +1783,12 @@ def _shell() -> dict[str, type]:
             except OSError:
                 pass
             self.verdict = read_verdict(self.repo, self.snapshot, previous=self.verdict)
+            if self.replay is None:
+                # Replay renders the run's own record and names its log rather
+                # than asking bd how the issue reads now, so it spawns nothing.
+                self.identity = read_identity(
+                    self.repo, self.snapshot, previous=self.identity
+                )
             self.workspaces = workspace_count(self.workspace_root)
             self.tick += 1
             self.last_frame = frame(
@@ -1481,6 +1797,7 @@ def _shell() -> dict[str, type]:
                 replay=self.replay,
                 verdict=self.verdict,
                 workspaces=self.workspaces,
+                identity=self.identity,
             )
             return self.last_frame
 
