@@ -162,6 +162,145 @@ class _VerifiedLifecycle:
         return 0
 
 
+class _PacketDriftThenVerified(_VerifiedLifecycle):
+    """Rewrites the claimed issue's description during the first implementation.
+
+    A genuine mid-flight edit to what the issue asks for — the one thing the
+    packet guard still exists to catch — so the candidate must be rejected.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.drifted = ""
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        readonly: bool = False,
+        **kwargs: object,
+    ) -> int:
+        if not readonly and not self.drifted:
+            claimed = json.loads(
+                subprocess.run(
+                    ["bd", "list", "--status", "in_progress", "--json"],
+                    cwd=str(repo),
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+            )
+            self.drifted = str(claimed[0]["id"])
+            subprocess.run(
+                [
+                    "bd",
+                    "update",
+                    self.drifted,
+                    "--description",
+                    "## Objective\nA completely different ask.",
+                ],
+                cwd=str(repo),
+                check=True,
+                capture_output=True,
+            )
+        return super().run(
+            prompt, repo=repo, log_path=log_path, readonly=readonly, **kwargs
+        )
+
+
+def _bd_status(repo: Path, issue_id: str) -> str:
+    return json.loads(
+        subprocess.run(
+            ["bd", "show", issue_id, "--json"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )[0]["status"]
+
+
+def test_packet_drift_does_not_end_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-znhv AC-4: a rejected packet is an issue-level event.
+
+    One drifted packet used to `break` the outer loop and strand every
+    remaining queued issue. The drifted issue keeps its claim and its preserved
+    candidate; the run moves on and finalizes the next ready issue.
+    """
+    repo = _seed_repo(tmp_path, n_issues=2)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    backend = _PacketDriftThenVerified()
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
+
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+    log = _read_log(repo)
+    assert result.exit_code == 0, (
+        result.stdout + result.stderr + "\n--- log ---\n" + log
+    )
+    assert "the immutable issue packet changed during implementation" in log, log
+    assert backend.drifted, "the fake never claimed an issue to drift"
+    # The whole point: a second issue was claimed, verified and finalized after
+    # the rejection instead of the run stopping there.
+    assert "closed +1" in log, f"expected the loop to continue past the drift:\n{log}"
+    assert "(report, close, commit, sync)" in log
+    assert _bd_status(repo, backend.drifted) == "in_progress", (
+        "the rejected candidate keeps its claim"
+    )
+    closed = json.loads(
+        subprocess.run(
+            ["bd", "list", "--status", "closed", "--json"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    assert [issue["id"] for issue in closed] and backend.drifted not in {
+        issue["id"] for issue in closed
+    }
+
+
+def test_packet_drift_message_names_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-znhv AC-5: the rejection reports fields, not a culprit.
+
+    Grind compares two SHA-256 values and cannot know who wrote the change.
+    Diagnosing the first incident needed a hand-written script precisely
+    because the message named no field.
+    """
+    repo = _seed_repo(tmp_path, n_issues=1)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    backend = _PacketDriftThenVerified()
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
+
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+    log = _read_log(repo)
+    assert result.exit_code == 0, (
+        result.stdout + result.stderr + "\n--- log ---\n" + log
+    )
+    comments = subprocess.run(
+        ["bd", "comments", backend.drifted, "--json"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    finding = next(
+        line for line in log.splitlines() if "issue packet changed during" in line
+    )
+    assert "description: " in finding, finding
+    assert "A completely different ask" in finding, finding
+    assert "worker" not in finding, f"the guard cannot know the author: {finding}"
+    assert "description: " in comments and "worker changed" not in comments
+
+
 # --- closed branch --------------------------------------------------------
 
 

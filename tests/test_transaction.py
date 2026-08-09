@@ -11,9 +11,133 @@ from ortus.core.transaction import (
     CandidateJournal,
     JournalStore,
     candidate_diff,
+    contract_packet_changes,
     issue_packet_hash,
     sha256_bytes,
 )
+
+
+def _claimed_packet(**overrides: object) -> dict[str, object]:
+    """A realistic `bd show --json` packet for a claimed issue."""
+
+    packet: dict[str, object] = {
+        "id": "repo-znhv",
+        "title": "Hash the issue contract",
+        "description": "## Objective\nStop metadata edits from aborting a grind.",
+        "design": "## Scope\nInvert the filter to an allowlist.",
+        "acceptance_criteria": "- AC-1: a label edit leaves the hash unchanged.",
+        "issue_type": "bug",
+        "status": "in_progress",
+        "priority": 0,
+        "owner": "operator@example.com",
+        "created_by": "operator",
+        "created_at": "2026-08-09T01:56:58Z",
+        "updated_at": "2026-08-09T02:35:04Z",
+        "started_at": "2026-08-09T02:35:04Z",
+        "estimated_minutes": 90,
+        "labels": ["dx", "orchestration"],
+        "dependencies": [],
+        "dependents": [],
+        "notes": "Two incidents on 2026-08-08.",
+        "comments": [],
+    }
+    packet.update(overrides)
+    return packet
+
+
+def test_packet_hash_ignores_labels() -> None:
+    """AC-1: the escalation convention writes a label; that must not be fatal.
+
+    An implementation worker that measures a criterion as unmeetable is told by
+    this repo to add the `human` label. Hashing labels made following that
+    instruction end the session.
+    """
+
+    claimed = _claimed_packet()
+    baseline = issue_packet_hash(claimed)
+
+    flagged = _claimed_packet(labels=["dx", "orchestration", "human"])
+    unlabelled = _claimed_packet(labels=[])
+
+    assert issue_packet_hash(flagged) == baseline
+    assert issue_packet_hash(unlabelled) == baseline
+    assert contract_packet_changes(claimed, flagged) == ()
+
+
+def test_packet_hash_ignores_scheduling_metadata() -> None:
+    """AC-2: priority, dependency edges and notes are bookkeeping, not contract.
+
+    `dependents` is the sharpest of the three: `bd dep add <other> <claimed>`
+    writes it onto an issue that was not even an argument to the command, so
+    hashing it let an unrelated edit poison a claimed issue.
+    """
+
+    claimed = _claimed_packet()
+    baseline = issue_packet_hash(claimed)
+
+    for mutated in (
+        _claimed_packet(priority=2),
+        _claimed_packet(dependents=["repo-j3xw"]),
+        _claimed_packet(dependencies=["repo-kwfm"]),
+        _claimed_packet(notes="Measured 6.9% against a 25% threshold."),
+        _claimed_packet(estimated_minutes=45),
+        _claimed_packet(owner="someone-else@example.com"),
+        _claimed_packet(field_bd_added_later="whatever"),
+    ):
+        assert issue_packet_hash(mutated) == baseline
+        assert contract_packet_changes(claimed, mutated) == ()
+
+
+def test_packet_hash_tracks_contract_fields() -> None:
+    """AC-3: a genuine edit to what the issue asks for still moves the hash."""
+
+    claimed = _claimed_packet()
+    baseline = issue_packet_hash(claimed)
+
+    for field, value in (
+        ("title", "A different ask"),
+        ("description", "## Objective\nSomething else entirely."),
+        ("design", "## Scope\nA different plan."),
+        ("acceptance_criteria", "- AC-1: something else is observable."),
+        ("issue_type", "feature"),
+    ):
+        mutated = _claimed_packet(**{field: value})
+        assert issue_packet_hash(mutated) != baseline, field
+        changed = contract_packet_changes(claimed, mutated)
+        assert len(changed) == 1 and changed[0].startswith(f"{field}: "), changed
+
+    # A worker that moved a contract field *and* a label is still caught, and
+    # the report names only the contract field.
+    both = _claimed_packet(title="A different ask", labels=["human"])
+    assert issue_packet_hash(both) != baseline
+    assert [
+        entry.split(":", 1)[0] for entry in contract_packet_changes(claimed, both)
+    ] == ["title"]
+
+
+def test_packet_hash_treats_a_missing_contract_field_as_empty() -> None:
+    """An absent contract field and an empty one are the same contract."""
+
+    absent = _claimed_packet()
+    del absent["design"]
+
+    assert issue_packet_hash(absent) == issue_packet_hash(_claimed_packet(design=""))
+    assert issue_packet_hash(absent) == issue_packet_hash(_claimed_packet(design=None))
+    assert contract_packet_changes(absent, _claimed_packet(design="")) == ()
+
+
+def test_contract_packet_changes_truncates_and_names_no_author() -> None:
+    """AC-5: the report carries a bounded before and after, and no culprit."""
+
+    before = _claimed_packet(description="old " * 200)
+    after = _claimed_packet(description="new " * 200)
+
+    (entry,) = contract_packet_changes(before, after, width=20)
+
+    assert entry.startswith("description: ")
+    assert "…" in entry, entry
+    assert len(entry) < 120, entry
+    assert "worker" not in entry
 
 
 def test_journal_round_trip_and_baseline_fingerprint(tmp_path: Path) -> None:

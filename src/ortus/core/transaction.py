@@ -39,44 +39,77 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-#: Keys `bd show --json` reports that are lifecycle bookkeeping rather than
-#: authoritative packet content. ``comments`` is the load-bearing one: Ortus
-#: appends a verifier report to the issue on *every* attempt, so hashing it
-#: would make the packet guard reject each correction's re-verification by
-#: construction — no retry could ever pass. The rest bd rewrites on its own as
-#: the claim moves, and none of them is something a verdict should be bound to.
-VOLATILE_PACKET_FIELDS: frozenset[str] = frozenset(
-    {
-        "assignee",
-        "close_reason",
-        "closed_at",
-        "comments",
-        "started_at",
-        "status",
-        "updated_at",
-    }
+#: The `bd show --json` keys that state what an issue asks for. A verdict is
+#: bound to exactly these and to nothing else bd reports.
+#:
+#: An allowlist rather than a denylist, because a guard whose false positives
+#: cost a whole session must fail closed: every key bd grows later is scheduling
+#: or bookkeeping until someone deliberately promotes it, not load-bearing by
+#: default. Three exclusions are worth naming:
+#:
+#: * ``dependents`` changes when a *different* issue is edited, so hashing it
+#:   lets ``bd dep add`` poison a claimed issue nobody touched.
+#: * ``notes`` is prose but stays out: it is where operators and workers record
+#:   evidence and measurements mid-run, and hashing it makes recording evidence
+#:   fatal. The criteria a verifier actually runs live in ``acceptance_criteria``.
+#: * ``comments`` stays out for the same reason it always did — Ortus appends a
+#:   verifier report on *every* attempt, so hashing it would reject each
+#:   correction's re-verification by construction.
+#:
+#: Status is excluded too: it is re-checked directly against bd at each
+#: lifecycle boundary, where a stale-status failure can be reported precisely
+#: instead of hiding inside an opaque hash mismatch.
+CONTRACT_PACKET_FIELDS: tuple[str, ...] = (
+    "acceptance_criteria",
+    "description",
+    "design",
+    "issue_type",
+    "title",
 )
 
 
 def authoritative_packet(packet: dict[str, Any]) -> dict[str, Any]:
     """The packet fields a verdict is legitimately bound to.
 
-    Status is deliberately excluded: it is re-checked directly against bd at
-    each lifecycle boundary, where a stale-status failure can be reported
-    precisely instead of hiding inside an opaque hash mismatch.
+    Every contract field is always present in the projection, so an issue that
+    omits one and an issue that leaves it empty hash identically.
     """
 
-    return {
-        key: value
-        for key, value in packet.items()
-        if key not in VOLATILE_PACKET_FIELDS
-    }
+    return {key: packet.get(key) or "" for key in CONTRACT_PACKET_FIELDS}
 
 
 def issue_packet_hash(packet: dict[str, Any]) -> str:
     """Bind verification to the exact authoritative issue packet."""
 
     return sha256_bytes(canonical_json(authoritative_packet(packet)))
+
+
+def _excerpt(value: Any, width: int) -> str:
+    """One packet value, collapsed to a single quoted line for a message."""
+
+    text = " ".join(str(value).split())
+    if len(text) > width:
+        text = text[: max(width - 1, 0)] + "…"
+    return json.dumps(text, ensure_ascii=False)
+
+
+def contract_packet_changes(
+    before: dict[str, Any], after: dict[str, Any], *, width: int = 80
+) -> tuple[str, ...]:
+    """The contract fields that differ, each as ``field: before -> after``.
+
+    This is the whole of what a hash mismatch actually knows. Grind compares two
+    digests of the same issue at two times; it cannot see who wrote the change,
+    so the report names the fields and leaves attribution to the operator.
+    """
+
+    left = authoritative_packet(before)
+    right = authoritative_packet(after)
+    return tuple(
+        f"{key}: {_excerpt(left[key], width)} -> {_excerpt(right[key], width)}"
+        for key in CONTRACT_PACKET_FIELDS
+        if left[key] != right[key]
+    )
 
 
 def _path_fingerprint(repo: Path, relative: str) -> str:

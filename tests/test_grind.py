@@ -464,7 +464,7 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
         (
             "implementation-packet",
             "implementation-rejected",
-            "changed the immutable issue packet artifact",
+            "issue packet artifact changed during implementation",
         ),
     ],
 )

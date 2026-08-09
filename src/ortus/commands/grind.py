@@ -76,6 +76,7 @@ from ortus.core.transaction import (
 )
 from ortus.core.transaction import (
     candidate_diff,
+    contract_packet_changes,
     fingerprint_paths,
     issue_packet_hash,
     sha256_bytes,
@@ -829,6 +830,27 @@ def _packet_artifact_intact(repo: Path, journal: CandidateJournal) -> bool:
     return sha256_bytes(payload) == journal.issue_packet_hash
 
 
+def _packet_drift(
+    repo: Path, journal: CandidateJournal, current: dict[str, Any]
+) -> str:
+    """Name the contract fields that moved since this packet was frozen.
+
+    The frozen packet is on disk as the very artifact the verifier is handed, so
+    the *before* values are readable even though bd only ever reports the after.
+    """
+
+    stored: Any = None
+    if journal.issue_packet_ref:
+        try:
+            stored = json.loads((repo / journal.issue_packet_ref).read_bytes())
+        except (OSError, ValueError):
+            stored = None
+    if not isinstance(stored, dict):
+        return "the frozen packet artifact is unreadable, so the fields cannot be named"
+    changes = contract_packet_changes(stored, current)
+    return "; ".join(changes) if changes else "no contract field differs"
+
+
 def _capture_evidence(
     store: JournalStore,
     journal: CandidateJournal,
@@ -1108,7 +1130,8 @@ def _verify_candidate(
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             timeout_failure += (
-                "; authoritative issue packet changed during verification"
+                "; authoritative issue packet changed during verification — "
+                + _packet_drift(repo, journal, current_packet)
             )
             timeout_phase = "verification-rejected"
             if current_packet.get("status") != "in_progress":
@@ -1182,7 +1205,8 @@ def _verify_candidate(
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             raise VerdictError(
-                "authoritative issue packet changed during verification"
+                "authoritative issue packet changed during verification — "
+                + _packet_drift(repo, journal, current_packet)
             )
     except (VerdictError, RuntimeError) as exc:
         failure = str(exc)
@@ -3020,19 +3044,32 @@ def grind(
                     # Ordered most-specific-first: whichever isolation boundary
                     # broke, the operator sees the concrete one in the report.
                     reason = None
+                    # A moved spec makes THIS candidate unverifiable and nothing
+                    # else; the rest of the queue is untouched, so the loop goes
+                    # on. The lifecycle and commit boundaries stay session-fatal:
+                    # both mean the run's own invariants no longer hold.
+                    packet_drift = False
                     if status_changed:
                         reason = "implementation worker changed issue lifecycle state"
                     elif (
                         issue_packet_hash(implementation_packet)
                         != active_journal.issue_packet_hash
                     ):
+                        # No author is named: the guard compares two digests and
+                        # cannot know who wrote the edit. It reports the fields.
+                        packet_drift = True
                         reason = (
-                            "implementation worker changed the immutable issue packet"
+                            "the immutable issue packet changed during "
+                            "implementation — "
+                            + _packet_drift(
+                                target, active_journal, implementation_packet
+                            )
                         )
                     elif not _packet_artifact_intact(target, active_journal):
+                        packet_drift = True
                         reason = (
-                            "implementation worker changed the immutable issue packet "
-                            "artifact"
+                            "the immutable issue packet artifact changed during "
+                            "implementation"
                         )
                     elif (
                         git.is_git_repo()
@@ -3066,7 +3103,29 @@ def grind(
                         transaction_store.save(active_journal)
                         write_log(f"iter {iters_run}: {reason}; candidate rejected")
                         output.error(f"grind: {reason}; candidate rejected")
-                        break
+                        if not packet_drift:
+                            break
+                        # A drifted packet is an issue-level event, not a
+                        # session-level one: the rejected candidate keeps its
+                        # report and its phase, and the queue moves on. The
+                        # candidate is preserved uncommitted, so the next
+                        # iteration inherits it as work it must leave alone
+                        # rather than folding it into another issue's commit.
+                        disowned_paths |= frozenset(active_journal.candidate_paths)
+                        handoff = _HandoffState(
+                            handoff_paths=disowned_paths,
+                            disowned=disowned_paths,
+                            active=bool(disowned_paths),
+                            notes=(
+                                "a candidate rejected by the implementation "
+                                "isolation guard is preserved uncommitted",
+                            ),
+                        )
+                        startup_handoff_paths = handoff.handoff_paths
+                        recovery_handoff = handoff.active
+                        active_journal = None
+                        resume_candidate_ready = False
+                        continue
 
                 # Candidate edits are indexed by the parent before a fresh
                 # verifier starts. Refresh failure is blocking only in required
