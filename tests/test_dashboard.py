@@ -353,8 +353,10 @@ def test_shell_names_every_region_of_the_layout(tmp_path: Path) -> None:
         assert titles[spec.key][0] == spec.title
         assert titles[spec.key][1]
     # Panel content belongs to the panel leaves; the shell only reserves space.
-    for key in ("current-action", "candidate"):
-        assert titles[key][1] == dash.PLACEHOLDER
+    assert titles["current-action"][1] == dash.PLACEHOLDER
+    # Candidate is filled by ortus-0udo.5, and a quiet repository has no journal,
+    # so nothing was ever captured rather than a candidate holding nothing.
+    assert titles["candidate"][1] == dash.CANDIDATE_IDLE
     # Warnings is filled by this leaf, so it states a finding rather than
     # holding space: a quiet region must read as "nothing fired".
     assert titles["warnings"][1] == dash.NO_WARNINGS
@@ -1388,6 +1390,275 @@ def test_visual_contract_colour_carries_meaning() -> None:
     for state in dash.STATE_CLASSES:
         assert f"Region.{state}" in dash._CSS, state
     assert len({dash.ACCENT_MOTION, dash.ACCENT_ATTENTION, dash.ACCENT_FAILURE}) == 3
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.5: the candidate region — owned, inherited and disowned paths
+# ---------------------------------------------------------------------------
+#
+# Candidate composition caused several failures in one session and was invisible
+# in all of them: a worker disowned seven inherited paths belonging to its own
+# issue, which would have committed five and abandoned seven, and a verifier was
+# rejected for drift because disowned paths were counted as unexplained. The
+# facts were in the journal the whole time, so these tests are about what the
+# panel makes visible rather than about how it is worded.
+
+_CANDIDATE_ISSUE = "ortus-0udo.5"
+_CANDIDATE_BASE = "9f1c4b7ad2e6c8b0"
+_CANDIDATE_LOG = "grind-20260809-031500.log"
+
+
+def _candidate_repo(
+    tmp_path: Path,
+    name: str,
+    *,
+    candidate: tuple[str, ...] = (),
+    handoff: tuple[str, ...] = (),
+    unrelated: tuple[str, ...] = (),
+    base_head: str = _CANDIDATE_BASE,
+    phase: str = "implementation",
+) -> Path:
+    """A repository whose journal records one candidate composition."""
+
+    repo = tmp_path / name
+    (repo / "logs").mkdir(parents=True)
+    JournalStore(repo).save(
+        CandidateJournal(
+            issue_id=_CANDIDATE_ISSUE,
+            base_head=base_head,
+            baseline_paths=(),
+            baseline_fingerprints={},
+            candidate_paths=candidate,
+            candidate_hash="deadbeefcafe",
+            handoff_paths=handoff,
+            unrelated_paths=unrelated,
+            phase=phase,
+            attempt=1,
+        )
+    )
+    (repo / "logs" / _CANDIDATE_LOG).write_text(
+        "[2026-08-09 03:15:00] iter 1: worker started\n", encoding="utf-8"
+    )
+    return repo
+
+
+def test_candidate_owned_paths_and_their_count_are_shown(tmp_path: Path) -> None:
+    """AC-1: what the run will commit, read off the journal.
+
+    A candidate with no handoff and nothing disowned is the common case, so it
+    renders as one labelled list rather than as three sections, two of them
+    empty.
+    """
+
+    owned = ("src/ortus/commands/dashboard.py", "tests/test_dashboard.py")
+    repo = _candidate_repo(tmp_path, "owned", candidate=owned)
+    panel = dash.DashboardApp(repo, refresh_seconds=3600).advance().candidate
+
+    assert f"{dash.OWNED} {len(owned)}" in panel
+    for path in owned:
+        assert path in panel
+    assert dash.INHERITED not in panel
+    assert dash.DISOWNED not in panel
+    assert "commits 2" in panel
+
+
+def test_candidate_of_a_repository_with_no_journal_shows_no_candidate(
+    tmp_path: Path,
+) -> None:
+    """Nothing was captured, which is not the same as a candidate holding nothing."""
+
+    quiet = dash.DashboardApp(_quiet_repo(tmp_path), refresh_seconds=3600)
+    assert quiet.advance().candidate == dash.CANDIDATE_IDLE
+
+    empty = _candidate_repo(tmp_path, "empty")
+    panel = dash.DashboardApp(empty, refresh_seconds=3600).advance().candidate
+    assert panel != dash.CANDIDATE_IDLE
+    assert dash.CANDIDATE_EMPTY in panel
+
+
+def test_candidate_inherited_and_disowned_are_labelled_apart_from_owned(
+    tmp_path: Path,
+) -> None:
+    """AC-2: three groups, each path in exactly one, disowned winning any overlap.
+
+    The overlap is not hypothetical: grind hands a resumed worker its
+    predecessor's candidate *plus* whatever was already disowned, so a disowned
+    path is normally in the handoff list too and would otherwise be counted
+    twice under two labels.
+    """
+
+    repo = _candidate_repo(
+        tmp_path,
+        "composed",
+        candidate=("src/ortus/core/runstate.py", "src/ortus/commands/dashboard.py"),
+        handoff=(
+            "src/ortus/commands/dashboard.py",
+            "docs/notes.md",
+            "scratch/leftover.txt",
+        ),
+        unrelated=("scratch/leftover.txt", "README.md"),
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().candidate
+    groups = dash.candidate_groups(app.snapshot)
+    by_label = {group.label: group.paths for group in groups}
+
+    assert by_label[dash.OWNED] == ("src/ortus/core/runstate.py",)
+    assert by_label[dash.INHERITED] == (
+        "docs/notes.md",
+        "src/ortus/commands/dashboard.py",
+    )
+    assert by_label[dash.DISOWNED] == ("README.md", "scratch/leftover.txt")
+    # One path, one group: a disowned path is out of the commit whichever other
+    # list also names it.
+    seen = [path for group in groups for path in group.paths]
+    assert len(seen) == len(set(seen))
+    assert panel.count("scratch/leftover.txt") == 1
+
+    for label, count in ((dash.OWNED, 1), (dash.INHERITED, 2), (dash.DISOWNED, 2)):
+        assert f"{label} {count}" in panel
+    # Disowning is the judgement that went wrong once, so the region claims a
+    # colour for it rather than sitting quiet.
+    assert dash.region_state("candidate", app.snapshot) == "state-ended"
+    kept = _candidate_repo(tmp_path, "kept", candidate=("src/a.py",))
+    quiet_app = dash.DashboardApp(kept, refresh_seconds=3600)
+    quiet_app.advance()
+    assert dash.region_state("candidate", quiet_app.snapshot) == "state-idle"
+
+
+def test_candidate_base_commit_is_shown(tmp_path: Path) -> None:
+    """AC-3: the tree the candidate was captured on, which a moved base invalidates."""
+
+    repo = _candidate_repo(tmp_path, "based", candidate=("src/a.py",))
+    panel = dash.DashboardApp(repo, refresh_seconds=3600).advance().candidate
+
+    assert f"base {_CANDIDATE_BASE[:12]}" in panel
+
+    # A journal that never recorded one says so rather than showing a blank.
+    unknown = _candidate_repo(
+        tmp_path, "baseless", candidate=("src/a.py",), base_head=""
+    )
+    assert "base unknown" in (
+        dash.DashboardApp(unknown, refresh_seconds=3600).advance().candidate
+    )
+
+
+def test_candidate_truncates_a_long_list_with_a_remaining_count(
+    tmp_path: Path,
+) -> None:
+    """AC-4: a candidate larger than the region is counted, not scrolled.
+
+    The floor matters as much as the cap: a thousand owned paths must not push
+    the disowned group down to a bare number, because a number with no paths
+    under it is what an operator cannot act on.
+    """
+
+    owned = tuple(f"src/generated/module_{index:04d}.py" for index in range(1200))
+    disowned = ("scratch/one.txt", "scratch/two.txt", "scratch/three.txt")
+    repo = _candidate_repo(
+        tmp_path, "large", candidate=owned, handoff=disowned, unrelated=disowned
+    )
+    panel = dash.DashboardApp(repo, refresh_seconds=3600).advance().candidate
+    lines = panel.splitlines()
+
+    assert f"{dash.OWNED} {len(owned)}" in panel
+    assert any("more not shown" in line for line in lines)
+    # Bounded: the path rows plus the base line, one heading per group and one
+    # elision line. Nothing here scrolls the layout.
+    assert len(lines) <= dash.CANDIDATE_PATH_ROWS + 8
+    for path in disowned:
+        assert path in panel
+    assert "commits 1200" in panel
+
+
+def test_candidate_path_with_unusual_characters_does_not_break_the_layout(
+    tmp_path: Path,
+) -> None:
+    """A filename is whatever the filesystem holds, and the screen must survive it.
+
+    A newline would split one row into two, an escape sequence would repaint the
+    terminal, and square brackets are markup to the widget these regions are
+    built on, so a bracketed path would silently vanish from the screen.
+    """
+
+    odd = "src/[bracketed]/na\tme\x1b[31m.py"
+    repo = _candidate_repo(tmp_path, "odd", candidate=(odd, "src/plain.py"))
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().candidate
+
+    assert "\x1b" not in panel and "\t" not in panel
+    assert len(panel.splitlines()) == 4  # base, heading, two paths
+    assert "[bracketed]" in panel
+
+    painted: list[str] = []
+
+    async def _steps(pilot: Any) -> None:
+        await pilot.pause()
+        painted.append(_screen_text(app))
+
+    _drive(app, _steps)
+    assert painted and "[bracketed]" in painted[0]
+    assert not _emoji_in(painted[0])
+
+
+def test_candidate_of_a_finalized_run_shows_what_was_committed(
+    tmp_path: Path,
+) -> None:
+    """A run that finished still explains its candidate rather than blanking."""
+
+    repo = _candidate_repo(
+        tmp_path,
+        "finalized",
+        candidate=("src/ortus/commands/dashboard.py",),
+        unrelated=("README.md",),
+        phase="finalized-committed",
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().candidate
+
+    assert app.snapshot.terminal
+    assert "src/ortus/commands/dashboard.py" in panel
+    assert f"{dash.DISOWNED} 1" in panel and "README.md" in panel
+
+
+def test_candidate_region_writes_nothing_while_it_reads_the_journal(
+    tmp_path: Path,
+) -> None:
+    """AC-3 of the shell still holds with the candidate region filled."""
+
+    repo = _candidate_repo(
+        tmp_path,
+        "readonly",
+        candidate=("src/a.py",),
+        handoff=("src/a.py", "docs/b.md"),
+        unrelated=("docs/b.md",),
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    app.advance()
+    before = _fingerprint(repo)
+    for _ in range(3):
+        app.advance()
+
+    assert _fingerprint(repo) == before
+    assert dash.DISOWNED in app.last_frame.candidate
+
+
+def test_candidate_row_budget_gives_every_group_a_floor() -> None:
+    """The allocator itself: floors first, then the remainder in render order."""
+
+    groups = (
+        dash.PathGroup(dash.OWNED, tuple(f"a{i}" for i in range(50))),
+        dash.PathGroup(dash.INHERITED, ()),
+        dash.PathGroup(dash.DISOWNED, tuple(f"c{i}" for i in range(4))),
+    )
+    rows = dash.path_rows(groups, total=12, floor=3)
+
+    assert rows[1] == 0
+    assert rows[2] >= 3
+    assert sum(rows) <= 12
+    # A candidate that fits is not truncated at all.
+    small = (dash.PathGroup(dash.OWNED, ("a", "b")), dash.PathGroup(dash.DISOWNED, ()))
+    assert dash.path_rows(small, total=12, floor=3) == (2, 0)
 
 
 # ---------------------------------------------------------------------------

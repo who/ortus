@@ -37,6 +37,22 @@ attributes to an attempt by name (`<candidate>.verifier-<attempt>.md`), so the
 latest report is the last reference rather than a merge of several. Nothing here
 re-runs a criterion check or judges whether the verdict is right.
 
+The candidate region is ortus-0udo.5. It answers what the run will commit if it
+passes and what it is deliberately leaving alone, which was invisible through
+several failures in one session: a worker inherited seven paths belonging to its
+own issue and disowned them, which would have committed five and silently
+abandoned seven, and separately a verifier was rejected for drift because
+disowned paths were counted as unexplained. Both facts were already in the
+journal and nobody was looking. Disowned paths are therefore shown beside owned
+ones rather than hidden, because the question they answer is whether the worker
+judged ownership correctly. Counts lead and paths follow, and every non-empty
+group keeps a floor of rows before any group takes the remainder, so a large
+candidate stays inside a fixed region without reducing a disowned set to a bare
+count. The base commit is shown because a candidate is only meaningful against
+the tree it was captured on, and a moved base is a failure the transaction
+already checks for. Nothing here renders a diff, which is git's job, and nothing
+here can disown a path, because the view is read-only.
+
 The warnings region and replay are ortus-0udo.7. Three conditions ended runs
 repeatedly in one session — a watchdog killing a worker mid-flight, correction
 attempts exhausting into a human label, and a verifier unable to execute any
@@ -111,6 +127,29 @@ WARNING_TEXT_CHARS = 120
 #: rather than left blank, so a quiet region reads as "nothing fired" instead
 #: of "this panel is broken".
 NO_WARNINGS = "none - no ortus warning line in this run"
+
+#: How the candidate region names its three parts. Disowned work is labelled
+#: rather than dropped: an operator has to be able to see that a path was
+#: deliberately excluded, which is the judgement that failed once already.
+OWNED = "owned"
+INHERITED = "inherited"
+DISOWNED = "disowned"
+#: The candidate region with no journal at all. Nothing was ever captured, which
+#: is a different fact from a candidate holding nothing, and the region says
+#: which rather than rendering an empty one.
+CANDIDATE_IDLE = "idle - no candidate captured"
+#: A journal in flight whose candidate is still empty: nothing has gone dirty
+#: since the claim. Stated rather than left blank, so the region reads as a
+#: finding instead of a broken panel.
+CANDIDATE_EMPTY = "no paths captured yet"
+#: Path rows the region shows across all three groups. A candidate larger than
+#: this is truncated with a count rather than scrolling the layout.
+CANDIDATE_PATH_ROWS = 18
+#: Rows each non-empty group keeps before any group takes the remainder, so a
+#: large owned set cannot render the disowned one as a bare count.
+CANDIDATE_GROUP_ROWS = 3
+#: Longest path rendered on one row.
+CANDIDATE_PATH_CHARS = 100
 
 #: The structured log event grind appends once a verdict is decided, rejected
 #: included. Its absence is what the verdict region reports as pending.
@@ -823,6 +862,126 @@ def verdict_region_state(state: VerdictState | None) -> str:
     return "state-idle"
 
 
+# --- candidate -------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PathGroup:
+    """One labelled part of the candidate: its paths, in render order."""
+
+    label: str
+    paths: tuple[str, ...] = ()
+
+
+def candidate_groups(snapshot: RunSnapshot) -> tuple[PathGroup, ...]:
+    """Owned, inherited and disowned paths, each path in exactly one group.
+
+    Ownership is a difference over the journal's three sets rather than a field
+    of its own. `candidate_paths` is what finalization commits, and a resumed
+    worker is handed its predecessor's candidate plus whatever was already
+    disowned, so the inherited part of a candidate is what the handoff also
+    names and the rest is this worker's own. Disowned wins any overlap: a path a
+    worker declared unrelated stays out of the commit whichever list also names
+    it, and it must render once rather than twice under two labels.
+    """
+
+    disowned = frozenset(snapshot.unrelated_paths)
+    inherited = frozenset(snapshot.handoff_paths) - disowned
+    owned = frozenset(snapshot.candidate_paths) - inherited - disowned
+    return (
+        PathGroup(OWNED, tuple(sorted(owned))),
+        PathGroup(INHERITED, tuple(sorted(inherited))),
+        PathGroup(DISOWNED, tuple(sorted(disowned))),
+    )
+
+
+def path_rows(
+    groups: tuple[PathGroup, ...],
+    *,
+    total: int = CANDIDATE_PATH_ROWS,
+    floor: int = CANDIDATE_GROUP_ROWS,
+) -> tuple[int, ...]:
+    """How many paths each group lists, bounded so the region cannot grow.
+
+    Every non-empty group keeps `floor` rows before any group takes the
+    remainder, because a count with no paths under it is exactly what an
+    operator could not act on when seven inherited paths were disowned in error.
+    """
+
+    shown = [min(len(group.paths), floor) for group in groups]
+    spare = total - sum(shown)
+    for index, group in enumerate(groups):
+        if spare <= 0:
+            break
+        extra = min(len(group.paths) - shown[index], spare)
+        shown[index] += extra
+        spare -= extra
+    return tuple(shown)
+
+
+def path_line(path: str, *, limit: int = CANDIDATE_PATH_CHARS) -> str:
+    """One path, flattened and bounded so an odd filename cannot break the view.
+
+    Git reports whatever the filesystem holds, and a path may carry a newline, a
+    tab or an escape sequence. The first two would split one row into several
+    and the third would repaint the terminal, so anything unprintable is shown
+    as a placeholder character rather than sent through.
+    """
+
+    printable = "".join(char if char.isprintable() else "?" for char in path)
+    return clip(printable, limit)
+
+
+def base_line(snapshot: RunSnapshot) -> str:
+    """The commit the candidate is measured against, and how much it commits.
+
+    A candidate only means anything against the tree it was captured on — grind
+    refuses to finalize one whose base has moved — so the base is on the panel
+    rather than in the journal alone.
+    """
+
+    return f"base {short(snapshot.base_head)}   commits {len(snapshot.candidate_paths)}"
+
+
+def candidate_panel(snapshot: RunSnapshot, *, total: int = CANDIDATE_PATH_ROWS) -> str:
+    """The candidate region: what the run will commit, and what it left alone.
+
+    Groups with nothing in them are omitted rather than rendered empty, because
+    a candidate with no handoff and nothing disowned is the common case and must
+    read as a plain list rather than as three sections, two of them blank.
+    """
+
+    if snapshot.idle:
+        return CANDIDATE_IDLE
+    groups = candidate_groups(snapshot)
+    budget = path_rows(groups, total=total)
+    lines = [base_line(snapshot)]
+    for group, rows in zip(groups, budget):
+        if not group.paths:
+            continue
+        lines.append(f"{group.label} {len(group.paths)}")
+        lines.extend(f"  {path_line(path)}" for path in group.paths[:rows])
+        hidden = len(group.paths) - rows
+        if hidden > 0:
+            lines.append(f"  ({hidden} more not shown)")
+    if len(lines) == 1:
+        lines.append(CANDIDATE_EMPTY)
+    return "\n".join(lines)
+
+
+def candidate_region_state(snapshot: RunSnapshot) -> str:
+    """Colour for the candidate region: attention once work has been disowned.
+
+    Disowning is the one thing in this region an operator may need to overrule,
+    and it is the judgement that went wrong, so it is the only condition here
+    that claims a colour.
+    """
+
+    if snapshot.idle:
+        return "state-idle"
+    return "state-ended" if snapshot.unrelated_paths else "state-idle"
+
+
 def _mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -882,6 +1041,8 @@ def region_state(
         return "state-ended" if snapshot.terminal else "state-live"
     if key == "warnings" and snapshot.warnings:
         return "state-failed"
+    if key == "candidate":
+        return candidate_region_state(snapshot)
     if key == "verdict":
         return verdict_region_state(verdict)
     return "state-idle"
@@ -909,7 +1070,7 @@ def frame(
     return Frame(
         header=header_line(snapshot, replay),
         current_action=PLACEHOLDER,
-        candidate=PLACEHOLDER,
+        candidate=candidate_panel(snapshot),
         verdict=verdict_panel(snapshot, state),
         warnings=warnings_panel(snapshot),
         pulse=pulse_line(snapshot, tick, width=width),
@@ -996,7 +1157,10 @@ def _shell() -> dict[str, type]:
         """One bordered region of the layout, filled by its own leaf."""
 
         def __init__(self, spec: RegionSpec) -> None:
-            super().__init__("", id=spec.key)
+            # Markup off: a region renders data read off disk, and a path or an
+            # evidence line holding square brackets would otherwise be parsed as
+            # a style tag and disappear from the screen.
+            super().__init__("", id=spec.key, markup=False)
             self.spec = spec
             #: The plain text currently displayed, kept so the shell (and its
             #: tests) can read back what was rendered.
