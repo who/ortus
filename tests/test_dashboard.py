@@ -15,6 +15,7 @@ import ast
 import asyncio
 import hashlib
 import inspect
+import json
 import os
 import subprocess
 from dataclasses import replace
@@ -26,6 +27,7 @@ from typer.models import OptionInfo
 from ortus.commands import dashboard as dash
 from ortus.core.runstate import RunSnapshot, RunWarning
 from ortus.core.transaction import CandidateJournal, JournalStore
+from ortus.core.verdict import Verdict, render_report
 
 _MODULE_SOURCE = Path(dash.__file__).read_text(encoding="utf-8")
 
@@ -350,11 +352,14 @@ def test_shell_names_every_region_of_the_layout(tmp_path: Path) -> None:
         assert titles[spec.key][0] == spec.title
         assert titles[spec.key][1]
     # Panel content belongs to the panel leaves; the shell only reserves space.
-    for key in ("current-action", "candidate", "verdict"):
+    for key in ("current-action", "candidate"):
         assert titles[key][1] == dash.PLACEHOLDER
     # Warnings is filled by this leaf, so it states a finding rather than
     # holding space: a quiet region must read as "nothing fired".
     assert titles["warnings"][1] == dash.NO_WARNINGS
+    # Verdict is filled by ortus-0udo.6, and a quiet repository has no run to
+    # judge, which is a state rather than a pending panel.
+    assert titles["verdict"][1] == dash.VERDICT_IDLE
 
 
 def test_refresh_carries_the_offset_between_ticks(tmp_path: Path) -> None:
@@ -870,6 +875,502 @@ def test_replay_option_is_registered_on_the_verb() -> None:
     default = params["replay"].default
     assert isinstance(default, OptionInfo)
     assert "--replay" in default.param_decls
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.6: the verdict region, criteria as they are judged
+# ---------------------------------------------------------------------------
+#
+# The fixtures below write their packet and their reports through the same
+# store and renderer grind uses, so a format change breaks these tests rather
+# than silently teaching the panel to parse something nothing writes.
+
+_VERDICT_ISSUE = "ortus-0udo.6"
+_VERDICT_LOG = "grind-20260808-231000.log"
+_VERDICT_CANDIDATE = "deadbeefcafe"
+
+_ACCEPTANCE = (
+    "## Observable criteria\n"
+    "- AC-1: criteria are listed before any verdict exists.\n"
+    "- AC-2: statuses update from a verifier report artifact.\n"
+    "- AC-3: the decision shows pending until an envelope is emitted.\n"
+    "\n"
+    "## Criterion checks\n"
+    "- AC-1: Run `uv run pytest tests/test_dashboard.py -k one -q`.\n"
+    "- AC-2: Run `uv run pytest tests/test_dashboard.py -k two -q`.\n"
+    "- AC-3: Run `uv run pytest tests/test_dashboard.py -k three -q`.\n"
+    "\n"
+    "## Targeted tests\n"
+    "Run `uv run pytest tests/test_dashboard.py -q`.\n"
+)
+
+
+def _packet(acceptance: str = _ACCEPTANCE) -> dict[str, Any]:
+    return {
+        "id": _VERDICT_ISSUE,
+        "issue_type": "feature",
+        "title": "Dashboard verdict panel",
+        "description": "## Objective\nShow criteria as they are judged.\n",
+        "design": "## Readiness schema\nv1\n",
+        "acceptance_criteria": acceptance,
+    }
+
+
+def _judged_repo(
+    tmp_path: Path,
+    name: str,
+    *,
+    acceptance: str = _ACCEPTANCE,
+    candidate_hash: str = _VERDICT_CANDIDATE,
+) -> Path:
+    """A repository mid-verification: a packet artifact, a journal, a log."""
+
+    repo = tmp_path / name
+    (repo / "logs").mkdir(parents=True)
+    store = JournalStore(repo)
+    digest, ref = store.save_packet(_VERDICT_ISSUE, _packet(acceptance))
+    store.save(
+        CandidateJournal(
+            issue_id=_VERDICT_ISSUE,
+            base_head="abc1234def",
+            baseline_paths=(),
+            baseline_fingerprints={},
+            candidate_paths=("src/ortus/commands/dashboard.py",),
+            candidate_hash=candidate_hash,
+            issue_packet_hash=digest,
+            issue_packet_ref=ref,
+            phase="verification",
+            attempt=1,
+        )
+    )
+    (repo / "logs" / _VERDICT_LOG).write_text(
+        "[2026-08-08 23:10:00] iter 1: verification started\n", encoding="utf-8"
+    )
+    return repo
+
+
+def _write_report(
+    repo: Path,
+    criteria: tuple[tuple[str, str, str], ...],
+    *,
+    decision: str = "fail",
+    candidate_hash: str = _VERDICT_CANDIDATE,
+    attempt: int = 1,
+) -> str:
+    """Render a verifier report the way grind renders one, and journal it."""
+
+    verdict = Verdict(
+        candidate_hash=candidate_hash,
+        decision=decision,
+        criteria=tuple(
+            {"id": name, "status": status, "evidence": evidence}
+            for name, status, evidence in criteria
+        ),
+        commands=("uv run pytest tests/test_dashboard.py -q",),
+        reviewed_files=("src/ortus/commands/dashboard.py",),
+        reviewed_interfaces=("verdict_panel",),
+        risks=("none",),
+        findings=("none",),
+        codegraph=("explored the verdict region",),
+    )
+    store = JournalStore(repo)
+    ref = store.save_report(
+        candidate_hash,
+        render_report(verdict, issue_id=_VERDICT_ISSUE, attempt=attempt),
+        attempt=attempt,
+    )
+    journal = store.load()
+    assert journal is not None
+    store.save(replace(journal, verifier_refs=(*journal.verifier_refs, ref)))
+    return ref
+
+
+def _log_envelope(
+    repo: Path,
+    *,
+    decision: str,
+    candidate_hash: str = _VERDICT_CANDIDATE,
+    reason: str = "",
+) -> None:
+    """Append the verdict envelope event exactly as grind appends it."""
+
+    with (repo / "logs" / _VERDICT_LOG).open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "ortus.verdict",
+                    "schema": 1,
+                    "decision": decision,
+                    "candidate_hash": candidate_hash,
+                    "reason": reason,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+
+
+def test_verdict_not_yet_reached_before_any_verdict_exists(tmp_path: Path) -> None:
+    """AC-1: the packet's criteria are listed, outstanding, before any verdict.
+
+    An operator watching a seven-criterion issue needs to know four are still
+    outstanding, which is only visible if the list comes from the packet rather
+    than from what the verifier has already reported.
+    """
+
+    repo = _judged_repo(tmp_path, "outstanding")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().verdict
+
+    assert app.verdict.criteria == ("AC-1", "AC-2", "AC-3")
+    for name in app.verdict.criteria:
+        assert f"{name:<8}{dash.NOT_REACHED}" in panel
+    # Not-yet-reached is not failing: a run with no report yet has failed nothing.
+    assert dash.STATUS_FAIL not in panel
+    assert dash.NO_REPORT in panel
+    assert dash.VERDICT_PENDING in panel
+    assert dash.region_state("verdict", app.snapshot, app.verdict) == "state-idle"
+
+
+def test_verdict_from_report_updates_each_criterion_status(tmp_path: Path) -> None:
+    """AC-2: statuses come from the report artifact as it is written.
+
+    The reasoning a verifier records is what went unread in a bd comment when a
+    criterion failed on a wider sweep than its own prescribed check, so the
+    evidence line is on the panel next to the status it explains.
+    """
+
+    repo = _judged_repo(tmp_path, "reported")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    assert dash.NOT_REACHED in app.advance().verdict
+
+    ref = _write_report(
+        repo,
+        (
+            ("AC-1", "pass", "listed all three before any verdict"),
+            ("AC-2", "fail", "statuses did not update on the second tick"),
+        ),
+    )
+    panel = app.advance().verdict
+
+    assert (
+        dash.criterion_line(
+            dash.Criterion(
+                id="AC-1",
+                status=dash.STATUS_PASS,
+                evidence="listed all three before any verdict",
+            )
+        )
+        in panel
+    )
+    assert (
+        dash.criterion_line(
+            dash.Criterion(
+                id="AC-2",
+                status=dash.STATUS_FAIL,
+                evidence="statuses did not update on the second tick",
+            )
+        )
+        in panel
+    )
+    # A criterion the report did not cover is outstanding, never inferred.
+    assert (
+        dash.criterion_line(dash.Criterion(id="AC-3", status=dash.NOT_REACHED)) in panel
+    )
+    # The panel says which artifact it read, so the claim is checkable.
+    assert ref in panel
+    assert "attempt 1" in panel
+    assert dash.region_state("verdict", app.snapshot, app.verdict) == "state-failed"
+
+
+def test_verdict_pending_then_decided_when_an_envelope_is_emitted(
+    tmp_path: Path,
+) -> None:
+    """AC-3: pending until an envelope exists, then the decision, and it stays.
+
+    A verifier that passed every criterion and then ended without emitting an
+    envelope had a sound candidate rejected, and the operator learned of it only
+    from a terse error after the run had exited. Pending is that failure mode
+    made visible while it is still happening.
+    """
+
+    repo = _judged_repo(tmp_path, "decided")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+
+    _write_report(
+        repo,
+        (
+            ("AC-1", "pass", "criteria listed"),
+            ("AC-2", "pass", "statuses updated"),
+            ("AC-3", "pass", "decision shown"),
+        ),
+        decision="pass",
+    )
+    panel = app.advance().verdict
+    # Every criterion has passed and there is still no decision: exactly the
+    # state that cost a run.
+    assert dash.VERDICT_PENDING in panel
+    assert dash.NOT_REACHED not in panel
+    assert app.verdict.envelope is None
+
+    _log_envelope(repo, decision="pass")
+    panel = app.advance().verdict
+    assert f"decision {dash.STATUS_PASS}" in panel
+    assert dash.VERDICT_PENDING not in panel
+    assert dash.region_state("verdict", app.snapshot, app.verdict) == "state-live"
+
+    # The log tail is incremental, so a tick that reads no new bytes must not
+    # forget the decision it has already seen.
+    later = app.advance()
+    assert app.snapshot.events == ()
+    assert f"decision {dash.STATUS_PASS}" in later.verdict
+
+
+def test_verdict_identifier_mismatch_renders_both_sets(tmp_path: Path) -> None:
+    """AC-4: neither the packet's ids nor the verdict's are dropped.
+
+    The verdict validator already treats a mismatch as a real condition — fatal
+    on a pass, recorded on a fail — so the panel has to show it as one rather
+    than render whichever set it happened to hold.
+    """
+
+    repo = _judged_repo(tmp_path, "mismatch")
+    _write_report(
+        repo,
+        (
+            ("AC-1", "pass", "packet criterion, reported"),
+            ("AC-9", "fail", "identifier the packet never named"),
+        ),
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().verdict
+
+    # Both sets are on screen: the packet's outstanding ids and the stray one.
+    for name in ("AC-2", "AC-3"):
+        assert (
+            dash.criterion_line(dash.Criterion(id=name, status=dash.NOT_REACHED))
+            in panel
+        )
+    assert "AC-9" in panel
+    assert "not in packet" in panel
+    assert "identifier the packet never named" in panel
+
+    mismatch = dash.criteria_mismatch(app.verdict)
+    assert "not in the issue packet: AC-9" in mismatch
+    assert "missing from the verdict: AC-2, AC-3" in mismatch
+    assert mismatch in panel
+
+
+def test_verdict_shows_the_latest_report_rather_than_merging_a_correction_round(
+    tmp_path: Path,
+) -> None:
+    """A correction round writes a second report; the panel shows that one."""
+
+    repo = _judged_repo(tmp_path, "correction")
+    first = _write_report(repo, (("AC-1", "fail", "first attempt was wrong"),))
+    second = _write_report(
+        repo,
+        (
+            ("AC-1", "pass", "second attempt corrected it"),
+            ("AC-2", "pass", "and covered the next one"),
+        ),
+        decision="pass",
+        attempt=2,
+    )
+    assert first != second
+
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().verdict
+
+    assert second in panel
+    assert first not in panel
+    assert "attempt 2" in panel
+    assert "second attempt corrected it" in panel
+    # Merged, the superseded failure would still be on screen.
+    assert "first attempt was wrong" not in panel
+    assert dash.STATUS_FAIL not in panel
+
+
+def test_verdict_for_a_stale_candidate_is_shown_as_stale(tmp_path: Path) -> None:
+    """A verdict against another candidate is stale rather than current."""
+
+    repo = _judged_repo(tmp_path, "stale")
+    _write_report(
+        repo,
+        (
+            ("AC-1", "pass", "judged an earlier candidate"),
+            ("AC-2", "pass", "judged an earlier candidate"),
+            ("AC-3", "pass", "judged an earlier candidate"),
+        ),
+        decision="pass",
+        candidate_hash="0123456789ab",
+    )
+    _log_envelope(repo, decision="pass", candidate_hash="0123456789ab")
+
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().verdict
+
+    assert "stale" in panel
+    assert "0123456789ab" in panel
+    assert dash.short(_VERDICT_CANDIDATE) in panel
+    # Stale is attention rather than the green of a current pass.
+    assert dash.region_state("verdict", app.snapshot, app.verdict) == "state-ended"
+
+
+def test_verdict_packet_without_criterion_identifiers_is_a_readiness_failure(
+    tmp_path: Path,
+) -> None:
+    """An unidentified packet is a readiness failure, not an empty verdict."""
+
+    repo = _judged_repo(
+        tmp_path,
+        "unidentified",
+        acceptance=(
+            "## Observable criteria\n"
+            "- the first thing works.\n"
+            "\n## Criterion checks\n"
+            "- Run `uv run pytest -q`.\n"
+            "\n## Targeted tests\n"
+            "Run `uv run pytest tests/test_dashboard.py -q`.\n"
+        ),
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    panel = app.advance().verdict
+
+    assert app.verdict.criteria == ()
+    assert "readiness failure" in panel
+    assert dash.region_state("verdict", app.snapshot, app.verdict) == "state-failed"
+
+    # A packet that is not on disk at all is named as absent rather than read
+    # as an issue with nothing to satisfy.
+    for artifact in (repo / "logs" / "grind-transactions").glob("*.issue.json"):
+        artifact.unlink()
+    assert dash.NO_PACKET in app.advance().verdict
+
+
+def test_verdict_summarises_a_report_too_large_to_show_rather_than_clipping_it(
+    tmp_path: Path,
+) -> None:
+    """Whole rows are dropped and counted; no criterion is cut in half.
+
+    The truncation marker is written by hand here because it only appears in a
+    report whose criterion matrix outgrew its own budget, which is a property of
+    the artifact rather than of any one fixture.
+    """
+
+    parsed = dash.parse_report(
+        "## Ortus verifier report (schema v1)\n"
+        "\n"
+        f"Issue: {_VERDICT_ISSUE}\n"
+        f"Candidate: `{_VERDICT_CANDIDATE}`\n"
+        "Decision: **FAIL**\n"
+        "Verifier attempt: 3\n"
+        "\n"
+        "### Acceptance criteria\n"
+        "- AC-1: pass — held\n"
+        "- AC-2: fail — did not hold\n"
+        "- [4 more entries truncated; see transaction artifacts]\n"
+        "\n"
+        "### Commands\n"
+        "- uv run pytest -q\n",
+        ref="logs/grind-transactions/deadbeefcafe.verifier-3.md",
+    )
+    assert parsed.decision == "fail"
+    assert parsed.attempt == 3
+    assert parsed.candidate_hash == _VERDICT_CANDIDATE
+    assert [item.id for item in parsed.criteria] == ["AC-1", "AC-2"]
+    assert parsed.criteria[1].evidence == "did not hold"
+    # A section that is not the matrix is not read as one.
+    assert all(item.id.startswith("AC-") for item in parsed.criteria)
+    assert parsed.elided == 4
+
+    state = dash.VerdictState(
+        criteria=tuple(f"AC-{index}" for index in range(1, 31)),
+        report=parsed,
+        candidate_hash=_VERDICT_CANDIDATE,
+    )
+    panel = dash.verdict_panel(RunSnapshot(journal_present=True), state)
+    rows = [line for line in panel.splitlines() if line.startswith("AC-")]
+
+    assert len(rows) == dash.CRITERION_ROWS
+    assert f"({30 - dash.CRITERION_ROWS} more criteria not shown)" in panel
+    assert "4 criteria summarised by the report" in panel
+    # Every rendered row is a whole criterion.
+    for row in rows:
+        assert row.split()[1] in (dash.STATUS_PASS, dash.STATUS_FAIL, "not")
+
+    long_evidence = "x" * (dash.CRITERION_TEXT_CHARS * 3)
+    clipped = dash.criterion_line(
+        dash.Criterion(id="AC-1", status=dash.STATUS_PASS, evidence=long_evidence)
+    )
+    assert len(clipped) < dash.CRITERION_TEXT_CHARS + 40
+
+
+def test_verdict_of_a_replayed_run_whose_journal_is_gone_still_names_the_decision(
+    tmp_path: Path,
+) -> None:
+    """The log outlives the journal, and the decision in it is worth reading."""
+
+    repo = _judged_repo(tmp_path, "replayed")
+    _log_envelope(repo, decision="fail", reason="AC-2 did not hold")
+    JournalStore(repo).path.unlink()
+
+    log = repo / "logs" / _VERDICT_LOG
+    app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
+    panel = app.advance().verdict
+
+    assert app.snapshot.idle
+    assert dash.VERDICT_IDLE not in panel
+    assert f"decision {dash.STATUS_FAIL}" in panel
+    assert "AC-2 did not hold" in panel
+    # Without the journal there is no packet reference, and the panel says so
+    # rather than rendering an issue with nothing to satisfy.
+    assert dash.NO_PACKET in panel
+
+
+def test_verdict_region_reads_the_packet_the_run_was_claimed_against(
+    tmp_path: Path,
+) -> None:
+    """The journal names the packet; an older journal falls back to the store.
+
+    The artifact is the packet the verifier is held to, so the panel and the
+    verdict validator answer the same question rather than the panel answering
+    for the issue as it happens to be now.
+    """
+
+    repo = _judged_repo(tmp_path, "packet")
+    snapshot = dash.read_snapshot(repo)
+    named = dash.packet_path(repo, snapshot)
+    assert named is not None
+    assert str(named.relative_to(repo)) == snapshot.issue_packet_ref
+
+    # A journal written before the reference existed still finds it, because
+    # the store prefixes a packet artifact with the issue that owns it.
+    older = replace(snapshot, issue_packet_ref="")
+    assert dash.packet_path(repo, older) == named
+
+    packet = dash.read_packet(named)
+    assert packet is not None
+    assert dash.packet_criteria(packet) == ("AC-1", "AC-2", "AC-3")
+
+
+def test_verdict_region_writes_nothing_while_it_reads_the_artifacts(
+    tmp_path: Path,
+) -> None:
+    """AC-3 of the shell still holds once the region reads two more artifacts."""
+
+    repo = _judged_repo(tmp_path, "readonly")
+    _write_report(repo, (("AC-1", "pass", "held"),), decision="pass")
+    _log_envelope(repo, decision="pass")
+
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    app.advance()
+    before = _fingerprint(repo)
+    for _ in range(3):
+        app.advance()
+
+    assert _fingerprint(repo) == before
+    assert f"decision {dash.STATUS_PASS}" in app.last_frame.verdict
 
 
 def test_visual_contract_colour_carries_meaning() -> None:

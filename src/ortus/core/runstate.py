@@ -134,6 +134,12 @@ class RunSnapshot:
     plan_gap_routed: bool = False
     base_head: str = ""
     candidate_hash: str = ""
+    #: Where the authoritative issue packet for this run was persisted, and its
+    #: digest. A panel that has to list what the run is being judged against
+    #: reads the packet the run is bound to rather than re-querying bd, which
+    #: would answer for the issue as it is now instead of as it was claimed.
+    issue_packet_ref: str = ""
+    issue_packet_hash: str = ""
     candidate_paths: tuple[str, ...] = ()
     handoff_paths: tuple[str, ...] = ()
     unrelated_paths: tuple[str, ...] = ()
@@ -384,6 +390,8 @@ def _journal_fields(journal: CandidateJournal | None) -> RunSnapshot:
         plan_gap_routed=journal.plan_gap_routed,
         base_head=journal.base_head,
         candidate_hash=journal.candidate_hash,
+        issue_packet_ref=journal.issue_packet_ref,
+        issue_packet_hash=journal.issue_packet_hash,
         candidate_paths=tuple(journal.candidate_paths),
         handoff_paths=tuple(journal.handoff_paths),
         unrelated_paths=tuple(journal.unrelated_paths),

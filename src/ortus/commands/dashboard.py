@@ -20,6 +20,23 @@ is the pulse: one element that advances on every tick, so a healthy run looks
 alive and a stalled one is obvious by its stillness. An operator once watched a
 silent tail for hours unable to tell progress from death.
 
+The verdict region is ortus-0udo.6. Verdicts are the most informative artifact a
+run produces and the least visible: in one session a verifier passed every
+criterion and then ended without emitting its envelope, so a sound candidate was
+rejected and the operator learned only from a terse error after the run had
+exited. The region therefore lists the criteria the run is being judged on
+before any verdict exists, so four outstanding of seven is a visible fact, and
+shows the decision as pending until an envelope appears, because a missing
+envelope is itself the failure mode that cost that run. Expectation comes from
+the authoritative issue packet the journal names — read off disk rather than
+re-queried, which would answer for the issue as it is now rather than as it was
+claimed — and is derived exactly as `ortus.commands.grind` derives the ids it
+holds the verdict to, so the panel and the validator cannot drift apart.
+Per-criterion status comes from the verifier report artifact, which the journal
+attributes to an attempt by name (`<candidate>.verifier-<attempt>.md`), so the
+latest report is the last reference rather than a merge of several. Nothing here
+re-runs a criterion check or judges whether the verdict is right.
+
 The warnings region and replay are ortus-0udo.7. Three conditions ended runs
 repeatedly in one session — a watchdog killing a worker mid-flight, correction
 attempts exhausting into a human label, and a verifier unable to execute any
@@ -50,10 +67,12 @@ pictograph.
 from __future__ import annotations
 
 import datetime as _dt
+import json
+import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from textual.app import App, ComposeResult
@@ -62,7 +81,9 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from ortus.core import output
-from ortus.core.runstate import TERMINAL_PHASES, RunSnapshot, read_snapshot
+from ortus.core.readiness import validate_issue
+from ortus.core.runstate import TERMINAL_PHASES, LogEvent, RunSnapshot, read_snapshot
+from ortus.core.transaction import JournalStore
 
 #: Seconds between refreshes. A tick reads only the bytes the log grew by, so
 #: this is cheap even against the megabyte logs a long session produces.
@@ -94,6 +115,63 @@ WARNING_TEXT_CHARS = 120
 #: rather than left blank, so a quiet region reads as "nothing fired" instead
 #: of "this panel is broken".
 NO_WARNINGS = "none - no ortus warning line in this run"
+
+#: The structured log event grind appends once a verdict is decided, rejected
+#: included. Its absence is what the verdict region reports as pending.
+VERDICT_EVENT_KIND = "ortus.verdict"
+#: Criterion identifiers, matched exactly as grind matches them when it builds
+#: the expected set the verdict validator enforces.
+CRITERION_ID = re.compile(r"\bAC-\d+\b")
+#: Status vocabulary. The first three are what a verifier report records; the
+#: fourth is this panel's own word for a criterion no report has covered yet,
+#: which is the state an operator watching a live run mostly sees.
+STATUS_PASS = "pass"
+STATUS_FAIL = "fail"
+STATUS_NOT_ASSESSED = "not assessed"
+NOT_REACHED = "not reached"
+
+#: The verdict region when there is no run to judge at all.
+VERDICT_IDLE = "idle - no run to judge"
+#: The decision line before any envelope exists. A verifier that reviews a whole
+#: candidate and then ends without emitting one is a real failure mode, and it
+#: costs a run, so it is named while it is happening rather than afterwards.
+VERDICT_PENDING = "decision pending - no verdict envelope emitted yet"
+#: No verifier report has been written for this run yet, so every criterion is
+#: outstanding rather than failing.
+NO_REPORT = "no verifier report yet"
+#: The packet the criteria would come from is not on disk.
+NO_PACKET = "issue packet unavailable - criteria cannot be listed"
+
+#: How many criterion rows the region shows. A criterion is never split across
+#: the boundary: a report too large to display is summarised by dropping whole
+#: rows and saying how many, never clipped mid-criterion.
+CRITERION_ROWS = 24
+#: Longest evidence excerpt per criterion row.
+CRITERION_TEXT_CHARS = 88
+#: Widths that keep the matrix aligned as a matrix.
+_ID_WIDTH = 8
+_STATUS_WIDTH = 12
+#: Most of a verifier report this panel will read. Reports are bounded at
+#: 24_000 characters before the CodeGraph block is appended, so this reads a
+#: whole one and still cannot be made to swallow a runaway file.
+REPORT_READ_CHARS = 64_000
+
+_REPORT_CRITERIA_HEADING = "### Acceptance criteria"
+_REPORT_SECTION = re.compile(r"^#{2,4}\s")
+_REPORT_ROW = re.compile(
+    r"^-\s+(?P<id>[A-Za-z][\w.-]*):\s+(?P<status>pass|fail|not assessed)\b"
+    r"\s*[—–-]?\s*(?P<evidence>.*)$",
+    re.IGNORECASE,
+)
+_REPORT_ELIDED = re.compile(r"^-\s+\[(?P<count>\d+) more entries truncated")
+_REPORT_DECISION = re.compile(r"^Decision:\s+\*\*(?P<decision>[A-Za-z]+)\*\*")
+_REPORT_CANDIDATE = re.compile(r"^Candidate:\s+`(?P<hash>[^`]*)`")
+_REPORT_ATTEMPT = re.compile(r"^Verifier attempt:\s+(?P<attempt>\d+)")
+#: The store names a report by the candidate it judged and the attempt that
+#: produced it, so a report is attributable from its filename and the journal
+#: alone and no verdict can be shown against the wrong attempt.
+_REF_ATTEMPT = re.compile(r"\.verifier-(?P<attempt>\d+)\.md$")
+_PACKET_GLOB = "{issue}-*.issue.json"
 
 #: Terminal phases the model names, in the words an operator would use. A phase
 #: absent from this map is rendered verbatim: a log from an older run whose
@@ -343,6 +421,426 @@ def warnings_panel(
     return "\n".join(lines)
 
 
+# --- verdict ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Criterion:
+    """One acceptance criterion and what is known about it."""
+
+    id: str
+    status: str
+    evidence: str = ""
+    #: False for an identifier a verdict reported that the packet never named.
+    #: Such a row is still rendered: dropping either set would hide a mismatch
+    #: the verdict validator already treats as a real condition.
+    in_packet: bool = True
+
+
+@dataclass(frozen=True)
+class Envelope:
+    """The verdict envelope grind logged once the decision was made."""
+
+    decision: str
+    candidate_hash: str = ""
+    reason: str = ""
+    at: _dt.datetime | None = None
+
+
+@dataclass(frozen=True)
+class VerifierReport:
+    """One verifier report artifact, parsed down to its criterion matrix."""
+
+    ref: str
+    attempt: int = 0
+    candidate_hash: str = ""
+    decision: str = ""
+    criteria: tuple[Criterion, ...] = ()
+    #: Criteria the report itself said it had truncated. Counted rather than
+    #: ignored, so a summarised report reads as summarised.
+    elided: int = 0
+    unreadable: bool = False
+
+
+@dataclass(frozen=True)
+class VerdictState:
+    """What the verdict region knows at one tick.
+
+    Carried between ticks because the log tail is incremental: an envelope is
+    logged once, and a region that only ever saw the newest slice would forget
+    the decision on the very next refresh.
+    """
+
+    criteria: tuple[str, ...] = ()
+    #: Why the criteria could not be listed, in readiness's own words.
+    readiness: str = ""
+    report: VerifierReport | None = None
+    envelope: Envelope | None = None
+    log_path: Path | None = None
+    candidate_hash: str = ""
+
+
+def packet_path(repo: Path, snapshot: RunSnapshot) -> Path | None:
+    """The authoritative issue packet artifact for this run, if it is on disk.
+
+    The journal names it exactly. The glob is the fallback for a journal
+    written before that reference was recorded: the store prefixes a packet
+    with its issue, so the newest one for this issue is the run's own.
+    """
+
+    if snapshot.issue_packet_ref:
+        named = repo / snapshot.issue_packet_ref
+        if named.is_file():
+            return named
+    if not snapshot.issue_id:
+        return None
+    pattern = _PACKET_GLOB.format(issue=snapshot.issue_id)
+    try:
+        found = [
+            path
+            for path in JournalStore(repo).artifacts.glob(pattern)
+            if path.is_file()
+        ]
+    except OSError:
+        return None
+    return max(found, key=_mtime) if found else None
+
+
+def read_packet(path: Path) -> dict[str, Any] | None:
+    """The packet artifact as a mapping; None when it cannot be read as one."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def packet_criteria(packet: dict[str, Any]) -> tuple[str, ...]:
+    """The criterion identifiers this run is judged on, in packet order.
+
+    Derived exactly as grind derives the expected set it hands the verdict
+    validator, so what the panel says is outstanding and what the validator
+    would call missing are the same question answered once.
+    """
+
+    field = str(packet.get("acceptance_criteria", ""))
+    return tuple(dict.fromkeys(CRITERION_ID.findall(field)))
+
+
+def criteria_defect(packet: dict[str, Any]) -> str:
+    """Why a packet names no criterion, in readiness's words.
+
+    A packet with no identifiers is a readiness failure rather than a verdict
+    with nothing in it, and the region says which so the operator knows the
+    issue is the defect and not the run.
+    """
+
+    for failure in validate_issue(packet).failures:
+        if failure.code == "observable_criteria":
+            return f"readiness failure - {failure.section}: {failure.message}"
+    return "readiness failure - the issue packet names no criterion identifier"
+
+
+def parse_report(text: str, *, ref: str = "") -> VerifierReport:
+    """Parse a verifier report down to its decision and criterion matrix.
+
+    Only the matrix is read. A report runs to kilobytes of commands, findings
+    and CodeGraph evidence that belong in the artifact rather than on a panel
+    refreshing once a second.
+    """
+
+    attempt = 0
+    match = _REF_ATTEMPT.search(ref)
+    if match is not None:
+        attempt = int(match.group("attempt"))
+    decision = ""
+    candidate_hash = ""
+    criteria: list[Criterion] = []
+    elided = 0
+    in_matrix = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if in_matrix:
+            if _REPORT_SECTION.match(stripped):
+                break
+            row = _REPORT_ROW.match(stripped)
+            if row is not None:
+                criteria.append(
+                    Criterion(
+                        id=row.group("id"),
+                        status=row.group("status").lower(),
+                        evidence=row.group("evidence").strip(),
+                    )
+                )
+                continue
+            dropped = _REPORT_ELIDED.match(stripped)
+            if dropped is not None:
+                elided += int(dropped.group("count"))
+            continue
+        if stripped == _REPORT_CRITERIA_HEADING:
+            in_matrix = True
+            continue
+        found = _REPORT_DECISION.match(stripped)
+        if found is not None:
+            decision = found.group("decision").lower()
+            continue
+        found = _REPORT_CANDIDATE.match(stripped)
+        if found is not None:
+            candidate_hash = found.group("hash")
+            continue
+        found = _REPORT_ATTEMPT.match(stripped)
+        if found is not None and not attempt:
+            attempt = int(found.group("attempt"))
+    return VerifierReport(
+        ref=ref,
+        attempt=attempt,
+        candidate_hash=candidate_hash,
+        decision=decision,
+        criteria=tuple(criteria),
+        elided=elided,
+    )
+
+
+def read_report(repo: Path, snapshot: RunSnapshot) -> VerifierReport | None:
+    """The latest verifier report artifact, or None when none exists yet.
+
+    Latest rather than merged: a correction round writes a second report for
+    the same issue, and the journal appends each reference as it is written, so
+    the last one is the attempt now in force.
+    """
+
+    ref = snapshot.verifier_refs[-1] if snapshot.verifier_refs else ""
+    if not ref:
+        return None
+    try:
+        with (repo / ref).open(encoding="utf-8", errors="replace") as handle:
+            text = handle.read(REPORT_READ_CHARS)
+    except OSError:
+        return VerifierReport(ref=ref, unreadable=True)
+    return parse_report(text, ref=ref)
+
+
+def scan_envelope(events: tuple[LogEvent, ...]) -> Envelope | None:
+    """The newest verdict envelope in one slice of the log, if it holds one."""
+
+    latest: Envelope | None = None
+    for event in events:
+        payload = event.payload
+        if event.kind != VERDICT_EVENT_KIND or not isinstance(payload, dict):
+            continue
+        latest = Envelope(
+            decision=str(payload.get("decision", "") or "unknown"),
+            candidate_hash=str(payload.get("candidate_hash", "") or ""),
+            reason=str(payload.get("reason", "") or ""),
+            at=event.at,
+        )
+    return latest
+
+
+def read_verdict(
+    repo: Path, snapshot: RunSnapshot, previous: VerdictState | None = None
+) -> VerdictState:
+    """Everything the verdict region needs, read from disk. Writes nothing.
+
+    Kept out of `frame`, which stays a pure function of what it is given, so
+    the renderer is testable without a repository and the reads happen once per
+    tick rather than once per region.
+    """
+
+    repo = Path(repo)
+    carried = (
+        previous.envelope
+        if previous is not None and previous.log_path == snapshot.log_path
+        else None
+    )
+    envelope = scan_envelope(snapshot.events) or carried
+
+    path = packet_path(repo, snapshot)
+    packet = read_packet(path) if path is not None else None
+    criteria = packet_criteria(packet) if packet is not None else ()
+    # Only a packet that is present and names nothing is a readiness failure. A
+    # packet that is simply not on disk is an absence, and the region says which.
+    readiness = criteria_defect(packet) if packet is not None and not criteria else ""
+
+    return VerdictState(
+        criteria=criteria,
+        readiness=readiness,
+        report=read_report(repo, snapshot),
+        envelope=envelope,
+        log_path=snapshot.log_path,
+        candidate_hash=snapshot.candidate_hash,
+    )
+
+
+def criterion_rows(state: VerdictState) -> tuple[Criterion, ...]:
+    """Every criterion to render: the packet's, in its order, then any extras.
+
+    A packet criterion no report has covered is not-yet-reached rather than
+    failing — before any report exists that is every one of them — and an
+    identifier only the verdict named is kept rather than dropped.
+    """
+
+    reported = state.report.criteria if state.report is not None else ()
+    by_id = {item.id.upper(): item for item in reported}
+    rows = [
+        replace(by_id[name.upper()], id=name)
+        if name.upper() in by_id
+        else Criterion(id=name, status=NOT_REACHED)
+        for name in state.criteria
+    ]
+    known = {name.upper() for name in state.criteria}
+    rows.extend(
+        replace(item, in_packet=False)
+        for item in reported
+        if item.id.upper() not in known
+    )
+    return tuple(rows)
+
+
+def criteria_mismatch(state: VerdictState) -> str:
+    """Both sides of a criterion-identifier mismatch, named rather than dropped.
+
+    The verdict validator already treats a mismatch as a real condition — fatal
+    on a pass, recorded on a fail — so the panel reports it as one instead of
+    quietly rendering whichever set it happened to have.
+    """
+
+    if state.report is None or not state.criteria:
+        return ""
+    reported = {item.id.upper() for item in state.report.criteria}
+    known = {name.upper() for name in state.criteria}
+    unexpected = tuple(
+        dict.fromkeys(
+            item.id for item in state.report.criteria if item.id.upper() not in known
+        )
+    )
+    missing = tuple(name for name in state.criteria if name.upper() not in reported)
+    parts = []
+    if unexpected:
+        parts.append(f"not in the issue packet: {', '.join(unexpected)}")
+    if missing:
+        parts.append(f"missing from the verdict: {', '.join(missing)}")
+    return f"id mismatch - {'; '.join(parts)}" if parts else ""
+
+
+def short(digest: str, width: int = 12) -> str:
+    """A candidate hash at the length the journal and reports print it."""
+
+    return digest[:width] if digest else "unknown"
+
+
+def stale_against(digest: str, current: str) -> bool:
+    """Whether `digest` names a candidate other than the one in flight."""
+
+    return bool(digest) and bool(current) and digest != current
+
+
+def decision_line(state: VerdictState) -> str:
+    """The overall decision, or pending until an envelope says otherwise."""
+
+    envelope = state.envelope
+    if envelope is None:
+        return VERDICT_PENDING
+    line = f"decision {envelope.decision}"
+    if stale_against(envelope.candidate_hash, state.candidate_hash):
+        line += (
+            f"   stale - judged {short(envelope.candidate_hash)}, "
+            f"current {short(state.candidate_hash)}"
+        )
+    elif envelope.candidate_hash:
+        line += f"   candidate {short(envelope.candidate_hash)}"
+    return line
+
+
+def report_line(state: VerdictState) -> str:
+    """Which report the statuses came from, and whether it is the current one."""
+
+    report = state.report
+    if report is None:
+        return NO_REPORT
+    if report.unreadable:
+        return f"report {report.ref} could not be read"
+    line = f"report {report.ref}"
+    if report.attempt:
+        line += f"   attempt {report.attempt}"
+    if stale_against(report.candidate_hash, state.candidate_hash):
+        line += f"   stale - judged {short(report.candidate_hash)}"
+    if report.elided:
+        line += f"   ({report.elided} criteria summarised by the report)"
+    return line
+
+
+def criterion_line(row: Criterion) -> str:
+    """One matrix row: identifier, status, and the evidence behind it."""
+
+    line = f"{row.id:<{_ID_WIDTH}}{row.status:<{_STATUS_WIDTH}}"
+    if not row.in_packet:
+        line += "not in packet   "
+    return (line + clip(row.evidence, CRITERION_TEXT_CHARS)).rstrip()
+
+
+def verdict_panel(
+    snapshot: RunSnapshot, state: VerdictState, *, limit: int = CRITERION_ROWS
+) -> str:
+    """The verdict region: every criterion, its outcome, and the decision.
+
+    Criteria are listed from the packet rather than from the verdict, so an
+    operator watching a seven-criterion issue can see that four are still
+    outstanding instead of only what has already been reported.
+    """
+
+    # No journal, no packet and no envelope is a repository with nothing to
+    # judge. A replayed run whose journal is gone still has its log, and the
+    # decision in it is the one thing worth reading, so that is not idle.
+    if snapshot.idle and not state.criteria and state.envelope is None:
+        return VERDICT_IDLE
+    lines = [decision_line(state)]
+    if state.envelope is not None and state.envelope.reason:
+        lines.append(clip(state.envelope.reason))
+    lines.append(report_line(state))
+    if not state.criteria:
+        lines.append(state.readiness or NO_PACKET)
+        return "\n".join(lines)
+    mismatch = criteria_mismatch(state)
+    if mismatch:
+        lines.append(mismatch)
+    rows = criterion_rows(state)
+    lines.extend(criterion_line(row) for row in rows[:limit])
+    if len(rows) > limit:
+        lines.append(f"({len(rows) - limit} more criteria not shown)")
+    return "\n".join(lines)
+
+
+def verdict_region_state(state: VerdictState | None) -> str:
+    """Colour for the verdict region: failure, attention, or nothing yet."""
+
+    if state is None:
+        return "state-idle"
+    if state.readiness or (state.report is not None and state.report.unreadable):
+        return "state-failed"
+    decision = state.envelope.decision.lower() if state.envelope is not None else ""
+    if decision in ("fail", "rejected"):
+        return "state-failed"
+    if any(row.status == STATUS_FAIL for row in criterion_rows(state)):
+        return "state-failed"
+    if criteria_mismatch(state):
+        return "state-ended"
+    if decision == STATUS_PASS:
+        stale = state.envelope is not None and stale_against(
+            state.envelope.candidate_hash, state.candidate_hash
+        )
+        return "state-ended" if stale else "state-live"
+    return "state-idle"
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def outcome_line(snapshot: RunSnapshot) -> str:
     """How the run ended and at which phase, in the operator's words.
 
@@ -384,7 +882,9 @@ def header_line(snapshot: RunSnapshot, replay: ReplaySource | None = None) -> st
     return line
 
 
-def region_state(key: str, snapshot: RunSnapshot) -> str:
+def region_state(
+    key: str, snapshot: RunSnapshot, verdict: VerdictState | None = None
+) -> str:
     """The state class for one region; colour carries meaning, not decoration."""
 
     if key == "header":
@@ -393,6 +893,8 @@ def region_state(key: str, snapshot: RunSnapshot) -> str:
         return "state-ended" if snapshot.terminal else "state-live"
     if key == "warnings" and snapshot.warnings:
         return "state-failed"
+    if key == "verdict":
+        return verdict_region_state(verdict)
     return "state-idle"
 
 
@@ -402,22 +904,29 @@ def frame(
     *,
     width: int = PULSE_WIDTH,
     replay: ReplaySource | None = None,
+    verdict: VerdictState | None = None,
 ) -> Frame:
     """Build the frame for `snapshot` at `tick`. Pure: reads nothing, writes nothing.
 
     Replay builds the same frame from the same snapshot; only the header names
     its source. One renderer means a finished run is explained exactly as the
     live run was, and there is a single path to keep correct.
+
+    The verdict state is passed in rather than read here, because it comes from
+    artifacts on disk and this stays a pure function of what it is handed.
     """
 
+    state = verdict if verdict is not None else VerdictState()
     return Frame(
         header=header_line(snapshot, replay),
         current_action=PLACEHOLDER,
         candidate=PLACEHOLDER,
-        verdict=PLACEHOLDER,
+        verdict=verdict_panel(snapshot, state),
         warnings=warnings_panel(snapshot),
         pulse=pulse_line(snapshot, tick, width=width),
-        states=tuple((spec.key, region_state(spec.key, snapshot)) for spec in REGIONS),
+        states=tuple(
+            (spec.key, region_state(spec.key, snapshot, state)) for spec in REGIONS
+        ),
     )
 
 
@@ -493,8 +1002,13 @@ class DashboardApp(App[None]):
         #: existed; replay only pins which log the same reader follows.
         self.replay = replay
         self.snapshot = RunSnapshot()
+        #: Carried between ticks: the log tail is incremental, and an envelope
+        #: is logged once, so the decision has to outlive the slice it arrived in.
+        self.verdict = VerdictState()
         self.tick = 0
-        self.last_frame = frame(self.snapshot, self.tick, replay=replay)
+        self.last_frame = frame(
+            self.snapshot, self.tick, replay=replay, verdict=self.verdict
+        )
 
     def compose(self) -> ComposeResult:
         yield Region(REGIONS[0])
@@ -525,8 +1039,11 @@ class DashboardApp(App[None]):
             )
         except OSError:
             pass
+        self.verdict = read_verdict(self.repo, self.snapshot, previous=self.verdict)
         self.tick += 1
-        self.last_frame = frame(self.snapshot, self.tick, replay=self.replay)
+        self.last_frame = frame(
+            self.snapshot, self.tick, replay=self.replay, verdict=self.verdict
+        )
         return self.last_frame
 
     def refresh_run(self) -> None:
