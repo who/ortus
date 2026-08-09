@@ -141,6 +141,204 @@ def test_pass_verdict_mismatch_is_fatal(criteria: list[dict[str, str]]) -> None:
         )
 
 
+def test_criterion_extra_key_is_named_and_no_key_is_claimed_missing() -> None:
+    """AC-1: the observed failure — all three keys present, one key too many.
+
+    The old wording said the criterion needed the fields it already carried, so
+    a correction attempt re-emitted the identical shape three times over. The
+    message is asserted verbatim-ish because an unactionable diagnosis is
+    exactly the defect, and only reading the text can pin it.
+    """
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[
+                    {
+                        "id": "AC-1",
+                        "status": "pass",
+                        "evidence": "covered",
+                        "verdict": "pass",
+                    }
+                ]
+            ),
+            HASH,
+        )
+    message = str(excinfo.value)
+    assert 'unexpected keys: "verdict"' in message
+    assert "missing keys: none" in message
+    assert "\n" not in message
+
+
+def test_criterion_missing_key_is_named() -> None:
+    """AC-2: a genuinely absent key is still rejected, and named."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(criteria=[{"id": "AC-1", "status": "pass"}]), HASH
+        )
+    message = str(excinfo.value)
+    assert 'missing keys: "evidence"' in message
+    assert "unexpected keys: none" in message
+
+
+def test_criterion_missing_and_extra_keys_are_reported_separately() -> None:
+    """Opposite corrections, so conflating them is what made the message useless."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[{"id": "AC-1", "status": "pass", "verdict": "pass"}]
+            ),
+            HASH,
+        )
+    message = str(excinfo.value)
+    assert 'missing keys: "evidence"' in message
+    assert 'unexpected keys: "verdict"' in message
+
+
+def test_criterion_fault_is_located_by_position_and_id() -> None:
+    """AC-3: with eight criteria the author has to know which one to fix."""
+
+    criteria = [
+        {"id": f"AC-{index}", "status": "pass", "evidence": "covered"}
+        for index in range(1, 9)
+    ]
+    criteria[5]["verdict"] = "pass"
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(valid_payload(criteria=criteria), HASH)
+
+    assert "criterion 6 (id AC-6)" in str(excinfo.value)
+
+
+def test_criterion_fault_is_located_by_position_without_an_id() -> None:
+    """An unidentifiable criterion is still findable by where it sits."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[
+                    {"id": "AC-1", "status": "pass", "evidence": "covered"},
+                    {"status": "pass", "evidence": "covered"},
+                ]
+            ),
+            HASH,
+        )
+    message = str(excinfo.value)
+    assert message.startswith("criterion 2:")
+    assert 'missing keys: "id"' in message
+
+
+def test_criterion_bad_status_is_named_with_its_value() -> None:
+    """AC-4: `passed` for `pass` must say so rather than assert malformedness."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[{"id": "AC-1", "status": "passed", "evidence": "covered"}]
+            ),
+            HASH,
+        )
+    message = str(excinfo.value)
+    assert "criterion 1 (id AC-1)" in message
+    assert "status must be pass or fail" in message
+    assert '"passed"' in message
+
+
+def test_criterion_bad_status_is_named_when_it_is_not_even_a_string() -> None:
+    """An unhashable status must reject the verdict, not crash the run."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[{"id": "AC-1", "status": ["pass"], "evidence": "covered"}]
+            ),
+            HASH,
+        )
+    message = str(excinfo.value)
+    assert "status must be pass or fail" in message
+    assert '["pass"]' in message
+
+
+@pytest.mark.parametrize("field", ["id", "evidence"])
+def test_criterion_bad_value_names_the_field_and_value(field: str) -> None:
+    criterion = {"id": "AC-1", "status": "pass", "evidence": "covered"}
+    criterion[field] = "   "
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(valid_payload(criteria=[criterion]), HASH)
+    message = str(excinfo.value)
+    assert f"{field} must be a non-empty string" in message
+    assert '"   "' in message
+
+
+def test_non_object_criterion_is_reported_as_such() -> None:
+    """Not a key problem — say what it actually is."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(valid_payload(criteria=["AC-1 passed"]), HASH)
+
+    assert "criterion 1 must be a JSON object, got str" in str(excinfo.value)
+
+
+def test_key_differing_by_case_or_whitespace_is_reported_as_unexpected() -> None:
+    """Quoting is what makes ` id` legible as different from `id`."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[{" id": "AC-1", "Status": "pass", "evidence": "covered"}]
+            ),
+            HASH,
+        )
+    message = str(excinfo.value)
+    assert '" id"' in message
+    assert '"Status"' in message
+    assert '"id", "status"' in message
+
+
+def test_criterion_diagnostic_stays_bounded_and_single_line() -> None:
+    """A pathological payload must not emit a message nothing can carry."""
+
+    criterion = {"id": "AC-1", "status": "pass", "evidence": "covered"}
+    criterion.update({f"stray-{index}": "x" for index in range(200)})
+    criterion["huge\nkey"] = "x"
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(valid_payload(criteria=[criterion]), HASH)
+    message = str(excinfo.value)
+    assert "\n" not in message
+    assert len(message) < 400
+    assert "and 195 more" in message
+
+
+def test_rejection_report_carries_the_criterion_diagnostic_verbatim() -> None:
+    """Step 5: a precise message that never reaches the author fixes nothing."""
+
+    with pytest.raises(VerdictError) as excinfo:
+        validate_verdict(
+            valid_payload(
+                criteria=[
+                    {
+                        "id": "AC-1",
+                        "status": "pass",
+                        "evidence": "covered",
+                        "verdict": "pass",
+                    }
+                ]
+            ),
+            HASH,
+        )
+    failure = str(excinfo.value)
+    report = render_rejection_report(
+        issue_id="repo-1",
+        candidate_hash=HASH,
+        failure=failure,
+        expected_criteria=("AC-1",),
+    )
+
+    assert failure in report
+    assert len(report) <= MAX_REPORT_CHARS
+
+
 def test_mismatch_names_ids() -> None:
     """AC-2: the operator must not have to diff the sets by hand."""
     with pytest.raises(VerdictError) as excinfo:

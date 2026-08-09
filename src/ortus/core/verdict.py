@@ -23,6 +23,14 @@ _TRUNCATION_MARKER = (
 _SECRET = re.compile(
     r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)([^\r\n]+)"
 )
+#: The exact key set one criterion carries, in the order a diagnostic names them.
+CRITERION_KEYS = ("id", "status", "evidence")
+#: Longest single key or value a criterion diagnostic spells out. Payload strings
+#: are unbounded and the message has to stay one readable line.
+_MAX_NAMED_CHARS = 60
+#: Most keys one diagnostic enumerates before summarising the remainder. A
+#: criterion carrying hundreds of stray keys still yields a bounded message.
+_MAX_NAMED_KEYS = 6
 
 
 class VerdictError(ValueError):
@@ -82,6 +90,46 @@ def _named_ids(values: tuple[str, ...]) -> str:
     return ", ".join(values) if values else "none"
 
 
+def _quoted(value: Any) -> str:
+    """One JSON-quoted, length-bounded token safe for a single-line message.
+
+    JSON quoting is what makes a key differing only by case or surrounding
+    whitespace legible: `" id"` and `"id"` read as different keys, and any
+    newline inside a payload string comes back escaped rather than breaking the
+    message across lines.
+    """
+
+    try:
+        text = json.dumps(value)
+    except (TypeError, ValueError):
+        text = json.dumps(str(value))
+    if len(text) > _MAX_NAMED_CHARS:
+        text = text[:_MAX_NAMED_CHARS] + "…"
+    return text
+
+
+def _named_keys(keys: Iterable[str]) -> str:
+    values = tuple(keys)
+    if not values:
+        return "none"
+    shown = ", ".join(_quoted(key) for key in values[:_MAX_NAMED_KEYS])
+    elided = len(values) - _MAX_NAMED_KEYS
+    return f"{shown} and {elided} more" if elided > 0 else shown
+
+
+def _criterion_label(position: int, item: dict[str, Any]) -> str:
+    """Locate one criterion by position, and by id when it carries a usable one.
+
+    Position alone is enough to find the row in an eight-criterion payload; the
+    id is added because that is what the author actually recognises.
+    """
+
+    identifier = item.get("id")
+    if isinstance(identifier, str) and identifier.strip():
+        return f"criterion {position} (id {identifier.strip()})"
+    return f"criterion {position}"
+
+
 def _collapse_duplicates(criteria: list[dict[str, str]]) -> list[dict[str, str]]:
     """Keep one row per criterion id, preferring the failing report.
 
@@ -131,14 +179,41 @@ def validate_verdict(
     if not isinstance(raw_criteria, list) or not raw_criteria:
         raise VerdictError("criteria must be a non-empty array")
     criteria: list[dict[str, str]] = []
-    for item in raw_criteria:
-        if not isinstance(item, dict) or set(item) != {"id", "status", "evidence"}:
-            raise VerdictError("each criterion needs id, status, and evidence")
-        if item["status"] not in {"pass", "fail"} or not all(
-            isinstance(item[key], str) and item[key].strip()
-            for key in ("id", "evidence")
-        ):
-            raise VerdictError("criterion values are malformed")
+    # Every rejection below names the criterion and the exact defect. The schema
+    # stays strict — an unknown key may be where the model put its real decision,
+    # so accepting it silently could close an issue on a status nobody meant —
+    # but a correction cannot converge on a diagnosis that reports missing fields
+    # the payload already carries, so missing and unexpected keys are reported
+    # separately: they call for opposite corrections.
+    for position, item in enumerate(raw_criteria, start=1):
+        if not isinstance(item, dict):
+            raise VerdictError(
+                f"criterion {position} must be a JSON object, got "
+                f"{type(item).__name__}"
+            )
+        label = _criterion_label(position, item)
+        missing_keys = tuple(key for key in CRITERION_KEYS if key not in item)
+        unexpected_keys = tuple(key for key in item if key not in CRITERION_KEYS)
+        if missing_keys or unexpected_keys:
+            raise VerdictError(
+                f"{label}: missing keys: {_named_keys(missing_keys)}; "
+                f"unexpected keys: {_named_keys(unexpected_keys)}; "
+                "a criterion carries exactly id, status, and evidence"
+            )
+        status = item["status"]
+        # isinstance first: a non-string status is a set-membership TypeError,
+        # which would leave the verification path as something other than a
+        # VerdictError and take the run down instead of rejecting the verdict.
+        if not isinstance(status, str) or status not in {"pass", "fail"}:
+            raise VerdictError(
+                f"{label}: status must be pass or fail, got {_quoted(status)}"
+            )
+        for key in ("id", "evidence"):
+            if not isinstance(item[key], str) or not item[key].strip():
+                raise VerdictError(
+                    f"{label}: {key} must be a non-empty string, got "
+                    f"{_quoted(item[key])}"
+                )
         criteria.append({key: item[key].strip() for key in item})
     expected_ids = tuple(expected_criteria)
     actual_ids = tuple(item["id"] for item in criteria)
