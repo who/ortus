@@ -10,11 +10,17 @@ generated .bat wrapper). See ortus-f4bu.
 
 from __future__ import annotations
 
+import atexit
+import hashlib
+import json
 import os
 import re
 import signal
 import shutil
 import subprocess
+import tempfile
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -371,90 +377,288 @@ def claude_mock() -> Callable[[str], Path]:
     return _resolve
 
 
+# ---------------------------------------------------------------------------
+# bd workspace templates (ortus-apmf).
+#
+# Every `bd` call is a fresh Go process opening a Dolt database, so `bd init`
+# measures ~1.6s and `bd create` ~1.2s where git doing comparable filesystem
+# work measures 2-3ms. Paying that per test put the grind-family suite on a
+# flat multi-second setup floor before a single assertion ran. Instead the
+# session pays one `bd init`, bakes the fixture issues into a few template
+# workspaces, and each test acquires its workspace by copying the template it
+# needs — measured at ~25ms including the re-rooting below.
+#
+# Copies rather than one shared workspace: grind tests mutate issue state, so
+# sharing would couple them, and at 25ms isolation is effectively free.
+# ---------------------------------------------------------------------------
+
+BD_TEMPLATE_PREFIX = "tmpl"
+
+
+@dataclass(frozen=True)
+class BdWorkspace:
+    """A bd workspace and the ids of the issues baked into it."""
+
+    path: Path
+    issues: tuple[str, ...]
+
+
+_TEMPLATES: dict[str, BdWorkspace] = {}
+_TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {}
+_bd_init_calls = 0
+
+
+def bd_init_calls() -> int:
+    """How many times this session has run `bd init` to build a template.
+
+    Per process, so under `-n auto` each xdist worker builds its own templates
+    and pays its own single init — a handful of inits per run rather than one
+    per test, which is the saving either way.
+    """
+    return _bd_init_calls
+
+
+@lru_cache(maxsize=1)
+def _templates_root() -> Path:
+    """A session-lifetime directory holding the template workspaces.
+
+    Deliberately not `tmp_path_factory`: `copy_bd_workspace` is called from
+    plain module-level helpers in the test modules, which have no fixture to
+    request. `atexit` removes the tree even when pytest exits on a signal.
+    """
+    root = Path(tempfile.mkdtemp(prefix="ortus-bd-templates-"))
+    atexit.register(shutil.rmtree, root, True)
+    return root
+
+
+def _bd(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["bd", *args], cwd=str(cwd), check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+def _build_bare(path: Path) -> tuple[str, ...]:
+    """The one `bd init` this session performs, plus the setup every test shares."""
+    global _bd_init_calls
+    _bd_init_calls += 1
+    _bd(path, "init", "--non-interactive", "--prefix", BD_TEMPLATE_PREFIX)
+    # `bd init` lands the incidental git repo on `master`; grind's branch guard
+    # (ortus-6fu6) pins to the `main` integration branch. Normalized here rather
+    # than at the copy so every copy inherits an already-correct branch.
+    normalize_git_branch(path)
+    # Ortus finalizes a verified candidate with a real `git commit`, which
+    # aborts without an author identity — and `neutralized_git_identity` hides
+    # the operator's global one from every test, exactly as a runner would.
+    _git(path, "config", "user.email", "ortus-tests@example.invalid")
+    _git(path, "config", "user.name", "Ortus Tests")
+    # grind refuses to spawn a worker unless bd is excluded from the sandbox.
+    # This overwrites the hook settings `bd init` writes, which is what every
+    # grind fixture did by hand before.
+    settings = path / ".claude" / "settings.json"
+    settings.parent.mkdir(exist_ok=True)
+    settings.write_text(
+        json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}), encoding="utf-8"
+    )
+    return ()
+
+
+def _build_leaf(path: Path) -> tuple[str, ...]:
+    """One ready, executable leaf — the shape most grind tests drive."""
+    return (
+        _bd(
+            path,
+            "create",
+            "--silent",
+            "--title",
+            "ready leaf",
+            "--type",
+            "task",
+            "--priority",
+            "1",
+            *ready_issue_args(),
+        ),
+    )
+
+
+def _build_epic(path: Path) -> tuple[str, ...]:
+    """1 epic + 2 children, one ready and one blocked behind it."""
+    common = ("create", "--silent", "--type")
+    epic = _bd(path, *common, "epic", "--title", "Test epic", "--priority", "1")
+    children = [
+        _bd(
+            path,
+            *common,
+            "task",
+            "--title",
+            title,
+            "--priority",
+            "2",
+            "--parent",
+            epic,
+            *ready_issue_args(),
+        )
+        for title in ("Child ready", "Child blocked")
+    ]
+    ready, blocked = children
+    # `blocked` waits on `ready` being closed first.
+    _bd(path, "dep", "add", blocked, ready)
+    return (epic, ready, blocked)
+
+
+_TEMPLATE_BUILDERS: dict[str, Callable[[Path], tuple[str, ...]]] = {
+    "bare": _build_bare,
+    "leaf": _build_leaf,
+    "epic": _build_epic,
+}
+
+
+def bd_template(kind: str = "bare") -> BdWorkspace:
+    """Return this session's `kind` template workspace, building it once.
+
+    Never hand the returned path to a test: it is the master that copies are
+    made from. Call `copy_bd_workspace` (or use the `bd_workspace` fixture).
+    """
+    if kind not in _TEMPLATE_BUILDERS:
+        raise ValueError(
+            f"unknown bd template kind {kind!r}; have {sorted(_TEMPLATE_BUILDERS)}"
+        )
+    cached = _TEMPLATES.get(kind)
+    if cached is not None:
+        return cached
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    path = _templates_root() / kind
+    if kind == "bare":
+        path.mkdir(parents=True)
+        issues = _build_bare(path)
+    else:
+        # Seeded kinds copy the bare template instead of re-running `bd init`,
+        # so the session pays exactly one init however many kinds it uses.
+        _copy_workspace(bd_template("bare").path, path)
+        issues = _TEMPLATE_BUILDERS[kind](path)
+    template = BdWorkspace(path, issues)
+    _TEMPLATES[kind] = template
+    _TEMPLATE_DIGESTS[kind] = _digests(path)
+    return template
+
+
+def copy_bd_workspace(dest: Path, kind: str = "bare") -> BdWorkspace:
+    """Copy the `kind` template workspace to `dest` and return the copy.
+
+    This is how a test acquires a bd workspace: ~25ms against ~1.6s for
+    `bd init`. `dest` must not exist yet; rooting it in the test's own
+    `tmp_path` is what keeps two xdist workers off the same destination.
+    """
+    template = bd_template(kind)
+    _assert_template_pristine(kind)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _copy_workspace(template.path, dest)
+    return BdWorkspace(dest, template.issues)
+
+
+def _copy_workspace(template: Path, dest: Path) -> None:
+    """Copy a workspace and prove the copy stands on its own.
+
+    The one absolute path `bd init` writes into a workspace is git's
+    `core.hooksPath`, aimed at `<workspace>/.beads/hooks`. A plain copy would
+    therefore run — and let git write through — the *template's* hooks, so it
+    is re-rooted onto the copy. The scan that follows then proves no other
+    reference survived, rather than assuming bd stores no path elsewhere.
+    """
+    shutil.copytree(template, dest, symlinks=True)
+    _git(dest, "config", "core.hooksPath", str(dest / ".beads" / "hooks"))
+    leaked = _template_path_references(template, dest)
+    if leaked:
+        raise AssertionError(
+            f"the bd workspace copied to {dest} still points at its template "
+            f"{template} from {leaked}. Such a copy is not isolated. Re-root the "
+            f"new reference here; do NOT fall back to a per-test `bd init`, which "
+            f"would silently restore the cost this harness exists to remove."
+        )
+
+
+def _template_path_references(template: Path, dest: Path) -> list[str]:
+    """Files under `dest` whose bytes still contain the template's own path.
+
+    Scanned as bytes over the whole tree, including the embedded Dolt database,
+    rather than over a hand-listed set of config files — a path stored somewhere
+    unanticipated is then detected instead of assumed absent.
+    """
+    needle = str(template).encode()
+    return [
+        str(path.relative_to(dest))
+        for path in sorted(dest.rglob("*"))
+        if path.is_file() and not path.is_symlink() and needle in path.read_bytes()
+    ]
+
+
+def _digests(path: Path) -> dict[str, str]:
+    return {
+        str(child.relative_to(path)): hashlib.sha256(child.read_bytes()).hexdigest()
+        for child in sorted(path.rglob("*"))
+        if child.is_file() and not child.is_symlink()
+    }
+
+
+def _assert_template_pristine(kind: str) -> None:
+    """Fail at the next acquisition if a test wrote into a template.
+
+    Content digests rather than size and mtime, so an in-place edit that
+    preserves both is still caught. The copy direction has to be enforced:
+    a mutated template silently changes every later test's starting state.
+    """
+    current = _digests(_TEMPLATES[kind].path)
+    expected = _TEMPLATE_DIGESTS[kind]
+    if current == expected:
+        return
+    changed = sorted(
+        set(current).symmetric_difference(expected)
+        | {name for name, digest in current.items() if expected.get(name) != digest}
+    )
+    raise AssertionError(
+        f"the {kind!r} bd template was modified after it was built: {changed}. "
+        f"Templates are read-only masters — write only into the copy that "
+        f"`copy_bd_workspace` returns."
+    )
+
+
+@pytest.fixture(scope="session")
+def bd_template_bare() -> BdWorkspace:
+    return bd_template("bare")
+
+
+@pytest.fixture(scope="session")
+def bd_template_leaf() -> BdWorkspace:
+    return bd_template("leaf")
+
+
+@pytest.fixture(scope="session")
+def bd_template_epic() -> BdWorkspace:
+    return bd_template("epic")
+
+
+@pytest.fixture()
+def bd_workspace(tmp_path: Path) -> Callable[..., BdWorkspace]:
+    """Factory for a per-test bd workspace: `bd_workspace("repo", "leaf")`.
+
+    Destination first, matching `copy_bd_workspace`; the difference is that
+    this one names a directory under the test's `tmp_path` instead of a path.
+    """
+
+    def _make(name: str = "repo", kind: str = "bare") -> BdWorkspace:
+        return copy_bd_workspace(tmp_path / name, kind)
+
+    return _make
+
+
 @pytest.fixture()
 def seeded_3_issues(tmp_path: Path) -> Path:
-    """A fresh bd workspace with 1 epic + 2 children (1 ready, 1 blocked).
+    """A bd workspace with 1 epic + 2 children (1 ready, 1 blocked).
 
     Returns the repo root.
     """
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "seeded"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "seed"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    # `bd init` lands the incidental git repo on `master`; grind's branch guard
-    # (ortus-6fu6) pins to the `main` integration branch, so align the fixture.
-    normalize_git_branch(repo)
-    # Epic
-    epic = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "Test epic",
-            "--type",
-            "epic",
-            "--priority",
-            "1",
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    # Ready child
-    ready = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "Child ready",
-            "--type",
-            "task",
-            "--priority",
-            "2",
-            "--parent",
-            epic,
-            *ready_issue_args(),
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    # Blocked child (depends on the ready one being closed first)
-    blocked = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "Child blocked",
-            "--type",
-            "task",
-            "--priority",
-            "2",
-            "--parent",
-            epic,
-            *ready_issue_args(),
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    # Make `blocked` depend on `ready` (ready blocks blocked).
-    subprocess.run(
-        ["bd", "dep", "add", blocked, ready],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    return repo
+    return copy_bd_workspace(tmp_path / "seeded", "epic").path

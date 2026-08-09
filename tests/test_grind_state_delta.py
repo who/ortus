@@ -22,7 +22,6 @@ where a claim goes unclosed, now belongs to the legacy `--condition` path.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -36,7 +35,8 @@ from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
-from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
+from tests._shims import make_inline_python_shim, ready_issue_args
+from tests.conftest import copy_bd_workspace
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -50,19 +50,15 @@ def _stub_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _seed_repo(tmp_path: Path, n_issues: int = 1) -> Path:
-    """A bd-initialized repo with `n_issues` ready tasks and an enabled .claude."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "sdt"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
-    for i in range(n_issues):
+    """A bd repo with `n_issues` ready tasks and an enabled .claude.
+
+    The first task comes baked into the `leaf` template, so a one-issue repo
+    costs a ~25ms copy instead of a `bd init` plus a `bd create` (ortus-apmf).
+    Only the extras beyond it are created here.
+    """
+    assert n_issues >= 1, "the leaf template always carries one ready task"
+    repo = copy_bd_workspace(tmp_path / "repo", "leaf").path
+    for i in range(1, n_issues):
         subprocess.run(
             [
                 "bd",
@@ -80,20 +76,6 @@ def _seed_repo(tmp_path: Path, n_issues: int = 1) -> Path:
             check=True,
             capture_output=True,
         )
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
-    # Ortus finalizes a verified candidate with a real `git commit`, which
-    # aborts without an author identity. Runners have no global one, so the
-    # fixture states its own rather than inheriting a developer machine's.
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=str(repo),
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Ortus Tests"], cwd=str(repo), check=True
-    )
     return repo
 
 
@@ -333,17 +315,7 @@ def test_human_only_queue_treated_as_drained_without_spawn(
 ) -> None:
     """ortus-9db5: when every remaining issue is labeled `human`, the
     orchestrator must treat the queue as drained instead of spinning."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "human-only"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "hu"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = copy_bd_workspace(tmp_path / "human-only", "bare").path
     # Seed two issues, label both `human` so nothing is agent-claimable.
     for i in range(2):
         new_id = subprocess.run(
@@ -366,9 +338,6 @@ def test_human_only_queue_treated_as_drained_without_spawn(
             text=True,
         ).stdout.strip()
         assert new_id  # sanity
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
 
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
@@ -398,20 +367,7 @@ def test_queue_drained_exits_outer_loop_without_spawn(
 ) -> None:
     """Acceptance #6: when bd shows zero open + zero in_progress at startup,
     the outer loop never spawns claude."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "empty-queue"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "eq"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    repo = copy_bd_workspace(tmp_path / "empty-queue", "bare").path
 
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)

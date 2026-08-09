@@ -15,7 +15,6 @@ between commit and push) are exactly the ones a happy-path test can't reach.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -33,7 +32,8 @@ from ortus.core.transaction import (
     JournalStore,
     candidate_diff,
 )
-from tests._shims import normalize_git_branch, ready_issue_args
+from tests._shims import ready_issue_args
+from tests.conftest import copy_bd_workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
@@ -54,49 +54,22 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _seed(tmp_path: Path, prefix: str, *, remote: bool = False) -> tuple[Path, str]:
-    """A bd workspace with a committed git baseline and one ready leaf."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / prefix
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--non-interactive", "--prefix", prefix],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+def _seed(tmp_path: Path, name: str, *, remote: bool = False) -> tuple[Path, str]:
+    """A bd workspace with a committed git baseline and one ready leaf.
+
+    The workspace is a ~25ms copy of the session's `leaf` template rather than
+    a `bd init` plus a `bd create` at roughly a second each (ortus-apmf); the
+    baseline commit stays per-test, since each test mutates its own repo.
+    """
+    workspace = copy_bd_workspace(tmp_path / name, "leaf")
+    repo, issue_id = workspace.path, workspace.issues[0]
     (repo / ".gitignore").write_text(
         "logs/\n.cache/\n.beads/*\n!.beads/issues.jsonl\n!.beads/interactions.jsonl\n"
     )
-    issue_id = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "finalization fixture",
-            "--type",
-            "task",
-            "--priority",
-            "1",
-            *ready_issue_args(),
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    _git(repo, "config", "user.email", "ortus-tests@example.invalid")
-    _git(repo, "config", "user.name", "Ortus Tests")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "fixture baseline")
     if remote:
-        bare = tmp_path / f"{prefix}-origin.git"
+        bare = tmp_path / f"{name}-origin.git"
         subprocess.run(
             ["git", "init", "--bare", str(bare)], check=True, capture_output=True
         )

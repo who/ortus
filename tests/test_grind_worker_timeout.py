@@ -18,7 +18,6 @@ completion cannot satisfy these assertions.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -32,7 +31,8 @@ from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import CandidateJournal, JournalStore
-from tests._shims import make_inline_python_shim, normalize_git_branch, ready_issue_args
+from tests._shims import make_inline_python_shim
+from tests.conftest import copy_bd_workspace
 
 
 # These tests spawn a real subprocess that hangs until the watchdog kills it;
@@ -49,40 +49,14 @@ def _stub_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
-    """Returns (repo, issue_id) — one ready issue."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "worker-timeout"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "wt"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
-    issue_id = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "worker-timeout test",
-            "--type",
-            "task",
-            "--priority",
-            "2",
-            *ready_issue_args(),
-        ],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
-    return repo, issue_id
+    """Returns (repo, issue_id) — one ready issue.
+
+    A ~25ms copy of the session's `leaf` template, which already carries the
+    ready issue and the enabled .claude, rather than a `bd init` plus a
+    `bd create` at roughly a second each (ortus-apmf).
+    """
+    workspace = copy_bd_workspace(tmp_path / "worker-timeout", "leaf")
+    return workspace.path, workspace.issues[0]
 
 
 def _install_shim(monkeypatch: pytest.MonkeyPatch, shim: Path) -> None:

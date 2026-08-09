@@ -23,7 +23,8 @@ from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
 from tests._platform import skip_unless_bwrap_usable
-from tests._shims import make_inline_python_shim, normalize_git_branch, shim_path
+from tests._shims import make_inline_python_shim, shim_path
+from tests.conftest import copy_bd_workspace
 from tests.test_readiness import ready_issue
 
 runner = CliRunner()
@@ -101,30 +102,14 @@ def _create_unready_issue(repo: Path, title: str, *, priority: str = "2") -> str
     ).stdout.strip()
 
 
-def _bd_repo(tmp_path: Path, prefix: str) -> Path:
-    """bd-initialized repo with hooks enabled, ready for a grind invocation."""
-    repo = tmp_path / prefix
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--non-interactive", "--prefix", prefix],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
-    # Ortus finalizes a verified candidate with a real `git commit`, which
-    # aborts without an author identity. Runners have no global one, so the
-    # fixture states its own rather than inheriting a developer machine's.
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
-    return repo
+def _bd_repo(tmp_path: Path, name: str) -> Path:
+    """bd-initialized repo with hooks enabled, ready for a grind invocation.
+
+    A ~25ms copy of the session's bare template rather than a ~1.6s `bd init`
+    (ortus-apmf). The template already carries the `main` branch, the fixture
+    git identity, and the sandbox settings every grind fixture wrote by hand.
+    """
+    return copy_bd_workspace(tmp_path / name, "bare").path
 
 
 def _issue_ids(repo: Path) -> set[str]:
@@ -411,21 +396,8 @@ def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
 def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "profile-routing"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--non-interactive", "--prefix", "route"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = _bd_repo(tmp_path, "profile-routing")
     issue_id = _create_ready_issue(repo, "route profiles")
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
     (repo / ".ortusrc").write_text(
         '[profiles.claude.implement]\nmodel = "sonnet"\n'
         '[profiles.claude.verify]\nmodel = "opus"\n'
@@ -503,28 +475,9 @@ def test_verifier_report_and_mutation_isolation(
     expected_phase: str,
     expected_text: str,
 ) -> None:
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / mutation
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--non-interactive", "--prefix", "ver"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = _bd_repo(tmp_path, mutation)
     issue_id = _create_ready_issue(repo, "verify candidate transaction")
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
     (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(
         ["git", "commit", "-m", "fixture baseline"],
@@ -904,17 +857,7 @@ def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
 def test_codex_rejects_implementation_worker_that_closes_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "codex-loop"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--non-interactive", "--prefix", "cdx"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = _bd_repo(tmp_path, "codex-loop")
     for number in range(3):
         _create_ready_issue(repo, f"task {number}")
     (repo / ".ortusrc").write_text('backend = "codex"\n')
@@ -922,12 +865,6 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
     (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
     with (repo / ".gitignore").open("a") as fh:
         fh.write("\nlogs/\n.cache/\n.beads/ortus.flock\n")
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(
         ["git", "commit", "-m", "test fixture baseline"],
@@ -1058,23 +995,10 @@ def test_grind_runs_fake_claude_and_logs_locally(
     --iterations 1 --idle-sleep 0 so the fake-claude (which doesn't touch
     bd) doesn't trigger an infinite no-change retry.
     """
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "fixture"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "fixtg"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = _bd_repo(tmp_path, "fixture")
     # Seed one ready issue so queue_drained() doesn't short-circuit before
     # claude is spawned.
     _create_ready_issue(repo, "smoke task")
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -1107,22 +1031,9 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
     the worker was handed the specific id the harness claimed — proving the
     worker is TOLD which issue to work rather than choosing/transcribing it.
     """
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "fixture"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "fixth"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = _bd_repo(tmp_path, "fixture")
     issue_id = _create_ready_issue(repo, "inject me", priority="1")
     assert issue_id, "expected bd create to print the new id"
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -1148,26 +1059,13 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
 def test_claude_goal_rejection_restores_claim_and_halts_without_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / "goal-rejection"
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--prefix", "goalrej"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
+    repo = _bd_repo(tmp_path, "goal-rejection")
     issue_id = _create_ready_issue(
         repo,
         "oversized planned issue",
         priority="1",
         extra_description="\n" + "thorough implementation packet " * 300,
     )
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
 
     rejection = "Goal condition is limited to 4000 characters (got 7523)"
     shim = make_inline_python_shim(

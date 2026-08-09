@@ -22,7 +22,6 @@ The controller's contract, in the order the loop applies it:
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -35,7 +34,7 @@ from ortus.core import sandbox as sandbox_mod
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
-from tests._shims import normalize_git_branch, ready_issue_args
+from tests.conftest import copy_bd_workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
@@ -54,49 +53,15 @@ def _fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _seed(tmp_path: Path, prefix: str) -> tuple[Path, str]:
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = tmp_path / prefix
-    repo.mkdir()
-    subprocess.run(
-        ["bd", "init", "--non-interactive", "--prefix", prefix],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    normalize_git_branch(repo)
-    settings = repo / ".claude" / "settings.json"
-    settings.parent.mkdir(exist_ok=True)
-    settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
-    # Ortus finalizes a verified candidate with a real `git commit`, which
-    # aborts without an author identity. Runners have no global one, so the
-    # fixture states its own rather than inheriting a developer machine's.
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
-    issue_id = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "correction fixture",
-            "--type",
-            "task",
-            "--priority",
-            "1",
-            *ready_issue_args(),
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return repo, issue_id
+def _seed(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """A bd workspace with one ready leaf, as a ~25ms template copy.
+
+    The `leaf` template already carries the ready issue, the `main` branch, the
+    fixture git identity, and the enabled .claude, so the whole setup costs a
+    copy instead of a `bd init` plus a `bd create` (ortus-apmf).
+    """
+    workspace = copy_bd_workspace(tmp_path / name, "leaf")
+    return workspace.path, workspace.issues[0]
 
 
 def _issue(repo: Path, issue_id: str) -> dict:

@@ -52,6 +52,50 @@ exempt from the CI budget as before. A test that passes serially but fails
 under `-n auto` is a real finding about a shared resource that test depends
 on: fix or mark it rather than dropping the flag.
 
+## bd workspaces: copy a template, never `bd init`
+
+Every `bd` call is a fresh Go process opening a Dolt database, so `bd init`
+costs about 1.6s and `bd create` about 1.2s where git doing comparable
+filesystem work costs 2-3ms. A test that runs `bd init` therefore starts with a
+multi-second setup floor before its first assertion. Instead `tests/conftest.py`
+runs `bd init` **once per session** into a template workspace, and each test
+copies the template it needs — measured at about 25ms.
+
+```python
+from tests.conftest import copy_bd_workspace
+
+def test_something(tmp_path):
+    workspace = copy_bd_workspace(tmp_path / "repo", "leaf")
+    repo, issue_id = workspace.path, workspace.issues[0]
+```
+
+Three kinds. `bare` is the one that runs `bd init`; the seeded kinds are built
+by copying it, so the session still pays exactly one init however many it uses:
+
+| kind | contents |
+| --- | --- |
+| `bare` | `main` branch, fixture git identity, `.claude/settings.json` with bd excluded from the sandbox, no issues |
+| `leaf` | `bare` plus one ready, executable leaf — `workspace.issues[0]` |
+| `epic` | `bare` plus 1 epic and 2 children, one ready and one blocked |
+
+`copy_bd_workspace(dest, kind)` returns a `BdWorkspace` carrying the copy's
+`path` and the ids baked into it, so a test never re-derives an id it was
+handed. The `bd_workspace` fixture is the same thing rooted at the test's own
+`tmp_path` — `bd_workspace("repo", "leaf")` — which is also what keeps two
+xdist workers off one destination.
+
+Templates are read-only masters: **never write into one.** Take a copy and
+mutate that. The copy step re-roots git's `core.hooksPath` (the one absolute
+path a bd workspace carries) onto the copy and then fails loudly if any other
+reference to the template survived, so a workspace that is not genuinely
+independent is caught at the copy rather than as a puzzling failure later. If a
+copied workspace is ever unusable on a supported platform, record a plan gap:
+falling back to a per-test `bd init` silently restores the cost this removed.
+
+Two kinds of test should still run `bd init` themselves — anything exercising
+`bd init` behaviour, and anything asserting on a specific issue prefix, since
+every template shares one prefix.
+
 Tests must also hold without an ambient global git identity, since a developer
 machine has one and a runner does not. `tests/conftest.py` points
 `GIT_CONFIG_GLOBAL` at an empty file for every test, so a fixture that shells

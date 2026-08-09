@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
-from tests.conftest import ci_gate_command, ci_gate_flags
+from tests import conftest
+from tests.conftest import BdWorkspace, ci_gate_command, ci_gate_flags
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -240,3 +243,116 @@ def test_testing_guide_documents_parallel_split() -> None:
     # eventually "simplify" it by putting `-n auto` in addopts.
     assert "mutually exclusive" in guide
     assert "quiet machine" in guide
+
+
+# ---------------------------------------------------------------------------
+# One `bd init` per session, then copies (ortus-apmf).
+# ---------------------------------------------------------------------------
+
+# The grind-family modules whose workspace builders must not pay for `bd init`.
+_MIGRATED_MODULES = (
+    "tests/conftest.py",
+    "tests/test_grind.py",
+    "tests/test_grind_corrections.py",
+    "tests/test_grind_finalization.py",
+    "tests/test_grind_orphan_policy.py",
+    "tests/test_grind_state_delta.py",
+    "tests/test_grind_worker_timeout.py",
+)
+
+
+def test_template_workspace_initialized_once(
+    bd_template_bare: BdWorkspace, bd_template_leaf: BdWorkspace
+) -> None:
+    """AC-1: two template kinds, still exactly one `bd init` for the session.
+
+    The seeded kinds are built by copying the bare template, so asking for a
+    second kind must not buy a second init — that is the whole saving.
+    """
+    assert conftest.bd_init_calls() == 1, (
+        f"expected one `bd init` per session; saw {conftest.bd_init_calls()}"
+    )
+    assert bd_template_bare.issues == ()
+    assert len(bd_template_leaf.issues) == 1
+    assert bd_template_leaf.path != bd_template_bare.path
+
+
+def test_copied_workspace_is_usable(
+    tmp_path: Path, bd_workspace: Callable[..., BdWorkspace]
+) -> None:
+    """AC-3: a copy lists the baked issues and mints new ids of its own.
+
+    A relocated Dolt database that opened read-only, or one still pointed at
+    the template, would fail exactly here rather than as a confusing failure
+    inside some grind test that assumed its workspace worked.
+    """
+    workspace = conftest.copy_bd_workspace(tmp_path / "copied", "leaf")
+
+    listed = json.loads(
+        subprocess.run(
+            ["bd", "list", "--all", "--json"],
+            cwd=workspace.path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        or "[]"
+    )
+    assert {issue["id"] for issue in listed} == set(workspace.issues)
+
+    minted = subprocess.run(
+        ["bd", "create", "--silent", "--type", "task", "--title", "in the copy"],
+        cwd=workspace.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert minted and minted not in workspace.issues
+
+    # The copy must stand alone: git's hooksPath is the one absolute path a bd
+    # workspace carries, and a copy still aimed at the template would run the
+    # template's hooks and write through to it.
+    hooks_path = subprocess.run(
+        ["git", "config", "core.hooksPath"],
+        cwd=workspace.path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert Path(hooks_path) == workspace.path / ".beads" / "hooks"
+
+    # ...and the template it came from is untouched by all of the above, so a
+    # second copy — here via the fixture form — starts from the same state.
+    second = bd_workspace("second", "leaf")
+    assert second.issues == workspace.issues
+    assert conftest.bd_template("leaf").issues == workspace.issues
+
+
+def test_grind_fixtures_copy_a_template_instead_of_bd_init() -> None:
+    """AC-2: only the template builder may run `bd init` (ortus-apmf).
+
+    `bd init` costs ~1.6s against ~25ms for a copy, so a builder that quietly
+    reintroduces one puts its whole module back on the setup floor this issue
+    removed. Asserted over the source rather than left to a one-off grep.
+    """
+    offenders: dict[str, int] = {}
+    for name in _MIGRATED_MODULES:
+        source = (REPO_ROOT / name).read_text(encoding="utf-8")
+        count = len(re.findall(r'"bd",\s*"init"|"init",\s*"--non-interactive"', source))
+        if count:
+            offenders[name] = count
+
+    # conftest's `_build_bare` is the one fixture that exists to run `bd init`.
+    assert offenders == {"tests/conftest.py": 1}, (
+        f"grind-family workspace builders must copy a template: {offenders}"
+    )
+
+
+def test_testing_guide_documents_template_pattern() -> None:
+    """AC-5: a new test's author has to be able to find the pattern."""
+    guide = TESTING_GUIDE.read_text(encoding="utf-8")
+    assert "copy_bd_workspace" in guide
+    assert "bd_workspace" in guide
+    # The rule and its reason, so the next author copies rather than inits.
+    assert "never write into one" in guide
+    assert "bd init" in guide
