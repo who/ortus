@@ -15,10 +15,26 @@ convention is exactly what a later panel would forget.
 
 This leaf is the shell: the verb, the layout, and the refresh loop. The five
 regions it names — header, current action, candidate, verdict, warnings — are
-filled by their own leaves and carry placeholders here. What the shell does own
-is the pulse: one element that advances on every tick, so a healthy run looks
-alive and a stalled one is obvious by its stillness. An operator once watched a
-silent tail for hours unable to tell progress from death.
+filled by their own leaves. What the shell does own is the pulse: one element
+that advances on every tick, so a healthy run looks alive and a stalled one is
+obvious by its stillness. An operator once watched a silent tail for hours
+unable to tell progress from death.
+
+The current-action region is ortus-0udo.4, and it answers the one question
+`ortus tail` cannot: whether a worker is thinking, blocked on a subprocess, or
+stalled. While a worker waits on a test suite it issues one blocking tool call
+and then nothing, so tail prints nothing for ten or twenty minutes and a healthy
+suite run is indistinguishable from a hang — measured on one turn, 61 percent of
+the elapsed time was spent blocked on tests. The region therefore names the
+latest action, says how long it has been the latest, and marks it as blocked
+rather than thinking once that age passes a threshold, because the age is
+exactly the quantity an operator uses to judge a stall and the log is the only
+signal a read-only observer has. Under it goes the pytest workspace count, which
+is the signal an operator was reduced to watching by hand: it moves while a
+suite runs, so it corroborates that work is happening underneath a silent
+action. It is labelled as evidence rather than drawn as progress, because the
+total is unknown and a temp root shared by two grinds counts both. Nothing here
+parses pytest output or predicts completion.
 
 The verdict region is ortus-0udo.6. Verdicts are the most informative artifact a
 run produces and the least visible: in one session a verifier passed every
@@ -83,9 +99,12 @@ pictograph.
 from __future__ import annotations
 
 import datetime as _dt
+import getpass
 import json
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
@@ -112,8 +131,40 @@ PULSE_WIDTH = 24
 _PULSE_MARK = "█"  # full block
 _PULSE_RULE = "─"  # box-drawing horizontal
 
-#: What a region shows before its own leaf fills it.
-PLACEHOLDER = "panel pending"
+#: How long an action may be the latest before it is called blocked rather than
+#: thinking. A worker issues one tool call and then goes quiet for as long as
+#: the subprocess behind it takes, and heartbeat-only stretches of ten to twenty
+#: minutes are normal, so the boundary sits well above an ordinary turn and well
+#: below the much longer bound at which the warnings region escalates a block.
+BLOCKED_SECONDS = 90.0
+
+#: The two states an action can be in while a run is live, and the third it
+#: takes once the run has ended. Distinct words as well as distinct colour: a
+#: terminal that cannot render the palette must still say which state it is in.
+ACTION_THINKING = "thinking"
+ACTION_BLOCKED = "blocked"
+ACTION_ENDED = "ended"
+#: No transaction is in flight, so there is no action. Said rather than left
+#: showing the last action of a run that has already finished, which is the
+#: stale reading an operator would act on.
+ACTION_IDLE = "idle - no action"
+#: A run in flight whose log has carried no action yet: the worker has started
+#: and not yet done anything the log names.
+NO_ACTION = "no action logged yet"
+#: Longest action text rendered. An action is a tool call with its argument,
+#: which is unbounded, and one long line must not own the region.
+ACTION_TEXT_CHARS = 100
+
+#: Where pytest keeps its temporary workspaces, by default and per user. The
+#: count of what is under it climbs while a suite runs, which is why an operator
+#: with no other signal was reduced to listing it by hand.
+PYTEST_ROOT_PREFIX = "pytest-of-"
+#: How the workspace count is labelled. Evidence, explicitly: the total is
+#: unknown so this is not progress, and a temp root shared by two concurrent
+#: grinds counts both runs rather than this one.
+WORKSPACE_EVIDENCE = (
+    "evidence  pytest workspaces {count}   shared temp root, not this run's progress"
+)
 
 #: How many evidence lines the warnings region shows at once. Warnings
 #: accumulate for the life of a run, and the newest are the ones being
@@ -396,6 +447,19 @@ def clip(text: str, limit: int = WARNING_TEXT_CHARS) -> str:
 
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "..."
+
+
+def printable(text: str) -> str:
+    """Every unprintable character replaced by a placeholder.
+
+    The strings this view renders come off disk unmodified — a filename git
+    reported, a shell command the agent ran — and either may carry a newline, a
+    tab or an escape sequence. The first two would split one row into several
+    and the third would repaint the terminal, so nothing unprintable is sent
+    through.
+    """
+
+    return "".join(char if char.isprintable() else "?" for char in text)
 
 
 def stamp_of(moment: _dt.datetime | None) -> str:
@@ -920,16 +984,9 @@ def path_rows(
 
 
 def path_line(path: str, *, limit: int = CANDIDATE_PATH_CHARS) -> str:
-    """One path, flattened and bounded so an odd filename cannot break the view.
+    """One path, flattened and bounded so an odd filename cannot break the view."""
 
-    Git reports whatever the filesystem holds, and a path may carry a newline, a
-    tab or an escape sequence. The first two would split one row into several
-    and the third would repaint the terminal, so anything unprintable is shown
-    as a placeholder character rather than sent through.
-    """
-
-    printable = "".join(char if char.isprintable() else "?" for char in path)
-    return clip(printable, limit)
+    return clip(printable(path), limit)
 
 
 def base_line(snapshot: RunSnapshot) -> str:
@@ -989,6 +1046,159 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+# --- current action --------------------------------------------------------
+
+
+def duration(seconds: float) -> str:
+    """An elapsed time in the coarsest unit that still reads as a number.
+
+    Seconds below a minute, then minutes, then hours. The question this answers
+    is whether an action has been current for a moment or for a quarter of an
+    hour; resolution finer than that only makes a line that changes under the
+    operator harder to read. Negative input is impossible from the model, which
+    clamps, and is clamped again here so a caller cannot render one.
+    """
+
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def pytest_root(base: Path | None = None) -> Path:
+    """The pytest temporary root for this user: `<tempdir>/pytest-of-<user>`.
+
+    Derived rather than configured, because it is pytest's own default and the
+    dashboard is reading the same directory the operator does. A host with no
+    passwd entry — a container, mostly — has no user name to key on, and pytest
+    itself falls back to the same word.
+    """
+
+    root = Path(base) if base is not None else Path(tempfile.gettempdir())
+    try:
+        user = getpass.getuser()
+    except (KeyError, OSError):
+        user = "unknown"
+    return root / f"{PYTEST_ROOT_PREFIX}{user}"
+
+
+def _scan(path: Path) -> list[os.DirEntry[str]] | None:
+    """One directory listing, or None when there is nothing to list.
+
+    `scandir` rather than `iterdir` plus `stat`: the entry type comes back with
+    the listing on every filesystem the grind runs on, so classifying an entry
+    costs no extra syscall. This runs on every refresh against a host that is
+    already spending most of its time compiling and testing.
+    """
+
+    try:
+        with os.scandir(path) as entries:
+            return list(entries)
+    except OSError:
+        return None
+
+
+def workspace_count(root: Path | None = None) -> int | None:
+    """How many pytest workspaces exist under `root`, or None when it is absent.
+
+    An absent root is the normal case — nothing has run a suite on this host
+    since it was last cleaned — and is reported as absent rather than as zero,
+    which would read as a suite that has produced nothing. When the root holds
+    session directories the count is taken from the newest of them, because that
+    is the one a running suite is filling and therefore the number that moves;
+    the root's own entries are counted only when there is no session below it.
+    """
+
+    entries = _scan(pytest_root() if root is None else Path(root))
+    if entries is None:
+        return None
+    sessions = [entry for entry in entries if entry.is_dir(follow_symlinks=False)]
+    if not sessions:
+        return len(entries)
+    newest = max(sessions, key=lambda entry: (_mtime(Path(entry.path)), entry.name))
+    inner = _scan(Path(newest.path))
+    return len(entries) if inner is None else len(inner)
+
+
+def action_state(
+    snapshot: RunSnapshot,
+    *,
+    replay: ReplaySource | None = None,
+    threshold: float = BLOCKED_SECONDS,
+) -> str:
+    """Whether the latest action is being thought about, blocked on, or over.
+
+    Blocked is decided by the age of the action rather than by any subprocess
+    state, because the log is the only signal a read-only observer has and the
+    age is the quantity an operator judges a stall by. A finished run has no
+    current action at all, so its last one is neither: replaying it, or watching
+    a run reach a terminal phase, must not show an age that grows forever.
+    """
+
+    if snapshot.terminal or replay is not None:
+        return ACTION_ENDED
+    return ACTION_BLOCKED if snapshot.blocked_seconds >= threshold else ACTION_THINKING
+
+
+def action_panel(
+    snapshot: RunSnapshot,
+    *,
+    replay: ReplaySource | None = None,
+    workspaces: int | None = None,
+    threshold: float = BLOCKED_SECONDS,
+) -> str:
+    """The current-action region: what the worker is doing, and for how long.
+
+    The action survives a heartbeat because the model only displaces it with
+    another action, so a stretch of content-free events keeps showing the suite
+    the worker is blocked on rather than blanking. A live view with no journal
+    shows no action even when an old log is lying around, since that action
+    belongs to a run that has already ended; replay is the one reader that wants
+    a finished run's last action, and it says so by pinning the log.
+
+    The workspace count corroborates an action that is still current, so a run
+    that has ended does not carry one: the directory would still be there, and
+    counting it against a finished run would be evidence for nothing.
+    """
+
+    if snapshot.idle and replay is None:
+        return ACTION_IDLE
+    if not snapshot.latest_action:
+        return NO_ACTION
+
+    state = action_state(snapshot, replay=replay, threshold=threshold)
+    stamp = stamp_of(snapshot.latest_action_at)
+    if state == ACTION_ENDED:
+        age = f"{state}   last action at {stamp}"
+    else:
+        age = f"{state} {duration(snapshot.blocked_seconds)}   since {stamp}"
+
+    lines = [clip(printable(snapshot.latest_action), ACTION_TEXT_CHARS), age]
+    if workspaces is not None and state != ACTION_ENDED:
+        lines.append(WORKSPACE_EVIDENCE.format(count=workspaces))
+    return "\n".join(lines)
+
+
+def action_region_state(
+    snapshot: RunSnapshot,
+    *,
+    replay: ReplaySource | None = None,
+    threshold: float = BLOCKED_SECONDS,
+) -> str:
+    """Colour for the current-action region: motion while thinking, attention
+    once blocked. The two states are what the region exists to tell apart, so
+    they never share a colour."""
+
+    if (snapshot.idle and replay is None) or not snapshot.latest_action:
+        return "state-idle"
+    state = action_state(snapshot, replay=replay, threshold=threshold)
+    return "state-live" if state == ACTION_THINKING else "state-ended"
+
+
 def outcome_line(snapshot: RunSnapshot) -> str:
     """How the run ended and at which phase, in the operator's words.
 
@@ -1031,7 +1241,10 @@ def header_line(snapshot: RunSnapshot, replay: ReplaySource | None = None) -> st
 
 
 def region_state(
-    key: str, snapshot: RunSnapshot, verdict: VerdictState | None = None
+    key: str,
+    snapshot: RunSnapshot,
+    verdict: VerdictState | None = None,
+    replay: ReplaySource | None = None,
 ) -> str:
     """The state class for one region; colour carries meaning, not decoration."""
 
@@ -1041,6 +1254,8 @@ def region_state(
         return "state-ended" if snapshot.terminal else "state-live"
     if key == "warnings" and snapshot.warnings:
         return "state-failed"
+    if key == "current-action":
+        return action_region_state(snapshot, replay=replay)
     if key == "candidate":
         return candidate_region_state(snapshot)
     if key == "verdict":
@@ -1055,6 +1270,7 @@ def frame(
     width: int = PULSE_WIDTH,
     replay: ReplaySource | None = None,
     verdict: VerdictState | None = None,
+    workspaces: int | None = None,
 ) -> Frame:
     """Build the frame for `snapshot` at `tick`. Pure: reads nothing, writes nothing.
 
@@ -1062,20 +1278,22 @@ def frame(
     its source. One renderer means a finished run is explained exactly as the
     live run was, and there is a single path to keep correct.
 
-    The verdict state is passed in rather than read here, because it comes from
-    artifacts on disk and this stays a pure function of what it is handed.
+    The verdict state and the workspace count are passed in rather than read
+    here, because both come from disk and this stays a pure function of what it
+    is handed.
     """
 
     state = verdict if verdict is not None else VerdictState()
     return Frame(
         header=header_line(snapshot, replay),
-        current_action=PLACEHOLDER,
+        current_action=action_panel(snapshot, replay=replay, workspaces=workspaces),
         candidate=candidate_panel(snapshot),
         verdict=verdict_panel(snapshot, state),
         warnings=warnings_panel(snapshot),
         pulse=pulse_line(snapshot, tick, width=width),
         states=tuple(
-            (spec.key, region_state(spec.key, snapshot, state)) for spec in REGIONS
+            (spec.key, region_state(spec.key, snapshot, state, replay))
+            for spec in REGIONS
         ),
     )
 
@@ -1196,10 +1414,18 @@ def _shell() -> dict[str, type]:
             *,
             refresh_seconds: float = REFRESH_SECONDS,
             replay: ReplaySource | None = None,
+            workspace_root: Path | None = None,
         ) -> None:
             super().__init__()
             self.repo = Path(repo)
             self.refresh_seconds = refresh_seconds
+            #: The pytest temporary root the current-action region counts as
+            #: evidence. Resolved once rather than per tick, and injectable so a
+            #: test names its own root instead of the host's.
+            self.workspace_root = (
+                Path(workspace_root) if workspace_root is not None else pytest_root()
+            )
+            self.workspaces: int | None = None
             #: The finished run being rendered, or None for live mode. Live mode is
             #: the default and reads the newest log, exactly as before replay
             #: existed; replay only pins which log the same reader follows.
@@ -1210,7 +1436,11 @@ def _shell() -> dict[str, type]:
             self.verdict = VerdictState()
             self.tick = 0
             self.last_frame = frame(
-                self.snapshot, self.tick, replay=replay, verdict=self.verdict
+                self.snapshot,
+                self.tick,
+                replay=replay,
+                verdict=self.verdict,
+                workspaces=self.workspaces,
             )
 
         def compose(self) -> ComposeResult:
@@ -1243,9 +1473,14 @@ def _shell() -> dict[str, type]:
             except OSError:
                 pass
             self.verdict = read_verdict(self.repo, self.snapshot, previous=self.verdict)
+            self.workspaces = workspace_count(self.workspace_root)
             self.tick += 1
             self.last_frame = frame(
-                self.snapshot, self.tick, replay=self.replay, verdict=self.verdict
+                self.snapshot,
+                self.tick,
+                replay=self.replay,
+                verdict=self.verdict,
+                workspaces=self.workspaces,
             )
             return self.last_frame
 

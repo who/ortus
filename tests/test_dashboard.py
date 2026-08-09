@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import datetime as _dt
 import hashlib
 import inspect
 import json
@@ -26,7 +27,7 @@ from typing import Any, Awaitable, Callable
 from typer.models import OptionInfo
 
 from ortus.commands import dashboard as dash
-from ortus.core.runstate import RunSnapshot, RunWarning
+from ortus.core.runstate import RunSnapshot, RunWarning, read_snapshot
 from ortus.core.transaction import CandidateJournal, JournalStore
 from ortus.core.verdict import Verdict, render_report
 
@@ -352,8 +353,9 @@ def test_shell_names_every_region_of_the_layout(tmp_path: Path) -> None:
     for spec in dash.REGIONS:
         assert titles[spec.key][0] == spec.title
         assert titles[spec.key][1]
-    # Panel content belongs to the panel leaves; the shell only reserves space.
-    assert titles["current-action"][1] == dash.PLACEHOLDER
+    # Current action is filled by ortus-0udo.4, and a quiet repository has no
+    # transaction in flight, so it says so rather than showing an old action.
+    assert titles["current-action"][1] == dash.ACTION_IDLE
     # Candidate is filled by ortus-0udo.5, and a quiet repository has no journal,
     # so nothing was ever captured rather than a candidate holding nothing.
     assert titles["candidate"][1] == dash.CANDIDATE_IDLE
@@ -1659,6 +1661,296 @@ def test_candidate_row_budget_gives_every_group_a_floor() -> None:
     # A candidate that fits is not truncated at all.
     small = (dash.PathGroup(dash.OWNED, ("a", "b")), dash.PathGroup(dash.DISOWNED, ()))
     assert dash.path_rows(small, total=12, floor=3) == (2, 0)
+
+
+# ---------------------------------------------------------------------------
+# ortus-0udo.4: what the worker is doing, and how long it has been doing it
+# ---------------------------------------------------------------------------
+#
+# The measured case: a worker issues one blocking tool call for a test suite and
+# then writes nothing with content for twenty minutes. Every test here fixes the
+# observation time rather than sleeping, because the property under test is the
+# age of an action and a real clock would either make the suite slow or make the
+# assertion approximate.
+
+
+_STARTED = "[2026-08-08 22:10:00] iter 1: worker started\n"
+_SUITE_CALL = (
+    '{"type":"assistant","timestamp":"2026-08-08T22:11:00+00:00","message":'
+    '{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":'
+    '{"command":"uv run pytest tests/test_dashboard.py"}}]}}\n'
+)
+#: Events that carry no content: a tool result and a session heartbeat. The
+#: model does not treat either as an action, and this region must not either.
+_HEARTBEATS = (
+    '{"type":"user","timestamp":"2026-08-08T22:15:00+00:00","message":{}}\n'
+    '{"type":"system","subtype":"heartbeat","timestamp":"2026-08-08T22:16:00+00:00"}\n'
+)
+_SESSION_END = (
+    '{"type":"result","subtype":"success","timestamp":"2026-08-08T22:20:00+00:00"}\n'
+)
+
+
+def _at(hour: int, minute: int, second: int = 0) -> _dt.datetime:
+    """One instant on the day the sample run was measured, in UTC."""
+
+    return _dt.datetime(2026, 8, 8, hour, minute, second, tzinfo=_dt.timezone.utc)
+
+
+def _acting_repo(tmp_path: Path, name: str, body: str) -> Path:
+    """A repository mid-run whose log holds `body`."""
+
+    repo = tmp_path / name
+    (repo / "logs").mkdir(parents=True)
+    JournalStore(repo).save(
+        CandidateJournal(
+            issue_id="ortus-0udo.4",
+            base_head="abc1234def",
+            baseline_paths=(),
+            baseline_fingerprints={},
+            phase="implementation",
+            attempt=1,
+        )
+    )
+    (repo / "logs" / "grind-20260808-221000.log").write_text(body, encoding="utf-8")
+    return repo
+
+
+def _pytest_root(tmp_path: Path, *, sessions: int = 1, workspaces: int = 0) -> Path:
+    """A stand-in for the pytest temporary root, with `workspaces` under the
+    newest session directory."""
+
+    root = tmp_path / "tmp" / "pytest-of-someone"
+    for index in range(sessions):
+        session = root / f"pytest-{index}"
+        session.mkdir(parents=True)
+    newest = root / f"pytest-{sessions - 1}"
+    for index in range(workspaces):
+        (newest / f"test_case{index}").mkdir()
+    return root
+
+
+def test_action_latest_names_what_the_worker_is_doing_and_for_how_long(
+    tmp_path: Path,
+) -> None:
+    """AC-1: the latest action and its age, for a live run."""
+
+    repo = _acting_repo(tmp_path, "acting", _STARTED + _SUITE_CALL)
+    snapshot = read_snapshot(repo, now=_at(22, 11, 30))
+    panel = dash.action_panel(snapshot)
+
+    # The action itself, named rather than summarised away.
+    assert "Bash" in panel
+    assert "uv run pytest tests/test_dashboard.py" in panel
+    # Its age, and the state that age puts it in.
+    assert dash.ACTION_THINKING in panel
+    assert "30s" in panel
+    assert dash.region_state("current-action", snapshot) == "state-live"
+
+
+def test_action_latest_survives_a_heartbeat_that_carries_no_content(
+    tmp_path: Path,
+) -> None:
+    """A log whose newest events are heartbeats still names the real action.
+
+    This is the whole reason the age is worth showing: the log grows the entire
+    time a suite runs, and none of that growth is something to display.
+    """
+
+    repo = _acting_repo(tmp_path, "beating", _STARTED + _SUITE_CALL + _HEARTBEATS)
+    snapshot = read_snapshot(repo, now=_at(22, 16, 30))
+    panel = dash.action_panel(snapshot)
+
+    assert "uv run pytest tests/test_dashboard.py" in panel
+    # The age is measured from the action, not from the last heartbeat, or a
+    # stalled worker would look busy every time its log twitched.
+    assert "5m 30s" in panel
+    assert snapshot.blocked_seconds == 330.0
+
+
+def test_action_text_cannot_repaint_the_terminal(tmp_path: Path) -> None:
+    """An action is a shell command the agent wrote, and may carry anything."""
+
+    hostile = (
+        '{"type":"assistant","timestamp":"2026-08-08T22:11:00+00:00","message":'
+        '{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":'
+        '{"command":"echo \\u001b[2Jwiped"}}]}}\n'
+    )
+    repo = _acting_repo(tmp_path, "hostile", _STARTED + hostile)
+    panel = dash.action_panel(read_snapshot(repo, now=_at(22, 11, 30)))
+
+    assert "\x1b" not in panel
+    assert "wiped" in panel
+    assert len(panel.splitlines()) == 2
+
+
+def test_action_blocked_threshold_is_visually_distinct_from_thinking(
+    tmp_path: Path,
+) -> None:
+    """AC-2: past the threshold the same action reads as blocked, not thinking."""
+
+    repo = _acting_repo(tmp_path, "blocking", _STARTED + _SUITE_CALL)
+    thinking = read_snapshot(repo, now=_at(22, 11, 30))
+    blocked = read_snapshot(repo, now=_at(22, 20, 0))
+
+    assert thinking.blocked_seconds < dash.BLOCKED_SECONDS <= blocked.blocked_seconds
+    assert dash.ACTION_THINKING in dash.action_panel(thinking)
+
+    panel = dash.action_panel(blocked)
+    assert dash.ACTION_BLOCKED in panel
+    assert dash.ACTION_THINKING not in panel
+    # Nine minutes on one tool call is the fact an operator acts on.
+    assert "9m 00s" in panel
+
+    # Distinct in words and in colour: a terminal that renders neither the
+    # palette nor the other would still tell the two states apart.
+    assert dash.region_state("current-action", thinking) == "state-live"
+    assert dash.region_state("current-action", blocked) == "state-ended"
+
+
+def test_action_blocked_threshold_clears_when_the_worker_finishes(
+    tmp_path: Path,
+) -> None:
+    """A worker that finishes while the panel shows blocked clears next tick."""
+
+    repo = _acting_repo(tmp_path, "finishing", _STARTED + _SUITE_CALL)
+    log = repo / "logs" / "grind-20260808-221000.log"
+    blocked = read_snapshot(repo, now=_at(22, 20, 0))
+    assert dash.ACTION_BLOCKED in dash.action_panel(blocked)
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(_SESSION_END)
+    finished = read_snapshot(repo, previous=blocked, now=_at(22, 20, 5))
+
+    panel = dash.action_panel(finished)
+    assert "worker session ended" in panel
+    assert dash.ACTION_BLOCKED not in panel
+    assert dash.region_state("current-action", finished) == "state-live"
+
+    # And once the run itself reaches a terminal phase, the last action is over
+    # rather than blocked: an age that keeps growing after a run has ended is
+    # the stall this region exists to report, and it never happened.
+    store = JournalStore(repo)
+    journal = store.load()
+    assert journal is not None
+    store.save(replace(journal, phase="finalized-verified"))
+    ended = dash.action_panel(read_snapshot(repo, previous=finished, now=_at(23, 0, 0)))
+
+    assert dash.ACTION_ENDED in ended
+    assert dash.ACTION_BLOCKED not in ended
+
+
+def test_action_workspace_evidence_reports_the_pytest_workspace_count(
+    tmp_path: Path,
+) -> None:
+    """AC-3: a running suite contributes a count, labelled as evidence."""
+
+    root = _pytest_root(tmp_path, sessions=3, workspaces=7)
+    assert dash.workspace_count(root) == 7
+
+    repo = _acting_repo(tmp_path, "evidenced", _STARTED + _SUITE_CALL)
+    app = dash.DashboardApp(repo, refresh_seconds=3600, workspace_root=root)
+    panel = app.advance().current_action
+
+    assert "7" in panel
+    # Evidence, explicitly: the total is unknown, and a root shared by two
+    # concurrent grinds counts both runs rather than this one.
+    assert "evidence" in panel
+    assert "not this run's progress" in panel
+    # It moves while the suite runs, which is what makes it corroboration.
+    (root / "pytest-2" / "test_case7").mkdir()
+    assert dash.workspace_count(root) == 8
+
+
+def test_action_workspace_evidence_is_absent_without_a_pytest_root(
+    tmp_path: Path,
+) -> None:
+    """A missing root is normal and renders as absent rather than as zero."""
+
+    missing = tmp_path / "tmp" / "pytest-of-nobody"
+    assert dash.workspace_count(missing) is None
+
+    repo = _acting_repo(tmp_path, "unevidenced", _STARTED + _SUITE_CALL)
+    app = dash.DashboardApp(repo, refresh_seconds=3600, workspace_root=missing)
+    panel = app.advance().current_action
+
+    # Absent, not zero: a count of nothing would read as a suite that has
+    # produced nothing rather than as a host that has run none.
+    assert "evidence" not in panel
+    assert dash.WORKSPACE_EVIDENCE.format(count=0) not in panel
+    # The action and its age are unaffected by the absence.
+    assert len(panel.splitlines()) == 2
+    assert "uv run pytest" in panel
+
+
+def test_action_idle_shows_no_action_rather_than_a_stale_one(
+    tmp_path: Path,
+) -> None:
+    """AC-4: a repository whose run has finished shows no current action.
+
+    The log outlives the transaction, so the last action of a finished run is
+    still readable long after it stopped being current. Showing it is exactly
+    the stale reading an operator would act on.
+    """
+
+    repo = _acting_repo(tmp_path, "over", _STARTED + _SUITE_CALL + _SESSION_END)
+    JournalStore(repo).path.unlink()
+    snapshot = read_snapshot(repo, now=_at(23, 30, 0))
+
+    assert snapshot.idle
+    assert snapshot.latest_action, "the log still holds the run's last action"
+    assert dash.action_panel(snapshot) == dash.ACTION_IDLE
+    assert dash.region_state("current-action", snapshot) == "state-idle"
+
+    # Replay is the one reader that wants a finished run's last action, and it
+    # says so by pinning the log rather than by showing an age that keeps growing.
+    source = dash.resolve_replay(repo / "logs" / "grind-20260808-221000.log")
+    replayed = dash.action_panel(snapshot, replay=source)
+    assert "worker session ended" in replayed
+    assert dash.ACTION_ENDED in replayed
+    assert dash.ACTION_BLOCKED not in replayed
+
+
+def test_action_idle_run_in_flight_has_logged_nothing_yet(tmp_path: Path) -> None:
+    """A claimed issue whose worker has not acted yet is not the same as idle."""
+
+    repo = _acting_repo(tmp_path, "starting", "")
+    snapshot = read_snapshot(repo, now=_at(22, 10, 0))
+
+    assert not snapshot.idle
+    assert dash.action_panel(snapshot) == dash.NO_ACTION
+    assert dash.region_state("current-action", snapshot) == "state-idle"
+
+
+def test_action_region_writes_nothing_while_it_counts_workspaces(
+    tmp_path: Path,
+) -> None:
+    """AC-3 of the shell still holds with the current-action region filled."""
+
+    root = _pytest_root(tmp_path, workspaces=2)
+    repo = _acting_repo(tmp_path, "readonly-action", _STARTED + _SUITE_CALL)
+    app = dash.DashboardApp(repo, refresh_seconds=3600, workspace_root=root)
+    app.advance()
+    before = (_fingerprint(repo), _fingerprint(root))
+    for _ in range(3):
+        app.advance()
+
+    assert (_fingerprint(repo), _fingerprint(root)) == before
+    assert "uv run pytest" in app.last_frame.current_action
+
+
+def test_action_duration_reads_in_the_coarsest_useful_unit() -> None:
+    """Seconds, then minutes, then hours, and never a negative age."""
+
+    assert dash.duration(0) == "0s"
+    assert dash.duration(59.9) == "59s"
+    assert dash.duration(60) == "1m 00s"
+    assert dash.duration(1_230) == "20m 30s"
+    assert dash.duration(3_600) == "1h 00m"
+    assert dash.duration(3_960) == "1h 06m"
+    # A journal timestamp in local time against a UTC log clock is the case the
+    # model clamps; a caller cannot render one either.
+    assert dash.duration(-5) == "0s"
 
 
 # ---------------------------------------------------------------------------
