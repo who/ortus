@@ -278,3 +278,35 @@ def test_verifier_must_emit_before_optional_investigation() -> None:
     assert "EMIT THE VERDICT AS SOON AS EVERY CRITERION CHECK HAS RUN" in prompt
     assert "never a reason to withhold one" in prompt
     assert "do not restart the review" in prompt
+
+
+# ---------------------------------------------------------------------------
+# (5) completion-comment quality — the bullets are the commit body (ortus-q3je)
+# ---------------------------------------------------------------------------
+
+
+def test_grind_prompt_states_the_changes_bullets_become_the_commit_body() -> None:
+    """AC-6: the format spec must hold the bullets to commit-worthy prose.
+
+    Finalization commits the latest `**Changes**` block verbatim, so the
+    quality ceiling of every commit message is set here. Guidance that only
+    asked for concision produced bullets no reader could use six months later.
+    """
+    body = _content()
+    assert "become the commit message body" in body
+    assert "six months" in body
+    assert "names the file or component" in body
+
+
+def test_grind_prompt_requires_a_refreshed_changes_block_after_a_correction() -> None:
+    """AC-6: bullets authored before a review describe code that has changed."""
+    body = _content()
+    assert "refreshed `**Changes**` block" in body
+    assert "final shipped state" in body
+
+
+def test_grind_prompt_keeps_the_sdlc_out_of_source_comments() -> None:
+    """AC-7: code comments explain the code, not the pipeline that produced it."""
+    body = _content()
+    assert "Comments explain code, not the Ortus SDLC" in body
+    assert "belongs in beads" in body

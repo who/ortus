@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -683,11 +684,16 @@ def _finalize_by_replay(
     name: str,
     *,
     title: str | None = None,
+    comments: tuple[str, ...] = (),
+    corrections: int = 0,
 ) -> tuple[Path, str, CandidateJournal]:
     """Drive one finalization from a staged journal, with no agent spawn.
 
     The message is built at the commit boundary, so the replay path exercises
     it exactly as a fresh pass does while keeping the test off the worker.
+    `comments` are posted in order before finalization runs, standing in for
+    what a worker recorded; `corrections` reproduces a run that went back and
+    edited the code after a rejection.
     """
     repo, issue_id = _seed(tmp_path, name)
     if title is not None:
@@ -697,7 +703,17 @@ def _finalize_by_replay(
             check=True,
             capture_output=True,
         )
+    for comment in comments:
+        subprocess.run(
+            ["bd", "comments", "add", issue_id, comment],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
     journal = _stage_pending_journal(repo, issue_id)
+    if corrections:
+        journal = replace(journal, corrections=corrections)
+        JournalStore(repo).save(journal)
     _install(monkeypatch, tmp_path, NeverRuns())
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
@@ -717,18 +733,132 @@ def test_commit_subject_names_the_issue(
     assert "verified candidate" not in subject
 
 
-def test_commit_body_records_provenance(
+CHANGES_COMMENT = (
+    "**Changes**:\n"
+    f"- {CANDIDATE} - added the SHIPPED flag the loader reads at import time\n"
+    "- docs/testing.md - documented the flag\n"
+    "\n"
+    "**Verification**: 4 passed\n"
+    "\n"
+    "**CodeGraph v1**:\n"
+    f"modified: SHIPPED@{CANDIDATE}:1 (2 callers, 0 cross-module)\n"
+    "new: none\n"
+    "oos_callers: none"
+)
+
+#: Every word the finalization body must never carry: the mechanics of how the
+#: change was produced belong in the bd record, not in `git log`.
+PROVENANCE_WORDS = ("Attempt:", "Corrections:", "Verifier report:")
+
+
+def test_commit_body_describes_the_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-2: objective, attempt, corrections and verifier reference, from record."""
-    repo, _, journal = _finalize_by_replay(tmp_path, monkeypatch, "fin14")
+    """AC-2/AC-3: the body is the authored change description, with no mechanics."""
+    repo, _, _ = _finalize_by_replay(
+        tmp_path, monkeypatch, "fin14", comments=(CHANGES_COMMENT,)
+    )
 
     subject, _, body = _head_message(repo).partition("\n\n")
     assert subject and "\n" not in subject
     assert "Exercise the behavior owned by this test." in body
-    assert f"Attempt: {journal.attempt}" in body
-    assert f"Corrections: {journal.corrections}" in body
-    assert f"Verifier report: {journal.verifier_refs[-1]}" in body
+    assert "added the SHIPPED flag the loader reads at import time" in body
+    assert "docs/testing.md - documented the flag" in body
+    for word in PROVENANCE_WORDS:
+        assert word not in body
+
+
+def test_commit_body_ignores_comments_that_are_not_change_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: a plan gap or a stopped-work note is never read as the description."""
+    plan_gap = "PLAN-GAP: the packet contradicts reality\n\n**Changes**:\n- nothing\n"
+    blocked = "BLOCKED: waiting on a decision\n\n**Changes**:\n- also nothing\n"
+    repo, _, _ = _finalize_by_replay(
+        tmp_path,
+        monkeypatch,
+        "fin14b",
+        comments=(CHANGES_COMMENT, plan_gap, blocked),
+    )
+
+    body = _head_message(repo).partition("\n\n")[2]
+    assert "added the SHIPPED flag the loader reads at import time" in body
+    assert "nothing" not in body
+
+
+def test_commit_body_falls_back_to_the_codegraph_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: an empty `**Changes**` block degrades to the structural record."""
+    empty_bullets = (
+        "**Changes**:\n"
+        "   \n"
+        "**Verification**: 4 passed\n"
+        "\n"
+        "**CodeGraph v1**:\n"
+        f"modified: SHIPPED@{CANDIDATE}:1 (2 callers, 0 cross-module)\n"
+        "new: Loader@loader.py:7 (class)\n"
+    )
+    repo, _, _ = _finalize_by_replay(
+        tmp_path, monkeypatch, "fin14c", comments=(empty_bullets,)
+    )
+
+    body = _head_message(repo).partition("\n\n")[2]
+    assert f"Modified: SHIPPED@{CANDIDATE}:1" in body
+    assert "Added: Loader@loader.py:7 (class)" in body
+
+
+def test_commit_body_falls_back_to_the_owned_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: with nothing authored, the journal's own paths describe the commit."""
+    repo, _, _ = _finalize_by_replay(tmp_path, monkeypatch, "fin14d")
+
+    body = _head_message(repo).partition("\n\n")[2]
+    assert "Files touched:" in body
+    assert f"- {CANDIDATE}" in body
+    for word in PROVENANCE_WORDS:
+        assert word not in body
+
+
+def test_commit_body_skips_a_stale_changes_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: bullets written before an edit round are not committed as current."""
+    repo, _, _ = _finalize_by_replay(
+        tmp_path,
+        monkeypatch,
+        "fin14e",
+        comments=(CHANGES_COMMENT,),
+        corrections=1,
+    )
+
+    body = _head_message(repo).partition("\n\n")[2]
+    assert "added the SHIPPED flag the loader reads at import time" not in body
+    assert f"Modified: SHIPPED@{CANDIDATE}:1" in body
+
+
+def test_commit_body_takes_the_refreshed_changes_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: one block per round makes the newest one describe what ships."""
+    refreshed = (
+        "**Changes**:\n"
+        f"- {CANDIDATE} - narrowed the SHIPPED flag to the loader entry point\n"
+        "\n"
+        "**Verification**: 5 passed\n"
+    )
+    repo, _, _ = _finalize_by_replay(
+        tmp_path,
+        monkeypatch,
+        "fin14f",
+        comments=(CHANGES_COMMENT, refreshed),
+        corrections=1,
+    )
+
+    body = _head_message(repo).partition("\n\n")[2]
+    assert "narrowed the SHIPPED flag to the loader entry point" in body
+    assert "added the SHIPPED flag" not in body
 
 
 def test_commit_degrades_without_packet(
@@ -736,7 +866,7 @@ def test_commit_degrades_without_packet(
 ) -> None:
     """AC-3: an unreadable packet costs the title, never the commit."""
     repo, issue_id = _seed(tmp_path, "fin15")
-    journal = _stage_pending_journal(repo, issue_id)
+    _stage_pending_journal(repo, issue_id)
     _install(monkeypatch, tmp_path, NeverRuns())
 
     # Only the packet read fails. `status` keeps answering — a tracker that
@@ -763,9 +893,46 @@ def test_commit_degrades_without_packet(
 
     subject, _, body = _head_message(repo).partition("\n\n")
     assert subject == f"{issue_id}: verified candidate"
-    assert f"Verifier report: {journal.verifier_refs[-1]}" in body
+    # The description does not come from the packet, so it survives the read
+    # failure that costs the title.
+    assert f"- {CANDIDATE}" in body
     assert CANDIDATE in _committed_paths(repo)
     assert JournalStore(repo).load() is None
+
+
+def _journal_with_paths(*paths: str) -> CandidateJournal:
+    return CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        candidate_paths=paths,
+        candidate_hash="a" * 64,
+    )
+
+
+def test_commit_message_survives_an_unencodable_path() -> None:
+    """AC-4: a path recovered with surrogateescape must not break the commit."""
+    journal = _journal_with_paths("src/caf\udce9.py", CANDIDATE)
+
+    message = grind_mod._commit_message(
+        "repo-1", {"title": "Handle odd filenames"}, grind_mod._paths_summary(journal)
+    )
+
+    assert message.startswith("repo-1: Handle odd filenames")
+    assert f"- {CANDIDATE}" in message
+    message.encode("utf-8")  # the git call would raise on a lone surrogate
+
+
+def test_commit_message_without_a_description_is_still_a_commit() -> None:
+    """AC-4: a tracker-only close has no owned paths and still gets committed."""
+    journal = _journal_with_paths()
+
+    message = grind_mod._commit_message(
+        "repo-1", {"title": "Retire a stale flag"}, grind_mod._paths_summary(journal)
+    )
+
+    assert message == "repo-1: Retire a stale flag\n"
 
 
 def test_commit_subject_truncates(
@@ -784,4 +951,4 @@ def test_commit_subject_truncates(
     assert subject.startswith(f"{issue_id}: Rewrite the finalization")
     assert subject.endswith("...")
     assert lines[1] == "", "the body must be separated by a blank line"
-    assert any(line.startswith("Attempt: ") for line in lines)
+    assert f"- {CANDIDATE}" in lines

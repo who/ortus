@@ -1420,14 +1420,22 @@ _FINALIZABLE_PHASES = frozenset(
 #: than folded into the body, so `git log --oneline`, `git shortlog` and forge
 #: UIs stay readable.
 _COMMIT_SUBJECT_LIMIT = 72
-#: Commit bodies are wrapped at the conventional width, and the quoted
-#: objective is bounded so a long one can't turn the message into an essay.
+#: Commit bodies are wrapped at the conventional width, and every quoted block
+#: is bounded so a long one can't turn the message into an essay.
 _COMMIT_BODY_WIDTH = 72
 _MAX_COMMIT_OBJECTIVE_CHARS = 480
-#: What the subject degrades to when the packet — and therefore the title —
-#: cannot be read. Losing a verified candidate because a tracker lookup failed
-#: would be far worse than a terse message.
+#: Subject text used in place of a title the tracker could not supply, so the
+#: subject still reads `<id>: <something>`.
 _DEGRADED_COMMIT_SUBJECT = "verified candidate"
+#: Markdown headers of the two blocks a completion comment can carry: authored
+#: prose about the change, and the structural record of the symbols it touched.
+_CHANGES_HEADER = "**Changes**"
+_CODEGRAPH_BLOCK_HEADER = "**CodeGraph v1**"
+#: A comment carrying either uppercase marker records why work stopped, not
+#: what changed. Matching uppercase leaves ordinary prose ("unblocked the
+#: queue") selectable.
+_NON_DESCRIPTIVE_COMMENT_RE = re.compile(r"\bPLAN-GAP\b|\bBLOCKED\b")
+_BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
 
 
 def _truncated(text: str, limit: int) -> str:
@@ -1441,9 +1449,9 @@ def _truncated(text: str, limit: int) -> str:
 def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
     """The authored packet for the commit message, or {} when unreadable.
 
-    Every failure mode collapses to the empty packet: finalization runs after a
-    passing verdict, so a tracker hiccup must degrade the message rather than
-    strand the candidate.
+    Every read failure — a tracker that will not answer, a malformed response,
+    a missing issue — collapses to the empty dict, so the caller formats a
+    degraded message instead of seeing an exception.
     """
 
     try:
@@ -1467,35 +1475,183 @@ def _commit_subject(issue_id: str, title: str) -> str:
     )
 
 
-def _commit_message(
-    issue_id: str, journal: CandidateJournal, packet: dict[str, Any]
-) -> str:
-    """Subject plus provenance body for the one commit this transaction makes.
+def _printable(text: Any) -> str:
+    """`text` with anything the terminal encoding can't carry replaced.
 
-    Everything here is recorded fact — the authored packet and the journal — so
-    the message cannot describe something other than what the verifier judged.
-    Summarising the diff was rejected for exactly that reason. An unreadable
-    packet still yields the journal-derived body under the degraded subject.
+    A path recovered with `surrogateescape` raises on encode, which would turn
+    an unusual filename into a failed commit.
+    """
+
+    return str(text).encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def _issue_comments(bd: BdClient, issue_id: str) -> list[str]:
+    """Comment bodies in tracker order, or [] when they cannot be read."""
+
+    try:
+        entries = bd.comments(issue_id)
+    except Exception:  # noqa: BLE001 - a missing description never blocks a commit
+        return []
+    bodies: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("body", "text", "comment", "content"):
+            value = entry.get(key)
+            if value:
+                bodies.append(str(value))
+                break
+    return bodies
+
+
+def _describes_the_change(text: str) -> bool:
+    """True when a comment is an implementer's record of what it changed.
+
+    A routed plan gap, a stopped-work note and Ortus's own finalization record
+    are excluded even when they quote a `**Changes**` header: committing one of
+    those as the description would say something the change does not contain.
+    """
+
+    if _FINALIZATION_MARKER in text or _NON_DESCRIPTIVE_COMMENT_RE.search(text):
+        return False
+    return _CHANGES_HEADER in text
+
+
+def _block_lines(comment: str, header: str) -> list[str]:
+    """Lines under `header`, up to the next bolded header or the end."""
+
+    lines: list[str] = []
+    inside = False
+    for line in comment.splitlines():
+        stripped = line.strip()
+        if not inside:
+            inside = stripped.startswith(header)
+            continue
+        if stripped.startswith("**"):
+            break
+        lines.append(line)
+    return lines
+
+
+def _changes_bullets(comment: str) -> list[str]:
+    """Bullets of the comment's `**Changes**` block, wrapped lines rejoined."""
+
+    bullets: list[str] = []
+    for line in _block_lines(comment, _CHANGES_HEADER):
+        match = _BULLET_RE.match(line)
+        if match:
+            bullets.append(" ".join(match.group(1).split()))
+        elif line.strip() and bullets:
+            bullets[-1] += " " + " ".join(line.split())
+    return [bullet for bullet in bullets if bullet]
+
+
+def _codegraph_summary(comment: str) -> str:
+    """The `modified:`/`new:` entries of a `**CodeGraph v1**` block as body text.
+
+    Only the exact schema header is read, so a comment carrying a later schema
+    contributes nothing rather than being parsed against the wrong shape.
+    """
+
+    fields: dict[str, str] = {}
+    for line in _block_lines(comment, _CODEGRAPH_BLOCK_HEADER):
+        key, separator, value = line.strip().partition(":")
+        key, value = key.strip().lower(), value.strip()
+        if not separator or key not in ("modified", "new") or not value:
+            continue
+        if value.lower() == "none" or value.lower().startswith("none "):
+            continue
+        fields[key] = value
+    labelled = [
+        ("Modified: ", fields.get("modified", "")),
+        ("Added: ", fields.get("new", "")),
+    ]
+    return _bounded_block(
+        [f"{label}{value}" for label, value in labelled if value], prefix=""
+    )
+
+
+def _paths_summary(journal: CandidateJournal) -> str:
+    """The transaction's owned paths as a plain touched-files list."""
+
+    paths = sorted(journal.candidate_paths)
+    if not paths:
+        return ""
+    return "Files touched:\n" + _bounded_block(paths)
+
+
+def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
+    """`entries` wrapped for a commit body, cut off once the budget is spent."""
+
+    rendered: list[str] = []
+    budget = _MAX_COMMIT_OBJECTIVE_CHARS
+    for entry in entries:
+        text = _truncated(_printable(entry), _MAX_COMMIT_OBJECTIVE_CHARS)
+        rendered.append(
+            textwrap.fill(
+                text,
+                width=_COMMIT_BODY_WIDTH,
+                initial_indent=prefix,
+                subsequent_indent=" " * len(prefix),
+            )
+        )
+        budget -= len(text)
+        if budget <= 0:
+            break
+    return "\n".join(rendered)
+
+
+def _change_description(bd: BdClient, issue_id: str, journal: CandidateJournal) -> str:
+    """What the commit changed, from the first source that states it.
+
+    Three sources, in descending order of how much they say: the implementer's
+    `**Changes**` bullets, the `**CodeGraph v1**` block of that same comment,
+    and the owned paths the journal already holds. The bullets are authored
+    before the code is re-checked, so a run that went back and edited the code
+    needs one `**Changes**` comment per round for them to describe what is
+    being committed; short of that the structural sources speak instead.
+    """
+
+    described = [
+        text for text in _issue_comments(bd, issue_id) if _describes_the_change(text)
+    ]
+    if described:
+        latest = described[-1]
+        if len(described) > journal.corrections:
+            bullets = _changes_bullets(latest)
+            if bullets:
+                return _bounded_block(bullets)
+        summary = _codegraph_summary(latest)
+        if summary:
+            return summary
+    return _paths_summary(journal)
+
+
+def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> str:
+    """`<id>: <title>`, the issue's objective, and what the commit changed.
+
+    Both body blocks are text someone else already wrote down — the authored
+    packet and `description` — so the message states nothing that was not
+    recorded before the commit ran. An unreadable packet still commits: the
+    subject degrades and the description stands alone.
     """
 
     subject = _commit_subject(issue_id, str(packet.get("title") or ""))
-    lines: list[str] = []
+    blocks: list[str] = []
     objective = " ".join(section_text(packet.get("description"), "Objective").split())
     if objective:
-        lines.append(
+        blocks.append(
             textwrap.fill(
                 _truncated(objective, _MAX_COMMIT_OBJECTIVE_CHARS),
                 width=_COMMIT_BODY_WIDTH,
             )
         )
-        lines.append("")
-    lines.append(f"Attempt: {journal.attempt}")
-    lines.append(f"Corrections: {journal.corrections}")
-    lines.append(
-        "Verifier report: "
-        + (journal.verifier_refs[-1] if journal.verifier_refs else "none")
-    )
-    return f"{subject}\n\n" + "\n".join(lines) + "\n"
+    body = _printable(description).strip()
+    if body:
+        blocks.append(body)
+    if not blocks:
+        return f"{subject}\n"
+    return f"{subject}\n\n" + "\n\n".join(blocks) + "\n"
 
 
 def _finalization_report(issue_id: str, journal: CandidateJournal) -> str:
@@ -1675,7 +1831,9 @@ def _finalize_candidate(
                     "finalization: issue packet unreadable; committing "
                     f"{issue_id} with a degraded subject"
                 )
-            message = _commit_message(issue_id, journal, packet)
+            message = _commit_message(
+                issue_id, packet, _change_description(bd, issue_id, journal)
+            )
             if not git.commit_paths(stage, message):
                 return journal, "path-scoped commit of the owned candidate failed"
             journal = journal.with_finalization("commit", git.head_oid())

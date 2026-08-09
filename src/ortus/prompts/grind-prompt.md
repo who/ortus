@@ -291,6 +291,7 @@ Reasoning depth is the model's decision; the scheduler does not infer it from ke
 - **Found bugs** - Never fix bugs inline. Always `bd create --type=bug` to track separately
 - **Verify acceptance criteria** - Tasks MUST NOT be closed unless ALL acceptance criteria pass. Before running `bd close`, verify each criterion is satisfied and document results in the completion comment
 - **Descriptive commits** - Include issue ID in commit message
+- **Comments explain code, not the Ortus SDLC** - A source comment describes what the code does and why it behaves that way, for a reader who has never heard of this pipeline. Never narrate the process that produced the change: no candidate, verifier, attempt, correction-round, or retry vocabulary in code comments, and no "we considered X and rejected it" rationale. That record belongs in beads — put it in the issue or the completion comment.
 
 ## Completion Comment Format
 
@@ -314,7 +315,9 @@ bd comments add bd-a1b2c3 "**Changes**:
 **Verification**: All tests passing (12/12), lint clean, manual login flow tested"
 ```
 
-**Keep it concise** — bullet points for changes, one line for verification.
+**These bullets become the commit message body.** Ortus reads the latest `**Changes**` block on the issue and commits it as the body of the one commit this issue produces, so write them as commit prose: each bullet names the file or component it changed and states what changed in it, readable six months from now by someone with no access to the issue. Keep the verification line to one line.
+
+**If you are correcting a rejected change, add a new comment carrying a refreshed `**Changes**` block** that describes the final shipped state. The block written before the review describes code that has since changed, and committing it would describe something the commit does not contain. Ortus reads the newest block and expects one per round; when a round leaves none, it skips the bullets entirely and commits a thinner structural description instead.
 
 **When `codegraph_available`, append a `**CodeGraph v1**` block** to the comment so the structural change record is parseable by future loops. Compute it from the main session using only `codegraph_search`, `codegraph_node`, and `codegraph_impact` against the symbols you modified — bound the work to ≤ 15 tool calls for a typical closure (≤ 5 modified symbols). The larger source-fetching CodeGraph tools remain subagent-only per step 4 and must not be invoked from the main session here.
 
