@@ -16,6 +16,7 @@ from typing import Any, Iterable
 from jinja2 import Environment, StrictUndefined
 
 from ortus import __version__ as ORTUS_VERSION
+from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 
 
 TEMPLATE_PACKAGE = "ortus.templates"
@@ -91,6 +92,7 @@ class RenderContext:
     package_manager: str = "none"
     framework: str = "none"
     linter: str = "none"
+    codegraph: str = DEFAULT_CODEGRAPH_MODE
     ortus_version: str = ORTUS_VERSION
     today: str = ""  # filled in if blank
 
@@ -102,6 +104,7 @@ class RenderContext:
             "package_manager": self.package_manager,
             "framework": self.framework,
             "linter": self.linter,
+            "codegraph": self.codegraph,
             "ortus_version": self.ortus_version,
             "today": self.today or _dt.date.today().isoformat(),
         }

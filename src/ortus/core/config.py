@@ -31,12 +31,18 @@ else:  # pragma: no cover - py3.10 fallback
     import tomli as tomllib
 
 
+# CodeGraph is a prerequisite of an Ortus project, not an enhancement: a repo
+# that omits the key inherits `required` and fails at the probe with actionable
+# remediation rather than silently running every verb without an index. `off`
+# stays the escape hatch for a repository CodeGraph cannot index.
+DEFAULT_CODEGRAPH_MODE = "required"
+
 DEFAULTS: dict[str, Any] = {
     "owner": None,
     "prefix": None,
     "condition": None,
     "backend": "claude",
-    "codegraph": "auto",
+    "codegraph": DEFAULT_CODEGRAPH_MODE,
     "codegraph_refresh_blocking": False,
 }
 

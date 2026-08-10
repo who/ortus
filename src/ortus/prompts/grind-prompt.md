@@ -34,15 +34,20 @@ You are invoked in a `ortus grind` loop. Each invocation = one task. The loop re
    - Prefer `codegraph_files` — one batched call across the file list when the tool is available.
    - Fall back to per-file `codegraph_search` when `codegraph_files` is unavailable.
 
-   Cap the result at **30 unique files** and **50 symbols** total; truncate beyond the cap rather than erroring. Add the surfaced symbols to the orient context block alongside the existing `bd list` output above — that invocation is preserved verbatim, this sub-step is additive only. When CodeGraph isn't available, skip silently.
+   Cap the result at **30 unique files** and **50 symbols** total; truncate beyond the cap rather than erroring. Add the surfaced symbols to the orient context block alongside the existing `bd list` output above — that invocation is preserved verbatim, this sub-step is additive only. When CodeGraph isn't available, apply the **availability policy** in step 4: under `auto` skip silently, under `required` stop and report.
 
-   **CodeGraph block reuse.** Additionally scan the recent bd comments returned by the `bd show --long` invocation above for `**CodeGraph v1**` headers. For each recognized v1 block, parse the `modified:` line and surface the `symbol@file:line` entries into the orient context alongside the activity-read output — this is the compounding-memory payoff of the parseable schema. The parser is tolerant per Appendix Q4: silently skip blocks whose schema version is unrecognized (e.g., a future `**CodeGraph v2**` this prompt hasn't learned yet) rather than erroring. Gated on `codegraph_available`; skip silently when CodeGraph isn't available.
+   **CodeGraph block reuse.** Additionally scan the recent bd comments returned by the `bd show --long` invocation above for `**CodeGraph v1**` headers. For each recognized v1 block, parse the `modified:` line and surface the `symbol@file:line` entries into the orient context alongside the activity-read output — this is the compounding-memory payoff of the parseable schema. The parser is tolerant per Appendix Q4: silently skip blocks whose schema version is unrecognized (e.g., a future `**CodeGraph v2**` this prompt hasn't learned yet) rather than erroring. Gated on `codegraph_available`; when CodeGraph isn't available, apply the **availability policy** in step 4.
 2. **Select**: Run `bd ready --json` to get issues with no blockers. If empty, end the turn — the /goal evaluator will judge from this turn's `bd ready` output that the queue is empty.
 3. **Claim**: Run `bd update <id> --status=in_progress` for the first issue before doing anything else
 4. **Investigate**: Before assuming anything is or isn't implemented, search the codebase. First, decide which path to take:
 
    - **`codegraph_available`** if `.codegraph/` exists at the project root *and* at least one tool whose name starts with `mcp__codegraph__` is registered in this session.
-   - Otherwise, fall through to the default subagent-grep path. Do not mention CodeGraph in any output.
+   - **`codegraph_policy`** is the policy named in the injected `## CodeGraph phase contract` block — `required`, `auto`, or `off`. It is the Ortus-resolved project policy and outranks anything this file says about optionality; `required` is the default for an Ortus project.
+   - **Availability policy.** Every CodeGraph-gated step below resolves an unavailable capability the same way:
+     - `codegraph_policy = required` — a missing index, an unregistered MCP server, or a failing CodeGraph call is **fatal**. Stop before further repository work and report the exact missing prerequisite (`codegraph init`, install the CLI, or register the MCP server) on the issue. Do not fall back to grep and do not proceed silently; the injected contract already states this, and this file must not contradict it.
+     - `codegraph_policy = auto` — fall back to grep/Read and state the fallback reason.
+     - `codegraph_policy = off` — call no CodeGraph tool; use repository Read/grep facilities.
+   - Otherwise, under `auto`, fall through to the default subagent-grep path.
 
    If **`codegraph_available`**, use these tools as the primary investigation surface (cheap, main-context-safe):
 
@@ -55,11 +60,11 @@ You are invoked in a `ortus grind` loop. Each invocation = one task. The loop re
 
    Fall back to subagent grep/glob/Read **only** if CodeGraph returns nothing useful for the question.
 
-   If **not** `codegraph_available`: Search the codebase first — don't assume not implemented. Use subagents for broad searches.
+   If **not** `codegraph_available`: apply the **availability policy** above. Under `auto` or `off`, search the codebase first — don't assume not implemented — and use subagents for broad searches. Under `required`, stop and report instead.
 5. **Implement**: Make the code changes described in the issue
 6. **Verify**: Follow `docs/testing.md`. Implementation workers run the smallest changed-surface modules, or the bounded default `uv run pytest -m fast -n auto --test-timeout=30`. Fresh verifiers expand by changed path and risk; core/prompt changes use the broader hermetic `-m "fast or integration"` group, run as `-n auto --test-timeout=180`. Both phases parallelise and leave `--enforce-duration-budget` to CI, which runs the same gate single-threaded and owns the duration verdict. Neither phase runs `network` or `live_provider` unless the issue explicitly requires external validation. Main CI owns the comprehensive hermetic platform/Python matrix, and tagged release validation owns external smoke. If checks fail, fix and re-verify — this is backpressure, not a reason to stop.
 
-**6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, skip silently — do not mention it in the completion comment.
+**6.5. Refresh the index (best-effort).** If codegraph_available and the `codegraph` CLI is on $PATH, run `codegraph sync` once. Ignore the exit code. Do not block the loop on this. If CodeGraph isn't available, apply the **availability policy** in step 4: under `auto` skip silently and do not mention it in the completion comment; under `required` the run has already stopped there.
 
 7. **Log**: Add structured completion comment (see format below)
 
@@ -188,7 +193,7 @@ Depends on: <closing-id>
 
 **Idempotency on retry.** Before each `bd create`, guard against duplicates by querying the existing auto-codegraph cohort. Run `bd list --label=auto-codegraph --json` and filter the result by description text containing **both** the closing-issue id (e.g., `ortus-a1b2c3`) **and** the modified-symbol name (e.g., `AuthMiddleware.validate`); if a matching issue already exists, skip the spawn for that caller in per-caller mode, or skip the entire umbrella spawn in umbrella mode. Idempotency is keyed on the `(closing-id, modified-symbol)` pair — the same closing id with a different modified symbol still spawns; the same modified symbol on a different closing id still spawns. This matters when a Ralph iteration is restarted partway (bash loop killed and resumed) and step 7.5 re-runs against an already-spawned cohort. Same non-blocking posture: a failing `bd list` query never blocks step 8 — proceed without the guard rather than aborting.
 
-**Non-blocking.** Step 7.5 shall never block step 8. If `bd create` returns non-zero, if `codegraph_impact` errors, or if the gate evaluation throws, log to a comment if convenient and proceed to step 8 — same posture as step 6.5. If `codegraph_available` is false, or if the **CodeGraph v1** block's `oos_callers` is `none`, skip silently.
+**Non-blocking.** Step 7.5 shall never block step 8. If `bd create` returns non-zero, if `codegraph_impact` errors, or if the gate evaluation throws, log to a comment if convenient and proceed to step 8 — same posture as step 6.5. If the **CodeGraph v1** block's `oos_callers` is `none`, skip silently. If `codegraph_available` is false, apply the **availability policy** in step 4.
 
 8. **Close**: Run `bd close <id> --reason="<brief summary>"`
 9. **Commit & Push**: Stage, commit with issue ID in message. Check `git remote` — if it outputs nothing, you're done (local-only project). Otherwise run these in order, **each as its own separate Bash tool call** (never chain with `&&` or `;` — that wraps everything in `bash -c` and `bd dolt push` loses its sandbox exemption, becoming a sandboxed child of bash and hanging on dolt):
@@ -228,7 +233,7 @@ Ask the model (subagent if needed) how to handle this issue given its type, labe
 }
 ```
 
-**Reference check.** When `codegraph_available`, before emitting the plan JSON, extract code-shaped references from the issue body and acceptance criteria using these patterns: `[A-Z][A-Za-z0-9_]*` (CamelCase), `[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*` (dotted methods), and file paths ending in a recognized source extension (`.ts`, `.tsx`, `.js`, `.py`, `.rs`, `.go`, `.java`, `.rb`). Run `codegraph_search` on each extracted reference. For every unresolved reference, append one entry to `missing` per Appendix G in this exact form: `References <symbol> in <field>; no such symbol in graph. Confirm during Investigate or flag as new code.` (where `<field>` is `body` or `acceptance_criteria`). Existing model-judged `missing` entries are preserved verbatim — this is additive only. **A graph-derived `missing` entry does NOT automatically flip `has_enough_info` to `false`** — the flip stays at the model's discretion, since the symbol may legitimately be new code introduced by this very issue. Skip silently when CodeGraph isn't available.
+**Reference check.** When `codegraph_available`, before emitting the plan JSON, extract code-shaped references from the issue body and acceptance criteria using these patterns: `[A-Z][A-Za-z0-9_]*` (CamelCase), `[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*` (dotted methods), and file paths ending in a recognized source extension (`.ts`, `.tsx`, `.js`, `.py`, `.rs`, `.go`, `.java`, `.rb`). Run `codegraph_search` on each extracted reference. For every unresolved reference, append one entry to `missing` per Appendix G in this exact form: `References <symbol> in <field>; no such symbol in graph. Confirm during Investigate or flag as new code.` (where `<field>` is `body` or `acceptance_criteria`). Existing model-judged `missing` entries are preserved verbatim — this is additive only. **A graph-derived `missing` entry does NOT automatically flip `has_enough_info` to `false`** — the flip stays at the model's discretion, since the symbol may legitimately be new code introduced by this very issue. When CodeGraph isn't available, apply the **availability policy** in step 4.
 
 The scheduler validates the shape — all five keys present, `has_enough_info` a boolean, `missing` an array of strings, `implementation_steps`/`verification_steps` arrays, `closure_reason` a non-empty string — then executes mechanically:
 
@@ -347,7 +352,7 @@ new: TokenStore@src/lib/token.ts:7 (class)
 oos_callers: ApiRouter.login@src/api/auth/login.ts:23 -> AuthMiddleware.validate"
 ```
 
-When `codegraph_available` is false, omit the block entirely — the comment must remain byte-equivalent to a pre-PRD closure.
+When `codegraph_available` is false under `auto` or `off`, omit the block entirely — the comment must remain byte-equivalent to a pre-PRD closure. Under `required` there is no such comment to write: the run stopped at step 4 per the **availability policy**.
 
 ## Completion Signals
 

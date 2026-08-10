@@ -112,6 +112,26 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             )
 
 
+@pytest.fixture(autouse=True)
+def _codegraph_policy(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the CodeGraph policy to `auto` unless a test opts into the default.
+
+    `required` is the built-in default, so a bd workspace built
+    without a `.codegraph/` index now aborts at the probe — and whether it
+    aborts would otherwise depend on which host runs the suite. Lifecycle
+    tests are not about CodeGraph, so they keep the best-effort policy;
+    tests that are about the policy carry `@pytest.mark.codegraph_default`
+    and see the real resolved default.
+    """
+    if "codegraph_default" in request.keywords:
+        return
+    from ortus.core import config as _config
+
+    monkeypatch.setitem(_config.DEFAULTS, "codegraph", "auto")
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_call(item: pytest.Item):
     """Bound individual tests while preserving pytest's normal report path."""

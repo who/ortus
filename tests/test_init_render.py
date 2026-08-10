@@ -133,6 +133,19 @@ def test_rendered_ortusrc_validates_as_toml() -> None:
     assert parsed["prefix"] == "acme"
     assert parsed["project_type"] == "go"
     assert parsed["backend"] == "claude"
+    # The policy is pinned explicitly rather than inherited.
+    assert parsed["codegraph"] == "required"
+
+
+def test_rendered_ortusrc_pins_the_selected_codegraph_mode() -> None:
+    ctx = RenderContext(prefix="acme", project_type="go", codegraph="off")
+    assert tomllib.loads(render_template(".ortusrc", ctx))["codegraph"] == "off"
+
+
+def test_rendered_gitignore_excludes_the_codegraph_index() -> None:
+    """The index is local, machine-specific, and must never be committed."""
+    ctx = RenderContext(prefix="acme", project_type="go")
+    assert ".codegraph/" in render_template(".gitignore", ctx)
 
 
 def test_codex_render_uses_codex_config_and_no_claude_dir(tmp_path: Path) -> None:

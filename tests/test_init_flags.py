@@ -36,6 +36,19 @@ def _require_bd() -> None:
         pytest.skip("bd binary not on PATH")
 
 
+@pytest.fixture(autouse=True)
+def _fake_codegraph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the CodeGraph CLI so stack-flag tests stay hermetic."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_codegraph_cli", lambda: "/usr/bin/codegraph")
+    monkeypatch.setattr(
+        init_mod,
+        "_codegraph_index",
+        lambda repo, **kwargs: (repo / ".codegraph").mkdir(parents=True, exist_ok=True),
+    )
+
+
 def _ortusrc(target: Path) -> dict:
     return tomllib.loads((target / ".ortusrc").read_text())
 
@@ -132,6 +145,54 @@ def test_invalid_project_type_rejected(tmp_path: Path) -> None:
     assert result.exit_code == 1
     combined = (result.stdout or "") + (result.stderr or "")
     assert "--project-type" in combined
+
+
+def test_codegraph_cli_missing_fails_under_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: no CLI under the default policy fails before writing."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_codegraph_cli", lambda: None)
+    target = tmp_path / "nocli"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (result.stderr or "")
+    compact = "".join(combined.split())
+    assert "codegraphCLIisnotonPATH" in compact, combined
+    assert "--codegraphoff" in compact, combined
+    # nothing bootstrapped on the rejection
+    assert not (target / ".beads").exists()
+
+
+def test_codegraph_off_skips_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: `off` never touches the CLI and pins itself."""
+    import ortus.commands.init as init_mod
+
+    def _never_lookup() -> str:
+        raise AssertionError("--codegraph off must not look for the CodeGraph CLI")
+
+    def _never_index(repo: Path, **kwargs: object) -> None:
+        raise AssertionError("--codegraph off must not invoke the CodeGraph CLI")
+
+    monkeypatch.setattr(init_mod, "_codegraph_cli", _never_lookup)
+    monkeypatch.setattr(init_mod, "_codegraph_index", _never_index)
+    target = tmp_path / "graphless"
+    result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    assert _ortusrc(target)["codegraph"] == "off"
+    assert not (target / ".codegraph").exists()
+
+
+def test_invalid_codegraph_mode_rejected(tmp_path: Path) -> None:
+    target = tmp_path / "badmode"
+    result = runner.invoke(app, ["init", str(target), "--codegraph", "maybe"])
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "--codegraph" in combined
+    assert not (target / ".beads").exists()
 
 
 def test_render_context_carries_new_fields() -> None:

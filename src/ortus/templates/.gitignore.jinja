@@ -33,6 +33,10 @@ logs/
 # Cache directories
 .cache/
 
+# CodeGraph index — local, machine-specific, and large. Every fresh clone
+# rebuilds it with `codegraph init`; `ortus check` reports it when missing.
+.codegraph/
+
 # Python / Node / Go / Rust common build outputs
 __pycache__/
 *.py[cod]

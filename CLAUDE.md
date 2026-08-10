@@ -105,9 +105,11 @@ This project uses **beads** (`bd`) for issue tracking. See **AGENTS.md** for wor
 * Use dependency trees to understand complex relationships
 * Higher priority issues (0-1) are usually more important than lower (2-4)
 
-## CodeGraph (optional)
+## CodeGraph (required)
 
-If you have [CodeGraph](https://github.com/colbymchenry/codegraph) installed, the orchestrator will use it automatically; if not, nothing changes. Not required — the loop detects CodeGraph at runtime and falls back silently to grep/glob/Read when absent.
+[CodeGraph](https://github.com/colbymchenry/codegraph) is a prerequisite of an Ortus project, not an enhancement. `ortus init` installs the index and pins `codegraph = "required"` in `.ortusrc`, `ortus check` reports the CLI, the `.codegraph/` index, and the backend's MCP registration, and `ortus plan` / `ortus grind` abort before launching an agent when any of those is missing.
+
+The policy resolves from `.ortusrc` (default `required`) and is injected into every agent phase as the CodeGraph phase contract. Under `required` a missing capability is fatal — stop and report the missing prerequisite rather than falling back. `auto` keeps the best-effort grep/Read fallback, and `off` disables CodeGraph entirely for a repository it cannot index. `.codegraph/` is gitignored, so each fresh clone runs `codegraph init` once.
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->

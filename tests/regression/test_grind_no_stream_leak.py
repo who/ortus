@@ -94,7 +94,9 @@ from ortus.cli import app
 # stream-json but does NOT touch bd; without the iter cap, the new
 # subprocess-per-task outer loop would sleep + retry forever on the
 # no-change branch.
-app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0'])
+# --codegraph off: this asserts on stream leakage, not the CodeGraph probe.
+app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0',
+     '--codegraph', 'off'])
 """
     )
     proc = subprocess.run(

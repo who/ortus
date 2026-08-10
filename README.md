@@ -104,7 +104,7 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 | **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
 | **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
 
-Optional: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. Ortus probes the project index and CLI, then reconciles those outer signals with CodeGraph MCP calls observed in each agent phase. It never assumes that an index alone means the agent can use the tools.
+Required: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. `ortus init` installs the index and pins `codegraph = "required"`, `ortus check` reports it as a prerequisite, and `plan`/`grind` abort before launching an agent when it is missing. Ortus probes the project index and CLI, then reconciles those outer signals with CodeGraph MCP calls observed in each agent phase. It never assumes that an index alone means the agent can use the tools. Bootstrap without it — for a repository CodeGraph cannot index — with `ortus init --codegraph off`.
 
 ## Agent backends
 
@@ -115,13 +115,28 @@ Claude workers run a narrow `claude -p '/goal …'` session. Codex workers run t
 Neither backend's worker may close an issue, commit, or push. Workers leave
 uncommitted candidate edits; `ortus grind` itself owns the lifecycle.
 
-Codex grind can start from a dirty checkout. Existing changes are treated as an
-engineering handoff: the fresh worker receives the selected issue and current
-Git state, assesses which work is useful, and continues instead of requiring a
-clean restart. If a worker exits or times out after editing files, the issue and
-available phase context are journaled under `logs/`; the next invocation prefers
-that same issue. Journal schema, prior HEAD, path, or hash differences are audit
-context rather than automatic startup failures.
+Either backend can start from a dirty checkout. Existing changes are treated as
+an engineering handoff: the fresh worker receives the selected issue and the
+current Git state, assesses which work is useful, and continues instead of
+requiring a clean restart. If a worker exits nonzero, is killed, or fails
+verification after editing files, the issue and available phase context are
+journaled under `logs/`; the next invocation prefers that same issue before
+selecting anything new. Journal schema, prior HEAD, path, or hash differences are
+audit context rather than automatic startup failures.
+
+Inherited work the worker judges unrelated to the issue stays out of the
+candidate: it lists those repo-relative paths in
+`logs/grind-unrelated-paths.txt`, and grind leaves them in the worktree — never
+reset, stashed, deleted, or committed. When uncommitted work has no journal and
+more than one issue is claimed, nothing can decide which goal owns it, so grind
+preserves everything and stops with the candidate ids and paths for a human to
+route.
+
+A claim left behind with no journal is still a cross-restart orphan, so
+`--orphan-policy=warn|revert|escalate` continues to govern it at startup. Its
+goal is captured before the sweep runs, so the default `revert` costs nothing —
+the loop re-claims the same issue and resumes the same worktree — while
+`escalate` hands the issue to a human and leaves the uncommitted work in place.
 
 ## Why ortus
 
@@ -138,7 +153,7 @@ Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 prefix = "myproj"       # bd issue-id prefix
 project_type = "python" # python | typescript | go | rust | polyglot
 backend = "claude"      # claude | codex
-codegraph = "auto"      # off | auto | required
+codegraph = "required"  # off | auto | required (default: required)
 codegraph_refresh_blocking = false
 
 [profiles.claude.plan]
@@ -361,23 +376,28 @@ stateDiagram-v2
 
 ### CodeGraph lifecycle
 
-`auto` is the default. Planning and each grind issue transaction emit a clear
-activation or fallback decision; missing or unhealthy CodeGraph falls back to
-grep/Read without making ordinary no-CodeGraph projects fail. `off` performs no
-CodeGraph calls and reports that it is disabled. `required` fails before agent
-launch when `.codegraph/` or the `codegraph` CLI is missing, fails when a phase
-transcript contains no CodeGraph MCP capability handshake, and blocks
-verification if the post-edit `codegraph sync` fails.
+`required` is the default. It fails before agent launch when `.codegraph/` or
+the `codegraph` CLI is missing, fails when a phase transcript contains no
+CodeGraph MCP capability handshake, and blocks verification if the post-edit
+`codegraph sync` fails. `auto` stays selectable for a best-effort posture:
+planning and each grind issue transaction emit a clear activation or fallback
+decision, and missing or unhealthy CodeGraph falls back to grep/Read. `off`
+performs no CodeGraph calls and reports that it is disabled — it is the escape
+hatch for a repository CodeGraph cannot index.
 
-Initialize and sync the index with the CodeGraph CLI and register its MCP server
-for the selected Claude or Codex backend. Planning validates issue packets,
+`ortus init` builds the index, writes the resolved policy into `.ortusrc`, and
+gitignores `.codegraph/` (the index is local, machine-specific, and often
+large). Because it is gitignored, a fresh clone has no index: run
+`codegraph init` once, which `ortus check` names as the remediation. Register
+the CodeGraph MCP server for the selected Claude or Codex backend. Planning
+validates issue packets,
 implementation confirms references and runs impact analysis, the parent refreshes
 the index after candidate edits, and a fresh verifier independently checks changed
 symbols and callers.
 
 ```text
-[ortus grind] CodeGraph probe (mode=auto)
-[ortus grind] CodeGraph fallback: project index .codegraph/ is missing
+[ortus grind] CodeGraph probe (mode=required)
+error: CodeGraph required but unavailable: project index .codegraph/ is missing.
 ```
 
 Logs retain bounded `ortus.codegraph` JSON records rendered by `ortus tail` as
@@ -390,6 +410,13 @@ Troubleshooting: a missing index means run `codegraph init` and `codegraph sync`
 a missing CLI means install it; a missing handshake means the selected backend
 has not registered the CodeGraph MCP server. Auto mode records the fallback and
 continues. Required mode stops with an actionable diagnostic.
+
+**Migrating an existing project.** A repo whose `.ortusrc` has no `codegraph`
+key now inherits `required` and will stop at the probe until CodeGraph is in
+place. Run `ortus check` to see which prerequisite is missing, then either
+install the CLI and run `codegraph init`, or pin the previous behavior
+explicitly with `codegraph = "auto"` (or `codegraph = "off"`) in `.ortusrc`.
+Projects that already pin an explicit value are unaffected.
 
 Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md` or `~/.ortus/prompts/<name>.md`; the bundled defaults under `src/ortus/prompts/` are the fallback (FR-025).
 

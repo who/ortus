@@ -17,6 +17,19 @@ from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_text
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every check in this module away from the real `~/.claude.json`.
+
+    The MCP-registration probe reads the user scope out of the home
+    directory, so a test that ran against the developer's own home would
+    pass or fail by whichever machine ran the suite. Autouse rather than
+    per-test: a new test here inherits the isolation instead of having to
+    remember it.
+    """
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+
+
 # --- fixture helpers -------------------------------------------------------
 
 
@@ -52,7 +65,20 @@ def _healthy_repo(tmp_path: Path) -> Path:
     settings.write_text(
         json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}})
     )
+    _healthy_codegraph(repo)
     return repo
+
+
+def _healthy_codegraph(repo: Path) -> None:
+    """Satisfy the CodeGraph prerequisite: index plus project MCP registration.
+
+    CodeGraph defaults to `required`, so a repo that is otherwise green now
+    needs both to stay green.
+    """
+    (repo / ".codegraph").mkdir(parents=True, exist_ok=True)
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"codegraph": {"command": "codegraph"}}})
+    )
 
 
 def _all_binaries_present(
@@ -113,8 +139,6 @@ def test_check_fails_on_disabled_hooks(
     )
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    # Force home to a tmp dir so the user's real ~/.claude isn't checked.
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
     assert "FAIL" in result.stdout
@@ -156,7 +180,6 @@ def test_check_reports_a_verifier_sandbox_that_cannot_execute(
         )
 
     monkeypatch.setattr(check_mod.ClaudeRunner, "preflight_readonly", _blocked)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
     # The table wraps long cells across rows, so drop the borders too.
@@ -172,6 +195,7 @@ def test_check_skips_the_verifier_probe_for_codex(
     """The Codex verifier is unwrapped, so there is no posture to probe."""
     repo = tmp_path / "codex-probe"
     (repo / ".beads").mkdir(parents=True)
+    (repo / ".codegraph").mkdir()
     (repo / ".codex").mkdir()
     (repo / ".codex" / "config.toml").write_text(
         'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
@@ -236,7 +260,6 @@ def test_check_reports_missing_excluded_commands(
     (repo / ".claude" / "settings.json").write_text(json.dumps({}))
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
     assert "excludedCommands" in result.stdout or "sandbox" in result.stdout
@@ -249,7 +272,6 @@ def test_check_reports_missing_beads_dir(
     repo.mkdir()
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
     assert ".beads/" in result.stdout
@@ -264,7 +286,6 @@ def test_check_reports_prompt_overrides(
     (overrides / "grind-prompt.md").write_text("custom")
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0
     assert "grind-prompt.md" in result.stdout
@@ -280,7 +301,6 @@ def test_check_reports_stale_override_missing_the_placeholder(
     (overrides / "plan-prompt.md").write_text("frozen contract, no placeholder\n")
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "FAIL" not in result.stdout
@@ -300,7 +320,6 @@ def test_check_leaves_a_current_override_out_of_the_stale_override_report(
     (overrides / "plan-prompt.md").write_text("custom preamble\n$readiness_spec\n")
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     compact = "".join(result.stdout.split())
@@ -315,7 +334,6 @@ def test_check_reports_present_readiness_memory(
     repo = _healthy_repo(tmp_path)
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     # The table wraps long cells, so compare with whitespace removed.
@@ -331,7 +349,6 @@ def test_check_reports_missing_readiness_memory(
     repo = _healthy_repo(tmp_path)
     _all_binaries_present(monkeypatch, readiness_memory=False)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
     # The table wraps long cells, so compare with whitespace removed.
@@ -355,7 +372,6 @@ def test_check_readiness_memory_is_read_only(
     monkeypatch.setattr(check_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.setattr(check_mod.subprocess, "run", _record)
     _fake_sandbox_ok(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     runner.invoke(app, ["check", str(repo)])
     memory_calls = [args for args in seen if "memories" in args]
     assert memory_calls, seen
@@ -364,11 +380,158 @@ def test_check_readiness_memory_is_read_only(
         assert "remember" not in args, args
 
 
+@pytest.mark.codegraph_default
+def test_codegraph_result_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: the table carries CLI, index, and MCP registration."""
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = "".join(result.stdout.split())
+    assert "codegraph" in compact
+    assert "mode=required" in compact
+    assert "CLI=ok" in compact
+    assert "index=present" in compact
+    assert "codegraphserverregistered" in compact
+
+
+@pytest.mark.codegraph_default
+def test_codegraph_required_missing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: a required policy with no index fails and names the remediation.
+
+    Asserted against the CheckResult rather than the table: Rich truncates a
+    long Details cell, and the remediation text is the point of the row.
+    """
+    repo = _healthy_repo(tmp_path)
+    (repo / ".codegraph").rmdir()
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = check_mod.check_codegraph(repo, "claude")
+    assert not result.ok
+    assert "index=missing" in result.message
+    assert check_mod.CODEGRAPH_INDEX_HINT in result.message
+    # and the verb still exits non-zero without raising
+    assert runner.invoke(app, ["check", str(repo)]).exit_code == 1
+
+
+@pytest.mark.codegraph_default
+def test_codegraph_unregistered_mcp_is_reported_not_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A just-init'd repo has an index but no MCP registration ortus can read.
+
+    Only the file-backed scopes are observable, so the row names the
+    remediation without failing the check — the phase handshake enforces it.
+    """
+    repo = _healthy_repo(tmp_path)
+    (repo / ".mcp.json").unlink()
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = check_mod.check_codegraph(repo, "claude")
+    assert result.ok, result.message
+    assert check_mod.CODEGRAPH_MCP_HINT in result.message
+    assert runner.invoke(app, ["check", str(repo)]).exit_code == 0
+
+
+@pytest.mark.codegraph_default
+def test_codegraph_required_missing_cli_is_reported_distinctly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Index present but CLI absent has a different remediation than the reverse."""
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    real_which = check_mod.shutil.which
+    monkeypatch.setattr(
+        check_mod.shutil,
+        "which",
+        lambda binary: None if binary == "codegraph" else real_which(binary),
+    )
+    result = check_mod.check_codegraph(repo, "claude")
+    assert not result.ok
+    assert "CLI=missing" in result.message
+    assert "index=present" in result.message
+    assert check_mod.CODEGRAPH_INSTALL_HINT in result.message
+    assert check_mod.CODEGRAPH_INDEX_HINT not in result.message
+
+
+def test_codegraph_off_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: `off` is an informational pass with no index or CLI requirement."""
+    repo = _healthy_repo(tmp_path)
+    (repo / ".codegraph").rmdir()
+    (repo / ".ortusrc").write_text('codegraph = "off"\n')
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = "".join(result.stdout.split())
+    assert "mode=off" in compact
+    assert "FAIL" not in result.stdout
+
+
+def test_codegraph_auto_reports_the_fallback_without_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`auto` keeps today's best-effort posture: reported, not failed."""
+    repo = _healthy_repo(tmp_path)
+    (repo / ".codegraph").rmdir()
+    (repo / ".ortusrc").write_text('codegraph = "auto"\n')
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    assert runner.invoke(app, ["check", str(repo)]).exit_code == 0
+    result = check_mod.check_codegraph(repo, "claude")
+    assert result.ok
+    assert "auto fallback" in result.message
+    assert check_mod.CODEGRAPH_INDEX_HINT in result.message
+
+
+def test_codegraph_invalid_mode_reports_rather_than_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparseable policy is a FAIL row, matching check_ortusrc's posture."""
+    repo = _healthy_repo(tmp_path)
+    (repo / ".ortusrc").write_text('codegraph = "sometimes"\n')
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    compact = "".join(result.stdout.split())
+    assert "invalidcodegraphmode" in compact
+
+
+def test_codegraph_codex_registration_is_the_injected_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex needs no user MCP config: ortus injects the capability itself."""
+    repo = tmp_path / "codex-graph"
+    (repo / ".beads").mkdir(parents=True)
+    (repo / ".codegraph").mkdir()
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text(
+        'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
+    )
+    (repo / ".ortusrc").write_text('backend = "codex"\n')
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = "".join(result.stdout.split())
+    assert "injectedperchildbyortus" in compact
+
+
 def test_check_codex_uses_codex_binary_and_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "codex-project"
     (repo / ".beads").mkdir(parents=True)
+    (repo / ".codegraph").mkdir()
     (repo / ".codex").mkdir()
     (repo / ".codex" / "config.toml").write_text(
         'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'

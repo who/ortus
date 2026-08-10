@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -10,6 +11,8 @@ import typer
 
 from ortus.core import output
 from ortus.core.agent import BACKENDS
+from ortus.core.codegraph import CodeGraphMode
+from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 from ortus.core.init_render import (
     FRAMEWORK_CHOICES,
     FRAMEWORK_DEFAULTS,
@@ -98,6 +101,90 @@ def _normalize_initial_branch(repo: Path, branch: str = "main") -> None:
         )
 
 
+CODEGRAPH_MODES: tuple[str, ...] = tuple(m.value for m in CodeGraphMode)
+# The policy does not vary by language, but keying it like the stack flags lets
+# `--codegraph` reuse `_resolve_choice`'s validation and error shape.
+CODEGRAPH_CHOICES: dict[str, tuple[str, ...]] = {pt: CODEGRAPH_MODES for pt in PROJECT_TYPES}
+CODEGRAPH_DEFAULTS: dict[str, str] = {pt: DEFAULT_CODEGRAPH_MODE for pt in PROJECT_TYPES}
+CODEGRAPH_INIT_TIMEOUT = 900
+CODEGRAPH_INSTALL_HINT = (
+    "install CodeGraph (https://github.com/colbymchenry/codegraph) and re-run, "
+    "or bootstrap without it: ortus init --codegraph off"
+)
+
+
+def _codegraph_cli() -> str | None:
+    """Locate the CodeGraph CLI; the seam init tests replace."""
+    return shutil.which("codegraph")
+
+
+def _codegraph_index(repo: Path, *, timeout: int = CODEGRAPH_INIT_TIMEOUT) -> None:
+    """Run `codegraph init` inside `repo`; the seam init tests replace.
+
+    Streams the CLI's own progress to the operator for the same reason
+    `_bd_init` does: indexing a large repo is slow, and a silent multi-minute
+    wait is indistinguishable from a hang. `check=True` turns a non-zero exit
+    into CalledProcessError for the caller to translate.
+    """
+    subprocess.run(
+        ["codegraph", "init", str(repo)], cwd=str(repo), check=True, timeout=timeout
+    )
+
+
+def _require_codegraph_cli(mode: str) -> None:
+    """Fail `init` before it writes anything when `required` cannot be honored.
+
+    Finishing init in a state where every subsequent grind aborts at the probe
+    is worse than failing now, while the operator is present and can install
+    the CLI. `auto` keeps its best-effort posture and only warns.
+    """
+    if mode == CodeGraphMode.OFF.value or _codegraph_cli() is not None:
+        return
+    if mode == CodeGraphMode.REQUIRED.value:
+        output.error(
+            "the codegraph CLI is not on PATH, and --codegraph=required needs it",
+            hint=CODEGRAPH_INSTALL_HINT,
+        )
+        raise typer.Exit(code=1)
+    output.warn("codegraph CLI not on PATH; --codegraph=auto will fall back to grep/Read")
+
+
+def _bootstrap_codegraph(repo: Path, mode: str) -> None:
+    """Build the project index so a finished `init` can run `grind` at once."""
+    if mode == CodeGraphMode.OFF.value:
+        output.progress("init", "CodeGraph disabled by policy (--codegraph off)")
+        return
+    if _codegraph_cli() is None:
+        return  # auto-only: _require_codegraph_cli already warned
+    if (repo / ".codegraph").is_dir():
+        output.progress("init", "CodeGraph index already present; skipping codegraph init")
+        return
+    output.progress(
+        "init", f"indexing with CodeGraph (timeout {CODEGRAPH_INIT_TIMEOUT}s)"
+    )
+    required = mode == CodeGraphMode.REQUIRED.value
+    try:
+        _codegraph_index(repo)
+    except subprocess.TimeoutExpired:
+        problem = f"codegraph init timed out after {CODEGRAPH_INIT_TIMEOUT}s"
+    except (subprocess.CalledProcessError, OSError) as exc:
+        returncode = getattr(exc, "returncode", None)
+        problem = (
+            f"codegraph init failed (exit {returncode})"
+            if returncode is not None
+            else f"codegraph init failed to run: {exc}"
+        )
+    else:
+        if (repo / ".codegraph").is_dir():
+            output.success("CodeGraph index built (.codegraph/)")
+            return
+        problem = "codegraph init exited 0 but left no .codegraph/ index"
+    if required:
+        output.error(problem, hint=CODEGRAPH_INSTALL_HINT)
+        raise typer.Exit(code=1)
+    output.warn(f"{problem}; continuing under --codegraph=auto")
+
+
 def _resolve_choice(
     flag_name: str,
     cli_value: Optional[str],
@@ -160,6 +247,11 @@ def init(
         "--backend",
         help="Agent backend to configure (claude|codex). Claude remains the default.",
     ),
+    codegraph: Optional[str] = typer.Option(
+        None,
+        "--codegraph",
+        help="CodeGraph policy to bootstrap and pin (off|auto|required); defaults to required.",
+    ),
 ) -> None:
     """Bootstrap a new repo with bd, backend config, .ortusrc, and AGENTS.md."""
     if project_type not in PROJECT_TYPES:
@@ -187,6 +279,13 @@ def init(
         "--linter", linter, project_type,
         LINTER_CHOICES, LINTER_DEFAULTS,
     )
+    resolved_codegraph = _resolve_choice(
+        "--codegraph", codegraph, project_type,
+        CODEGRAPH_CHOICES, CODEGRAPH_DEFAULTS,
+    )
+    # Before the target directory is even created: a missing CLI under
+    # `required` must fail while nothing has been written.
+    _require_codegraph_cli(resolved_codegraph)
 
     target = (repo if repo is not None else Path.cwd()).resolve()
     output.progress("init", f"target: {target}")
@@ -237,10 +336,15 @@ def init(
     else:
         output.success(f"readiness memory stored (key={READINESS_MEMORY_KEY})")
 
+    # Indexing runs before rendering so a failure leaves no half-written Ortus
+    # config behind.
+    _bootstrap_codegraph(target, resolved_codegraph)
+
     output.progress(
         "init",
         f"rendering ortus-owned files (project_type={project_type}, "
-        f"package_manager={resolved_pm}, framework={resolved_fw}, linter={resolved_lint})",
+        f"package_manager={resolved_pm}, framework={resolved_fw}, linter={resolved_lint}, "
+        f"codegraph={resolved_codegraph})",
     )
     ctx = RenderContext(
         prefix=resolved_prefix,
@@ -248,6 +352,7 @@ def init(
         package_manager=resolved_pm,
         framework=resolved_fw,
         linter=resolved_lint,
+        codegraph=resolved_codegraph,
         backend=backend,
     )
     written = render_all(target, ctx)

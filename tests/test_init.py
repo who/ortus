@@ -27,6 +27,25 @@ def _require_bd() -> None:
         pytest.skip("bd binary not on PATH")
 
 
+@pytest.fixture(autouse=True)
+def _fake_codegraph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep init's CodeGraph bootstrap hermetic.
+
+    Init now defaults to `--codegraph required`, so every invocation below
+    would otherwise shell out to a real `codegraph init` — slow, and a hard
+    failure on a host without the CLI. The fake stands in for both the PATH
+    lookup and the index build.
+    """
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_codegraph_cli", lambda: "/usr/bin/codegraph")
+    monkeypatch.setattr(
+        init_mod,
+        "_codegraph_index",
+        lambda repo, **kwargs: (repo / ".codegraph").mkdir(parents=True, exist_ok=True),
+    )
+
+
 def test_init_on_empty_dir_creates_all_artifacts(tmp_path: Path) -> None:
     """Acceptance #1: fresh dir → .beads/, settings.json, .ortusrc, AGENTS.md, .gitignore."""
     target = tmp_path / "fresh"
@@ -247,7 +266,9 @@ def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
     target = tmp_path / "closedstdin"
     t0 = time.monotonic()
     proc = subprocess.run(
-        ["ortus", "init", str(target)],
+        # `--codegraph off` keeps this about stdin: the monkeypatched bootstrap
+        # seam does not reach a real subprocess, and indexing is not on trial.
+        ["ortus", "init", str(target), "--codegraph", "off"],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -257,6 +278,48 @@ def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert elapsed < 10.0, f"ortus init took {elapsed:.2f}s with closed stdin (budget 10s)"
     assert (target / ".beads").is_dir()
+
+
+def test_codegraph_bootstrap_indexes_pins_and_ignores(tmp_path: Path) -> None:
+    """AC-2: init builds the index, pins the policy, ignores the dir."""
+    target = tmp_path / "graphed"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (target / ".codegraph").is_dir()
+    assert 'codegraph = "required"' in (target / ".ortusrc").read_text()
+    assert ".codegraph/" in (target / ".gitignore").read_text()
+
+
+def test_codegraph_bootstrap_skips_an_existing_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--force` over a repo that already has an index must not re-index."""
+    import ortus.commands.init as init_mod
+
+    target = tmp_path / "reindex"
+    assert runner.invoke(app, ["init", str(target)]).exit_code == 0
+    calls: list[Path] = []
+    monkeypatch.setattr(init_mod, "_codegraph_index", lambda repo, **kw: calls.append(repo))
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert calls == []
+
+
+def test_codegraph_index_failure_fails_init_before_rendering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-zero `codegraph init` leaves no half-written Ortus config."""
+    import ortus.commands.init as init_mod
+
+    def _boom(repo: Path, **kwargs: object) -> None:
+        raise subprocess.CalledProcessError(returncode=3, cmd=["codegraph", "init"])
+
+    monkeypatch.setattr(init_mod, "_codegraph_index", _boom)
+    target = tmp_path / "badindex"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 1
+    assert "codegraph init failed (exit 3)" in (result.stdout + result.stderr)
+    assert not (target / ".ortusrc").exists()
 
 
 def test_ortusrc_round_trips_as_toml(tmp_path: Path) -> None:

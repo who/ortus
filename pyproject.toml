@@ -99,4 +99,5 @@ markers = [
     "regression: regression tests guarding against specific past bugs (e.g., ortus-6q8v stream-leak)",
     "smoke: end-to-end smoke tests against seeded fixtures + canned claude responses",
     "slow: tests allowed to exceed the 5s per-test hermetic budget",
+    "codegraph_default: tests that must see the real resolved CodeGraph policy default",
 ]

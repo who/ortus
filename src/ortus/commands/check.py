@@ -19,7 +19,8 @@ import typer
 from ortus.core import output, sandbox
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
-from ortus.core.config import load_config
+from ortus.core.codegraph import CodeGraphMode
+from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.prompts import (
     READINESS_SPEC_PLACEHOLDER,
@@ -196,6 +197,104 @@ def check_ortusrc(repo: Path) -> CheckResult:
     return CheckResult(".ortusrc", True, f"layers loaded: {sources}")
 
 
+CODEGRAPH_INSTALL_HINT = (
+    "install the CodeGraph CLI (https://github.com/colbymchenry/codegraph)"
+)
+CODEGRAPH_INDEX_HINT = "run `codegraph init` in this repo"
+CODEGRAPH_MCP_HINT = "register the MCP server with `codegraph install`"
+
+
+def _claude_mcp_registered(repo: Path) -> bool:
+    """Report whether Claude can see a `codegraph` MCP server for this repo.
+
+    Only the file-backed registration layers are observable from the outer
+    process — project `.mcp.json`, and the user/local scopes bd and Claude
+    both keep in `~/.claude.json`. Launching an agent to ask it directly
+    would make a strictly read-only prerequisite check spawn a process, so
+    this reports what those layers say and nothing more.
+    """
+    candidates: list[Path] = [repo / ".mcp.json", Path.home() / ".claude.json"]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if "codegraph" in (data.get("mcpServers") or {}):
+            return True
+        projects = data.get("projects")
+        if isinstance(projects, dict):
+            entry = projects.get(str(repo)) or {}
+            if isinstance(entry, dict) and "codegraph" in (entry.get("mcpServers") or {}):
+                return True
+    return False
+
+
+def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
+    """Report CodeGraph as a first-class prerequisite.
+
+    Fails under `required` when the CLI or the index is missing, and passes
+    informationally under `off`. Under `auto` the same gaps are reported as
+    the fallback the run will take, not as a failure. Never raises: a repo
+    with no CodeGraph at all must still get a full table.
+
+    Claude's MCP registration is reported but never fails the check. Only the
+    file-backed scopes are observable here, `ortus init` does not register the
+    server, and the phase handshake — which does prove it, from inside the
+    agent — is what enforces it at run time.
+    """
+    name = "codegraph"
+    try:
+        cfg = load_config(repo=repo)
+    except Exception as exc:
+        return CheckResult(name, False, f".ortusrc parse error: {exc}")
+    raw = cfg.get("codegraph", DEFAULT_CODEGRAPH_MODE)
+    try:
+        mode = CodeGraphMode(raw)
+    except ValueError:
+        return CheckResult(
+            name, False, f"invalid codegraph mode {raw!r}; expected off, auto, or required"
+        )
+    if mode is CodeGraphMode.OFF:
+        return CheckResult(name, True, "mode=off — disabled by policy, no index required")
+
+    cli = _binary_check("codegraph")
+    index = (repo / ".codegraph").is_dir()
+    # Codex never reads a user MCP config: `CodeGraphAdapter.probe()` builds a
+    # CodeGraphCapability and Ortus injects it into every fresh child, so its
+    # registration is satisfied exactly when the CLI and index are.
+    if backend == "codex":
+        registered = cli.ok and index
+        registration = "injected per child by ortus" if registered else "needs CLI + index"
+    else:
+        registered = _claude_mcp_registered(repo)
+        registration = (
+            "codegraph server registered"
+            if registered
+            else f"not registered in a readable scope — {CODEGRAPH_MCP_HINT}"
+        )
+
+    missing: list[str] = []
+    if not cli.ok:
+        missing.append(f"CLI: {cli.message} — {CODEGRAPH_INSTALL_HINT}")
+    if not index:
+        missing.append(f"index .codegraph/ missing — {CODEGRAPH_INDEX_HINT}")
+
+    detail = (
+        f"mode={mode.value}; CLI={'ok' if cli.ok else 'missing'}; "
+        f"index={'present' if index else 'missing'}; MCP={registration}"
+    )
+    if not missing:
+        return CheckResult(name, True, detail)
+    joined = "; ".join(missing)
+    if mode is CodeGraphMode.REQUIRED:
+        return CheckResult(name, False, f"{detail} — required but unavailable: {joined}")
+    return CheckResult(name, True, f"{detail} — auto fallback: {joined}")
+
+
 def _stale_plan_prompt(repo: Path) -> Optional[str]:
     """Name the winning plan-prompt override if it predates the placeholder.
 
@@ -261,6 +360,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     repo_checks.extend(
         [
             (check_ortusrc, ".ortusrc"),
+            (lambda r: check_codegraph(r, backend), "codegraph"),
             (check_prompt_overrides, ".ortus/prompts/"),
         ]
     )

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ortus.core.config import DEFAULTS, load_config
+from ortus.core.config import DEFAULT_CODEGRAPH_MODE, DEFAULTS, load_config
 from ortus.core.profiles import Phase, ProfileError
 
 
@@ -54,6 +54,23 @@ def test_config_get_returns_default_for_missing_key(tmp_path: Path) -> None:
     cfg = load_config(repo=tmp_path, home=tmp_path / "home")
     assert cfg.get("nope", "fallback") == "fallback"
     assert cfg.get("owner") is None
+
+
+@pytest.mark.codegraph_default
+def test_codegraph_default_is_required(tmp_path: Path) -> None:
+    """AC-1: no `codegraph` key in any layer resolves to `required`."""
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert DEFAULT_CODEGRAPH_MODE == "required"
+    assert cfg.get("codegraph") == "required"
+
+
+def test_codegraph_explicit_pin_still_wins(tmp_path: Path) -> None:
+    """A project that pins a value is unaffected by the default flip."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_toml(repo / ".ortusrc", 'codegraph = "auto"\n')
+    cfg = load_config(repo=repo, home=tmp_path / "home")
+    assert cfg.get("codegraph") == "auto"
 
 
 def test_round_trip_sample_rc(tmp_path: Path) -> None:

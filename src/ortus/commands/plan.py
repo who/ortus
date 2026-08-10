@@ -27,7 +27,7 @@ from ortus.core.codegraph import (
     phase_contract,
     require_handshake,
 )
-from ortus.core.config import load_config
+from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.prompts import resolve_prompt, substitute
 from ortus.core.readiness import (
@@ -186,7 +186,7 @@ def plan(
     output.progress("plan", f"target: {target}")
     output.progress("plan", f"phase profile: {profile.display_name}")
 
-    configured_mode = config.get("codegraph", "auto")
+    configured_mode = config.get("codegraph", DEFAULT_CODEGRAPH_MODE)
     try:
         mode = codegraph or CodeGraphMode(configured_mode)
     except ValueError:
