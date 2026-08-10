@@ -90,12 +90,37 @@ violates neither.
 
 ## What it costs
 
-**Merge conflicts become real.** Sequential single-tree work never merges today.
-With branches, two issues touching one file conflict at merge time. That is a
-better problem — tooled, understood, with a resolution path — but the pain moves
-rather than disappearing, and it arrives *later*, once the work is already done.
-Symbol-level collision detection at selection is what keeps that acceptable, and
-it is the reason these two proposals interact.
+**Merge conflicts do not become real. They already are, in a worse form.**
+
+Two issues editing one file collide today. The collision simply has no name, no
+markers, no merge base and no tooling: git sees a single dirty file, and the loop
+has to *infer* which lines belong to whom from fingerprints, symbol ranges and
+heading spans. That inference is what `attribution.py` is, and it can be wrong
+silently. With several issues parked at once the inference is not two-way but
+N-way, and every additional parked issue makes it harder.
+
+Branches do not add conflicts to that. They remove most of them and give the
+remainder a shape.
+
+- **Non-overlapping edits to one file stop being an event at all.** Git merges
+  them without asking anyone. Today they are precisely the case that requires
+  attribution to sort out.
+- **Genuinely overlapping edits produce a conflict** — with a merge base, markers
+  and thirty years of tooling, instead of hunk archaeology.
+
+This repository's own history is the argument. Two issues both edited `README.md`
+and the entanglement cost six failed attempts on one, a lost section on the
+other, both correction budgets, and hours of manual separation. Their hunks:
+
+    issue A   @@ -245,0 +246,116 @@
+    issue B   @@ -107 @@  @@ -118 @@  @@ -141 @@  @@ -364 @@  @@ -379 @@  @@ -393 @@
+
+They never overlapped by a single line. On branches git would have merged them
+automatically and no one would have noticed there was anything to resolve.
+
+Symbol-level collision detection at selection still earns its place — it keeps
+the genuinely overlapping cases rare — but it is an optimization here rather than
+a precondition.
 
 **Latency, if pull requests are adopted.** Waiting for checks costs minutes per
 issue and real money. Worth it to stop breaking the integration branch; not
@@ -116,13 +141,29 @@ and recovery all touch the current definition.
 
 ## Where this might be wrong
 
-Conflicts surface *after* the work is done; attribution surfaces during it. In a
-repository with heavy cross-cutting churn, branch-per-issue could trade a bug
-class for a merge-pain class, and the trade would be worse rather than better.
-The judgement that merges are a solved problem and attribution is not is doing
-most of the work in this document, and it deserves a real test before the
-machinery it would delete is deleted.
+Not in the conflicts. The one property the shared tree provides by accident is
+that the second worker **sees the first one's uncommitted code**, and its tests
+run against the combination. Isolation removes that: each branch is written and
+verified against the integration branch as it was, so two changes that merge
+cleanly and break each other are not discovered until after the merge. Git
+cannot catch a semantic conflict, only a textual one.
 
-A cheap way to find out: run stage 1 for a while. It changes no worker behavior
-and still produces the branch history that would show how often two issues would
-have collided.
+That is a real regression in coverage, and it is the thing to design against
+rather than the merge mechanics. The fix is cheap and deliberate: **merge the
+integration branch forward into the issue branch before verification**, so the
+reviewer judges the combination rather than the change in isolation. That
+restores the property on purpose instead of by accident, and it moves the
+discovery earlier than the shared tree ever did — before review rather than
+during the next issue's run.
+
+The residual exposure after that is a change merging between one branch's
+verification and its merge. Narrow, and it is what checks on the integration
+branch are for.
+
+## The cheapest way to find out
+
+Run stage 1 for a while. Finalization commits to a branch and fast-forwards; no
+worker behavior changes at all. The resulting branch history answers the question
+this document is really making a bet about — how often two issues actually touch
+the same lines, as opposed to the same files — before any of the machinery it
+would delete is deleted.
