@@ -1576,6 +1576,24 @@ def _truncated(text: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _shortened(text: str, limit: int) -> str:
+    """`text` bounded to `limit` characters on a word boundary, no ellipsis.
+
+    A trailing `...` reads as corruption and tells a reader nothing they can
+    act on, so an over-long text simply ends on the last whole word that fits.
+    A first word wider than the entire budget is cut where the budget runs out
+    rather than yielding nothing at all. The cut is by character, so a
+    multi-byte character is never split in half.
+    """
+
+    if len(text) <= limit:
+        return text
+    head = text[: limit + 1].rsplit(" ", 1)[0].rstrip()
+    if not head or len(head) > limit:
+        return text[:limit].rstrip()
+    return head
+
+
 def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
     """The authored packet for the commit message, or {} when unreadable.
 
@@ -1591,18 +1609,36 @@ def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
     return packet if isinstance(packet, dict) else {}
 
 
+def _undoubled_component(issue_id: str, title: str) -> str:
+    """`title` without a leading component the id prefix already names.
+
+    An id like `ortus-4b2p` opens every subject with `ortus`, so a title
+    written as `ortus: retire the flag` would say it twice. A title leading
+    with any other component is left exactly as written — that word carries
+    information the id does not.
+    """
+
+    component = issue_id.partition("-")[0].strip().lower()
+    head, separator, rest = title.partition(":")
+    if not component or not separator or head.strip().lower() != component:
+        return title
+    return rest.strip() or title
+
+
 def _commit_subject(issue_id: str, title: str) -> str:
     """`<id>: <title>`, bounded to a conventional subject length.
 
     The id stays first so existing habits — and any tooling that greps a
     subject for an issue id — keep working. Whitespace is collapsed because a
-    title carrying a newline would otherwise split into a spurious body.
+    title carrying a newline would otherwise split into a spurious body. Only
+    the title spends the length budget, so the id prefix stays intact and
+    greppable no matter how long the title runs.
     """
 
-    collapsed = " ".join(str(title or "").split())
-    return _truncated(
-        f"{issue_id}: {collapsed or _DEGRADED_COMMIT_SUBJECT}", _COMMIT_SUBJECT_LIMIT
-    )
+    prefix = f"{issue_id}: "
+    collapsed = _undoubled_component(issue_id, " ".join(str(title or "").split()))
+    budget = max(_COMMIT_SUBJECT_LIMIT - len(prefix), 1)
+    return prefix + _shortened(collapsed or _DEGRADED_COMMIT_SUBJECT, budget)
 
 
 def _printable(text: Any) -> str:
@@ -1701,15 +1737,6 @@ def _codegraph_summary(comment: str) -> str:
     )
 
 
-def _paths_summary(journal: CandidateJournal) -> str:
-    """The transaction's owned paths as a plain touched-files list."""
-
-    paths = sorted(journal.candidate_paths)
-    if not paths:
-        return ""
-    return "Files touched:\n" + _bounded_block(paths)
-
-
 def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
     """`entries` wrapped for a commit body, cut off once the budget is spent."""
 
@@ -1731,30 +1758,45 @@ def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
     return "\n".join(rendered)
 
 
-def _change_description(bd: BdClient, issue_id: str, journal: CandidateJournal) -> str:
+def _change_description(
+    bd: BdClient,
+    issue_id: str,
+    journal: CandidateJournal,
+    *,
+    write_log: Callable[[str], None],
+) -> str:
     """What the commit changed, from the first source that states it.
 
-    Three sources, in descending order of how much they say: the implementer's
-    `**Changes**` bullets, the `**CodeGraph v1**` block of that same comment,
-    and the owned paths the journal already holds. The bullets are authored
-    before the code is re-checked, so a run that went back and edited the code
-    needs one `**Changes**` comment per round for them to describe what is
-    being committed; short of that the structural sources speak instead.
+    Two sources, in descending order of how much they say: the implementer's
+    `**Changes**` bullets, and the `**CodeGraph v1**` block of that same
+    comment. The bullets are authored before the code is re-checked, so a run
+    that went back and edited the code needs one `**Changes**` comment per
+    round for them to describe what is being committed; short of that the
+    structural block speaks instead, and short of that the message carries only
+    what the issue itself already said.
+
+    No source enumerates the committed files: `git show --stat` prints them
+    from the commit itself, so a list in the body could only agree with it or
+    be wrong. Falling back at all means the prose the commit was supposed to
+    carry was never written, which is a degradation worth a line in the run
+    log rather than a silently thinner message.
     """
 
     described = [
         text for text in _issue_comments(bd, issue_id) if _describes_the_change(text)
     ]
-    if described:
-        latest = described[-1]
-        if len(described) > journal.corrections:
-            bullets = _changes_bullets(latest)
-            if bullets:
-                return _bounded_block(bullets)
-        summary = _codegraph_summary(latest)
-        if summary:
-            return summary
-    return _paths_summary(journal)
+    latest = described[-1] if described else ""
+    if latest and len(described) > journal.corrections:
+        bullets = _changes_bullets(latest)
+        if bullets:
+            return _bounded_block(bullets)
+    summary = _codegraph_summary(latest) if latest else ""
+    write_log(
+        f"finalization: no usable **Changes** bullets for {issue_id}; the commit "
+        "body degrades to "
+        + ("the CodeGraph block" if summary else "the issue objective alone")
+    )
+    return summary
 
 
 def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> str:
@@ -1962,7 +2004,9 @@ def _finalize_candidate(
                     f"{issue_id} with a degraded subject"
                 )
             message = _commit_message(
-                issue_id, packet, _change_description(bd, issue_id, journal)
+                issue_id,
+                packet,
+                _change_description(bd, issue_id, journal, write_log=write_log),
             )
             if not git.commit_paths(stage, message):
                 return journal, "path-scoped commit of the owned candidate failed"

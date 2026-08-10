@@ -296,6 +296,9 @@ def test_grind_prompt_states_the_changes_bullets_become_the_commit_body() -> Non
     assert "become the commit message body" in body
     assert "six months" in body
     assert "names the file or component" in body
+    # Nothing else describes the change: the file list the fallback used to
+    # print is gone, so a missing block leaves only the issue's own words.
+    assert "only prose the commit can carry" in body
 
 
 def test_grind_prompt_requires_a_refreshed_changes_block_after_a_correction() -> None:

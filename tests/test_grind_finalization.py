@@ -808,17 +808,53 @@ def test_commit_body_falls_back_to_the_codegraph_block(
     assert "Added: Loader@loader.py:7 (class)" in body
 
 
-def test_commit_body_falls_back_to_the_owned_paths(
+def test_commit_body_has_no_file_inventory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-4: with nothing authored, the journal's own paths describe the commit."""
+    """AC-3: the body never lists the committed files.
+
+    `git show --stat` prints them from the commit itself, so a list in the body
+    could only agree with it or contradict it. With nothing authored the body
+    is the issue objective and nothing else.
+    """
     repo, _, _ = _finalize_by_replay(tmp_path, monkeypatch, "fin14d")
 
     body = _head_message(repo).partition("\n\n")[2]
-    assert "Files touched:" in body
-    assert f"- {CANDIDATE}" in body
+    assert "Files touched:" not in body
+    assert CANDIDATE not in body
     for word in PROVENANCE_WORDS:
         assert word not in body
+
+
+def test_missing_change_bullets_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a commit body thinner than intended is visible in the run log.
+
+    The worker prompt asks for a `**Changes**` block and this run had none, so
+    the operator log has to say the commit message degraded — otherwise the
+    only trace is a commit nobody notices is thin.
+    """
+    repo, issue_id, _ = _finalize_by_replay(tmp_path, monkeypatch, "fin14g")
+
+    logs = "\n".join(
+        p.read_text(encoding="utf-8") for p in (repo / "logs").glob("grind-*.log")
+    )
+    assert f"no usable **Changes** bullets for {issue_id}" in logs
+
+
+def test_authored_bullets_are_not_logged_as_a_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: the degradation line only fires when the bullets are missing."""
+    repo, issue_id, _ = _finalize_by_replay(
+        tmp_path, monkeypatch, "fin14h", comments=(CHANGES_COMMENT,)
+    )
+
+    logs = "\n".join(
+        p.read_text(encoding="utf-8") for p in (repo / "logs").glob("grind-*.log")
+    )
+    assert f"no usable **Changes** bullets for {issue_id}" not in logs
 
 
 def test_commit_body_skips_a_stale_changes_block(
@@ -891,54 +927,42 @@ def test_commit_degrades_without_packet(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    subject, _, body = _head_message(repo).partition("\n\n")
+    subject = _head_message(repo).partition("\n\n")[0]
     assert subject == f"{issue_id}: verified candidate"
-    # The description does not come from the packet, so it survives the read
-    # failure that costs the title.
-    assert f"- {CANDIDATE}" in body
+    # A tracker that cannot answer costs the title and the objective both, and
+    # nothing else authored a body — but the owned paths are still committed.
     assert CANDIDATE in _committed_paths(repo)
     assert JournalStore(repo).load() is None
 
 
-def _journal_with_paths(*paths: str) -> CandidateJournal:
-    return CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        candidate_paths=paths,
-        candidate_hash="a" * 64,
-    )
-
-
 def test_commit_message_survives_an_unencodable_path() -> None:
-    """AC-4: a path recovered with surrogateescape must not break the commit."""
-    journal = _journal_with_paths("src/caf\udce9.py", CANDIDATE)
-
+    """AC-4: text recovered with surrogateescape must not break the commit."""
     message = grind_mod._commit_message(
-        "repo-1", {"title": "Handle odd filenames"}, grind_mod._paths_summary(journal)
+        "repo-1",
+        {"title": "Handle odd filenames"},
+        grind_mod._bounded_block(["src/caf\udce9.py - renamed the loader"]),
     )
 
     assert message.startswith("repo-1: Handle odd filenames")
-    assert f"- {CANDIDATE}" in message
+    assert "renamed the loader" in message
     message.encode("utf-8")  # the git call would raise on a lone surrogate
 
 
 def test_commit_message_without_a_description_is_still_a_commit() -> None:
-    """AC-4: a tracker-only close has no owned paths and still gets committed."""
-    journal = _journal_with_paths()
-
-    message = grind_mod._commit_message(
-        "repo-1", {"title": "Retire a stale flag"}, grind_mod._paths_summary(journal)
-    )
+    """AC-4: a change nobody described still gets committed, subject only."""
+    message = grind_mod._commit_message("repo-1", {"title": "Retire a stale flag"}, "")
 
     assert message == "repo-1: Retire a stale flag\n"
 
 
-def test_commit_subject_truncates(
+def test_commit_subject_shortens_on_word_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-4: a long title is truncated, and the body stays a separate paragraph."""
+    """AC-1: an over-long title ends on a whole word, with no ellipsis.
+
+    A subject cut mid-word behind a `...` reads as a corrupted log line and
+    tells a reader nothing the whole words before it did not already say.
+    """
     long_title = "Rewrite " + "the finalization commit message machinery " * 4
     repo, issue_id, _ = _finalize_by_replay(
         tmp_path, monkeypatch, "fin16", title=long_title
@@ -949,6 +973,52 @@ def test_commit_subject_truncates(
     assert len(long_title) > grind_mod._COMMIT_SUBJECT_LIMIT
     assert len(subject) <= grind_mod._COMMIT_SUBJECT_LIMIT
     assert subject.startswith(f"{issue_id}: Rewrite the finalization")
-    assert subject.endswith("...")
+    assert "..." not in subject
+    assert long_title.startswith(subject.partition(": ")[2] + " ")
     assert lines[1] == "", "the body must be separated by a blank line"
-    assert f"- {CANDIDATE}" in lines
+
+
+def test_commit_subject_keeps_issue_prefix() -> None:
+    """AC-5: the greppable `<id>: ` prefix survives any title length."""
+    for title in ("", "short", "word " * 40, "supercalifragilistic" * 8):
+        subject = grind_mod._commit_subject("repo-1", title)
+        assert subject.startswith("repo-1: ")
+        assert len(subject) <= grind_mod._COMMIT_SUBJECT_LIMIT
+
+
+def test_commit_subject_deduplicates_component_prefix() -> None:
+    """AC-2: the component the id already names is not repeated after it."""
+    assert (
+        grind_mod._commit_subject("ortus-4b2p", "ortus: retire the stale flag")
+        == "ortus-4b2p: retire the stale flag"
+    )
+    # A leading component the id does not name is information, so it stays.
+    assert (
+        grind_mod._commit_subject("ortus-4b2p", "grind: retire the stale flag")
+        == "ortus-4b2p: grind: retire the stale flag"
+    )
+    # No colon, nothing to de-duplicate.
+    assert (
+        grind_mod._commit_subject("ortus-4b2p", "retire the stale flag")
+        == "ortus-4b2p: retire the stale flag"
+    )
+    # A title that is only the component keeps it rather than becoming empty.
+    assert grind_mod._commit_subject("ortus-4b2p", "ortus:") == "ortus-4b2p: ortus:"
+
+
+def test_commit_subject_first_word_over_limit() -> None:
+    """AC-6: a single word wider than the budget is cut, never dropped."""
+    subject = grind_mod._commit_subject("repo-1", "x" * 200)
+
+    assert subject.startswith("repo-1: x")
+    assert len(subject) == grind_mod._COMMIT_SUBJECT_LIMIT
+
+
+def test_commit_subject_non_ascii_title() -> None:
+    """AC-7: shortening never splits a multi-byte character."""
+    title = "Précis über die Änderungen an dem Änderungsprotokoll " * 3
+    subject = grind_mod._commit_subject("repo-1", title)
+
+    assert len(subject) <= grind_mod._COMMIT_SUBJECT_LIMIT
+    assert subject.startswith("repo-1: Précis über die")
+    subject.encode("utf-8").decode("utf-8")
