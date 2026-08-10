@@ -243,6 +243,122 @@ profile, which is normally the slow, expensive one — lowering
 `--verify-model` / `--verify-reasoning-effort` is the next. Omitting the
 profile tables entirely keeps every phase on its provider default.
 
+### State graphs
+
+Ortus drives two lifecycles, and they are easy to confuse because both are
+spelled as short lowercase strings. A bd issue's status outlives any single
+grind run; a candidate journal's `phase` lives only as long as one candidate
+transaction. Both are declared as data in `src/ortus/core/lifecycle.py`, and
+the block below is generated from that declaration — changing a state without
+regenerating it fails the test suite.
+
+<!-- BEGIN GENERATED: state-graph -->
+<!-- Generated from src/ortus/core/lifecycle.py. Do not edit by hand: tests/test_state_graph_docs.py fails and prints the correct block. -->
+
+#### bd issue status
+
+The statuses Ortus reads and writes through `bd`. One issue moves through this machine across however many grind runs it takes.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> open
+    open --> in_progress: grind claims the selected issue
+    in_progress --> in_progress: grind restores a claim a worker released without authority
+    in_progress --> open: orphan policy revert releases a claim that outlived its worker
+    in_progress --> closed: finalization closes the verified issue
+    closed --> [*]
+```
+
+#### Candidate journal phase
+
+`CandidateJournal.phase` for one candidate transaction, from the first worker edit to a committed candidate or a halt a human owns.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    state "candidate-captured" as candidate_captured
+    state "implementation-timeout" as implementation_timeout
+    state "implementation-rejected" as implementation_rejected
+    state "verification-timeout" as verification_timeout
+    state "verification-rejected" as verification_rejected
+    state "verified-pass" as verified_pass
+    state "verified-fail" as verified_fail
+    state "correction-timeout" as correction_timeout
+    state "correction-rejected" as correction_rejected
+    state "corrections-exhausted" as corrections_exhausted
+    state "plan-gap-routed" as plan_gap_routed
+    state "plan-gap-escalated" as plan_gap_escalated
+    state "orphaned-candidate" as orphaned_candidate
+    state "incomplete-candidate" as incomplete_candidate
+    state "finalization-blocked" as finalization_blocked
+    state "finalized-report" as finalized_report
+    state "finalized-close" as finalized_close
+    state "finalized-commit" as finalized_commit
+    state "finalized-sync" as finalized_sync
+    [*] --> implementation
+    implementation --> handoff: an unusable journal is rebuilt from the lone claim and the dirty tree
+    implementation --> candidate_captured: the worker returned and grind sealed its diff
+    implementation --> implementation_timeout: the worker ran out of wall clock
+    handoff --> candidate_captured: the resumed worker returned and grind sealed its diff
+    handoff --> implementation_timeout: the resumed worker ran out of wall clock
+    implementation_timeout --> candidate_captured: a restart resumes the same issue and a fresh worker finishes it
+    candidate_captured --> implementation_rejected: the implementation isolation guard refused the candidate
+    candidate_captured --> orphaned_candidate: the claim outlived its worker
+    candidate_captured --> incomplete_candidate: the worker returned with its claim still open
+    candidate_captured --> finalizing: legacy condition mode; the Codex worker closed the issue itself
+    candidate_captured --> verification: a fresh read-only verifier starts
+    implementation_rejected --> candidate_captured: a restart re-implements the rejected candidate
+    verification --> verified_pass: the verifier returned a passing verdict
+    verification --> verified_fail: the verifier returned a failing verdict
+    verification --> verification_rejected: the verifier produced no usable verdict, or moved the candidate
+    verification --> verification_timeout: the verifier ran out of wall clock with the candidate intact
+    verification_timeout --> verification: a restart re-verifies the preserved candidate
+    verification_timeout --> correction_rejected: a correction had already been spent on this candidate
+    verification_rejected --> candidate_captured: a restart re-implements after a rejected verification
+    verification_rejected --> correction_rejected: a correction had already been spent on this candidate
+    verified_fail --> correction: a correction attempt remains in the budget
+    verified_fail --> corrections_exhausted: the bounded correction budget is spent
+    verified_fail --> plan_gap_routed: the findings name a planning gap; one planning pass is spent
+    verified_fail --> plan_gap_escalated: the planning gap survived its one planning pass
+    correction --> candidate_captured: the correction worker returned and grind re-sealed the diff
+    correction --> correction_timeout: the correction worker ran out of wall clock
+    correction_timeout --> candidate_captured: a restart re-implements the timed-out correction
+    plan_gap_routed --> candidate_captured: a restart re-implements against the replanned issue
+    verified_pass --> finalized_report: finalization boundary report landed
+    verified_pass --> finalization_blocked: a finalization precondition failed
+    finalized_report --> finalized_close: finalization boundary close landed
+    finalized_close --> finalized_commit: finalization boundary commit landed
+    finalized_commit --> finalized_sync: finalization boundary sync landed
+    finalized_report --> finalization_blocked: a finalization precondition failed on replay
+    finalized_close --> finalization_blocked: a finalization precondition failed on replay
+    finalized_commit --> finalization_blocked: a finalization precondition failed on replay
+    finalization_blocked --> finalized_report: a restart replays the first boundary that has not landed
+    finalization_blocked --> finalized_close: a restart replays the first boundary that has not landed
+    finalization_blocked --> finalized_commit: a restart replays the first boundary that has not landed
+    finalization_blocked --> finalized_sync: a restart replays the first boundary that has not landed
+    correction_rejected --> [*]
+    corrections_exhausted --> [*]
+    plan_gap_escalated --> [*]
+    orphaned_candidate --> [*]
+    incomplete_candidate --> [*]
+    finalizing --> [*]
+    finalized_sync --> [*]
+```
+
+#### Where the two machines meet
+
+| Candidate phase | Issue status | What it means |
+| --- | --- | --- |
+| `finalized-close` | in_progress -> closed | Only finalization closes an issue, and only after a fresh verifier passed the candidate. |
+| `finalizing` | already closed | Legacy condition mode: the Codex worker closed the issue itself, so grind only commits the owned paths behind it. |
+| `orphaned-candidate, implementation-timeout` | in_progress -> open | Orphan policy `revert` releases the claim; the candidate stays in the worktree and the journal keeps the issue association, so the next run re-claims the same issue. |
+| `plan-gap-escalated, corrections-exhausted, correction-rejected` | stays in_progress, labelled `human` | A halt a human owns: no close, no commit. The issue keeps its claim so nothing else selects it. |
+| `verification, correction` | in_progress -> in_progress | A worker that changed the status despite the phase contract cannot make that stick; grind restores the claim before continuing. |
+
+`startup`, `pre-iter`, `post-close`, `post-housekeeping` are *not* journal phases. They are the `phase=` argument of grind's branch-discipline logging, and they never reach a journal; neither does `idle`, which a run snapshot reports when no journal exists at all.
+<!-- END GENERATED: state-graph -->
+
 ### CodeGraph lifecycle
 
 `auto` is the default. Planning and each grind issue transaction emit a clear

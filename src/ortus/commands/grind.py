@@ -68,6 +68,28 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.config import load_config
+from ortus.core.lifecycle import (
+    CANDIDATE_CAPTURED,
+    CORRECTION_REJECTED,
+    CORRECTION_TIMEOUT,
+    CORRECTIONS_EXHAUSTED,
+    FINALIZATION_BLOCKED,
+    FINALIZING,
+    HANDOFF,
+    IMPLEMENTATION,
+    IMPLEMENTATION_REJECTED,
+    IMPLEMENTATION_TIMEOUT,
+    INCOMPLETE_CANDIDATE,
+    ORPHANED_CANDIDATE,
+    PLAN_GAP_ESCALATED,
+    PLAN_GAP_ROUTED,
+    VERIFICATION,
+    VERIFICATION_REJECTED,
+    VERIFICATION_TIMEOUT,
+    VERIFIED_FAIL,
+    VERIFIED_PASS,
+    finalized_phase,
+)
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.readiness import ReadinessReport, section_text
 from ortus.core.transaction import (
@@ -170,11 +192,11 @@ _HANDOFF_PROMPT_CHARS = 1_200
 #: for an in-flight phase it is just the prior worker's unfinished edits.
 _SEALED_PHASES = frozenset(
     {
-        "implementation-timeout",
-        "verification-timeout",
-        "correction-timeout",
-        "orphaned-candidate",
-        "incomplete-candidate",
+        IMPLEMENTATION_TIMEOUT,
+        VERIFICATION_TIMEOUT,
+        CORRECTION_TIMEOUT,
+        ORPHANED_CANDIDATE,
+        INCOMPLETE_CANDIDATE,
     }
 )
 
@@ -552,7 +574,7 @@ def _rebuild_journal_from_claim(
         base_head=git.head_oid(),
         baseline_paths=(),
     ).with_candidate(
-        paths, phase="handoff", candidate_hash=digest, diff_ref=diff_ref
+        paths, phase=HANDOFF, candidate_hash=digest, diff_ref=diff_ref
     )
     store.save(journal)
     write_log(
@@ -805,7 +827,7 @@ def _prepare_handoff(
         # Implementation already produced a reviewable candidate for these
         # phases, so the resume goes straight to a fresh verifier.
         candidate_ready=prior_phase
-        in {"candidate-captured", "verification", "verification-timeout"},
+        in {CANDIDATE_CAPTURED, VERIFICATION, VERIFICATION_TIMEOUT},
         active=True,
         prior_phase=prior_phase,
         diff_ref=journal.candidate_diff_ref,
@@ -1107,34 +1129,34 @@ def _verify_candidate(
 
     if timed_out:
         timeout_failure = f"verifier timed out after {worker_timeout}s without a verdict"
-        timeout_phase = "verification-timeout"
+        timeout_phase = VERIFICATION_TIMEOUT
         if git.is_git_repo():
             post_dirty = git.dirty_paths()
             if post_dirty is None:
                 timeout_failure += "; could not inspect the candidate after timeout"
-                timeout_phase = "verification-rejected"
+                timeout_phase = VERIFICATION_REJECTED
             else:
                 post_paths = _candidate_paths(post_dirty, baseline)
                 if post_paths != frozenset(journal.candidate_paths):
                     timeout_failure += "; verifier mutated the candidate path set"
-                    timeout_phase = "verification-rejected"
+                    timeout_phase = VERIFICATION_REJECTED
                 else:
                     try:
                         post_diff = candidate_diff(repo, post_paths)
                     except RuntimeError as exc:
                         timeout_failure += f"; could not hash the candidate: {exc}"
-                        timeout_phase = "verification-rejected"
+                        timeout_phase = VERIFICATION_REJECTED
                     else:
                         if sha256_bytes(post_diff) != journal.candidate_hash:
                             timeout_failure += "; verifier mutated the candidate"
-                            timeout_phase = "verification-rejected"
+                            timeout_phase = VERIFICATION_REJECTED
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             timeout_failure += (
                 "; authoritative issue packet changed during verification — "
                 + _packet_drift(repo, journal, current_packet)
             )
-            timeout_phase = "verification-rejected"
+            timeout_phase = VERIFICATION_REJECTED
             if current_packet.get("status") != "in_progress":
                 bd.update_status(issue_id, "in_progress")
         result = _reject(timeout_failure, phase=timeout_phase, summary=_summarize())
@@ -1221,7 +1243,7 @@ def _verify_candidate(
         # restore the claim before persisting the rejection.
         if bd.show(issue_id).get("status") != "in_progress":
             bd.update_status(issue_id, "in_progress")
-        result = _reject(failure, phase="verification-rejected", summary=summary)
+        result = _reject(failure, phase=VERIFICATION_REJECTED, summary=summary)
         write_log(f"iter {iteration}: verifier rejected: {failure}")
         output.error(f"grind: verifier rejected candidate: {failure}")
         return result
@@ -1241,7 +1263,7 @@ def _verify_candidate(
     # AC-1: the complete failed report is durable BEFORE any correction runs.
     bd.add_comment(issue_id, report)
     journal = journal.finish_verification(
-        report_ref, phase=("verified-pass" if verdict.passed else "verified-fail")
+        report_ref, phase=(VERIFIED_PASS if verdict.passed else VERIFIED_FAIL)
     )
     store.save(journal)
     _append_verdict_event(
@@ -1395,7 +1417,7 @@ def _run_plan_gap_pass(
 
 
 _FINALIZATION_MARKER = "## Ortus finalization record"
-_FINALIZATION_BLOCKED_PHASE = "finalization-blocked"
+_FINALIZATION_BLOCKED_PHASE = FINALIZATION_BLOCKED
 #: Journal phases whose transaction still owes finalization work. A restart at
 #: any of these resumes the remaining steps instead of selecting new work.
 #:
@@ -1409,9 +1431,9 @@ _FINALIZATION_BLOCKED_PHASE = "finalization-blocked"
 #: issue (AC-5 requires the opposite — hold the queue until it finishes).
 _FINALIZABLE_PHASES = frozenset(
     {
-        "verified-pass",
+        VERIFIED_PASS,
         _FINALIZATION_BLOCKED_PHASE,
-        *(f"finalized-{step}" for step in FINALIZATION_STEPS[:-1]),
+        *(finalized_phase(step) for step in FINALIZATION_STEPS[:-1]),
     }
 )
 
@@ -3011,7 +3033,7 @@ def grind(
                         - _TRACKER_EXPORT_PATHS,
                         phase=active_journal.phase
                         if resume_candidate_ready
-                        else "implementation",
+                        else IMPLEMENTATION,
                     )
                     transaction_store.save(active_journal)
                     resume_issue_id = None
@@ -3151,7 +3173,7 @@ def grind(
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
-                            phase="implementation-timeout",
+                            phase=IMPLEMENTATION_TIMEOUT,
                         )
                     active_journal = _capture_evidence(
                         transaction_store,
@@ -3181,7 +3203,7 @@ def grind(
                         transaction_store,
                         active_journal,
                         _candidate_baseline(active_journal, codex_baseline),
-                        phase="implementation-timeout",
+                        phase=IMPLEMENTATION_TIMEOUT,
                     )
                     active_journal = _capture_evidence(
                         transaction_store,
@@ -3193,7 +3215,7 @@ def grind(
                     )
                     active_journal = active_journal.with_candidate(
                         active_journal.candidate_paths,
-                        phase="implementation-timeout",
+                        phase=IMPLEMENTATION_TIMEOUT,
                     )
                     transaction_store.save(active_journal)
                     write_log(
@@ -3215,13 +3237,13 @@ def grind(
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
-                            phase="candidate-captured",
+                            phase=CANDIDATE_CAPTURED,
                         )
                     else:
                         digest, diff_ref = transaction_store.save_diff(b"")
                         active_journal = active_journal.with_candidate(
                             (),
-                            phase="candidate-captured",
+                            phase=CANDIDATE_CAPTURED,
                             candidate_hash=digest,
                             diff_ref=diff_ref,
                         )
@@ -3345,7 +3367,7 @@ def grind(
                         )
                         bd.add_comment(issue_id, report)
                         active_journal = active_journal.finish_verification(
-                            report_ref, phase="implementation-rejected"
+                            report_ref, phase=IMPLEMENTATION_REJECTED
                         )
                         transaction_store.save(active_journal)
                         write_log(f"iter {iters_run}: {reason}; candidate rejected")
@@ -3453,7 +3475,7 @@ def grind(
                             # fix, so flag it rather than leaving a silently
                             # stalled in_progress claim behind.
                             if active_journal.corrections > 0:
-                                halt_phase = "correction-rejected"
+                                halt_phase = CORRECTION_REJECTED
                                 escalate = True
                             break
                         verdict = verification.verdict
@@ -3463,7 +3485,7 @@ def grind(
                         gaps = _plan_gap_findings(verdict)
                         if gaps and active_journal.plan_gap_routed:
                             halt = "plan gap persists after one planning-profile pass"
-                            halt_phase = "plan-gap-escalated"
+                            halt_phase = PLAN_GAP_ESCALATED
                             escalate = True
                             break
                         if gaps:
@@ -3505,7 +3527,7 @@ def grind(
                                 if gap_rc == 0
                                 else f"plan-gap routing pass failed (exit {gap_rc})"
                             )
-                            halt_phase = "plan-gap-routed"
+                            halt_phase = PLAN_GAP_ROUTED
                             escalate = True
                             break
                         if active_journal.corrections >= max_corrections:
@@ -3513,7 +3535,7 @@ def grind(
                                 "bounded correction attempts exhausted "
                                 f"({active_journal.corrections}/{max_corrections})"
                             )
-                            halt_phase = "corrections-exhausted"
+                            halt_phase = CORRECTIONS_EXHAUSTED
                             escalate = True
                             break
 
@@ -3580,9 +3602,9 @@ def grind(
                                 active_journal,
                                 _candidate_baseline(active_journal, codex_baseline),
                                 phase=(
-                                    "correction-timeout"
+                                    CORRECTION_TIMEOUT
                                     if correction_timed_out
-                                    else "candidate-captured"
+                                    else CANDIDATE_CAPTURED
                                 ),
                             )
                         active_journal = _capture_evidence(
@@ -3749,7 +3771,7 @@ def grind(
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
-                            phase="finalizing",
+                            phase=FINALIZING,
                         )
                         owned_paths = frozenset(active_journal.candidate_paths)
                         if not git.commit_paths(owned_paths, commit_subject):
@@ -3787,7 +3809,7 @@ def grind(
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
-                            phase="orphaned-candidate",
+                            phase=ORPHANED_CANDIDATE,
                         )
                         source_candidate = (
                             frozenset(active_journal.candidate_paths)
@@ -3825,7 +3847,7 @@ def grind(
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
-                            phase="incomplete-candidate",
+                            phase=INCOMPLETE_CANDIDATE,
                         )
                         if (
                             frozenset(active_journal.candidate_paths)

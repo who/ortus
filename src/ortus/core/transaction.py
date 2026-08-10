@@ -11,6 +11,14 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Iterable
 
+from ortus.core.lifecycle import (
+    CORRECTION,
+    FINALIZATION_STEPS,
+    IMPLEMENTATION,
+    PLAN_GAP_ROUTED,
+    VERIFICATION,
+    finalized_phase,
+)
 
 JOURNAL_SCHEMA = 4
 JOURNAL_RELATIVE_PATH = Path("logs") / "grind-transaction.json"
@@ -19,10 +27,12 @@ _MAX_EVIDENCE_CHARS = 16_000
 #: repeatedly-resumed transaction cannot grow its journal without bound.
 _MAX_HANDOFFS = 8
 
-#: Ordered finalization boundaries. Each one is journaled *after* it lands, so a
-#: restart replays only the steps that never completed and can never duplicate a
-#: comment, close, commit, or push.
-FINALIZATION_STEPS: tuple[str, ...] = ("report", "close", "commit", "sync")
+# `FINALIZATION_STEPS` is imported above and re-exported from here for the
+# callers that already read it off this module. `lifecycle` owns the
+# declaration so the phase graph can derive its `finalized-*` states without
+# importing the journal. Each boundary is still journaled *after* it lands, so
+# a restart replays only the steps that never completed and can never
+# duplicate a comment, close, commit, or push.
 
 
 def _now() -> str:
@@ -198,7 +208,7 @@ class CandidateJournal:
     candidate_paths: tuple[str, ...] = ()
     candidate_hash: str = ""
     candidate_diff_ref: str = ""
-    phase: str = "implementation"
+    phase: str = IMPLEMENTATION
     attempt: int = 1
     attempts: tuple[dict[str, Any], ...] = ()
     profiles: dict[str, str] = field(default_factory=dict)
@@ -250,7 +260,7 @@ class CandidateJournal:
             issue_packet_hash=packet_hash,
             issue_packet_ref=packet_ref,
             profiles={} if profiles is None else profiles,
-            attempts=({"number": 1, "phase": "implementation", "started_at": now},),
+            attempts=({"number": 1, "phase": IMPLEMENTATION, "started_at": now},),
             created_at=now,
             updated_at=now,
             implementation_started_at=now,
@@ -291,13 +301,13 @@ class CandidateJournal:
         now = _now()
         return replace(
             self,
-            phase="verification",
+            phase=VERIFICATION,
             attempt=self.attempt + 1,
             attempts=(
                 *self.attempts,
                 {
                     "number": self.attempt + 1,
-                    "phase": "verification",
+                    "phase": VERIFICATION,
                     "started_at": now,
                 },
             ),
@@ -326,14 +336,14 @@ class CandidateJournal:
         number = self.attempt + 1
         return replace(
             self,
-            phase="correction",
+            phase=CORRECTION,
             attempt=number,
             corrections=self.corrections + 1,
             attempts=(
                 *self.attempts,
                 {
                     "number": number,
-                    "phase": "correction",
+                    "phase": CORRECTION,
                     "correction": self.corrections + 1,
                     "findings": list(findings),
                     "started_at": now,
@@ -424,7 +434,7 @@ class CandidateJournal:
         """Mark the one planning route a plan gap is allowed to consume."""
 
         return replace(
-            self, plan_gap_routed=True, phase="plan-gap-routed", updated_at=_now()
+            self, plan_gap_routed=True, phase=PLAN_GAP_ROUTED, updated_at=_now()
         )
 
     def with_finalization(self, step: str, value: Any = True) -> CandidateJournal:
@@ -438,7 +448,7 @@ class CandidateJournal:
         return replace(
             self,
             finalization=record,
-            phase=f"finalized-{step}",
+            phase=finalized_phase(step),
             updated_at=_now(),
         )
 
@@ -523,7 +533,7 @@ class JournalStore:
             payload["attempts"] = (
                 {
                     "number": 1,
-                    "phase": str(payload.get("phase", "implementation")),
+                    "phase": str(payload.get("phase", IMPLEMENTATION)),
                     "started_at": migrated_at,
                     "migration": "schema-v1",
                 },

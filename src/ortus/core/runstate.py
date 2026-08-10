@@ -37,6 +37,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ortus.core.lifecycle import (
+    CORRECTION_REJECTED,
+    CORRECTIONS_EXHAUSTED,
+    FINALIZED_PREFIX,
+    INCOMPLETE_CANDIDATE,
+    ORPHANED_CANDIDATE,
+    PLAN_GAP_ESCALATED,
+)
 from ortus.core.transaction import CandidateJournal, JournalStore
 
 #: Grind writes one timestamped log per run under the already-ignored logs/
@@ -48,17 +56,19 @@ PHASE_IDLE = "idle"
 #: Journal phases that mean the run is over. `finalized-*` is written per
 #: finalization boundary, the rest are the halts grind records before it
 #: leaves a candidate uncommitted. Anything else — including the resumable
-#: `*-timeout` phases — is reported verbatim and treated as live.
+#: `*-timeout` phases — is reported verbatim and treated as live. Every member
+#: is a state declared in `ortus.core.lifecycle`; the graph there also records
+#: why grind still treats the non-final `finalized-*` boundaries as resumable.
 TERMINAL_PHASES = frozenset(
     {
-        "corrections-exhausted",
-        "correction-rejected",
-        "plan-gap-escalated",
-        "orphaned-candidate",
-        "incomplete-candidate",
+        CORRECTIONS_EXHAUSTED,
+        CORRECTION_REJECTED,
+        PLAN_GAP_ESCALATED,
+        ORPHANED_CANDIDATE,
+        INCOMPLETE_CANDIDATE,
     }
 )
-_TERMINAL_PREFIX = "finalized-"
+_TERMINAL_PREFIX = FINALIZED_PREFIX
 #: Warning vocabulary, taken from grind's own `write_log` calls. Matched only
 #: against plain ortus lines, so agent content quoting any of it counts for
 #: nothing. First match wins, so one line is at most one warning.
