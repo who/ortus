@@ -66,6 +66,22 @@ jobs:
           sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
           bd --version
 
+      # CodeGraph ships as a node package with a bounded engine range (1.4.1
+      # declared >=20 <25) and the runner's default node drifts, so it is
+      # pinned here rather than inherited.
+      - name: Set up Node (CodeGraph engine range)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install CodeGraph
+        run: |
+          # Pinned like bd. `ortus check` and the required-mode aborts in plan
+          # and grind only need the CLI on PATH; indexing a repo downloads a
+          # ~130MB model set, so no `codegraph init` runs in this gate.
+          npm install --global @colbymchenry/codegraph@1.5.0
+          codegraph --version
+
       - name: Install sandbox prereq (Linux only)
         if: runner.os == 'Linux'
         run: |
@@ -119,6 +135,16 @@ jobs:
           curl --fail -L -o /tmp/bd.tar.gz \
             "https://github.com/gastownhall/beads/releases/download/v${version}/beads_${version}_linux_amd64.tar.gz"
           sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
+
+      - name: Set up Node (CodeGraph engine range)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install CodeGraph
+        run: |
+          npm install --global @colbymchenry/codegraph@1.5.0
+          codegraph --version
 
       - name: Install sandbox prerequisite
         run: |
