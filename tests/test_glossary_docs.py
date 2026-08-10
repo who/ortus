@@ -127,7 +127,10 @@ def test_every_declared_term_is_rendered() -> None:
         f"disagree: {declared ^ REQUIRED_TERMS}"
     )
     for entry in TERMS:
-        row = f"| **{entry.term}** | {entry.definition} | {entry.home} |"
+        row = (
+            f"| **{entry.term}** | {entry.definition} | {entry.analogy} | "
+            f"{entry.home} |"
+        )
         assert row in block, f"{entry.term} is declared but absent from the README"
 
 
@@ -169,13 +172,21 @@ def test_terms_are_declared_alphabetically() -> None:
 
 def test_a_pipe_in_a_definition_cannot_break_the_table() -> None:
     rendered = render_glossary_table(
-        (Term(term="pipe", definition="A | in a cell.", home="`nowhere`"),)
+        (
+            Term(
+                term="pipe",
+                definition="A | in a cell.",
+                home="`nowhere`",
+                analogy="A | in the analogy too.",
+            ),
+        )
     )
     row = rendered.splitlines()[-1]
 
     assert r"A \| in a cell." in row
-    # Escaped, the row still has exactly the three declared columns.
-    assert row.replace(r"\|", "").count("|") == 4
+    assert r"A \| in the analogy too." in row
+    # Escaped, the row still has exactly the four declared columns.
+    assert row.replace(r"\|", "").count("|") == 5
 
 
 @pytest.mark.parametrize(

@@ -54,6 +54,12 @@ class Term:
     term: str
     definition: str
     home: str
+    #: The same idea on a team that has never run an agent: which person,
+    #: artifact or ceremony plays this part. Ortus's vocabulary is unfamiliar
+    #: but the machinery is not — nearly every term is a role a team already
+    #: fills, so naming that role is the shortest route from "what is this
+    #: word" to "oh, I know what that is."
+    analogy: str
 
 
 def sort_key(term: str) -> str:
@@ -79,6 +85,10 @@ TERMS: tuple[Term, ...] = (
             "resumes at the first step that did not — not a limit or an edge."
         ),
         home="`FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py`",
+        analogy=(
+            "A ticked line on the release manager's checklist. Interrupt the "
+            "release and the next person resumes at the first line not ticked."
+        ),
     ),
     Term(
         term="candidate",
@@ -87,6 +97,10 @@ TERMS: tuple[Term, ...] = (
             "a fresh verifier judges before anything is committed."
         ),
         home="`CandidateJournal.candidate_paths` in `src/ortus/core/transaction.py`",
+        analogy=(
+            "The branch a developer has pushed but not merged: complete enough "
+            "to review, and not yet anyone else's problem."
+        ),
     ),
     Term(
         term="degraded",
@@ -95,6 +109,10 @@ TERMS: tuple[Term, ...] = (
             "failing, such as a commit subject written without a readable packet."
         ),
         home="finalization logging in `src/ortus/commands/grind.py`",
+        analogy=(
+            "Shipping the release notes with a section missing rather than "
+            "holding the release for it."
+        ),
     ),
     Term(
         term="disown",
@@ -104,6 +122,10 @@ TERMS: tuple[Term, ...] = (
             "than merely leaving it alone."
         ),
         home="`src/ortus/core/attribution.py`",
+        analogy=(
+            "Telling your reviewer that half the diff on this shared branch "
+            "belongs to someone else's ticket, so please do not attribute it."
+        ),
     ),
     Term(
         term="finalization",
@@ -112,6 +134,10 @@ TERMS: tuple[Term, ...] = (
             "verdict, one journaled boundary at a time; no worker closes an issue."
         ),
         home="`finalized_phase()` in `src/ortus/core/lifecycle.py`",
+        analogy=(
+            "The release manager merging, closing the ticket and updating the "
+            "board — never the developer who wrote the code."
+        ),
     ),
     Term(
         term="handoff",
@@ -121,6 +147,10 @@ TERMS: tuple[Term, ...] = (
             "from the worker's own edits."
         ),
         home="`CandidateJournal.with_handoff()` in `src/ortus/core/transaction.py`",
+        analogy=(
+            "Sitting down at a shared machine and finding a colleague's "
+            "half-finished work still in the editor."
+        ),
     ),
     Term(
         term="harness",
@@ -129,6 +159,10 @@ TERMS: tuple[Term, ...] = (
             "launches each worker against it; the worker never chooses its own work."
         ),
         home="`src/ortus/core/grind_loop.py`",
+        analogy=(
+            "The team lead who assigns the ticket and books the room. Engineers "
+            "do not pick their own work here."
+        ),
     ),
     Term(
         term="journal",
@@ -137,6 +171,10 @@ TERMS: tuple[Term, ...] = (
             "hashes and evidence, which is what lets an interrupted run resume."
         ),
         home="`JOURNAL_RELATIVE_PATH` in `src/ortus/core/transaction.py`",
+        analogy=(
+            "The build log a pipeline keeps so an interrupted run can resume "
+            "where it stopped, rather than the code it was building."
+        ),
     ),
     Term(
         term="leaf",
@@ -145,6 +183,10 @@ TERMS: tuple[Term, ...] = (
             "worker to execute end to end, which is what readiness validates."
         ),
         home="`src/ortus/core/readiness.py`",
+        analogy=(
+            "A story an engineer can finish in one sitting, as opposed to an "
+            "epic that has to be broken down first."
+        ),
     ),
     Term(
         term="main path",
@@ -153,6 +195,10 @@ TERMS: tuple[Term, ...] = (
             "which is the only part the README diagrams draw."
         ),
         home="`StateMachine.main_path` in `src/ortus/core/lifecycle.py`",
+        analogy=(
+            "The happy path a runbook documents first, with the failure modes "
+            "in an appendix."
+        ),
     ),
     Term(
         term="orphan",
@@ -161,6 +207,10 @@ TERMS: tuple[Term, ...] = (
             "finishing, which the configured orphan policy then releases or keeps."
         ),
         home="`src/ortus/core/grind_loop.py`",
+        analogy=(
+            "A ticket left In Progress by someone who went on holiday without "
+            "updating the board."
+        ),
     ),
     Term(
         term="packet",
@@ -170,6 +220,10 @@ TERMS: tuple[Term, ...] = (
             "message on a queue."
         ),
         home="`authoritative_packet()` in `src/ortus/core/transaction.py`",
+        analogy=(
+            "The ticket as the analyst wrote it: the spec of record a developer "
+            "builds from and argues with, not a chat message."
+        ),
     ),
     Term(
         term="phase",
@@ -178,6 +232,10 @@ TERMS: tuple[Term, ...] = (
             "one candidate transaction and is never a bd issue status."
         ),
         home="`CandidateJournal.phase` in `src/ortus/core/transaction.py`",
+        analogy=(
+            "Where a pull request sits right now — draft, in review, approved — "
+            "which is not the same thing as the ticket's status on the board."
+        ),
     ),
     Term(
         term="plan-gap",
@@ -186,6 +244,10 @@ TERMS: tuple[Term, ...] = (
             "resolve, which routes back to planning instead of producing a candidate."
         ),
         home="`PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py`",
+        analogy=(
+            "A developer handing a ticket back to the analyst because it cannot "
+            "be built as written."
+        ),
     ),
     Term(
         term="readiness",
@@ -194,6 +256,10 @@ TERMS: tuple[Term, ...] = (
             "be launched at it, checked mechanically when the issue is planned."
         ),
         home="`validate_issue()` in `src/ortus/core/readiness.py`",
+        analogy=(
+            "Definition of Ready: the checklist a story passes before planning "
+            "will let anyone start it."
+        ),
     ),
     Term(
         term="seal",
@@ -202,6 +268,10 @@ TERMS: tuple[Term, ...] = (
             "the edit set it is judging is the one the worker produced."
         ),
         home="`CandidateJournal.candidate_hash` in `src/ortus/core/transaction.py`",
+        analogy=(
+            "Approving a pull request at a named commit, so the sign-off refers "
+            "to one exact diff rather than to whatever the branch holds later."
+        ),
     ),
     Term(
         term="tracker export",
@@ -210,6 +280,10 @@ TERMS: tuple[Term, ...] = (
             "an issue changes, checkpointed apart from a worker's own edits."
         ),
         home="`src/ortus/commands/grind.py`",
+        analogy=(
+            "The issue tracker's own database, as distinct from the source code "
+            "— written by the tool, not by the engineer."
+        ),
     ),
     Term(
         term="verdict",
@@ -218,6 +292,10 @@ TERMS: tuple[Term, ...] = (
             "emits about a candidate, with one entry per acceptance criterion."
         ),
         home="`parse_verdict()` in `src/ortus/core/verdict.py`",
+        analogy=(
+            "The reviewer's formal approve or request-changes, with a note "
+            "against each acceptance criterion."
+        ),
     ),
     Term(
         term="worker",
@@ -226,6 +304,10 @@ TERMS: tuple[Term, ...] = (
             "with no memory of any worker before it."
         ),
         home="`compose_worker_prompt()` in `src/ortus/core/agent.py`",
+        analogy=(
+            "A contractor hired for exactly one ticket, who has never seen the "
+            "codebase before and will not be back."
+        ),
     ),
 )
 
@@ -272,13 +354,13 @@ def render_glossary_table(terms: Sequence[Term] = TERMS) -> str:
         )
 
     rows = [
-        "| Term | What it means | Where it lives |",
-        "| --- | --- | --- |",
+        "| Term | What it means | On a team without agents | Where it lives |",
+        "| --- | --- | --- | --- |",
     ]
     for entry in terms:
         rows.append(
             f"| **{_cell(entry.term)}** | {_cell(entry.definition)} | "
-            f"{_cell(entry.home)} |"
+            f"{_cell(entry.analogy)} | {_cell(entry.home)} |"
         )
     return "\n".join(rows)
 
