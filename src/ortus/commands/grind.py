@@ -67,6 +67,7 @@ from ortus.core.codegraph import (
     phase_contract,
     require_handshake,
 )
+from ortus.core.attribution import Ownership, describe, path_ownership
 from ortus.core.config import load_config
 from ortus.core.lifecycle import (
     CANDIDATE_CAPTURED,
@@ -445,6 +446,11 @@ def _absorb_unrelated_declaration(
     neither reset, stashed, deleted, nor committed. The declaration is honored
     for handoff paths only: work this attempt produced cannot be disowned, and
     neither can inherited work the journal attributes to the claimed issue.
+
+    Nor can a path the same worker went on to edit after disowning it. That
+    edit is a deliberate adoption, so its changed regions decide the path:
+    wholly this issue's returns it to the candidate, mixed ownership is a plan
+    gap for a human, and anything unattributable leaves the declaration alone.
     """
 
     declaration = repo / _UNRELATED_DECLARATION
@@ -462,6 +468,14 @@ def _absorb_unrelated_declaration(
     # because a hard abort turns a recoverable misjudgement into a stopped run.
     own_work = sorted(honored & journal.own_inherited_work())
     honored -= set(own_work)
+    # A declaration is written once, and the same worker may go on to edit the
+    # very path it disowned. `_resume_or_handoff` already re-adopts a disowned
+    # path whose fingerprint moved, but that runs before a worker starts, so a
+    # disown-then-edit inside one session was never re-examined and the edit was
+    # dropped from every later candidate. Re-ask the question here, at the only
+    # other moment the answer can change.
+    readopted, gaps = _reclassify_edited_declarations(repo, journal, honored)
+    honored -= set(readopted)
     try:
         declaration.unlink()
     except OSError:
@@ -477,18 +491,112 @@ def _absorb_unrelated_declaration(
             f"to {journal.issue_id}; kept in the candidate: "
             + ", ".join(own_work[:_HANDOFF_PROMPT_PATHS])
         )
-    if not honored:
+    if readopted:
+        write_log(
+            "handoff: declaration refused; the worker edited this path after "
+            "disowning it and every changed region is "
+            f"{journal.issue_id}'s, so it returns to the candidate: "
+            + ", ".join(readopted[:_HANDOFF_PROMPT_PATHS])
+        )
+        output.progress(
+            "grind",
+            f"{len(readopted)} disowned path(s) edited afterwards; re-adopted into "
+            "the candidate",
+        )
+    updated = journal
+    if readopted:
+        # An earlier declaration in the same run may already hold the path, and
+        # `with_unrelated` only ever adds, so dropping it from `honored` is not
+        # enough to put it back in the candidate.
+        updated = replace(
+            updated,
+            unrelated_paths=tuple(
+                path for path in updated.unrelated_paths if path not in readopted
+            ),
+        )
+    if gaps:
+        # Ownership is unresolved, so nothing moves: the path keeps the
+        # declaration and a human is told which regions collided. Splitting a
+        # file across owners, or guessing which claimant wins, is exactly the
+        # improvisation the plan-gap route exists to prevent.
+        updated = updated.route_plan_gap()
+        for gap in gaps[:_HANDOFF_PROMPT_PATHS]:
+            write_log(f"handoff: PLAN-GAP — mixed ownership in a disowned path; {gap}")
+        output.progress(
+            "grind",
+            f"plan gap: {len(gaps)} disowned path(s) carry regions owned by more "
+            "than one issue",
+        )
+    if honored:
+        updated = updated.with_unrelated(honored)
+    if updated is journal:
         return journal
-    updated = journal.with_unrelated(honored)
     store.save(updated)
-    write_log(
-        "handoff: worker declared unrelated; left untouched and never committed: "
-        + ", ".join(sorted(honored))
-    )
-    output.progress(
-        "grind", f"{len(honored)} inherited path(s) declared unrelated; left untouched"
-    )
+    if honored:
+        write_log(
+            "handoff: worker declared unrelated; left untouched and never committed: "
+            + ", ".join(sorted(honored))
+        )
+        output.progress(
+            "grind",
+            f"{len(honored)} inherited path(s) declared unrelated; left untouched",
+        )
     return updated
+
+
+def _reclassify_edited_declarations(
+    repo: Path, journal: CandidateJournal, honored: set[str]
+) -> tuple[list[str], list[str]]:
+    """Split declared paths the worker then edited into re-adopted and blocked.
+
+    A declared path whose content still matches the fingerprint recorded at
+    handoff is nobody's work and keeps today's behavior exactly. One whose
+    content moved was picked back up deliberately, so its changed regions decide
+    it: all of them the claimed issue's re-adopts the whole path, a mix of
+    owners is a plan gap, and anything else — including a region nothing in the
+    index or the packet can name — leaves the declaration standing.
+    """
+
+    if not honored:
+        return [], []
+    current = fingerprint_paths(repo, honored)
+    edited = sorted(
+        path
+        for path in honored
+        if journal.handoff_fingerprints.get(path) not in (None, current.get(path))
+    )
+    if not edited:
+        return [], []
+    locations = _concrete_locations(repo, journal)
+    readopted: list[str] = []
+    gaps: list[str] = []
+    for path in edited:
+        decision = path_ownership(repo, path, locations)
+        if decision.ownership is Ownership.OWN:
+            readopted.append(path)
+        elif decision.ownership is Ownership.MIXED:
+            gaps.append(describe(path, decision))
+    return readopted, gaps
+
+
+def _concrete_locations(repo: Path, journal: CandidateJournal) -> str:
+    """The claimed issue's Concrete locations, read from the frozen packet.
+
+    The packet artifact is the authoritative copy this attempt is bound to, so
+    ownership is judged against the same text the verifier will read rather
+    than against whatever bd holds now. An unreadable or unauthored section
+    names nothing, which makes every region foreign and honors the declaration.
+    """
+
+    if not journal.issue_packet_ref:
+        return ""
+    try:
+        packet = json.loads((repo / journal.issue_packet_ref).read_bytes())
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(packet, dict):
+        return ""
+    return section_text(packet.get("design"), "Concrete locations")
 
 
 @dataclass
