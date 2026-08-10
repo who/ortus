@@ -63,7 +63,9 @@ def test_readme_contains_the_glossary() -> None:
     assert text.count(END_MARKER) == 1
 
     block = readme_block(text)
-    assert block.count("| --- | --- | --- |") == 1
+    # The whole separator, not a prefix of it: a shorter string would still
+    # match inside a wider table and stop noticing a dropped column.
+    assert block.count("| --- | --- | --- | --- | --- |") == 1
 
     # Its own marker pair, next to the state graphs and never inside them: a
     # glossary edit and a state-machine edit must not collide in one block.
@@ -128,8 +130,8 @@ def test_every_declared_term_is_rendered() -> None:
     )
     for entry in TERMS:
         row = (
-            f"| **{entry.term}** | {entry.definition} | {entry.analogy} | "
-            f"{entry.home} |"
+            f"| **{entry.term}** | {entry.definition} | {entry.team_role} | "
+            f"{entry.analogy} | {entry.home} |"
         )
         assert row in block, f"{entry.term} is declared but absent from the README"
 
@@ -177,6 +179,7 @@ def test_a_pipe_in_a_definition_cannot_break_the_table() -> None:
                 term="pipe",
                 definition="A | in a cell.",
                 home="`nowhere`",
+                team_role="A | in the team role too.",
                 analogy="A | in the analogy too.",
             ),
         )
@@ -184,9 +187,10 @@ def test_a_pipe_in_a_definition_cannot_break_the_table() -> None:
     row = rendered.splitlines()[-1]
 
     assert r"A \| in a cell." in row
+    assert r"A \| in the team role too." in row
     assert r"A \| in the analogy too." in row
-    # Escaped, the row still has exactly the four declared columns.
-    assert row.replace(r"\|", "").count("|") == 5
+    # Escaped, the row still has exactly the five declared columns.
+    assert row.replace(r"\|", "").count("|") == 6
 
 
 @pytest.mark.parametrize(
