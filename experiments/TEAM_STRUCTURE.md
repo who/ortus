@@ -178,6 +178,7 @@ a storage problem and becomes a release.
 | Reviewer | Inspector emitting pass or fail, starting from zero every time | Second pair of eyes that gets faster and sharper the more of this codebase it has seen, and that may propose as well as refuse |
 | Finalization | Release manager who closes what someone else built | Shared shipping ritual that names everyone who contributed |
 | Plan gap | A failed attempt that produced no candidate | An andon cord: the contributor stopped the line because the spec could not be built, and that is valuable |
+| Integrator | Does not exist; overlapping work is inferred from a shared dirty tree | Holds both issues' intent when two changes meet, proposes a resolution confined to the conflict, and stops when the disagreement is about what the code should do rather than about text — see `experiments/CANDIDATE_ISOLATION.md` |
 
 ## Proposed changes
 

@@ -139,6 +139,81 @@ and recovery all touch the current definition.
 3. **Pull requests where a remote exists**, opt-in, for checks before merge.
 4. **Worktrees** only if concurrent execution becomes a goal.
 
+## The integrator
+
+Branches leave one job that has no owner today, and it is unlike every other job
+in the system: **every existing phase is scoped to one issue.** A planner writes
+one packet, an implementer works one issue, a reviewer judges one candidate,
+finalization ships one issue. A conflict is inherently *between* two pieces of
+work, so it is the first thing here whose unit is a relationship rather than a
+change.
+
+That deserves a role rather than a branch in the scheduler.
+
+### What it reads
+
+The text of a conflict is the least informative thing about it. An integrator
+should open with:
+
+- **Both packets.** What each side was asked to achieve, and what it promised to
+  satisfy. A conflict resolved from diff text alone is guesswork; resolved with
+  both intents in view it is usually obvious which line belongs where and why.
+- **Both verifier reports.** Each side was independently reviewed, and the report
+  says what that side was proving.
+- **The merge base and both sides**, so the question is what each changed *from*,
+  not merely what each says now.
+- **CodeGraph**, to see whether the two changes interact beyond the text — the
+  callers one side added to a function the other rewrote.
+
+### What authority it has
+
+Bounded deliberately, because this role could quietly become the place changes
+get smuggled in.
+
+1. **It proposes; Ortus applies.** The resolution is a candidate like any other.
+2. **Its diff is confined to the conflicted hunks.** A resolution that needs a
+   change outside them is not a resolution — it is new work, and routes as such.
+3. **The merged result is verified again.** A merge is a change that neither
+   side's verification covered, which is precisely the semantic-conflict gap
+   isolation opens. This is not optional.
+4. **It states which side it took, per hunk, and why.** A resolver that silently
+   picks a side loses work and nobody finds out until later.
+
+### When it must stop
+
+The role is only worth having if it knows what it cannot decide, and that line is
+sharper than it first looks:
+
+> A textual conflict is a merge problem. A disagreement about what the code
+> should do is a planning problem wearing a merge problem's clothes.
+
+Escalate when the two packets' acceptance criteria cannot both hold — satisfying
+one falsifies the other. Escalate when resolving would change behavior neither
+packet asked for. Escalate when one side's intent cannot be established because
+its packet is missing or describes code that has since moved. Escalate when both
+sides changed the same logic deliberately, for different stated reasons.
+
+None of those are merges. Papering over them is the failure mode this role must
+be built to avoid, and it is why the resolver proposes rather than decides.
+
+The escalation path already exists: an issue labelled for human attention is
+skipped by selection, and `ortus human` reports what is waiting. Nothing new is
+needed to stop.
+
+### Why this role wants memory most
+
+Repeated conflicts between the same two areas are not a merge fact, they are a
+decomposition fact. An integrator that remembers *these two subsystems collide
+every time* has found something planning needs to know, and that is a lesson no
+single-issue phase is positioned to notice.
+
+### What it changes upstream
+
+With a competent integrator, avoiding collisions at selection matters less than
+it does now. Symbol-level detection stops being the thing that keeps the system
+safe and becomes the thing that keeps it quick — worth having, no longer load
+bearing.
+
 ## Where this might be wrong
 
 Not in the conflicts. The one property the shared tree provides by accident is
