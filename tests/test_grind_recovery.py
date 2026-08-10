@@ -26,7 +26,7 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
-from ortus.core.git import GitClient
+from ortus.core.git import CommitResult, GitClient
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import CandidateJournal, JournalStore, candidate_diff
@@ -1044,6 +1044,58 @@ def test_failure_phase_malformed_verdict_resumes_and_then_finishes(
     assert second.exit_code == 0, second.stdout + second.stderr
 
     assert "RECOVERY HANDOFF" in resumed.prompt_for(Phase.IMPLEMENT)
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert len(_finalization_commits(repo, issue_id)) == 1
+    assert CANDIDATE in _committed_paths(repo)
+    assert JournalStore(repo).load() is None
+
+
+def test_blocked_finalization_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: a commit git refused blocks finalization, names the reason, and
+    leaves the transaction recoverable — once the cause is gone the next grind
+    replays only the boundaries that never landed (ortus-pgqg)."""
+    repo, issue_id = _seed(tmp_path, "rec15")
+
+    def implement(repo: Path, log_path: Path) -> int:
+        (repo / CANDIDATE).write_text("SHIPPED = True\n")
+        return 0
+
+    real_commit = GitClient.commit_paths
+    refusals: list[str] = []
+
+    def refuse_once(
+        self: GitClient, paths: frozenset[str], message: str
+    ) -> CommitResult:
+        if not refusals:
+            refusals.append(message)
+            return CommitResult(
+                ok=False, command="commit", returncode=1, detail="hook refused: lint"
+            )
+        return real_commit(self, paths, message)
+
+    monkeypatch.setattr(GitClient, "commit_paths", refuse_once)
+    _install(
+        monkeypatch, tmp_path, ScriptedRunner(implement=implement, verify=_pass_verdict)
+    )
+
+    blocked = _grind(repo, "--tasks", "1")
+    assert blocked.exit_code == 0, blocked.stdout + blocked.stderr
+
+    assert "git commit exited 1: hook refused: lint" in _log(repo)
+    journal = JournalStore(repo).load()
+    assert journal is not None
+    assert journal.finalized("close") and not journal.finalized("commit")
+    assert not _finalization_commits(repo, issue_id)
+
+    resumed = ScriptedRunner()
+    _install(monkeypatch, tmp_path, resumed)
+    second = _grind(repo, "--tasks", "1")
+    assert second.exit_code == 0, second.stdout + second.stderr
+
+    assert resumed.prompts == [], "a replay finishes the transaction, never re-runs it"
+    assert "resuming finalization" in _log(repo) or "finalization resume" in _log(repo)
     assert _issue(repo, issue_id)["status"] == "closed"
     assert len(_finalization_commits(repo, issue_id)) == 1
     assert CANDIDATE in _committed_paths(repo)

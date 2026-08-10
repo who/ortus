@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import typer
+from rich.markup import escape as escape_markup
 
 from ortus.core import cache, hooks, output, sandbox
 from ortus.core.agent import (
@@ -2327,8 +2328,16 @@ def _finalize_candidate(
                     packet,
                     _change_description(bd, issue_id, journal, write_log=write_log),
                 )
-            if not git.commit_paths(stage, message):
-                return journal, "path-scoped commit of the owned candidate failed"
+            committed = git.commit_paths(stage, message)
+            if not committed:
+                # git already said why microseconds ago; carrying its text out
+                # of here is the difference between an operator acting on the
+                # cause and reproducing the failure by hand (ortus-pgqg).
+                blocked = "path-scoped commit of the owned candidate failed"
+                if committed.reason:
+                    blocked = f"{blocked}; {committed.reason}"
+                write_log(f"finalization: HALT — {blocked}")
+                return journal, blocked
             journal = journal.with_finalization("commit", git.head_oid())
             store.save(journal)
             write_log(
@@ -2683,6 +2692,18 @@ def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
         ):
             return result.strip()
     return None
+
+
+def _console_safe(text: str) -> str:
+    """Text a Rich console renders verbatim.
+
+    A blocker now quotes git's own output, which may contain brackets — a hook
+    printing `[ERROR] refused` would otherwise be read as markup and silently
+    dropped from the very line that exists to explain the failure. The run log
+    keeps the unescaped text.
+    """
+
+    return escape_markup(text)
 
 
 def _log_writer(log_path: Path) -> Callable[[str], None]:
@@ -3041,7 +3062,8 @@ def grind(
                 if blocker is not None:
                     write_log(f"finalization resume: HALT — {blocker}")
                     output.error(
-                        f"grind: could not finish the pending finalization — {blocker}",
+                        "grind: could not finish the pending finalization — "
+                        + _console_safe(blocker),
                         hint=(
                             "the transaction journal under logs/ retains the "
                             "recoverable state; resolve the blocker and re-run grind"
@@ -4201,7 +4223,8 @@ def grind(
                             f"iter {iters_run}: finalization blocked — {blocker}"
                         )
                         output.error(
-                            f"grind: finalization blocked — {blocker}",
+                            "grind: finalization blocked — "
+                            + _console_safe(blocker),
                             hint=(
                                 "the transaction journal under logs/ retains the "
                                 "recoverable state; re-run grind to resume this "

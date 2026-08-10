@@ -188,6 +188,103 @@ def test_commit_paths_leaves_unrelated_dirty_paths_untouched(tmp_path: Path) -> 
     ]
 
 
+def _refusing_hook(repo: Path, body: str) -> None:
+    """Install a pre-commit hook that refuses with `body` on stderr.
+
+    A refusing hook is the failure that stranded a downstream finalization
+    (ortus-pgqg): git's exit status alone says nothing about why.
+    """
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(f"#!/bin/sh\n{body}\nexit 1\n")
+    hook.chmod(0o755)
+
+
+def test_commit_paths_names_the_failing_command(tmp_path: Path) -> None:
+    """AC-1: `add`, `diff --cached` and `commit` fail for different reasons, so
+    a refusal has to say which one refused."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+    _refusing_hook(repo, 'echo "hook refused: lint failed" >&2')
+
+    result = GitClient(repo).commit_paths(frozenset({"owned.py"}), "repo-1: candidate")
+
+    assert not result, "a refused commit must be falsy at every boolean call site"
+    assert result.command == "commit"
+    assert result.reason.startswith("git commit exited 1")
+    assert _subjects(repo)[0] == "baseline", "nothing may be committed"
+
+
+def test_commit_paths_carries_git_stderr(tmp_path: Path) -> None:
+    """AC-2: the operator gets git's own text, not a translation of it."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+    _refusing_hook(repo, 'echo "refusing: src/odd [name].py is unformatted" >&2')
+
+    result = GitClient(repo).commit_paths(frozenset({"owned.py"}), "repo-1: candidate")
+
+    assert "refusing: src/odd [name].py is unformatted" in result.reason
+
+
+def test_commit_paths_bounds_captured_output(tmp_path: Path) -> None:
+    """AC-3: a hook that prints a full lint report must not flood the log, and
+    the reason git and hooks put first must survive the bound."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+    _refusing_hook(
+        repo,
+        'echo "refused: 400 findings" >&2\n'
+        'for i in $(seq 1 400); do echo "finding $i: a long explanatory line" >&2; done',
+    )
+
+    result = GitClient(repo).commit_paths(frozenset({"owned.py"}), "repo-1: candidate")
+
+    assert "refused: 400 findings" in result.detail
+    assert result.detail.endswith("[truncated]")
+    assert len(result.detail) < 600
+    assert "finding 300" not in result.detail
+
+
+def test_commit_paths_empty_stderr_still_names_command(tmp_path: Path) -> None:
+    """AC-6: a git that fails silently still tells the operator which step of
+    the path-scoped commit it was."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+
+    result = GitClient(repo, binary="false").commit_paths(
+        frozenset({"owned.py"}), "repo-1: candidate"
+    )
+
+    assert not result
+    assert result.command == "add"
+    assert result.detail == ""
+    assert result.reason == "git add exited 1 without a message"
+
+
+def test_commit_paths_survives_non_utf8_git_output(tmp_path: Path) -> None:
+    """Hook output is arbitrary bytes; reporting it may not raise."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+    _refusing_hook(repo, "printf 'refused \\377\\376 bytes\\n' >&2")
+
+    result = GitClient(repo).commit_paths(frozenset({"owned.py"}), "repo-1: candidate")
+
+    assert not result
+    assert result.reason.startswith("git commit exited 1: refused")
+
+
+def test_successful_commit_paths_reports_no_failure(tmp_path: Path) -> None:
+    """AC-7's helper half: success carries nothing for a caller to log."""
+    repo = _repo(tmp_path)
+    (repo / "owned.py").write_text("OWNED = True\n")
+    git = GitClient(repo)
+
+    result = git.commit_paths(frozenset({"owned.py"}), "repo-1: candidate")
+
+    assert result and result.reason == "" and result.command == ""
+    # An empty candidate never touches git, and is not a failure either.
+    assert git.commit_paths(frozenset(), "repo-1: nothing").reason == ""
+
+
 def test_status_text_is_bounded_and_empty_outside_a_repo(tmp_path: Path) -> None:
     """The handoff prompt shares Claude's 4,000-character /goal budget, so the
     status it carries is truncated rather than unbounded."""

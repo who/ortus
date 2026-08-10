@@ -27,7 +27,7 @@ from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.bd import BdClient, BdError
-from ortus.core.git import GitClient
+from ortus.core.git import CommitResult, GitClient
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import (
@@ -232,6 +232,31 @@ def _install(
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend_runner)
 
 
+def _refuse_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    detail: str = "hook refused: [ERROR] src/odd [name].py is unformatted",
+) -> None:
+    """Fail the path-scoped commit the way a refusing pre-commit hook does.
+
+    The detail carries brackets on purpose: it reaches a Rich console, which
+    would read them as markup and drop the explanation.
+    """
+    monkeypatch.setattr(
+        GitClient,
+        "commit_paths",
+        lambda self, paths, message: CommitResult(
+            ok=False, command="commit", returncode=1, detail=detail
+        ),
+    )
+
+
+def _log_text(repo: Path) -> str:
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in (repo / "logs").glob("grind-*.log")
+    )
+
+
 def _stage_pending_journal(
     repo: Path,
     issue_id: str,
@@ -380,9 +405,7 @@ def test_failure_at_commit_retains_a_recoverable_journal(
     """AC-5: a commit that fails leaves report+close journaled and stops."""
     repo, issue_id = _seed(tmp_path, "fin3")
     _install(monkeypatch, tmp_path, PassingRunner(repo))
-    monkeypatch.setattr(
-        GitClient, "commit_paths", lambda self, paths, message: False
-    )
+    _refuse_commit(monkeypatch)
 
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
@@ -399,6 +422,77 @@ def test_failure_at_commit_retains_a_recoverable_journal(
     # that failed leaves it as the last one that landed.
     assert journal.phase == "finalized-compose"
     assert _issue(repo, issue_id)["status"] == "closed"
+
+
+def test_blocker_keeps_its_first_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1/AC-2/AC-4: the blocker still opens with the sentence operators and
+    tests already match on, and now says which git command refused and what it
+    said — the cause the old message threw away (ortus-pgqg)."""
+    repo, _issue_id = _seed(tmp_path, "fin3a")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    _refuse_commit(monkeypatch)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log_text(repo)
+    blocked = [line for line in log.splitlines() if "finalization blocked" in line]
+    assert blocked, log
+    sentence = "path-scoped commit of the owned candidate failed"
+    assert blocked[0].split("— ", 1)[1].startswith(sentence)
+    assert "git commit exited 1" in blocked[0]
+    assert "src/odd [name].py is unformatted" in blocked[0]
+    # Step 4: the same detail is written where the failure happened, not only
+    # where the iteration reports it.
+    assert f"finalization: HALT — {sentence}; git commit exited 1" in log
+    # The console keeps the bracketed text a Rich console would otherwise eat.
+    console = " ".join((result.stdout + result.stderr).split())
+    assert "[ERROR] src/odd [name].py is unformatted" in console
+
+
+def test_blocker_keeps_the_recovery_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: the run really is resumable, so the sentence that says so stays."""
+    repo, _issue_id = _seed(tmp_path, "fin3b")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    _refuse_commit(monkeypatch)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    # Normalized: output.error hard-wraps its hint at the console width.
+    console = " ".join((result.stdout + result.stderr).split())
+    assert (
+        "the transaction journal under logs/ retains the recoverable state; "
+        "re-run grind to resume this exact issue" in console
+    )
+
+
+def test_successful_commit_logging_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: the new detail belongs to failures only; a commit that lands logs
+    exactly what it logged before."""
+    repo, issue_id = _seed(tmp_path, "fin3c")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log_text(repo)
+    assert f"finalization: committed owned paths for {issue_id}: {CANDIDATE}" in log
+    assert "git commit exited" not in log
+    assert "finalization: HALT" not in log
+    assert CANDIDATE in _committed_paths(repo)
 
 
 def test_failure_at_push_retains_a_recoverable_journal(
