@@ -139,6 +139,11 @@ and recovery all touch the current definition.
 3. **Pull requests where a remote exists**, opt-in, for checks before merge.
 4. **Worktrees** only if concurrent execution becomes a goal.
 
+The candidate model exists because a separate reviewer needs something immutable
+to judge. Whether that reviewer earns what the model costs is measured in
+`experiments/REVIEW_MODEL.md`, which reaches this document's conclusion from the
+other end.
+
 ## The integrator
 
 Branches leave one job that has no owner today, and it is unlike every other job
