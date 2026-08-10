@@ -170,7 +170,9 @@ def test_init_emits_progress_lines(tmp_path: Path) -> None:
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     target = tmp_path / "fresh"
-    result = runner.invoke(app, ["init", str(target)])
+    # This is about the progress-line shape, not the CodeGraph prerequisite,
+    # and the codegraph CLI is absent on hermetic runners.
+    result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "[ortus init]" in result.stderr
     assert "[ortus init] done" in result.stderr
@@ -181,7 +183,7 @@ def test_verb_progress_lines_open_with_timestamp_then_verb_tag(tmp_path: Path) -
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     target = tmp_path / "stamped"
-    result = runner.invoke(app, ["init", str(target)])
+    result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
     tagged = [line for line in result.stderr.splitlines() if "[ortus init]" in line]
     assert tagged, result.stderr

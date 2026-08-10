@@ -123,6 +123,11 @@ def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
             str(repo),
             "--prefix",
             random_prefix,
+            # The fixture is about having a project to run verbs against, not
+            # about the CodeGraph prerequisite, and the codegraph CLI is absent
+            # on hermetic runners.
+            "--codegraph",
+            "off",
         ],
         check=False,
         capture_output=True,
@@ -325,12 +330,12 @@ def test_init_idempotency_force(local_ortus: OrtusCallable, tmp_repo: Path) -> N
     that a second init refuses and a third init with --force succeeds.
     """
     _require("bd")
-    again = local_ortus("init", str(tmp_repo))
+    again = local_ortus("init", str(tmp_repo), "--codegraph", "off")
     assert again.returncode != 0, (
         "second `ortus init` without --force exited 0; expected refusal "
         "since .beads/ already exists (would silently clobber state)."
     )
-    forced = local_ortus("init", str(tmp_repo), "--force")
+    forced = local_ortus("init", str(tmp_repo), "--force", "--codegraph", "off")
     assert forced.returncode == 0, (
         f"`ortus init --force` exited {forced.returncode}.\n"
         f"stdout:\n{forced.stdout}\nstderr:\n{forced.stderr}"
