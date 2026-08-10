@@ -3467,6 +3467,9 @@ def grind(
                 # then hung still counts, and a claimed-but-unclosed issue still
                 # gets the orphan-policy treatment.
                 implementation_timed_out = False
+                # Re-armed every iteration: only the one iteration that skips
+                # the worker is exempt from the handshake gate below.
+                implementation_worker_ran = True
                 phase_offset = log.stat().st_size if log.exists() else 0
                 try:
                     output.progress(
@@ -3479,6 +3482,7 @@ def grind(
                         ),
                     )
                     if resume_candidate_ready:
+                        implementation_worker_ran = False
                         rc = int(
                             active_journal.evidence[-1].get("returncode", 0)
                             if active_journal and active_journal.evidence
@@ -3637,6 +3641,17 @@ def grind(
                     output.progress(
                         "grind", "implementation CodeGraph handshake succeeded"
                     )
+                elif not implementation_worker_ran:
+                    # The transcript segment is empty by construction: no agent
+                    # was asked to perform this handshake. Reporting a fallback
+                    # here — or asserting the handshake below — would blame the
+                    # operator's MCP configuration for a phase that never ran.
+                    if codegraph_mode is not CodeGraphMode.OFF:
+                        write_log(
+                            f"iter {iters_run}: implementation CodeGraph handshake "
+                            "not required; the candidate was inherited and no "
+                            "implementation worker turn ran"
+                        )
                 elif codegraph_mode is not CodeGraphMode.OFF:
                     output.progress(
                         "grind",
@@ -3647,13 +3662,14 @@ def grind(
                     f"CodeGraph implementation summary: queries={len(implementation_summary.events)} "
                     f"fallbacks={implementation_summary.fallbacks or 'none'}"
                 )
-                try:
-                    require_handshake(implementation_summary)
-                except CodeGraphUnavailable as exc:
-                    if harness_select:
-                        bd.update_status(issue_id, "open")
-                    output.error(str(exc))
-                    raise typer.Exit(code=1)
+                if implementation_worker_ran:
+                    try:
+                        require_handshake(implementation_summary)
+                    except CodeGraphUnavailable as exc:
+                        if harness_select:
+                            bd.update_status(issue_id, "open")
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
 
                 if (
                     harness_select
