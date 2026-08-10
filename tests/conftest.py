@@ -30,6 +30,13 @@ from tests._shims import normalize_git_branch, ready_issue_args, shim_path
 
 _DEPENDENCY_MARKERS = ("fast", "integration", "network", "live_provider")
 _HERMETIC_TEST_BUDGET_SECONDS = 5.0
+#: Multiplier applied to that budget, so a slow machine cannot redden a healthy
+#: build. Hosted runners vary by roughly 3x run to run — the same commit on the
+#: same leg has taken 706s and 2232s — and an absolute budget measures the
+#: runner rather than the test. CI raises this; a developer machine is stable
+#: enough to keep the tight number that makes the guard useful.
+_DURATION_BUDGET_SCALE = float(os.environ.get("ORTUS_TEST_BUDGET_SCALE", "1") or "1")
+_DURATION_BUDGET = _HERMETIC_TEST_BUDGET_SECONDS * _DURATION_BUDGET_SCALE
 _CI_GATE_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "test.yml"
 # The gate invocation, including its backslash-continued flag lines.
 _CI_GATE_COMMAND_RE = re.compile(
@@ -160,7 +167,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
         report.when == "call"
         and report.passed
         and item.config.getoption("--enforce-duration-budget")
-        and report.duration > _HERMETIC_TEST_BUDGET_SECONDS
+        and report.duration > _DURATION_BUDGET
         and item.get_closest_marker("network") is None
         and item.get_closest_marker("live_provider") is None
         and item.get_closest_marker("slow") is None
@@ -168,7 +175,7 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
         report.outcome = "failed"
         report.longrepr = (
             f"{item.nodeid} took {report.duration:.2f}s; hermetic tests over "
-            f"{_HERMETIC_TEST_BUDGET_SECONDS:.0f}s must be optimized or marked slow"
+            f"{_DURATION_BUDGET:.0f}s must be optimized or marked slow"
         )
 
 

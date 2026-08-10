@@ -154,6 +154,11 @@ def test_over_budget_is_rejected_under_verification_flags(tmp_path: Path) -> Non
         capture_output=True,
         check=False,
         timeout=180,
+        # This proves the guard rejects a breach of the stated budget, so the
+        # probe must run against the unscaled number. CI raises the scale to
+        # absorb slow runners, and inheriting it here would let the probe's
+        # deliberate overrun slip under a budget three times its size.
+        env={**os.environ, "ORTUS_TEST_BUDGET_SCALE": "1"},
     )
     combined = result.stdout + result.stderr
     assert result.returncode != 0, combined

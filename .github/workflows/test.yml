@@ -102,6 +102,12 @@ jobs:
         run: uv pip install -e '.[dev]'
 
       - name: Run comprehensive hermetic pytest gate
+        env:
+          # Hosted runners vary by ~3x run to run, so the tight local duration
+          # budget measures the machine here rather than the test. The guard
+          # stays on — a pathological test still trips 15s — without a healthy
+          # one reddening main because the runner was slow.
+          ORTUS_TEST_BUDGET_SCALE: '3'
         run: |
           uv run pytest -m "fast or integration" \
             --test-timeout=180 --enforce-duration-budget --durations=20 \
