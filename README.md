@@ -438,6 +438,42 @@ Projects that already pin an explicit value are unaffected.
 
 Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md` or `~/.ortus/prompts/<name>.md`; the bundled defaults under `src/ortus/prompts/` are the fallback (FR-025).
 
+## Glossary
+
+Ortus's vocabulary is small, load-bearing, and largely made of ordinary
+English words carrying one specific sense — a packet is authored issue
+content, not a message on a queue; a boundary is a finalization step, not a
+limit. These words appear in log lines, prompt contracts and error messages,
+so guessing at one misreads the run. The table below is generated from the
+declaration in `src/ortus/core/glossary.py`; changing a term without
+regenerating it fails the test suite.
+
+<!-- BEGIN GENERATED: glossary -->
+<!-- Generated from src/ortus/core/glossary.py. Do not edit by hand: tests/test_glossary_docs.py fails and prints the correct block. -->
+
+| Term | What it means | Where it lives |
+| --- | --- | --- |
+| **boundary** | One finalization step that is journaled as it lands, so a restart resumes at the first step that did not — not a limit or an edge. | `FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py` |
+| **candidate** | The uncommitted edit set one worker produced for one issue, which a fresh verifier judges before anything is committed. | `CandidateJournal.candidate_paths` in `src/ortus/core/transaction.py` |
+| **degraded** | A step that completed with less information than usual instead of failing, such as a commit subject written without a readable packet. | finalization logging in `src/ortus/commands/grind.py` |
+| **disown** | A worker declaring that an inherited uncommitted path is not its issue's work, which keeps the path out of the candidate rather than merely leaving it alone. | `src/ortus/core/attribution.py` |
+| **finalization** | The commit-and-close sequence grind runs itself after a passing verdict, one journaled boundary at a time; no worker closes an issue. | `finalized_phase()` in `src/ortus/core/lifecycle.py` |
+| **handoff** | The uncommitted paths a fresh worker inherits from whoever edited the tree before it, recorded so attribution can tell them apart from the worker's own edits. | `CandidateJournal.with_handoff()` in `src/ortus/core/transaction.py` |
+| **harness** | The grind scheduler process that selects and claims the issue and launches each worker against it; the worker never chooses its own work. | `src/ortus/core/grind_loop.py` |
+| **journal** | The one JSON file holding a candidate transaction's phase, paths, hashes and evidence, which is what lets an interrupted run resume. | `JOURNAL_RELATIVE_PATH` in `src/ortus/core/transaction.py` |
+| **leaf** | A non-epic bd issue small and complete enough for one implementation worker to execute end to end, which is what readiness validates. | `src/ortus/core/readiness.py` |
+| **main path** | The route through a state machine taken when nothing goes wrong, which is the only part the README diagrams draw. | `StateMachine.main_path` in `src/ortus/core/lifecycle.py` |
+| **orphan** | An issue left claimed but unclosed by a worker that ended without finishing, which the configured orphan policy then releases or keeps. | `src/ortus/core/grind_loop.py` |
+| **packet** | The authored bd issue content — description, design, acceptance criteria, notes — that a worker treats as authoritative, not any message on a queue. | `authoritative_packet()` in `src/ortus/core/transaction.py` |
+| **phase** | The candidate journal's current state, which lives only as long as one candidate transaction and is never a bd issue status. | `CandidateJournal.phase` in `src/ortus/core/transaction.py` |
+| **plan-gap** | A defect in the issue packet that no amount of implementing can resolve, which routes back to planning instead of producing a candidate. | `PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py` |
+| **readiness** | The schema an issue must satisfy before an implementation worker may be launched at it, checked mechanically when the issue is planned. | `validate_issue()` in `src/ortus/core/readiness.py` |
+| **seal** | Recording the candidate's diff hash, so every later phase can prove the edit set it is judging is the one the worker produced. | `CandidateJournal.candidate_hash` in `src/ortus/core/transaction.py` |
+| **tracker export** | The generated beads files under `.beads/` that bd rewrites whenever an issue changes, checkpointed apart from a worker's own edits. | `src/ortus/commands/grind.py` |
+| **verdict** | The structured pass-or-fail judgement a fresh read-only verifier emits about a candidate, with one entry per acceptance criterion. | `parse_verdict()` in `src/ortus/core/verdict.py` |
+| **worker** | One agent subprocess running one phase for one issue, started fresh with no memory of any worker before it. | `compose_worker_prompt()` in `src/ortus/core/agent.py` |
+<!-- END GENERATED: glossary -->
+
 ## Session-close protocol
 
 When ending a work session, push your work:
