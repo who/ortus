@@ -76,11 +76,18 @@ jobs:
 
       - name: Install CodeGraph
         run: |
-          # Pinned like bd. `ortus check` and the required-mode aborts in plan
-          # and grind only need the CLI on PATH; indexing a repo downloads a
-          # ~130MB model set, so no `codegraph init` runs in this gate.
+          # Pinned like bd.
           npm install --global @colbymchenry/codegraph@1.5.0
           codegraph --version
+
+      - name: Build the CodeGraph index
+        run: |
+          # `.codegraph/` is gitignored, so a fresh checkout has no index and
+          # required mode would abort. The `-i` flag is a deprecated no-op on
+          # 1.5.0 — indexing runs by default. A full index of this repo is
+          # 129 files / ~0.2s locally, so it is cheap enough for every leg.
+          codegraph init .
+          codegraph status
 
       - name: Install sandbox prereq (Linux only)
         if: runner.os == 'Linux'
@@ -145,6 +152,11 @@ jobs:
         run: |
           npm install --global @colbymchenry/codegraph@1.5.0
           codegraph --version
+
+      - name: Build the CodeGraph index
+        run: |
+          codegraph init .
+          codegraph status
 
       - name: Install sandbox prerequisite
         run: |
