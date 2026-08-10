@@ -975,6 +975,84 @@ def test_commit_message_without_a_description_is_still_a_commit() -> None:
     assert message == "repo-1: Retire a stale flag\n"
 
 
+# ---------------------------------------------------------------------------
+# ortus-ot7q — the commit body carries no markup a commit view renders
+# ---------------------------------------------------------------------------
+
+SPANNED_CHANGES_COMMENT = (
+    "**Changes**:\n"
+    f"- `{CANDIDATE}` - added the `SHIPPED` flag the loader reads at import\n"
+    "\n"
+    "**Verification**: 4 passed\n"
+)
+
+VERIFIER_REPORT_COMMENT = (
+    "## Verifier report\n\n"
+    "Decision: **PASS**\n\n"
+    f"`{CANDIDATE}` satisfies every criterion in `## Acceptance criteria`.\n"
+)
+
+
+def test_strips_code_spans_from_deterministic_body() -> None:
+    """AC-2: both assembled blocks lose the markers and keep the words."""
+    packet = {
+        "title": "Read the flag once at import",
+        "description": (
+            "## Objective\n\n"
+            "`load_config()` read the flag out of `.ortusrc` twice, so two "
+            "callers could disagree about what it said.\n"
+        ),
+    }
+
+    message = grind_mod._commit_message(
+        "repo-1",
+        packet,
+        grind_mod._bounded_block(
+            [f"`{CANDIDATE}` - read `.ortusrc` once at import time"]
+        ),
+    )
+
+    assert "`" not in message
+    assert "load_config() read the flag out of .ortusrc twice" in message
+    assert f"- {CANDIDATE} - read .ortusrc once at import time" in message
+
+
+def test_comment_keeps_spans_but_commit_body_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: only the copy that reaches the commit gives up its markup."""
+    repo, issue_id, _ = _finalize_by_replay(
+        tmp_path, monkeypatch, "fin-spans1", comments=(SPANNED_CHANGES_COMMENT,)
+    )
+
+    # bd renders Markdown, so the comment the implementer wrote is untouched.
+    assert any("`SHIPPED`" in body for body in _comment_bodies(repo, issue_id))
+
+    body = _head_message(repo).partition("\n\n")[2]
+    assert "`" not in body
+    assert f"{CANDIDATE} - added the SHIPPED flag the loader reads at import" in body
+
+
+def test_report_and_record_keep_markdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: every surface that renders Markdown keeps the Markdown it had."""
+    repo, issue_id, _ = _finalize_by_replay(
+        tmp_path,
+        monkeypatch,
+        "fin-spans2",
+        comments=(SPANNED_CHANGES_COMMENT, VERIFIER_REPORT_COMMENT),
+    )
+    bodies = _comment_bodies(repo, issue_id)
+
+    assert any(
+        "Decision: **PASS**" in body and f"`{CANDIDATE}`" in body for body in bodies
+    )
+    record = next(body for body in bodies if FINALIZATION_MARKER in body)
+    assert "Candidate: `" in record and "Base commit: `" in record
+    assert "## Objective" in str(_issue(repo, issue_id)["description"])
+
+
 def test_commit_subject_shortens_on_word_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

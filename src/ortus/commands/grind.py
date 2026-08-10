@@ -74,6 +74,7 @@ from ortus.core.compose import (
     ComposeFailed,
     compose_commit_message,
     guard_read_only,
+    strip_code_spans,
     with_default_model,
 )
 from ortus.core.config import load_config
@@ -1744,12 +1745,20 @@ def _codegraph_summary(comment: str) -> str:
 
 
 def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
-    """`entries` wrapped for a commit body, cut off once the budget is spent."""
+    """`entries` wrapped for a commit body, cut off once the budget is spent.
+
+    An entry is copied out of a bd comment, where a code span renders; the
+    commit body it is being copied into renders nothing, so the span markers
+    come off here. Stripping precedes both the bound and the wrap, so a span
+    can never be cut in half and the markers never spend the budget.
+    """
 
     rendered: list[str] = []
     budget = _MAX_COMMIT_CHANGES_CHARS
     for entry in entries:
-        text = _shortened(_printable(entry), _MAX_COMMIT_CHANGES_CHARS)
+        text = _shortened(
+            strip_code_spans(_printable(entry)), _MAX_COMMIT_CHANGES_CHARS
+        )
         rendered.append(
             textwrap.fill(
                 text,
@@ -1823,11 +1832,16 @@ def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> 
     packet and `description` — so the message states nothing that was not
     recorded before the commit ran. An unreadable packet still commits: the
     subject degrades and the description stands alone.
+
+    The objective is written in bd, where Markdown renders, and is stripped of
+    its code spans on the way in here, where it does not.
     """
 
     subject = _commit_subject(issue_id, str(packet.get("title") or ""))
     blocks: list[str] = []
-    objective = " ".join(section_text(packet.get("description"), "Objective").split())
+    objective = strip_code_spans(
+        " ".join(section_text(packet.get("description"), "Objective").split())
+    )
     if objective:
         blocks.append(
             textwrap.fill(

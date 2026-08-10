@@ -139,16 +139,16 @@ _EXAMPLE = {
     "subject": "Re-read the worktree before deciding a path is unrelated",
     "body": (
         "A path a worker disowned early in a run stayed disowned even after a "
-        "later worker edited it. `_candidate_baseline()` unions the disowned "
+        "later worker edited it. _candidate_baseline() unions the disowned "
         "set into the baseline every snapshot subtracts, so the edit could "
         "not enter the candidate, reach the verifier, or be committed — the "
         "work was done and then silently dropped on the floor.\n\n"
         "A disowned path is now re-adopted the moment its contents move. "
         "Disowning still means \"this is somebody else's leftover\"; it no "
         "longer means \"nobody may touch this file again this run\".\n\n"
-        "`_prepare_handoff()` already fingerprints every inherited path when a "
+        "_prepare_handoff() already fingerprints every inherited path when a "
         "worker is handed the tree. That record is what makes the decision "
-        "possible: `own_inherited_work()` compares the stored fingerprint "
+        "possible: own_inherited_work() compares the stored fingerprint "
         "against the file on disk and drops any path whose bytes changed out "
         "of the disowned set, so the next snapshot picks it up. Attribution "
         "keys on the recorded fingerprint rather than the path string, "
@@ -247,9 +247,14 @@ RULES
   Ortus prepends, so leave that prefix off. It describes the change, not the
   issue, and never restates the issue title. No trailing period, no `...`.
 - Body: paragraphs of prose. Not a bullet list, and never an inventory of the
-  files this commit touched — `git show --stat` already prints those.
+  files this commit touched — git show --stat already prints those.
+- A commit body is not rendered as Markdown. Git prints it verbatim and the
+  forges show it as preformatted text, so a backtick around a name is shown to
+  the reader as a backtick. Write identifiers as bare words, with no backticks
+  and no other markup.
 - Name at least one function, class, or file that actually appears in the
-  diff, and never name one that does not. Wrap those names in backticks.
+  diff, and never name one that does not. Write a function or a method with
+  its parentheses — compose_prompt() — so a bare word still reads as a symbol.
 - Explain jargon on first use. A reader six months out has the code and
   nothing else.
 - Never narrate how this commit was produced: no attempt counts, correction
@@ -265,7 +270,9 @@ WORKED EXAMPLE — the shape and altitude to hit, not the subject matter:
 
 Note what the example does: it opens with the concrete failure and its cost,
 states the new behaviour in one line, then explains the mechanism by naming the
-functions that implement it, and closes on the limit the design chose.
+functions that implement it, and closes on the limit the design chose. Note
+what it does not do: it carries no backticks, because the surface it is written
+for cannot render them.
 
 --- ISSUE PACKET ---
 {chr(10).join(packet)}
@@ -426,6 +433,29 @@ _CITATION_RE = re.compile(r"^[\w./-]+(?:\(\))?$")
 _BARE_CALL_RE = re.compile(r"\b([A-Za-z_][\w.]*)\(\)")
 
 
+#: One Markdown code span: a lone backtick, its contents, and a lone closing
+#: backtick. The lookarounds keep a fence out of the match rather than
+#: half-stripping one, and the contents may cross a single line break so a span
+#: a wrapped body split over two lines is still recognized as one span.
+_CODE_SPAN_RE = re.compile(r"(?<!`)`(?!`)([^`\n]*(?:\n[^`\n]*)?)`(?!`)")
+
+
+def strip_code_spans(text: str) -> str:
+    """`text` with code-span backticks removed and their contents kept.
+
+    Nothing that displays a commit message renders Markdown: git prints the
+    body verbatim and the forges show it as preformatted text, so a backtick
+    written around an identifier reaches every reader as a literal character.
+    The word inside the span is the useful part, so only the two markers go.
+
+    An unpaired backtick is left exactly where it is. On its own it is more
+    likely prose about the character than a broken span, and removing it would
+    corrupt a sentence to tidy up markup nobody wrote.
+    """
+
+    return _CODE_SPAN_RE.sub(r"\1", text)
+
+
 def _normalized(text: str) -> str:
     return " ".join(_WORD_RE.findall(text.casefold()))
 
@@ -484,6 +514,11 @@ def validate_message(
     Every check here is mechanical. The pass is asked for judgement and given
     latitude in the prompt; what reaches a commit is only what can be checked
     against the diff and the issue in front of us.
+
+    Code spans are stripped rather than refused, and stripped last: the
+    citation check reads backticks as the pass's claim about the diff, and an
+    otherwise good message must not be thrown away — degrading to the
+    deterministic body — over two characters of markup that render nowhere.
     """
 
     subject = " ".join(_printable(message.subject).split())
@@ -540,7 +575,9 @@ def validate_message(
             + ", ".join(unsupported)
             + ", which the diff does not contain"
         )
-    return CommitMessage(subject=prefix + subject, body=body)
+    return CommitMessage(
+        subject=prefix + strip_code_spans(subject), body=strip_code_spans(body)
+    )
 
 
 def guard_read_only(before: Mapping[str, str], after: Mapping[str, str]) -> None:
