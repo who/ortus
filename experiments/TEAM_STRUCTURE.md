@@ -280,6 +280,13 @@ issue moves to a named branch instead of being left in the next worker's tree.
 edited one README and one prompt file, and untangling it by hand took hours,
 twice.
 
+The parking half of this is treated at greater depth in
+`experiments/CANDIDATE_ISOLATION.md`, which argues the same failures follow from
+defining a candidate as worktree state rather than as a commit. The two
+proposals lean on each other: collision detection is what makes conflicts at
+merge time rare enough to accept, and branches are what make parked work
+durable enough to detect against.
+
 ### 5. The packet as a living agreement
 
 Implementers append dated field notes to the packet. Planners fold them into the
