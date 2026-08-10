@@ -1988,6 +1988,20 @@ for _stale in [m for m in sys.modules if m == "textual" or m.startswith("textual
     del sys.modules[_stale]
 """
 
+# rich styles a phrase token by token, so a literal like `--replay` reaches the
+# pipe as `ESC[1;36m-ESC[0mESC[1;36m-replayESC[0m` and no substring assertion on
+# it can hold. `plain()` removes the styling so the assertions test the text.
+_PLAIN_OUTPUT = r'''
+import re as _re
+
+_ANSI = _re.compile(r"\x1b\[[0-9;:?]*[ -/]*[@-~]")
+
+
+def plain(text):
+    """Child output with any ANSI escape sequences removed."""
+    return _ANSI.sub("", text)
+'''
+
 
 def _run_without_textual(body: str) -> subprocess.CompletedProcess:
     """Run `body` in a child interpreter that cannot import textual."""
@@ -1996,8 +2010,15 @@ def _run_without_textual(body: str) -> subprocess.CompletedProcess:
     # rich wraps stderr at the console width, and an assertion on a phrase in
     # the message must not fail because the phrase straddled a wrap.
     env["COLUMNS"] = "400"
+    # rich turns color on when it detects a CI environment, which splits the
+    # asserted phrases across escape sequences. Turning it off is the same
+    # class of defense as the width above; `plain()` at the assertion sites
+    # covers a renderer that ignores this. TERM is deliberately left alone —
+    # `TERM=dumb` makes rich report a fixed 80-column console and would undo
+    # COLUMNS above.
+    env["NO_COLOR"] = "1"
     return subprocess.run(
-        [sys.executable, "-c", _BLOCK_TEXTUAL + body],
+        [sys.executable, "-c", _BLOCK_TEXTUAL + _PLAIN_OUTPUT + body],
         capture_output=True,
         text=True,
         timeout=120,
@@ -2018,9 +2039,10 @@ from ortus.cli import app
 
 assert "textual" not in sys.modules, "importing the CLI pulled in textual"
 
-result = CliRunner().invoke(app, ["grind", {str(repo)!r}, "--dry-run"])
+# --codegraph off: this is about textual, not the CodeGraph prerequisite.
+result = CliRunner().invoke(app, ["grind", {str(repo)!r}, "--dry-run", "--codegraph", "off"])
 assert result.exit_code == 0, (result.exit_code, result.output, result.exception)
-assert "/goal" in result.stdout, result.stdout
+assert "/goal" in plain(result.stdout), result.stdout
 assert "textual" not in sys.modules, "running grind pulled in textual"
 print("VERB-OK")
 """
@@ -2045,12 +2067,14 @@ runner = CliRunner()
 # Argument parsing needs no framework, so --help still answers.
 helped = runner.invoke(app, ["dashboard", "--help"])
 assert helped.exit_code == 0, (helped.exit_code, helped.output)
-assert "--replay" in helped.stdout, helped.stdout
+assert "--replay" in plain(helped.stdout), helped.stdout
 
 result = runner.invoke(app, ["dashboard", {str(repo)!r}])
 assert result.exit_code == 1, (result.exit_code, result.output, result.exception)
 assert not isinstance(result.exception, ImportError), result.exception
-message = result.stderr
+# Stripping can only remove text, so the negative assertions below stay at
+# least as strict as they were: a real traceback still trips them.
+message = plain(result.stderr)
 assert "pip install textual" in message, message
 assert "Traceback" not in message, message
 assert "ModuleNotFoundError" not in message, message
