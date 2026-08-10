@@ -489,7 +489,21 @@ def test_successful_commit_logging_unchanged(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     log = _log_text(repo)
-    assert f"finalization: committed owned paths for {issue_id}: {CANDIDATE}" in log
+    # The line names every path the commit staged, sorted — and whether bd has
+    # dirtied its tracker exports by this point is timing, not behavior. Assert
+    # the line is there and names the candidate, rather than that the candidate
+    # is the only path on it: `.beads/…` sorts first, so the stricter form fails
+    # wherever the exports happen to be checkpointed in the same commit.
+    committed = next(
+        (
+            line
+            for line in log.splitlines()
+            if f"finalization: committed owned paths for {issue_id}:" in line
+        ),
+        "",
+    )
+    assert committed, log
+    assert CANDIDATE in committed, committed
     assert "git commit exited" not in log
     assert "finalization: HALT" not in log
     assert CANDIDATE in _committed_paths(repo)
