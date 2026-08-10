@@ -3324,6 +3324,11 @@ def grind(
                                 f"{active_journal.issue_id} but this iteration claimed "
                                 f"{issue_id}; starting a new transaction"
                             )
+                        # The resume belongs to the inherited candidate, not to
+                        # the run: a transaction starting here has no captured
+                        # implementation by definition, so this issue gets a
+                        # real implementation phase like any first claim.
+                        resume_candidate_ready = False
                         active_journal = CandidateJournal.start(
                             repo=target,
                             issue_id=issue_id,

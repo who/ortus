@@ -1160,3 +1160,174 @@ def test_idempotent_repeated_handoffs_add_no_duplicate_finalization_or_commits(
     )
     assert (repo / OPERATOR).read_text() == "operator work nobody owns\n"
     assert (repo / CANDIDATE).read_text() == "STILL_WIP = True\n"
+
+
+# ---------------------------------------------------------------------------
+# ortus-afft — a resumed candidate exempts its own iteration and no other
+# ---------------------------------------------------------------------------
+
+RESUMED = "resumed-candidate.txt"
+RESUMING_LINE = "implementation already captured; resuming at verification"
+
+
+def _implementations(backend: ScriptedRunner) -> list[str]:
+    return [text for name, text in backend.prompts if name == Phase.IMPLEMENT.value]
+
+
+def _inherited_candidate_then_a_second_issue(
+    tmp_path: Path, prefix: str
+) -> tuple[Path, str, str]:
+    """A run whose first iteration resumes a candidate it never finalizes.
+
+    The inherited issue is human-flagged, so the iteration that resumes it skips
+    its implementation worker — the candidate is already captured — and then
+    falls through without a verdict, leaving its journal and its resume in place
+    for the next iteration. A second, ordinary issue waits behind it.
+    """
+    repo, first_id = _seed(tmp_path, prefix)
+    second_id = _create_issue(repo, "the next issue in the queue", priority="2")
+    (repo / RESUMED).write_text("the first issue's captured candidate\n")
+    _stage_journal(
+        repo, first_id, phase="candidate-captured", paths=frozenset({RESUMED})
+    )
+    subprocess.run(
+        ["bd", "label", "add", first_id, "human"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, first_id, second_id
+
+
+def test_second_claim_runs_an_implementation_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the resume exemption belongs to the inherited candidate alone. An
+    issue claimed after it has no captured implementation, so skipping its
+    worker would hand the verifier somebody else's work."""
+    repo, _first_id, second_id = _inherited_candidate_then_a_second_issue(
+        tmp_path, "rec21"
+    )
+    backend = ScriptedRunner(
+        implement=_shipped_and_declares(RESUMED), verify=_pass_verdict
+    )
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo, "--iterations", "2")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    implementations = _implementations(backend)
+    assert len(implementations) == 1, "exactly the second claim gets a worker"
+    assert f"Work bd issue {second_id}." in implementations[0]
+    assert _issue(repo, second_id)["status"] == "closed"
+    assert CANDIDATE in _committed_paths(repo)
+
+
+def test_second_claim_does_not_log_resuming_at_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: only the inherited candidate's own iteration resumes. The line is
+    the operator's evidence for which iteration skipped its worker, so a second
+    one means the flag outlived the transaction it described."""
+    repo, _first_id, _second_id = _inherited_candidate_then_a_second_issue(
+        tmp_path, "rec22"
+    )
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(implement=_shipped_and_declares(RESUMED), verify=_pass_verdict),
+    )
+
+    result = _grind(repo, "--iterations", "2")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert f"iter 1: {RESUMING_LINE}" in log
+    assert f"iter 2: {RESUMING_LINE}" not in log
+
+
+def test_resumed_issue_still_skips_implementation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: an iteration continuing the issue its own journal owns keeps the
+    resume, including the handshake exemption — re-running the implementation
+    worker over a captured candidate is the thing resuming exists to avoid."""
+    repo, issue_id = _seed(tmp_path, "rec23")
+    (repo / RESUMED).write_text("the captured candidate\n")
+    _stage_journal(
+        repo, issue_id, phase="candidate-captured", paths=frozenset({RESUMED})
+    )
+    backend = ScriptedRunner(verify=_pass_verdict)
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert _implementations(backend) == []
+    log = _log(repo)
+    assert RESUMING_LINE in log
+    assert "implementation CodeGraph handshake not required" in log
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert RESUMED in _committed_paths(repo)
+
+
+def test_no_handoff_runs_every_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a run that inherits nothing never has the flag set, so every
+    iteration spawns its own implementation worker."""
+    repo, first_id = _seed(tmp_path, "rec24")
+    second_id = _create_issue(repo, "second queued issue", priority="2")
+
+    def implement(repo: Path, log_path: Path) -> int:
+        (repo / CANDIDATE).write_text("SHIPPED = True\n")
+        return 0
+
+    backend = ScriptedRunner(implement=implement, verify=_pass_verdict)
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo, "--tasks", "2")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    implementations = _implementations(backend)
+    assert len(implementations) == 2
+    assert f"Work bd issue {first_id}." in implementations[0]
+    assert f"Work bd issue {second_id}." in implementations[1]
+    assert RESUMING_LINE not in _log(repo)
+
+
+def test_candidate_paths_belong_to_the_claimed_issue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: a verifier judges the claimed issue against work that issue's own
+    worker produced. Handing it the inherited candidate of a different issue is
+    how a passing verdict would commit one issue's work under another's id."""
+    repo, _first_id, second_id = _inherited_candidate_then_a_second_issue(
+        tmp_path, "rec25"
+    )
+    reviewed: list[tuple[str, tuple[str, ...]]] = []
+
+    def verify(repo: Path, log_path: Path) -> int:
+        # Every post-implementation phase reads the transaction, so this records
+        # each one — none of them may be handed another issue's candidate.
+        journal = JournalStore(repo).load()
+        assert journal is not None
+        reviewed.append((journal.issue_id, journal.candidate_paths))
+        return _pass_verdict(repo, log_path)
+
+    _install(
+        monkeypatch,
+        tmp_path,
+        ScriptedRunner(implement=_shipped_and_declares(RESUMED), verify=verify),
+    )
+
+    result = _grind(repo, "--iterations", "2")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert reviewed, "the claimed issue reached a verifier"
+    for verified_id, verified_paths in reviewed:
+        assert verified_id == second_id
+        assert CANDIDATE in verified_paths, "the claimed issue's own work"
+        assert RESUMED not in verified_paths, "the other issue's inherited candidate"
+    assert RESUMED not in _committed_paths(repo)
+    assert (repo / RESUMED).read_text() == "the first issue's captured candidate\n"
