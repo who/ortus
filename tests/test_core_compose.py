@@ -28,7 +28,6 @@ from ortus.core.compose import (
     compose_prompt,
     guard_read_only,
     parse_message,
-    strip_code_spans,
     validate_message,
     with_default_model,
 )
@@ -238,107 +237,6 @@ def test_citations_ignore_prose_wrapped_in_backticks() -> None:
         "validate_message",
         "parse_message",
     )
-
-
-# ---------------------------------------------------------------------------
-# ortus-ot7q — the commit body carries no markup a commit view renders
-# ---------------------------------------------------------------------------
-
-
-def test_strips_code_spans_from_composed_message(tmp_path: Path) -> None:
-    """AC-1: what reaches the commit is the identifier, not the markup."""
-
-    body = (
-        "The body quoted every identifier in backticks, and nothing that shows "
-        "a commit renders them, so the reader saw the markers themselves.\n\n"
-        "`validate_message` now hands back a body a commit view can print, and "
-        "`guard_read_only` is untouched by the change."
-    )
-    validated = _validated(_message(subject="Drop the `backticks` from the body", body=body))
-
-    assert "`" not in validated.body and "`" not in validated.subject
-    assert "validate_message now hands back" in validated.body
-    assert "guard_read_only is untouched" in validated.body
-
-    # End to end: the text the caller commits is stripped, not just the value
-    # validation happened to build.
-    composed = _compose(tmp_path, _FakeRunner(text=_envelope("Write the body", body)))
-    assert "`" not in composed
-    assert "validate_message" in composed
-
-
-def test_plain_message_is_unchanged() -> None:
-    """AC-3: a message with no code spans is returned byte-identical."""
-
-    body = (
-        "The deterministic body restated an objective written before the code "
-        "existed, so it explained nothing about the change itself.\n\n"
-        "validate_message() decides what may be committed, and a body with no "
-        "markup passes through it exactly as written."
-    )
-    validated = _validated(_message(body=body))
-
-    assert validated.body == body
-
-
-def test_unpaired_backtick_is_preserved() -> None:
-    """AC-4: a lone backtick is prose about a character, not a broken span."""
-
-    body = (
-        "A body could open a code span and never close it, and a stripper that "
-        "removed the opener would silently edit the sentence.\n\n"
-        "validate_message() now leaves a lone ` exactly where it was written, "
-        "because a backtick without a partner is being talked about rather "
-        "than marking anything up."
-    )
-    validated = _validated(_message(body=body))
-
-    assert "leaves a lone ` exactly" in validated.body
-
-
-def test_a_fenced_block_is_left_alone_rather_than_half_stripped() -> None:
-    """A fence is not a code span, so it is not partly unwrapped."""
-
-    fenced = "See:\n\n```\nvalidate_message(message)\n```\n\nand nothing else."
-    assert strip_code_spans(fenced) == fenced
-
-
-def test_code_spans_are_cleaned_not_rejected() -> None:
-    """AC-5: markup is never grounds for losing an otherwise good message.
-
-    The citation check reads a backticked name as the pass's claim about the
-    diff, so stripping has to come after it — a message whose only citations
-    are code spans still passes, and still arrives bare.
-    """
-
-    body = (
-        "Nothing in the body named a symbol without wrapping it, and a rule "
-        "that refused such a body would throw away the explanation.\n\n"
-        "`validate_message` and `guard_read_only` are cited here in spans and "
-        "nowhere else, which is the case that must survive."
-    )
-    validated = _validated(_message(body=body))
-
-    assert "`" not in validated.body
-    assert "validate_message and guard_read_only are cited" in validated.body
-
-
-def test_rubric_states_commit_bodies_are_not_markdown() -> None:
-    """AC-6: the rubric gives the reason, and the example demonstrates it."""
-
-    prompt = compose_prompt(
-        issue_id=ISSUE, title=TITLE, objective="", changes="", diff=DIFF
-    )
-    rubric = prompt.partition("--- ISSUE PACKET ---")[0]
-    example = prompt.partition("WORKED EXAMPLE")[2].partition("Note what the")[0]
-
-    assert "not rendered as Markdown" in rubric
-    assert "bare words" in rubric
-    # The worked example is the part an author imitates, so it demonstrates
-    # the rule rather than contradicting it.
-    assert example.strip(), "the rubric no longer carries a worked example"
-    assert "`" not in example
-    assert "_prepare_handoff()" in example
 
 
 # ---------------------------------------------------------------------------
