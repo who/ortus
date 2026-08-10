@@ -67,6 +67,28 @@ def _assert_block_matches(text: str) -> None:
         )
 
 
+def test_every_transition_is_documented_even_when_the_diagram_omits_it() -> None:
+    """The diagram draws the main path only; the table owes the rest.
+
+    This is the contract that lets the picture stay readable. Drop it and a
+    state can be added to the machine, left out of the main path, and never
+    documented anywhere — which is worse than the crowded diagram this
+    replaced, because the omission is invisible.
+    """
+
+    block = readme_block(_readme_text())
+    for machine in (ISSUE_MACHINE, CANDIDATE_MACHINE):
+        for transition in machine.transitions:
+            row = (
+                f"| `{transition.source}` | {transition.trigger} | "
+                f"`{transition.target}` |"
+            )
+            assert row in block, (
+                f"{machine.name}: {transition.source} -> {transition.target} "
+                "is declared but absent from the README transition table"
+            )
+
+
 def test_readme_block_matches_renderer() -> None:
     _assert_block_matches(_readme_text())
 
@@ -83,7 +105,9 @@ def test_mermaid_state_ids_are_hyphen_free() -> None:
         (CANDIDATE_MACHINE, mermaid_candidate_graph()),
     ):
         assert graph.startswith("stateDiagram-v2")
-        for state in machine.states:
+        # Only the main path is drawn, so only the main path needs aliasing;
+        # the states left out are carried by the transition table instead.
+        for state in machine.main_path or machine.states:
             if "-" not in state:
                 continue
             assert f'state "{state}" as {state.replace("-", "_")}' in graph

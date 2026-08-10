@@ -285,91 +285,99 @@ stateDiagram-v2
     direction TB
     [*] --> open
     open --> in_progress: grind claims the selected issue
-    in_progress --> in_progress: grind restores a claim a worker released without authority
     in_progress --> open: orphan policy revert releases a claim that outlived its worker
     in_progress --> closed: finalization closes the verified issue
     closed --> [*]
 ```
 
+<details><summary>Every issue transition (4)</summary>
+
+| From | Trigger | To |
+| --- | --- | --- |
+| `open` | grind claims the selected issue | `in_progress` |
+| `in_progress` | grind restores a claim a worker released without authority | `in_progress` |
+| `in_progress` | orphan policy revert releases a claim that outlived its worker | `open` |
+| `in_progress` | finalization closes the verified issue | `closed` |
+
+</details>
+
 #### Candidate journal phase
 
 `CandidateJournal.phase` for one candidate transaction, from the first worker edit to a committed candidate or a halt a human owns.
+
+The diagram is the path through when nothing goes wrong — 9 of 25 states. Timeouts, refusals, plan gaps and halts are real and are listed in full beneath it.
 
 ```mermaid
 stateDiagram-v2
     direction TB
     state "candidate-captured" as candidate_captured
-    state "implementation-timeout" as implementation_timeout
-    state "implementation-rejected" as implementation_rejected
-    state "verification-timeout" as verification_timeout
-    state "verification-rejected" as verification_rejected
     state "verified-pass" as verified_pass
-    state "verified-fail" as verified_fail
-    state "correction-timeout" as correction_timeout
-    state "correction-rejected" as correction_rejected
-    state "corrections-exhausted" as corrections_exhausted
-    state "plan-gap-routed" as plan_gap_routed
-    state "plan-gap-escalated" as plan_gap_escalated
-    state "orphaned-candidate" as orphaned_candidate
-    state "incomplete-candidate" as incomplete_candidate
-    state "finalization-blocked" as finalization_blocked
     state "finalized-report" as finalized_report
     state "finalized-close" as finalized_close
     state "finalized-compose" as finalized_compose
     state "finalized-commit" as finalized_commit
     state "finalized-sync" as finalized_sync
     [*] --> implementation
-    implementation --> handoff: an unusable journal is rebuilt from the lone claim and the dirty tree
     implementation --> candidate_captured: the worker returned and grind sealed its diff
-    implementation --> implementation_timeout: the worker ran out of wall clock
-    handoff --> candidate_captured: the resumed worker returned and grind sealed its diff
-    handoff --> implementation_timeout: the resumed worker ran out of wall clock
-    implementation_timeout --> candidate_captured: a restart resumes the same issue and a fresh worker finishes it
-    candidate_captured --> implementation_rejected: the implementation isolation guard refused the candidate
-    candidate_captured --> orphaned_candidate: the claim outlived its worker
-    candidate_captured --> incomplete_candidate: the worker returned with its claim still open
-    candidate_captured --> finalizing: legacy condition mode; the Codex worker closed the issue itself
     candidate_captured --> verification: a fresh read-only verifier starts
-    implementation_rejected --> candidate_captured: a restart re-implements the rejected candidate
     verification --> verified_pass: the verifier returned a passing verdict
-    verification --> verified_fail: the verifier returned a failing verdict
-    verification --> verification_rejected: the verifier produced no usable verdict, or moved the candidate
-    verification --> verification_timeout: the verifier ran out of wall clock with the candidate intact
-    verification_timeout --> verification: a restart re-verifies the preserved candidate
-    verification_timeout --> correction_rejected: a correction had already been spent on this candidate
-    verification_rejected --> candidate_captured: a restart re-implements after a rejected verification
-    verification_rejected --> correction_rejected: a correction had already been spent on this candidate
-    verified_fail --> correction: a correction attempt remains in the budget
-    verified_fail --> corrections_exhausted: the bounded correction budget is spent
-    verified_fail --> plan_gap_routed: the findings name a planning gap; one planning pass is spent
-    verified_fail --> plan_gap_escalated: the planning gap survived its one planning pass
-    correction --> candidate_captured: the correction worker returned and grind re-sealed the diff
-    correction --> correction_timeout: the correction worker ran out of wall clock
-    correction_timeout --> candidate_captured: a restart re-implements the timed-out correction
-    plan_gap_routed --> candidate_captured: a restart re-implements against the replanned issue
     verified_pass --> finalized_report: finalization boundary report landed
-    verified_pass --> finalization_blocked: a finalization precondition failed
     finalized_report --> finalized_close: finalization boundary close landed
     finalized_close --> finalized_compose: finalization boundary compose landed
     finalized_compose --> finalized_commit: finalization boundary commit landed
     finalized_commit --> finalized_sync: finalization boundary sync landed
-    finalized_report --> finalization_blocked: a finalization precondition failed on replay
-    finalized_close --> finalization_blocked: a finalization precondition failed on replay
-    finalized_compose --> finalization_blocked: a finalization precondition failed on replay
-    finalized_commit --> finalization_blocked: a finalization precondition failed on replay
-    finalization_blocked --> finalized_report: a restart replays the first boundary that has not landed
-    finalization_blocked --> finalized_close: a restart replays the first boundary that has not landed
-    finalization_blocked --> finalized_compose: a restart replays the first boundary that has not landed
-    finalization_blocked --> finalized_commit: a restart replays the first boundary that has not landed
-    finalization_blocked --> finalized_sync: a restart replays the first boundary that has not landed
-    correction_rejected --> [*]
-    corrections_exhausted --> [*]
-    plan_gap_escalated --> [*]
-    orphaned_candidate --> [*]
-    incomplete_candidate --> [*]
-    finalizing --> [*]
     finalized_sync --> [*]
 ```
+
+<details><summary>Every candidate transition (43)</summary>
+
+| From | Trigger | To |
+| --- | --- | --- |
+| `implementation` | an unusable journal is rebuilt from the lone claim and the dirty tree | `handoff` |
+| `implementation` | the worker returned and grind sealed its diff | `candidate-captured` |
+| `implementation` | the worker ran out of wall clock | `implementation-timeout` |
+| `handoff` | the resumed worker returned and grind sealed its diff | `candidate-captured` |
+| `handoff` | the resumed worker ran out of wall clock | `implementation-timeout` |
+| `implementation-timeout` | a restart resumes the same issue and a fresh worker finishes it | `candidate-captured` |
+| `candidate-captured` | the implementation isolation guard refused the candidate | `implementation-rejected` |
+| `candidate-captured` | the claim outlived its worker | `orphaned-candidate` |
+| `candidate-captured` | the worker returned with its claim still open | `incomplete-candidate` |
+| `candidate-captured` | legacy condition mode; the Codex worker closed the issue itself | `finalizing` |
+| `candidate-captured` | a fresh read-only verifier starts | `verification` |
+| `implementation-rejected` | a restart re-implements the rejected candidate | `candidate-captured` |
+| `verification` | the verifier returned a passing verdict | `verified-pass` |
+| `verification` | the verifier returned a failing verdict | `verified-fail` |
+| `verification` | the verifier produced no usable verdict, or moved the candidate | `verification-rejected` |
+| `verification` | the verifier ran out of wall clock with the candidate intact | `verification-timeout` |
+| `verification-timeout` | a restart re-verifies the preserved candidate | `verification` |
+| `verification-timeout` | a correction had already been spent on this candidate | `correction-rejected` |
+| `verification-rejected` | a restart re-implements after a rejected verification | `candidate-captured` |
+| `verification-rejected` | a correction had already been spent on this candidate | `correction-rejected` |
+| `verified-fail` | a correction attempt remains in the budget | `correction` |
+| `verified-fail` | the bounded correction budget is spent | `corrections-exhausted` |
+| `verified-fail` | the findings name a planning gap; one planning pass is spent | `plan-gap-routed` |
+| `verified-fail` | the planning gap survived its one planning pass | `plan-gap-escalated` |
+| `correction` | the correction worker returned and grind re-sealed the diff | `candidate-captured` |
+| `correction` | the correction worker ran out of wall clock | `correction-timeout` |
+| `correction-timeout` | a restart re-implements the timed-out correction | `candidate-captured` |
+| `plan-gap-routed` | a restart re-implements against the replanned issue | `candidate-captured` |
+| `verified-pass` | finalization boundary report landed | `finalized-report` |
+| `verified-pass` | a finalization precondition failed | `finalization-blocked` |
+| `finalized-report` | finalization boundary close landed | `finalized-close` |
+| `finalized-close` | finalization boundary compose landed | `finalized-compose` |
+| `finalized-compose` | finalization boundary commit landed | `finalized-commit` |
+| `finalized-commit` | finalization boundary sync landed | `finalized-sync` |
+| `finalized-report` | a finalization precondition failed on replay | `finalization-blocked` |
+| `finalized-close` | a finalization precondition failed on replay | `finalization-blocked` |
+| `finalized-compose` | a finalization precondition failed on replay | `finalization-blocked` |
+| `finalized-commit` | a finalization precondition failed on replay | `finalization-blocked` |
+| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-report` |
+| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-close` |
+| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-compose` |
+| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-commit` |
+| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-sync` |
+
+</details>
 
 #### Where the two machines meet
 

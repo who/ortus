@@ -194,6 +194,13 @@ class StateMachine:
     states: tuple[str, ...]
     terminal: frozenset[str]
     transitions: tuple[Transition, ...]
+    #: The states a run passes through when nothing goes wrong, in order. The
+    #: diagram draws only these, because a reader's first question is how a
+    #: candidate reaches a commit, and a graph carrying every timeout, refusal
+    #: and halt alongside it answers that question worse than no graph at all.
+    #: Nothing is hidden: the table beneath the diagram carries every
+    #: transition, and rows are exhaustive where pictures stop scaling.
+    main_path: tuple[str, ...] = ()
 
     def outgoing(self, state: str) -> tuple[Transition, ...]:
         """Transitions that leave `state`, excluding self-loops."""
@@ -292,6 +299,7 @@ ISSUE_MACHINE = StateMachine(
     initial=ISSUE_OPEN,
     states=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
     terminal=frozenset({ISSUE_CLOSED}),
+    main_path=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
     transitions=(
         Transition(ISSUE_OPEN, ISSUE_IN_PROGRESS, "grind claims the selected issue"),
         Transition(
@@ -545,6 +553,17 @@ def build_candidate_machine(
             }
         ),
         transitions=tuple(transitions),
+        # Worker edit to committed candidate, with nothing going wrong. The
+        # finalized-* steps are listed individually because their order is the
+        # crash-resume contract, and a reader who cannot see it in the diagram
+        # has to reconstruct it from the table.
+        main_path=(
+            IMPLEMENTATION,
+            CANDIDATE_CAPTURED,
+            VERIFICATION,
+            VERIFIED_PASS,
+            *finalized,
+        ),
     )
     machine.validate()
     return machine
@@ -622,27 +641,61 @@ def _node_id(state: str) -> str:
 
 
 def render_mermaid(machine: StateMachine) -> str:
-    """Render `machine` as deterministic ``stateDiagram-v2`` text.
+    """Render `machine`'s main path as deterministic ``stateDiagram-v2`` text.
+
+    Only main-path states and the transitions between them are drawn. The
+    declaration holds 29 states and 57 transitions across the two machines,
+    and a diagram carrying all of them routes edges around each other until
+    the main line is impossible to trace — the picture stops being a picture.
+    Every transition still appears in :func:`render_transition_table`.
 
     Ordering follows the declaration, and nothing here reads the clock or the
     environment, so the output is stable across runs.
     """
 
+    drawn = machine.main_path or machine.states
+    included = frozenset(drawn)
     lines = ["stateDiagram-v2", "    direction TB"]
-    for state in machine.states:
+    for state in drawn:
         node = _node_id(state)
         if node != state:
             lines.append(f'    state "{state}" as {node}')
-    lines.append(f"    [*] --> {_node_id(machine.initial)}")
+    if machine.initial in included:
+        lines.append(f"    [*] --> {_node_id(machine.initial)}")
     for transition in machine.transitions:
+        if transition.source not in included or transition.target not in included:
+            continue
+        if transition.source == transition.target:
+            continue
         lines.append(
             f"    {_node_id(transition.source)} --> "
             f"{_node_id(transition.target)}: {transition.trigger}"
         )
-    for state in machine.states:
+    for state in drawn:
         if state in machine.terminal:
             lines.append(f"    {_node_id(state)} --> [*]")
     return "\n".join(lines)
+
+
+def render_transition_table(machine: StateMachine) -> str:
+    """Every transition `machine` declares, as a Markdown table.
+
+    This is the exhaustive record the diagram deliberately is not. A table
+    does not degrade as the machine grows, it greps, and it diffs a row at a
+    time in review — which is what a reader chasing one specific failure path
+    actually needs.
+    """
+
+    rows = [
+        "| From | Trigger | To |",
+        "| --- | --- | --- |",
+    ]
+    for transition in machine.transitions:
+        rows.append(
+            f"| `{transition.source}` | {transition.trigger} | "
+            f"`{transition.target}` |"
+        )
+    return "\n".join(rows)
 
 
 def mermaid_issue_graph() -> str:
@@ -658,16 +711,37 @@ def mermaid_candidate_graph() -> str:
 
 
 def _machine_section(machine: StateMachine, graph: str) -> list[str]:
-    return [
+    drawn = len(machine.main_path or machine.states)
+    total = len(machine.states)
+    note = (
+        f"The diagram is the path through when nothing goes wrong — {drawn} of "
+        f"{total} states. Timeouts, refusals, plan gaps and halts are real and "
+        "are listed in full beneath it."
+        if drawn < total
+        else ""
+    )
+    lines = [
         f"#### {machine.title}",
         "",
         machine.summary,
         "",
+    ]
+    if note:
+        lines += [note, ""]
+    lines += [
         "```mermaid",
         graph,
         "```",
         "",
+        f"<details><summary>Every {machine.name} transition "
+        f"({len(machine.transitions)})</summary>",
+        "",
+        render_transition_table(machine),
+        "",
+        "</details>",
+        "",
     ]
+    return lines
 
 
 def render_readme_block() -> str:
