@@ -1559,9 +1559,15 @@ _FINALIZABLE_PHASES = frozenset(
 #: UIs stay readable.
 _COMMIT_SUBJECT_LIMIT = 72
 #: Commit bodies are wrapped at the conventional width, and every quoted block
-#: is bounded so a long one can't turn the message into an essay.
+#: is bounded so a runaway one can't turn the message into an essay.
 _COMMIT_BODY_WIDTH = 72
-_MAX_COMMIT_OBJECTIVE_CHARS = 480
+#: One paragraph of stated intent. Generous enough that a real objective lands
+#: whole, since a body that explains the change is the point of the message.
+_MAX_COMMIT_OBJECTIVE_CHARS = 1200
+#: The change description is the part a reader is actually here for, so it gets
+#: room to explain rather than a budget that guarantees a sentence dies
+#: mid-word. Bounded only against a pathological entry, not against prose.
+_MAX_COMMIT_CHANGES_CHARS = 4000
 #: Subject text used in place of a title the tracker could not supply, so the
 #: subject still reads `<id>: <something>`.
 _DEGRADED_COMMIT_SUBJECT = "verified candidate"
@@ -1574,14 +1580,6 @@ _CODEGRAPH_BLOCK_HEADER = "**CodeGraph v1**"
 #: queue") selectable.
 _NON_DESCRIPTIVE_COMMENT_RE = re.compile(r"\bPLAN-GAP\b|\bBLOCKED\b")
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
-
-
-def _truncated(text: str, limit: int) -> str:
-    """`text` bounded to `limit` characters, ellipsis included in the budget."""
-
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
 
 
 def _shortened(text: str, limit: int) -> str:
@@ -1749,9 +1747,9 @@ def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
     """`entries` wrapped for a commit body, cut off once the budget is spent."""
 
     rendered: list[str] = []
-    budget = _MAX_COMMIT_OBJECTIVE_CHARS
+    budget = _MAX_COMMIT_CHANGES_CHARS
     for entry in entries:
-        text = _truncated(_printable(entry), _MAX_COMMIT_OBJECTIVE_CHARS)
+        text = _shortened(_printable(entry), _MAX_COMMIT_CHANGES_CHARS)
         rendered.append(
             textwrap.fill(
                 text,
@@ -1833,7 +1831,7 @@ def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> 
     if objective:
         blocks.append(
             textwrap.fill(
-                _truncated(objective, _MAX_COMMIT_OBJECTIVE_CHARS),
+                _shortened(objective, _MAX_COMMIT_OBJECTIVE_CHARS),
                 width=_COMMIT_BODY_WIDTH,
             )
         )
