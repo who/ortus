@@ -144,7 +144,13 @@ FINALIZATION_BLOCKED = "finalization-blocked"
 #: duplicate a comment, close, commit, or push. Declared here rather than in
 #: :mod:`ortus.core.transaction` (which re-exports it) so the phase graph can
 #: derive its ``finalized-*`` states without importing the journal.
-FINALIZATION_STEPS: tuple[str, ...] = ("report", "close", "commit", "sync")
+FINALIZATION_STEPS: tuple[str, ...] = (
+    "report",
+    "close",
+    "compose",
+    "commit",
+    "sync",
+)
 FINALIZED_PREFIX = "finalized-"
 
 #: `phase=` values that tag a log line instead of naming a state. They are

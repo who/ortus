@@ -13,6 +13,9 @@ class Phase(str, Enum):
     PLAN = "plan"
     IMPLEMENT = "implement"
     VERIFY = "verify"
+    #: Writes the commit message from the verified diff. Bounded prose over
+    #: material it is handed, so it is the one phase a cheap model suits.
+    FINALIZE = "finalize"
 
 
 SUPPORTED_EFFORTS: dict[str, frozenset[str]] = {

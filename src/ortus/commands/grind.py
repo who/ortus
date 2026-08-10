@@ -58,6 +58,7 @@ from ortus.core.claude import (
 )
 from ortus.core.codegraph import (
     CodeGraphAdapter,
+    CodeGraphCapability,
     CodeGraphMode,
     CodeGraphPhase,
     CodeGraphProbe,
@@ -68,6 +69,13 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.attribution import Ownership, describe, path_ownership
+from ortus.core.compose import (
+    ComposeExceededAuthority,
+    ComposeFailed,
+    compose_commit_message,
+    guard_read_only,
+    with_default_model,
+)
 from ortus.core.config import load_config
 from ortus.core.lifecycle import (
     CANDIDATE_CAPTURED,
@@ -1758,6 +1766,19 @@ def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
     return "\n".join(rendered)
 
 
+def _completion_comments(bd: BdClient, issue_id: str) -> list[str]:
+    """Implementer records of what changed, oldest first.
+
+    Read without any degradation logging of its own: both the deterministic
+    body and the composition pass want this text, and only the former treats
+    its absence as a degradation worth a line in the run log.
+    """
+
+    return [
+        text for text in _issue_comments(bd, issue_id) if _describes_the_change(text)
+    ]
+
+
 def _change_description(
     bd: BdClient,
     issue_id: str,
@@ -1782,9 +1803,7 @@ def _change_description(
     log rather than a silently thinner message.
     """
 
-    described = [
-        text for text in _issue_comments(bd, issue_id) if _describes_the_change(text)
-    ]
+    described = _completion_comments(bd, issue_id)
     latest = described[-1] if described else ""
     if latest and len(described) > journal.corrections:
         bullets = _changes_bullets(latest)
@@ -1824,6 +1843,59 @@ def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> 
     if not blocks:
         return f"{subject}\n"
     return f"{subject}\n\n" + "\n\n".join(blocks) + "\n"
+
+
+#: Journaled in place of a message when the composition pass produced none, so
+#: the boundary still reads as landed and a restart does not spend a second
+#: model call re-asking a question that already failed.
+_COMPOSE_UNAVAILABLE = "unavailable"
+
+#: What the composition pass is handed and what it returns: the journal it is
+#: describing plus the authored packet fields, and the full commit message text
+#: or a `ComposeFailed`.
+ComposeCallable = Callable[..., str]
+
+
+def _composed_message(journal: CandidateJournal) -> str:
+    """The message a prior compose boundary journaled, if it produced one."""
+
+    value = journal.finalization.get("compose")
+    if not isinstance(value, str) or value == _COMPOSE_UNAVAILABLE:
+        return ""
+    return value
+
+
+def _authority_state(
+    bd: BdClient,
+    git: GitClient,
+    journal: CandidateJournal,
+    *,
+    repo: Path,
+    issue_id: str,
+) -> dict[str, str]:
+    """Everything a read-only pass must leave exactly as it found it.
+
+    The candidate's own bytes, the shape of the worktree around it (so a file
+    created beside the candidate is caught too), and the issue's status.
+
+    The tracker is read first and its generated exports are excluded from the
+    worktree shape: bd rewrites those as a side effect of being asked anything,
+    including by this function, and comparing them would report the reader's
+    own footprints as the pass's.
+    """
+
+    state: dict[str, str] = {}
+    try:
+        state["tracker"] = str(bd.status(issue_id) or "")
+    except Exception:  # noqa: BLE001 - an unreadable tracker is compared as such
+        state["tracker"] = "unreadable"
+    for path, fingerprint in fingerprint_paths(
+        repo, journal.candidate_paths
+    ).items():
+        state[f"path:{path}"] = fingerprint
+    dirty = (git.dirty_paths() if git.is_git_repo() else frozenset()) or frozenset()
+    state["worktree"] = ", ".join(sorted(dirty - _TRACKER_EXPORT_PATHS))
+    return state
 
 
 def _finalization_report(issue_id: str, journal: CandidateJournal) -> str:
@@ -1914,6 +1986,61 @@ def _finalization_blocker(
     return None
 
 
+def _message_composer(
+    *,
+    repo: Path,
+    log: Path,
+    backend: str,
+    profile: AgentProfile,
+    capability: CodeGraphCapability | None,
+    timeout: float | None,
+) -> ComposeCallable:
+    """Bind the composition pass to this run's backend, log, and profile.
+
+    Finalization is handed a callable rather than a runner so it stays a
+    tracker-and-git routine: it decides when a message is wanted and what
+    happens when there isn't one, and knows nothing about how one is obtained.
+    """
+
+    def _compose(
+        journal: CandidateJournal,
+        *,
+        issue_id: str,
+        packet: dict[str, Any],
+        changes: list[str],
+    ) -> str:
+        reference = journal.candidate_diff_ref
+        if not reference:
+            raise ComposeFailed("the transaction recorded no candidate diff")
+        artifact = Path(reference)
+        if not artifact.is_absolute():
+            artifact = repo / artifact
+        try:
+            diff = artifact.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise ComposeFailed(
+                f"the candidate diff at {reference} is unreadable ({exc})"
+            ) from exc
+        return compose_commit_message(
+            repo,
+            issue_id=issue_id,
+            title=str(packet.get("title") or ""),
+            objective=section_text(packet.get("description"), "Objective"),
+            changes=changes[-1] if changes else "",
+            diff=diff,
+            log_path=log,
+            backend=backend,
+            profile=profile,
+            capability=capability,
+            timeout=timeout,
+            # The same indirection every other spawn in this module goes
+            # through, so one patch point still swaps the whole backend.
+            runner_factory=_make_runner,
+        )
+
+    return _compose
+
+
 def _finalize_candidate(
     bd: BdClient,
     git: GitClient,
@@ -1925,13 +2052,19 @@ def _finalize_candidate(
     integration_branch: str,
     baseline: frozenset[str],
     write_log: Callable[[str], None],
+    compose: ComposeCallable | None = None,
 ) -> tuple[CandidateJournal, str | None]:
-    """Ortus-owned report → close → commit → sync, journaled step by step.
+    """Ortus-owned report → close → compose → commit → sync, journaled by step.
 
     Returns the updated journal and a blocker string when finalization could
     not complete. Every step is skipped when its boundary is already journaled
     OR when observable state already shows it landed, so a restart at any
     boundary produces no duplicate comment, close, commit, or push.
+
+    `compose` is the one place a model participates in finalization: it writes
+    the commit message from the sealed diff and returns text. It is optional,
+    it decides nothing, and every way it can fail ends in the deterministic
+    body — the commit lands either way.
     """
 
     blocker = _finalization_blocker(
@@ -1979,6 +2112,52 @@ def _finalize_candidate(
             + ("closed by Ortus" if closed else "was already closed; close skipped")
         )
 
+    if not journal.finalized("compose"):
+        composed = ""
+        if compose is None:
+            write_log(
+                f"finalization: no commit-message pass configured for {issue_id}; "
+                "the deterministic body stands"
+            )
+        else:
+            before = _authority_state(
+                bd, git, journal, repo=repo, issue_id=issue_id
+            )
+            failure = ""
+            try:
+                composed = compose(
+                    journal,
+                    issue_id=issue_id,
+                    packet=_commit_packet(bd, issue_id),
+                    changes=_completion_comments(bd, issue_id),
+                )
+            except ComposeFailed as exc:
+                failure = str(exc)
+            except Exception as exc:  # noqa: BLE001 - prose is never worth a commit
+                failure = f"unexpected error ({exc})"
+            # Checked whether the pass succeeded or not: a pass that failed
+            # after writing is exactly the case where trusting its own report
+            # would be wrong.
+            after = _authority_state(bd, git, journal, repo=repo, issue_id=issue_id)
+            try:
+                guard_read_only(before, after)
+            except ComposeExceededAuthority as exc:
+                write_log(f"finalization: HALT — {exc}")
+                journal = replace(journal, phase=_FINALIZATION_BLOCKED_PHASE)
+                store.save(journal)
+                return journal, str(exc)
+            if failure:
+                write_log(
+                    f"finalization: commit-message pass for {issue_id} produced "
+                    f"nothing usable ({failure}); the deterministic body stands"
+                )
+        journal = journal.with_finalization(
+            "compose", composed or _COMPOSE_UNAVAILABLE
+        )
+        store.save(journal)
+        if composed:
+            write_log(f"finalization: commit message composed for {issue_id}")
+
     if not journal.finalized("commit"):
         if not git.is_git_repo():
             journal = journal.with_finalization("commit", "not-a-git-repo")
@@ -1997,17 +2176,24 @@ def _finalize_candidate(
                     "finalization: leaving unrelated worktree paths untouched: "
                     + ", ".join(sorted(unrelated))
                 )
-            packet = _commit_packet(bd, issue_id)
-            if not packet:
+            message = _composed_message(journal)
+            if message:
                 write_log(
-                    "finalization: issue packet unreadable; committing "
-                    f"{issue_id} with a degraded subject"
+                    f"finalization: committing {issue_id} with the composed "
+                    "message"
                 )
-            message = _commit_message(
-                issue_id,
-                packet,
-                _change_description(bd, issue_id, journal, write_log=write_log),
-            )
+            else:
+                packet = _commit_packet(bd, issue_id)
+                if not packet:
+                    write_log(
+                        "finalization: issue packet unreadable; committing "
+                        f"{issue_id} with a degraded subject"
+                    )
+                message = _commit_message(
+                    issue_id,
+                    packet,
+                    _change_description(bd, issue_id, journal, write_log=write_log),
+                )
             if not git.commit_paths(stage, message):
                 return journal, "path-scoped commit of the owned candidate failed"
             journal = journal.with_finalization("commit", git.head_oid())
@@ -2523,6 +2709,12 @@ def grind(
         # Repairing an unready packet is authoring work, not implementation, so
         # the self-heal pass runs on the planning profile.
         plan_profile = config.resolve_profile(resolved_backend, Phase.PLAN)
+        # Writing the commit message is bounded prose over material the pass is
+        # handed, so it defaults to the cheap tier unless an operator says
+        # otherwise in `.ortusrc`.
+        finalize_profile = with_default_model(
+            config.resolve_profile(resolved_backend, Phase.FINALIZE)
+        )
     except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
@@ -2596,6 +2788,7 @@ def grind(
         output.info(f"backend:        {resolved_backend}")
         output.info(f"implement:      {implement_profile.display_name}")
         output.info(f"verify:         {verify_profile.display_name}")
+        output.info(f"finalize:       {finalize_profile.display_name}")
         output.info(
             "repair:         "
             + (
@@ -2652,6 +2845,15 @@ def grind(
             )
             write_log(f"phase profile: {implement_profile.display_name}")
             write_log(f"phase profile: {verify_profile.display_name}")
+            write_log(f"phase profile: {finalize_profile.display_name}")
+            compose_message = _message_composer(
+                repo=target,
+                log=log,
+                backend=resolved_backend,
+                profile=finalize_profile,
+                capability=codegraph_probe.capability,
+                timeout=(worker_timeout if worker_timeout > 0 else None),
+            )
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
@@ -2701,6 +2903,7 @@ def grind(
                         frozenset(pending_finalization.baseline_paths),
                     ),
                     write_log=write_log,
+                    compose=compose_message,
                 )
                 if blocker is not None:
                     write_log(f"finalization resume: HALT — {blocker}")
@@ -3106,6 +3309,7 @@ def grind(
                     phase_profiles = {
                         "implementation": implement_profile.display_name,
                         "verification": verify_profile.display_name,
+                        "finalization": finalize_profile.display_name,
                     }
                     packet_digest, packet_ref = transaction_store.save_packet(
                         issue_id, target_issue
@@ -3836,6 +4040,7 @@ def grind(
                         integration_branch=integration_branch,
                         baseline=_candidate_baseline(active_journal, codex_baseline),
                         write_log=write_log,
+                        compose=compose_message,
                     )
                     if blocker is not None:
                         write_log(

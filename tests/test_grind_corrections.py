@@ -340,6 +340,9 @@ def test_retry_after_failure_reverifies_and_then_finalizes(
         Phase.VERIFY.value,
         Phase.IMPLEMENT.value,
         Phase.VERIFY.value,
+        # Finalization's own pass, after the second verifier passed the
+        # corrected candidate: it writes the commit message and nothing else.
+        Phase.FINALIZE.value,
     ], f"one fresh verifier per attempt; got {phases}"
     assert _issue(repo, issue_id)["status"] == "closed"
     assert JournalStore(repo).load() is None, "a finalized transaction clears itself"

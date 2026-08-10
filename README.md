@@ -167,13 +167,19 @@ model = "sonnet"
 model = "opus"
 reasoning_effort = "high"
 
+[profiles.claude.finalize]
+model = "haiku"
+
 [profiles.codex.implement]
 model = "gpt-5.2-codex"
 reasoning_effort = "high"
 ```
 
-Profiles are independent for `plan`, `implement`, and `verify`, and are scoped
-to the selected backend. Resolution is CLI phase override, then the matching
+Profiles are independent for `plan`, `implement`, `verify`, and `finalize`, and
+are scoped to the selected backend. `finalize` is the one bounded, read-only
+pass that writes the commit message from the verified diff; it is prose over
+material it is handed rather than correctness reasoning, so Claude defaults it
+to `haiku` and any failure falls back to the deterministic commit body. Resolution is CLI phase override, then the matching
 project table, then the matching user table, then the provider default. Nested
 tables merge field by field, so a project can override only `model` while
 inheriting `reasoning_effort` from `~/.ortusrc`. Omitted fields add no backend
@@ -309,6 +315,7 @@ stateDiagram-v2
     state "finalization-blocked" as finalization_blocked
     state "finalized-report" as finalized_report
     state "finalized-close" as finalized_close
+    state "finalized-compose" as finalized_compose
     state "finalized-commit" as finalized_commit
     state "finalized-sync" as finalized_sync
     [*] --> implementation
@@ -343,13 +350,16 @@ stateDiagram-v2
     verified_pass --> finalized_report: finalization boundary report landed
     verified_pass --> finalization_blocked: a finalization precondition failed
     finalized_report --> finalized_close: finalization boundary close landed
-    finalized_close --> finalized_commit: finalization boundary commit landed
+    finalized_close --> finalized_compose: finalization boundary compose landed
+    finalized_compose --> finalized_commit: finalization boundary commit landed
     finalized_commit --> finalized_sync: finalization boundary sync landed
     finalized_report --> finalization_blocked: a finalization precondition failed on replay
     finalized_close --> finalization_blocked: a finalization precondition failed on replay
+    finalized_compose --> finalization_blocked: a finalization precondition failed on replay
     finalized_commit --> finalization_blocked: a finalization precondition failed on replay
     finalization_blocked --> finalized_report: a restart replays the first boundary that has not landed
     finalization_blocked --> finalized_close: a restart replays the first boundary that has not landed
+    finalization_blocked --> finalized_compose: a restart replays the first boundary that has not landed
     finalization_blocked --> finalized_commit: a restart replays the first boundary that has not landed
     finalization_blocked --> finalized_sync: a restart replays the first boundary that has not landed
     correction_rejected --> [*]

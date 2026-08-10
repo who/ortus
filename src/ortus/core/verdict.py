@@ -260,7 +260,9 @@ def validate_verdict(
     )
 
 
-def _assistant_text(event: dict[str, Any]) -> Iterable[str]:
+def assistant_text(event: dict[str, Any]) -> Iterable[str]:
+    """Model-authored text carried by one transcript event, either backend."""
+
     if event.get("type") == "assistant":
         content = event.get("message", {}).get("content", [])
         for part in content if isinstance(content, list) else [content]:
@@ -291,7 +293,7 @@ def parse_verdict(
                 continue
             if not isinstance(event, dict):
                 continue
-            for text in _assistant_text(event):
+            for text in assistant_text(event):
                 for line in text.splitlines():
                     if line.strip().startswith(VERDICT_PREFIX):
                         encoded = line.strip()[len(VERDICT_PREFIX) :].strip()

@@ -118,8 +118,8 @@ def _validate_profiles(values: dict[str, Any]) -> None:
                 phase = Phase(phase_name)
             except ValueError as exc:
                 raise ProfileError(
-                    f"invalid phase profiles.{backend}.{phase_name}; expected plan, "
-                    "implement, or verify"
+                    f"invalid phase profiles.{backend}.{phase_name}; expected "
+                    + ", ".join(member.value for member in Phase)
                 ) from exc
             if not isinstance(table, dict):
                 raise ProfileError(

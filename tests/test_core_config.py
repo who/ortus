@@ -126,6 +126,29 @@ def test_profile_cli_fields_override_config_independently(tmp_path: Path) -> Non
     assert profile.reasoning_effort == "medium"
 
 
+def test_finalize_phase_profile_is_settable_for_both_backends(tmp_path: Path) -> None:
+    """The commit-message pass is an operator-tunable phase like any other."""
+
+    _write_toml(
+        tmp_path / ".ortusrc",
+        '[profiles.claude.finalize]\nmodel = "haiku"\nreasoning_effort = "low"\n'
+        '[profiles.codex.finalize]\nmodel = "cheap-codex"\n',
+    )
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+
+    claude = cfg.resolve_profile("claude", Phase.FINALIZE)
+    assert (claude.model, claude.reasoning_effort) == ("haiku", "low")
+    assert cfg.resolve_profile("codex", Phase.FINALIZE).model == "cheap-codex"
+
+
+def test_finalize_phase_profile_is_named_in_the_error_for_an_unknown_phase(
+    tmp_path: Path,
+) -> None:
+    _write_toml(tmp_path / ".ortusrc", '[profiles.claude.ship]\nmodel = "x"\n')
+    with pytest.raises(ProfileError, match="expected plan, implement, verify, finalize"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
 @pytest.mark.parametrize(
     "toml, message",
     [

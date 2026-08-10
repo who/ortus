@@ -247,8 +247,9 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
     )
 
     assert result.exit_code == 0, result.stdout + result.stderr
-    # The repair ran on the planning profile, ahead of the implement/verify pair.
-    assert phases == [Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY]
+    # The repair ran on the planning profile, ahead of the implement/verify
+    # pair, and finalization spent one last pass writing the commit message.
+    assert phases == [Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY, Phase.FINALIZE]
     assert _issue_ids(repo) == ids_before, "repair must update in place, not create"
     assert JournalStore(repo).load() is None, "the passing candidate is finalized"
     assert _issue(repo, issue_id)["status"] == "closed"

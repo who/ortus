@@ -129,14 +129,17 @@ def test_finalized_states_derived_from_steps() -> None:
     assert declared == [finalized_phase(step) for step in FINALIZATION_STEPS]
 
     # A new boundary must appear in the graph without editing the declaration.
-    grown = build_candidate_machine((*FINALIZATION_STEPS[:-1], "compose", "sync"))
-    assert finalized_phase("compose") in grown.states
+    # `attest` is hypothetical on purpose: a step this repository already
+    # declares would prove the derivation only for a state someone had already
+    # hand-checked into the graph.
+    grown = build_candidate_machine((*FINALIZATION_STEPS[:-1], "attest", "sync"))
+    assert finalized_phase("attest") in grown.states
     assert grown.terminal >= {finalized_phase("sync")}
     # ... wired into the chain, not stranded.
     grown.validate()
-    assert finalized_phase("compose") in grown.reachable()
+    assert finalized_phase("attest") in grown.reachable()
     assert any(
-        t.source == finalized_phase("compose") and t.target == finalized_phase("sync")
+        t.source == finalized_phase("attest") and t.target == finalized_phase("sync")
         for t in grown.transitions
     )
 
@@ -239,6 +242,7 @@ def test_classification_sets_are_declared() -> None:
         "finalization-blocked",
         "finalized-report",
         "finalized-close",
+        "finalized-compose",
         "finalized-commit",
     }
 
