@@ -104,6 +104,71 @@ substitute for what this run proved.
 "I have passed something like this before" is a reason to look harder at the
 part that differs. It is never a reason to skip the check.
 
+## Where memory lives
+
+One constraint decides most of this. Writing memory during a run means writing
+files, and every file that appears in the worktree mid-run has to be attributed
+to an issue — which is the machinery that produced nearly every bug fixed on
+2026-08-10. The tracker's own exports are already carved out of candidate
+attribution, so **bd is the only store that can be written mid-run without
+touching the candidate at all**. A new directory would need its own carve-out and
+would walk back into that hazard for no gain.
+
+Three tiers, each mapping to a store that already exists.
+
+### Crew lessons — bd memories
+
+Few, curated, loaded every session. The seeding, injection and verification path
+already ships for one static pointer; carrying more is a change of content, not
+of mechanism. This is where a lesson like *the verification sandbox is read-only,
+so copy the tree before sweeping* belongs.
+
+The cost is real and bounds the design: every memory is injected into every
+session with no relevance filtering. A dozen is free, sixty is a context tax on
+every worker. So this tier needs a hard cap and a standing pruning duty — which
+is a feature, because it sets a bar for what earns permanent residence in
+everyone's head.
+
+### Review history — already stored, never read
+
+Every verifier report is already a durable comment on its issue, carrying the
+criteria, the commands run, the files reviewed and the findings. The entire
+review history of a repository is sitting in the tracker, unread.
+
+So the reviewer's playbooks need **no new storage**. Retrieve the reports from
+closed issues whose concrete locations overlap this candidate, using CodeGraph to
+compute the overlap. Priors become a query rather than a corpus to build, and
+they load when relevant instead of always — which is the behavior wanted anyway,
+and the reason they must not go into the always-injected tier.
+
+### Run evidence — journal and logs
+
+Already exists, already discarded deliberately. Nothing changes.
+
+### What is never stored
+
+Anything derivable from the code. CodeGraph answers those questions freshly, and
+a cached copy is a lie waiting for its moment. Raw transcripts likewise: that is
+context rot with extra steps.
+
+### Product lessons and repository lessons
+
+The storage question settles what memory is *for*:
+
+> If a lesson is true for every Ortus project, it belongs in the prompt — in
+> Ortus's own source. If it is true about *this* repository, it belongs in
+> memory.
+
+*A prerequisite present in the review environment and absent in CI is invisible
+to review* is a product lesson; it should change the verifier's contract and ship
+to everyone. *This repository's dashboard tests are timing-sensitive under a
+parallel sweep* is a repository lesson, and belongs in that repository's
+memories.
+
+That gives the useful part: **a memory that keeps recurring across repositories
+is a signal to change the product.** Sharing lessons between projects stops being
+a storage problem and becomes a release.
+
 ## The roles, re-founded
 
 | Role | Today | Proposed |
@@ -129,6 +194,11 @@ not accumulated transcript. *Costs* prompt budget and a curation step. *Evidence
 — the hazard that a long-lived scheduler holds the code it started with has now
 produced three commits written by code that predated its own fix, and it was
 rediscovered from scratch each time.
+
+Smaller than it first appears. The store is bd, the seeding and injection path
+already ships, and the write lands in the tracker export that is already carved
+out of candidate attribution. What is missing is the reading, the proposing and
+the pruning — not a place to put anything.
 
 ### 2. Review that proposes
 
@@ -268,9 +338,10 @@ its own risk, and it should follow the design rather than lead it.
 
 ## Open questions
 
-- **Whose memory is it?** Per repository is the obvious answer, but a lesson
-  about agent behavior is not repository-specific. A shared tier is possible and
-  is a much larger surface.
+- **How large may the always-loaded tier grow?** Every crew lesson is injected
+  into every session, so the tier has a budget rather than a capacity. A cap
+  forces the pruning duty to be real, and picking the number wants evidence about
+  what a worker's context can spare rather than a guess made here.
 - **Who curates?** A dedicated pass costs a model call. The planner could do it
   as part of its existing work. Neither is obviously right.
 - **How do we know memory is helping rather than dulling?** A reviewer getting
