@@ -107,10 +107,14 @@ from ortus.core.transaction import (
     JournalStore,
 )
 from ortus.core.transaction import (
+    SealedPath,
     candidate_diff,
     contract_packet_changes,
     fingerprint_paths,
     issue_packet_hash,
+    moved_sealed_paths,
+    restore_sealed_path,
+    seal_paths,
     sha256_bytes,
 )
 from ortus.core.verdict import (
@@ -1078,6 +1082,92 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
     )
 
 
+def _declared_reviewed(verdict: Verdict | None, repo: Path) -> frozenset[str]:
+    """The candidate paths a verdict claims its author reviewed.
+
+    Normalized to the repo-relative spelling the candidate path set uses, so a
+    verifier that wrote `./src/app.ts` or an absolute path is still understood
+    to have named that path.
+    """
+
+    if verdict is None:
+        return frozenset()
+    prefixes = tuple(
+        f"{base}/" for base in {repo.as_posix(), repo.resolve().as_posix()}
+    )
+    declared: set[str] = set()
+    for entry in verdict.reviewed_files:
+        text = str(entry).strip().replace("\\", "/")
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+        while text.startswith("./"):
+            text = text[2:]
+        text = text.rstrip("/")
+        if text:
+            declared.add(text)
+    return frozenset(declared)
+
+
+def _restore_rebuilt_candidate(
+    repo: Path,
+    *,
+    sealed: dict[str, SealedPath],
+    reviewed: frozenset[str],
+    write_log: Callable[[str], None],
+    iteration: int,
+) -> tuple[str, ...]:
+    """Put back candidate paths the reviewer's own checks rebuilt.
+
+    A read-only reviewer must not change what it is judging, so a path it
+    declared reviewing that moved anyway is misconduct and stays fatal. But the
+    packet also tells that reviewer to run the project's checks, and a
+    repository that commits build output — a bundled image, a transpiled
+    sibling of a TypeScript source, a lockfile a dependency install rewrites —
+    has those checks rewrite candidate paths nobody edited. Ortus cannot see
+    inside a subprocess and will not guess which paths a project generates, so
+    attribution keys on the verdict the reviewer signed: a path it never claims
+    to have opened, that moved while its commands ran, is a rebuild.
+
+    The rebuilt bytes are never adopted. They are replaced by the sealed ones,
+    so what finalization commits is the candidate that was actually reviewed,
+    and every restored path is named, because an artifact that differs on every
+    run is a real finding about the repository even when it is nobody's fault.
+
+    Returns the restored paths. Raises `VerdictError` for a reviewed path that
+    moved and for a path that could not be put back.
+    """
+
+    moved = moved_sealed_paths(repo, sealed)
+    edited = tuple(path for path in moved if path in reviewed)
+    if edited:
+        write_log(
+            f"iter {iteration}: verifier changed candidate paths it reviewed: "
+            + ", ".join(edited)
+        )
+        raise VerdictError("verifier mutated the candidate during read-only review")
+    restored: list[str] = []
+    failures: list[str] = []
+    for path in moved:
+        try:
+            restore_sealed_path(repo, path, sealed[path])
+        except OSError as exc:
+            failures.append(f"{path} ({exc})")
+        else:
+            restored.append(path)
+    for path in restored:
+        write_log(
+            f"iter {iteration}: restored {path} — the verifier's checks rebuilt it "
+            "during read-only review; the sealed candidate is what gets committed"
+        )
+    if failures:
+        raise VerdictError(
+            "could not restore the candidate after read-only review: "
+            + "; ".join(failures)
+        )
+    return tuple(restored)
+
+
 @dataclass
 class _VerificationResult:
     """What one fresh verifier attempt produced, for the retry controller."""
@@ -1153,6 +1243,10 @@ def _verify_candidate(
     )
     journal = journal.begin_verification()
     store.save(journal)
+    # Sealed before anything the reviewer can run, so a candidate path its
+    # checks rebuild can be put back to what it judged rather than reported as
+    # tampering (ortus-9yh9).
+    sealed = seal_paths(repo, journal.candidate_paths) if git.is_git_repo() else {}
     if configure_codegraph is not None:
         configure_codegraph(probe.capability)
     try:
@@ -1259,13 +1353,36 @@ def _verify_candidate(
                 else:
                     try:
                         post_diff = candidate_diff(repo, post_paths)
+                        if sha256_bytes(post_diff) != journal.candidate_hash:
+                            # No verdict exists to attribute the change to, and
+                            # the run is rejected either way; restoring is what
+                            # leaves the preserved candidate identical to the
+                            # one the journal records, so a resume can use it.
+                            restored = _restore_rebuilt_candidate(
+                                repo,
+                                sealed=sealed,
+                                reviewed=frozenset(),
+                                write_log=write_log,
+                                iteration=iteration,
+                            )
+                            if (
+                                sha256_bytes(candidate_diff(repo, post_paths))
+                                != journal.candidate_hash
+                            ):
+                                timeout_failure += "; verifier mutated the candidate"
+                                timeout_phase = VERIFICATION_REJECTED
+                            elif restored:
+                                timeout_failure += (
+                                    "; the verifier's checks rebuilt "
+                                    + ", ".join(restored)
+                                    + ", restored from the seal"
+                                )
                     except RuntimeError as exc:
                         timeout_failure += f"; could not hash the candidate: {exc}"
                         timeout_phase = VERIFICATION_REJECTED
-                    else:
-                        if sha256_bytes(post_diff) != journal.candidate_hash:
-                            timeout_failure += "; verifier mutated the candidate"
-                            timeout_phase = VERIFICATION_REJECTED
+                    except VerdictError as exc:
+                        timeout_failure += f"; {exc}"
+                        timeout_phase = VERIFICATION_REJECTED
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             timeout_failure += (
@@ -1338,8 +1455,26 @@ def _verify_candidate(
                 )
             post_diff = candidate_diff(repo, post_paths)
             if sha256_bytes(post_diff) != journal.candidate_hash:
-                raise VerdictError(
-                    "verifier mutated the candidate during read-only review"
+                restored = _restore_rebuilt_candidate(
+                    repo,
+                    sealed=sealed,
+                    reviewed=_declared_reviewed(verdict, repo),
+                    write_log=write_log,
+                    iteration=iteration,
+                )
+                if (
+                    sha256_bytes(candidate_diff(repo, post_paths))
+                    != journal.candidate_hash
+                ):
+                    # Something moved that the seal does not cover, so the
+                    # sealed candidate is no longer what is on disk.
+                    raise VerdictError(
+                        "verifier mutated the candidate during read-only review"
+                    )
+                output.progress(
+                    "grind",
+                    "restored candidate paths the verifier's checks rebuilt: "
+                    + ", ".join(restored),
                 )
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:

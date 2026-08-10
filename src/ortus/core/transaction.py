@@ -196,6 +196,83 @@ def candidate_diff(repo: Path, paths: Iterable[str]) -> bytes:
 
 
 @dataclass(frozen=True)
+class SealedPath:
+    """Exactly what one candidate path held at the moment it was sealed.
+
+    The bytes themselves, not a digest: a digest can only say that something
+    moved, and putting a rebuilt artifact back requires the content. Symlinks
+    and absent paths are recorded as such so a path deleted or replaced during
+    a read-only review is restored to what it was rather than to a file.
+    """
+
+    kind: str
+    content: bytes = b""
+    target: str = ""
+    mode: int = 0
+
+
+def _seal_path(repo: Path, relative: str) -> SealedPath:
+    path = repo / relative
+    try:
+        if path.is_symlink():
+            return SealedPath(kind="symlink", target=os.readlink(path))
+        if path.is_file():
+            return SealedPath(
+                kind="file",
+                content=path.read_bytes(),
+                mode=path.stat().st_mode & 0o777,
+            )
+        if path.is_dir():
+            return SealedPath(kind="directory")
+        if path.exists():
+            return SealedPath(kind="other")
+        return SealedPath(kind="missing")
+    except OSError:
+        # No error text is kept: two unreadable reads must compare equal, so a
+        # path Ortus never could open is not reported as one that moved.
+        return SealedPath(kind="unreadable")
+
+
+def seal_paths(repo: Path, paths: Iterable[str]) -> dict[str, SealedPath]:
+    """Capture the candidate's exact content before an agent runs over it."""
+
+    return {path: _seal_path(repo, path) for path in sorted(set(paths))}
+
+
+def moved_sealed_paths(repo: Path, sealed: dict[str, SealedPath]) -> tuple[str, ...]:
+    """The sealed paths the worktree no longer holds as sealed."""
+
+    return tuple(
+        path for path, seal in sorted(sealed.items()) if _seal_path(repo, path) != seal
+    )
+
+
+def restore_sealed_path(repo: Path, relative: str, sealed: SealedPath) -> None:
+    """Put one path back to its sealed content, byte for byte.
+
+    Raises `OSError` when the worktree will not take the sealed content back —
+    an unwritable mount, a path now occupied by a directory, or a seal that
+    captured no content to restore. The caller treats that as fatal: a
+    candidate Ortus cannot put back is one no reviewer saw.
+    """
+
+    if sealed.kind not in ("file", "symlink", "missing"):
+        raise OSError(f"{relative}: no sealed content to restore ({sealed.kind})")
+    path = repo / relative
+    if path.is_symlink() or path.exists():
+        path.unlink()
+    if sealed.kind == "missing":
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if sealed.kind == "symlink":
+        os.symlink(sealed.target, path)
+        return
+    path.write_bytes(sealed.content)
+    if sealed.mode:
+        os.chmod(path, sealed.mode)
+
+
+@dataclass(frozen=True)
 class CandidateJournal:
     """Durable identity and evidence for one claimed candidate attempt."""
 

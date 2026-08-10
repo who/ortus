@@ -13,6 +13,9 @@ from ortus.core.transaction import (
     candidate_diff,
     contract_packet_changes,
     issue_packet_hash,
+    moved_sealed_paths,
+    restore_sealed_path,
+    seal_paths,
     sha256_bytes,
 )
 
@@ -439,3 +442,54 @@ def test_schema_two_journal_loads_without_finalization_state(tmp_path: Path) -> 
     assert journal.finalization == {}
     assert journal.corrections == 0
     assert journal.plan_gap_routed is False
+
+
+# ---------------------------------------------------------------------------
+# ortus-9yh9 — sealing a candidate so a rebuilt path can be put back
+# ---------------------------------------------------------------------------
+
+
+def test_seal_restores_content_mode_symlinks_and_absences(tmp_path: Path) -> None:
+    """Every worktree shape a candidate path can take goes back as sealed.
+
+    Byte-exact rather than text: an artifact is as likely to be an image as a
+    transpiled module, and a restore that round-tripped through text would
+    corrupt the first while looking correct on the second.
+    """
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "logo.png").write_bytes(b"\x89PNG\x00\xff built\x00")
+    (tmp_path / "build.sh").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (tmp_path / "build.sh").chmod(0o755)
+    (tmp_path / "current").symlink_to("dist/logo.png")
+    paths = ["absent.lock", "build.sh", "current", "dist/logo.png"]
+
+    sealed = seal_paths(tmp_path, paths)
+    assert moved_sealed_paths(tmp_path, sealed) == ()
+
+    (tmp_path / "dist" / "logo.png").write_bytes(b"\x89PNG\x00\xff rebuilt\x00\x00")
+    (tmp_path / "build.sh").chmod(0o644)
+    (tmp_path / "current").unlink()
+    (tmp_path / "current").symlink_to("build.sh")
+    (tmp_path / "absent.lock").write_text("written by a dependency install\n")
+
+    assert moved_sealed_paths(tmp_path, sealed) == tuple(paths)
+    for path in paths:
+        restore_sealed_path(tmp_path, path, sealed[path])
+
+    assert moved_sealed_paths(tmp_path, sealed) == ()
+    assert (tmp_path / "dist" / "logo.png").read_bytes() == b"\x89PNG\x00\xff built\x00"
+    assert (tmp_path / "build.sh").stat().st_mode & 0o777 == 0o755
+    assert (tmp_path / "current").readlink() == Path("dist/logo.png")
+    assert not (tmp_path / "absent.lock").exists()
+
+
+def test_restore_reports_a_path_it_cannot_put_back(tmp_path: Path) -> None:
+    """A candidate Ortus cannot restore raises rather than reporting success —
+    continuing there would commit bytes no reviewer ever saw."""
+    (tmp_path / "artifact.js").write_text("// built\n")
+    sealed = seal_paths(tmp_path, ["artifact.js"])
+    (tmp_path / "artifact.js").unlink()
+    (tmp_path / "artifact.js").mkdir()
+
+    with pytest.raises(OSError):
+        restore_sealed_path(tmp_path, "artifact.js", sealed["artifact.js"])

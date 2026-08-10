@@ -14,6 +14,7 @@ between commit and push) are exactly the ones a happy-path test can't reach.
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 from dataclasses import replace
@@ -1248,3 +1249,281 @@ def test_compose_that_writes_to_the_candidate_blocks_finalization(
     assert journal is not None
     assert journal.phase == "finalization-blocked"
     assert not journal.finalized("compose") and not journal.finalized("commit")
+
+
+# ---------------------------------------------------------------------------
+# ortus-9yh9 — a check that rebuilds committed build output is not misconduct
+# ---------------------------------------------------------------------------
+
+
+GENERATED = "dist/app.js"
+BUILT = b"// built from candidate.py\n"
+REBUILT = b"// rebuilt at review time\n"
+
+
+def _log(repo: Path) -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in (repo / "logs").glob("grind-*.log")
+    )
+
+
+def _blob(repo: Path, relative: str) -> bytes:
+    return subprocess.run(
+        ["git", "show", f"HEAD:{relative}"], cwd=repo, capture_output=True, check=True
+    ).stdout
+
+
+class RebuildingRunner(PassingRunner):
+    """A candidate carrying build output whose checks rebuild it under review.
+
+    The shape the guard used to blame the reviewer for: the implementation
+    ships a source file plus the artifact built from it, and the read-only
+    verifier's own checks write that artifact again with different bytes. The
+    inherited verdict declares only `CANDIDATE` as reviewed — a reviewer reads
+    the source, not the transpiled sibling it never opened.
+    """
+
+    def __init__(
+        self,
+        repo: Path,
+        *,
+        built: bytes = BUILT,
+        rebuilt: bytes = REBUILT,
+        artifact: str = GENERATED,
+        also_edits: str = "",
+        adds_path: str = "",
+        removes_artifact: bool = False,
+    ) -> None:
+        super().__init__(repo)
+        self.built = built
+        self.rebuilt = rebuilt
+        self.artifact = artifact
+        self.also_edits = also_edits
+        self.adds_path = adds_path
+        self.removes_artifact = removes_artifact
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        profile: object,
+        **kwargs: object,
+    ) -> int:
+        phase = profile.phase  # type: ignore[union-attr]
+        if phase is Phase.IMPLEMENT:
+            (repo / self.artifact).parent.mkdir(parents=True, exist_ok=True)
+            (repo / self.artifact).write_bytes(self.built)
+        elif phase is Phase.VERIFY:
+            if self.removes_artifact:
+                (repo / self.artifact).unlink()
+            else:
+                (repo / self.artifact).write_bytes(self.rebuilt)
+            if self.also_edits:
+                (repo / self.also_edits).write_text("SHIPPED = True\n# edited\n")
+            if self.adds_path:
+                (repo / self.adds_path).write_text("scratch from the reviewer\n")
+        return super().run(
+            prompt, repo=repo, log_path=log_path, profile=profile, **kwargs
+        )
+
+
+def test_rebuilt_artifact_is_restored_and_run_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the reviewer's checks rebuilt a candidate path, so the run goes on.
+
+    Before this, the re-diff saw only that a byte moved and rejected the
+    verdict for reviewer tampering — systematically, on every candidate that
+    carries build output.
+    """
+    repo, issue_id = _seed(tmp_path, "fin-seal1")
+    backend = RebuildingRunner(repo)
+    _install(monkeypatch, tmp_path, backend)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert backend.phases == [
+        Phase.IMPLEMENT.value,
+        Phase.VERIFY.value,
+        Phase.FINALIZE.value,
+    ]
+    assert "mutated the candidate" not in _log(repo)
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert {CANDIDATE, GENERATED} <= _committed_paths(repo)
+    assert JournalStore(repo).load() is None
+
+
+def test_restored_paths_are_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: an artifact that differs every run is a finding, not a silence."""
+    repo, _ = _seed(tmp_path, "fin-seal2")
+    _install(monkeypatch, tmp_path, RebuildingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert f"restored {GENERATED}" in log
+    assert "the verifier's checks rebuilt it during read-only review" in log
+
+
+def test_verifier_source_edit_still_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: the seal is not weakened for what the reviewer says it reviewed.
+
+    Restoring a rebuilt artifact must not become a licence to edit the code
+    under review; that property is the whole reason the phase is read-only.
+    """
+    repo, issue_id = _seed(tmp_path, "fin-seal3")
+    _install(monkeypatch, tmp_path, RebuildingRunner(repo, also_edits=CANDIDATE))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert "verifier mutated the candidate during read-only review" in _log(repo)
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert _finalization_commits(repo, issue_id) == []
+    journal = JournalStore(repo).load()
+    assert journal is not None and journal.phase == "verification-rejected"
+
+
+def test_failed_restore_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a candidate Ortus cannot put back is one no reviewer saw.
+
+    And the diagnosis names the restore, not the reviewer: an unwritable mount
+    is not misconduct.
+    """
+    repo, issue_id = _seed(tmp_path, "fin-seal4")
+    _install(monkeypatch, tmp_path, RebuildingRunner(repo))
+
+    def _unwritable(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(grind_mod, "restore_sealed_path", _unwritable)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert "could not restore the candidate after read-only review" in log
+    assert GENERATED in log
+    assert "verifier mutated the candidate" not in log
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert _finalization_commits(repo, issue_id) == []
+
+
+def test_path_set_change_still_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: a path the reviewer added is a different failure, and stays fatal."""
+    repo, issue_id = _seed(tmp_path, "fin-seal5")
+    _install(monkeypatch, tmp_path, RebuildingRunner(repo, adds_path="reviewer.txt"))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert "mutated the candidate path set during read-only review" in _log(repo)
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert _finalization_commits(repo, issue_id) == []
+
+
+def test_binary_artifact_restored_byte_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: an image goes back byte for byte, never through a text path."""
+    image = b"\x89PNG\r\n\x1a\n\x00\x01\xff\xfe built\x00"
+    repo, _ = _seed(tmp_path, "fin-seal6")
+    _install(
+        monkeypatch,
+        tmp_path,
+        RebuildingRunner(
+            repo,
+            artifact="assets/logo.png",
+            built=image,
+            rebuilt=b"\x89PNG\r\n\x1a\n\x00\x01\xff\xfe rebuilt\x00\x00",
+        ),
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert (repo / "assets/logo.png").read_bytes() == image
+    assert _blob(repo, "assets/logo.png") == image
+
+
+def test_unchanged_review_is_unaffected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: a review during which nothing moved logs nothing new."""
+    repo, issue_id = _seed(tmp_path, "fin-seal7")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert "restored" not in log
+    assert "mutated the candidate" not in log
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert CANDIDATE in _committed_paths(repo)
+
+
+def test_commit_carries_the_sealed_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: the rebuilt bytes are never adopted, on disk or in the commit."""
+    repo, _ = _seed(tmp_path, "fin-seal8")
+    _install(monkeypatch, tmp_path, RebuildingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert _blob(repo, GENERATED) == BUILT
+    assert (repo / GENERATED).read_bytes() == BUILT
+
+
+def test_deleted_artifact_is_restored_not_taken_as_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check that cleans build output before rebuilding it still leaves the
+    candidate whole: the path comes back with its sealed content rather than
+    being committed as a deletion nobody reviewed."""
+    repo, issue_id = _seed(tmp_path, "fin-seal9")
+    (repo / GENERATED).parent.mkdir(parents=True)
+    (repo / GENERATED).write_bytes(b"// stale build\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "committed build output")
+    _install(monkeypatch, tmp_path, RebuildingRunner(repo, removes_artifact=True))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert f"restored {GENERATED}" in _log(repo)
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert (repo / GENERATED).read_bytes() == BUILT
+    assert _blob(repo, GENERATED) == BUILT
