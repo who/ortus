@@ -2,7 +2,11 @@ name: test
 
 on:
   push:
-    branches: [main]
+    # ortus/** is the issue-branch namespace: every finalized candidate lands
+    # on ortus/<issue-id> first, and running the same gate there is what lets
+    # a later phase make the merge wait for the result (ortus-6a0a.1).
+    # Unrelated local branches stay untriggered.
+    branches: [main, 'ortus/**']
     tags: ['v*']
   pull_request:
     branches: [main]
