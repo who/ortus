@@ -199,6 +199,84 @@ accordingly.
   skipped by type. The first thing grind would take is `ortus-xjdf`.
 - The integration branch is green as of the last check.
 
+## How to act on a decision
+
+### Filing or rewriting a leaf
+
+Run **`ortus spec`** first. It prints readiness schema v1 exactly as the
+validator enforces it — do not work from this summary where the two disagree.
+
+Every non-epic issue needs all fifteen headings across three bd fields:
+`description` carries Objective and Behavioral context; `design` carries
+Readiness schema, Scope, Non-goals, Concrete locations, Resolved decisions,
+Compatibility constraints, Ordered steps, Dependencies, Edge cases and Plan-gap
+guidance; `acceptance_criteria` carries Observable criteria, Criterion checks and
+Targeted tests. Epics need none of it — they are containers and selection skips
+them by type.
+
+Four shape rules bite in practice:
+
+- Concrete locations needs at least one file path **and** one symbol, both in
+  backticks.
+- Ordered steps must be numbered.
+- Every criterion needs an `AC-N` identifier, and **Criterion checks must mention
+  each identifier exactly once**. Writing "verify AC-1 through AC-6" inside an
+  AC-7 check fails validation, because the parser counts identifiers rather than
+  reading intent. I broke this and it cost a repair pass.
+- Targeted tests needs a backticked pytest command.
+
+Write the fields to files and pass them with `--description "$(cat …)"` rather
+than inline; heredocs into `bd create` are how quoting errors get in. Create the
+whole graph as **one sequential script** — the tracker enforces a single writer,
+so fanned-out writes fail.
+
+Validate with `ortus grind --dry-run`, which prints a readiness skip for any
+unready packet and stays silent when everything passes. An unready leaf is not
+merely imperfect: **selection cannot see it**, so it sits invisible. That is how
+one issue sat unworked for a day.
+
+### Deciding grind versus hand
+
+The mechanism is the `human` label. Selection excludes it — `EXCLUDED_LABELS`
+is exactly `("human",)` — so a labelled issue is filed, visible and tracked, but
+never claimed. That is how Phase 0 is marked.
+
+The rule I applied, which you may disagree with:
+
+> A leaf goes to grind unless it modifies the code path that will ship it.
+
+Finalization, the scheduler loop, the journal and candidate capture are the paths
+that ship work. A change to any of them cannot be trusted to the run that carries
+it, because a long-lived scheduler executes the code it started with — three
+commits over two days were written by code predating their own fix, and
+finalization shipped three separate changes to finalization in the old behavior.
+
+Prompts, new modules, tests and CI configuration are safe to grind: nothing in
+the shipping path reads them mid-run.
+
+If you relabel something, relabel deliberately. Removing `human` from a Phase 0
+leaf hands the pipeline a change to its own commit mechanism. Adding `human` to a
+Phase 1 leaf is safe but wastes the pipeline.
+
+### Operational rules that are not obvious
+
+- **Never edit the working tree while a run is in flight.** A file appearing
+  mid-run becomes foreign work the next worker must disown, which is the failure
+  the programme exists to remove. Check `logs/grind-*.log` mtime before touching
+  anything.
+- **Gate with the environment masked.** Three CI failures came from verifying
+  where a tool was installed and CI has none. Run the gate with `codegraph`
+  removed from `PATH` before believing a green result.
+- **`uv` needs a writable cache** in this sandbox: pass `UV_CACHE_DIR` at a
+  writable path or every invocation fails on a read-only filesystem.
+- **Do not use `git worktree add`** for a throwaway tree. Cleanup is
+  unrecoverable here; use `git archive <ref> | tar -x -C <dir>`. Note that an
+  archive has no git metadata, so anything deriving a version from git will not
+  build in it — I hit that.
+- **Long test suites need `-n auto`.** The finalization suite takes over five
+  minutes serially and about seventy seconds in parallel, and that difference is
+  what made a healthy worker look hung for ninety minutes.
+
 ## What I would most like challenged
 
 1. Is Phase 0 worth doing at all, or should it fold into Phase 2?
