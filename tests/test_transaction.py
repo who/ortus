@@ -493,3 +493,37 @@ def test_restore_reports_a_path_it_cannot_put_back(tmp_path: Path) -> None:
 
     with pytest.raises(OSError):
         restore_sealed_path(tmp_path, "artifact.js", sealed["artifact.js"])
+
+
+def test_journal_records_branch_and_head(tmp_path: Path) -> None:
+    """`with_branch` records the issue branch and observed head, and both
+    survive a save/load round trip."""
+    journal = CandidateJournal.start(
+        repo=tmp_path, issue_id="tmpl-br", base_head="abc123", baseline_paths=()
+    ).with_branch("ortus/tmpl-br", "def456")
+    assert journal.issue_branch == "ortus/tmpl-br"
+    assert journal.branch_head == "def456"
+    store = JournalStore(tmp_path)
+    store.save(journal)
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.issue_branch == "ortus/tmpl-br"
+    assert loaded.branch_head == "def456"
+
+
+def test_legacy_journal_without_branch_fields_loads(tmp_path: Path) -> None:
+    """A journal written before branch-scoped finalization loads with the
+    branch fields defaulted, so it finalizes by the pre-branch path."""
+    journal = CandidateJournal.start(
+        repo=tmp_path, issue_id="tmpl-old", base_head="abc123", baseline_paths=()
+    )
+    store = JournalStore(tmp_path)
+    store.save(journal)
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    payload.pop("issue_branch", None)
+    payload.pop("branch_head", None)
+    store.path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.issue_branch == ""
+    assert loaded.branch_head == ""

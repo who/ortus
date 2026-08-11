@@ -305,6 +305,42 @@ class GitClient:
         """
         return self._run("pull", "--rebase", "origin", branch).returncode == 0
 
+    def valid_branch_name(self, name: str) -> bool:
+        """True when git accepts `name` as a branch name."""
+        return self._run("check-ref-format", "--branch", name).returncode == 0
+
+    def branch_exists(self, name: str) -> bool:
+        """True when a local branch of that exact name exists."""
+        proc = self._run("rev-parse", "--verify", "--quiet", f"refs/heads/{name}")
+        return proc.returncode == 0
+
+    def branch_tip(self, name: str) -> str:
+        """The branch's tip object id, or "" when the branch does not exist."""
+        proc = self._run("rev-parse", "--verify", "--quiet", f"refs/heads/{name}")
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    def create_branch(self, name: str, at_ref: str) -> bool:
+        """`git branch <name> <at_ref>`, never forced. Returns True on success.
+
+        Refuses (returns False) when the branch already exists — reusing or
+        reporting an existing branch is the caller's decision, and silently
+        resetting one would invent history nobody made.
+        """
+        return self._run("branch", name, at_ref).returncode == 0
+
+    def fast_forward(self, branch: str, to_ref: str) -> bool:
+        """Fast-forward `branch` (not checked out) to `to_ref`. True on success.
+
+        ``git fetch . <to_ref>:<branch>`` updates the ref without touching the
+        working tree and refuses anything that is not a fast-forward — the only
+        integration this client performs. Updating the ref first, then
+        switching to it, means the switch is between two names for the same
+        commit and can never conflict with concurrently-dirtied files (the
+        tracker's asynchronous exports made a checkout-then-merge sequence
+        racy). Refuses to update the currently checked-out branch.
+        """
+        return self._run("fetch", ".", f"{to_ref}:{branch}").returncode == 0
+
     def commit_paths(self, paths: frozenset[str], message: str) -> CommitResult:
         """Commit only explicitly owned paths, preserving everything else.
 

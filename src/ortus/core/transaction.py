@@ -306,6 +306,13 @@ class CandidateJournal:
     #: Handoff paths a worker judged unrelated to this issue. They stay in the
     #: worktree and out of the candidate, so finalization never commits them.
     unrelated_paths: tuple[str, ...] = ()
+    #: The issue's branch (`ortus/<issue-id>`), and the last head this
+    #: transaction observed on it. The name is how a human finds the work; the
+    #: head is what proves which commit was meant. Both default empty so a
+    #: journal written before branch-scoped finalization loads and finalizes
+    #: by the pre-branch path.
+    issue_branch: str = ""
+    branch_head: str = ""
     finalization: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
@@ -512,6 +519,13 @@ class CandidateJournal:
 
         return replace(
             self, plan_gap_routed=True, phase=PLAN_GAP_ROUTED, updated_at=_now()
+        )
+
+    def with_branch(self, name: str, head: str) -> CandidateJournal:
+        """Record the issue branch and the head observed on it."""
+
+        return replace(
+            self, issue_branch=name, branch_head=head, updated_at=_now()
         )
 
     def with_finalization(self, step: str, value: Any = True) -> CandidateJournal:

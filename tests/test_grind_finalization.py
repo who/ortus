@@ -1685,3 +1685,89 @@ def test_deleted_artifact_is_restored_not_taken_as_unchanged(
     assert _issue(repo, issue_id)["status"] == "closed"
     assert (repo / GENERATED).read_bytes() == BUILT
     assert _blob(repo, GENERATED) == BUILT
+
+
+# ---------------------------------------------------------------------------
+# Branch-scoped finalization (ortus-rcdf.1, Phase L0 commit A)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_lands_on_an_issue_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit exists on `ortus/<issue-id>` and the integration branch is
+    fast-forwarded to it; the branch survives finalization."""
+    repo, issue_id = _seed(tmp_path, "br1")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    branch = f"ortus/{issue_id}"
+    tip = _git(repo, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert tip == head
+    assert CANDIDATE in _committed_paths(repo)
+
+
+def test_run_ends_on_the_integration_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, issue_id = _seed(tmp_path, "br2")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    current = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    assert current == "main"
+    assert _issue(repo, issue_id)["status"] == "closed"
+
+
+def test_existing_branch_is_not_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing issue branch that is not at the integration head is
+    reported and the claim reverted — never reused silently, never reset."""
+    repo, issue_id = _seed(tmp_path, "br3")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    stray = repo / "stray.txt"
+    stray.write_text("earlier attempt\n")
+    _git(repo, "checkout", "-b", f"ortus/{issue_id}")
+    _git(repo, "add", "stray.txt")
+    _git(repo, "commit", "-m", "earlier attempt")
+    earlier_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    # Checking main back out drops stray.txt from the tree: it is committed on
+    # the issue branch only, which is exactly the durable home under test.
+    _git(repo, "checkout", "main")
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 1
+    kept = _git(repo, "rev-parse", f"refs/heads/ortus/{issue_id}").stdout.strip()
+    assert kept == earlier_tip
+    assert _issue(repo, issue_id)["status"] == "open"
+
+
+def test_pass_with_a_remote_pushes_the_fast_forwarded_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync step still lands the integration branch on origin after the
+    fast-forward, so nothing about the remote contract changed."""
+    repo, issue_id = _seed(tmp_path, "br4", remote=True)
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    local = _git(repo, "rev-parse", "main").stdout.strip()
+    remote = _git(repo, "rev-parse", "origin/main").stdout.strip()
+    assert local == remote
+    branch_tip = _git(
+        repo, "rev-parse", f"refs/heads/ortus/{issue_id}"
+    ).stdout.strip()
+    assert branch_tip == local

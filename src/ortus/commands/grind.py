@@ -2084,13 +2084,30 @@ def _finalization_blocker(
     # An unborn branch (bd-only fixture, freshly `ortus init`'d repo) has no
     # resolvable name and nothing stranded; branch discipline skips it for the
     # same reason, so finalization must not read it as a detached HEAD.
+    # The transaction's own issue branch is the one legitimate non-integration
+    # location: the claim checked it out, and the commit step lands there
+    # before fast-forwarding the integration branch.
     if git.has_commits() and branch != integration_branch:
-        return (
-            f"working tree is on {branch or 'a detached HEAD'}, "
-            f"not {integration_branch}"
-        )
+        if not (journal.issue_branch and branch == journal.issue_branch):
+            return (
+                f"working tree is on {branch or 'a detached HEAD'}, "
+                f"not {integration_branch}"
+            )
     if journal.finalized("commit"):
         return None
+    if journal.issue_branch:
+        tip = git.branch_tip(journal.issue_branch)
+        if (
+            tip
+            and tip != journal.base_head
+            and git.head_oid() == tip
+        ):
+            # The branch commit and fast-forward landed but the boundary was
+            # never journaled (a crash between the merge and the write). The
+            # candidate legitimately left the worktree by being committed, so
+            # the dirty-path and hash re-checks below would misread it; the
+            # commit step re-journals from this same observable state.
+            return None
     if git.head_oid() != journal.base_head:
         return (
             f"base commit {journal.base_head} is no longer HEAD; the candidate was "
@@ -2300,6 +2317,21 @@ def _finalize_candidate(
             journal = journal.with_finalization("commit", "not-a-git-repo")
             store.save(journal)
         else:
+            # The commit belongs on the issue branch. A resumed finalization
+            # may arrive here on the integration branch (the startup guard
+            # re-asserts it); the branch exists from the claim and sits at the
+            # same commit, so a checkout carries the dirty candidate along.
+            if (
+                journal.issue_branch
+                and git.branch_tip(journal.issue_branch)
+                and git.current_branch() != journal.issue_branch
+                and git.head_oid() == journal.base_head
+            ):
+                if not git.checkout(journal.issue_branch):
+                    return journal, (
+                        f"could not check out {journal.issue_branch} to commit "
+                        "the candidate"
+                    )
             dirty = git.dirty_paths()
             if dirty is None:
                 return journal, "could not read the worktree before committing"
@@ -2341,6 +2373,34 @@ def _finalize_candidate(
                     blocked = f"{blocked}; {committed.reason}"
                 write_log(f"finalization: HALT — {blocked}")
                 return journal, blocked
+            if journal.issue_branch and git.current_branch() == journal.issue_branch:
+                # The commit exists on the issue branch — its durable home.
+                # The integration ref is fast-forwarded first, without
+                # touching the working tree, so the checkout that follows
+                # switches between two names for the same commit and cannot
+                # conflict with concurrently-dirtied files. Anything short of
+                # a fast-forward is a blocker to report, and the branch keeps
+                # the commit either way; it is deliberately never deleted.
+                branch_head = git.head_oid()
+                journal = journal.with_branch(journal.issue_branch, branch_head)
+                store.save(journal)
+                if not git.fast_forward(integration_branch, journal.issue_branch):
+                    return journal, (
+                        f"fast-forward of {integration_branch} to "
+                        f"{journal.issue_branch} is not possible (the "
+                        "integration branch moved); the commit is preserved "
+                        f"on {journal.issue_branch} — resolve and re-run grind"
+                    )
+                if not git.checkout(integration_branch):
+                    return journal, (
+                        f"{integration_branch} was fast-forwarded to "
+                        f"{journal.issue_branch} but could not be checked "
+                        "out; check the working tree and re-run grind"
+                    )
+                write_log(
+                    f"finalization: {integration_branch} fast-forwarded to "
+                    f"{journal.issue_branch} at {branch_head[:12]}"
+                )
             journal = journal.with_finalization("commit", git.head_oid())
             store.save(journal)
             write_log(
@@ -2385,6 +2445,7 @@ def _enforce_branch_discipline(
     write_log: Callable[[str], None],
     *,
     phase: str,
+    allowed_branch: str = "",
 ) -> None:
     """Pin the working tree to the integration branch and keep origin current.
 
@@ -2406,6 +2467,17 @@ def _enforce_branch_discipline(
     # detached HEAD and halting the loop before any work has been done.
     if not git.has_commits():
         write_log(f"branch-guard [{phase}]: repo has no commits yet; skipping")
+        return
+
+    # The active transaction's issue branch is a sanctioned location, not a
+    # stray: a crash between the branch commit and the fast-forward leaves the
+    # tree exactly here with a unique commit, and the journal replay — not a
+    # HALT — is how that work reaches the integration branch.
+    if allowed_branch and git.current_branch() == allowed_branch:
+        write_log(
+            f"branch-guard [{phase}]: on issue branch {allowed_branch!r} "
+            "owned by the active transaction; leaving it for the journal replay"
+        )
         return
 
     decision = classify_branch_state(git.branch_state(integration_branch))
@@ -3016,14 +3088,23 @@ def grind(
 
             bd = _make_bd(target)
             git = _make_git(target)
+            transaction_store = JournalStore(target)
             # Re-assert branch discipline before anything else: a stray branch
             # left by a prior crashed grind (or a manual checkout) is caught
             # here and either re-checked-out or halted on, so we never start
-            # spawning workers on top of stranded work (ortus-6fu6).
+            # spawning workers on top of stranded work (ortus-6fu6). The one
+            # sanctioned exception is the journal's own issue branch, whose
+            # stranded commit the finalization replay below integrates.
+            startup_journal = transaction_store.load()
             _enforce_branch_discipline(
-                git, integration_branch, write_log, phase="startup"
+                git,
+                integration_branch,
+                write_log,
+                phase="startup",
+                allowed_branch=(
+                    startup_journal.issue_branch if startup_journal else ""
+                ),
             )
-            transaction_store = JournalStore(target)
             # AC-6: a run killed between any two finalization boundaries left a
             # journal that still owes work. Replay it BEFORE selecting anything,
             # and never select another issue while one is outstanding. Each step
@@ -3224,7 +3305,13 @@ def grind(
                 # previous worker drifted onto). Halts loudly on stranded work
                 # (ortus-6fu6).
                 _enforce_branch_discipline(
-                    git, integration_branch, write_log, phase="pre-iter"
+                    git,
+                    integration_branch,
+                    write_log,
+                    phase="pre-iter",
+                    allowed_branch=(
+                        active_journal.issue_branch if active_journal else ""
+                    ),
                 )
 
                 # Queue reads can auto-export generated Beads state between
@@ -3543,6 +3630,51 @@ def grind(
                                 active_journal, profiles=phase_profiles
                             )
                             transaction_store.save(active_journal)
+                    # Branch-scoped candidates (Phase L0): every claim works on
+                    # `ortus/<issue-id>`, cut at the integration head. The
+                    # committed result is byte-identical to the path-scoped
+                    # commit; the difference is that the commit exists on a
+                    # named branch first, and an interrupted finalization
+                    # resumes from a ref instead of being reasoned about.
+                    if git.is_git_repo() and git.has_commits():
+                        issue_branch = f"ortus/{issue_id}"
+                        branch_blocker = ""
+                        if not git.valid_branch_name(issue_branch):
+                            branch_blocker = (
+                                f"issue id {issue_id!r} is not a legal branch "
+                                f"name component for {issue_branch!r}"
+                            )
+                        elif git.branch_exists(issue_branch):
+                            if git.branch_tip(issue_branch) != git.head_oid():
+                                branch_blocker = (
+                                    f"branch {issue_branch} already exists at "
+                                    f"{git.branch_tip(issue_branch)[:12]}, not at the "
+                                    f"integration head {git.head_oid()[:12]}; refusing "
+                                    "to reuse or reset it — resolve the branch "
+                                    "manually, then re-run grind"
+                                )
+                            else:
+                                write_log(
+                                    f"iter prep: reusing existing {issue_branch} "
+                                    "at the integration head"
+                                )
+                        elif not git.create_branch(issue_branch, integration_branch):
+                            branch_blocker = f"could not create {issue_branch}"
+                        if not branch_blocker and not git.checkout(issue_branch):
+                            branch_blocker = f"could not check out {issue_branch}"
+                        if branch_blocker:
+                            bd.update_status(issue_id, "open")
+                            write_log(f"iter prep: HALT — {branch_blocker}")
+                            output.error(f"grind: {branch_blocker}")
+                            raise typer.Exit(code=1)
+                        active_journal = active_journal.with_branch(
+                            issue_branch, git.head_oid()
+                        )
+                        transaction_store.save(active_journal)
+                        write_log(
+                            f"iter prep: working tree on {issue_branch} at "
+                            f"{git.head_oid()[:12]}"
+                        )
                     dirty_after_claim = git.dirty_paths()
                     if dirty_after_claim is None:
                         output.error("grind: could not record candidate ownership")

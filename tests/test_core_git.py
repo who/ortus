@@ -405,3 +405,58 @@ def test_failed_housekeeping_push_halts_before_work() -> None:
         _enforce_branch_discipline(  # type: ignore[arg-type]
             PushFailingGit(), "main", lambda _message: None, phase="test"
         )
+
+
+# ---------------------------------------------------------------------------
+# Branch helpers for branch-scoped finalization (ortus-rcdf.1)
+# ---------------------------------------------------------------------------
+
+
+def test_create_branch_never_forces(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    git = GitClient(repo)
+    assert git.create_branch("ortus/tmpl-x", "main")
+    assert git.branch_exists("ortus/tmpl-x")
+    assert git.branch_tip("ortus/tmpl-x") == git.head_oid()
+    # A second create of the same name refuses instead of resetting.
+    (repo / "source.py").write_text("BASELINE = False\n")
+    subprocess.run(["git", "commit", "-am", "move main"], cwd=repo, check=True)
+    assert not git.create_branch("ortus/tmpl-x", "main")
+    assert git.branch_tip("ortus/tmpl-x") != git.head_oid()
+
+
+def test_branch_helpers_answer_conservatively(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    git = GitClient(repo)
+    assert not git.branch_exists("ortus/absent")
+    assert git.branch_tip("ortus/absent") == ""
+    assert git.valid_branch_name("ortus/tmpl-a.1")
+    assert not git.valid_branch_name("ortus/bad..name")
+
+
+def test_fast_forward_updates_the_ref_without_touching_the_tree(
+    tmp_path: Path,
+) -> None:
+    """`fast_forward` moves the target ref while another branch is checked
+    out, leaves dirty files alone, and refuses a non-fast-forward."""
+    repo = _repo(tmp_path)
+    git = GitClient(repo)
+    assert git.create_branch("ortus/tmpl-y", "main")
+    subprocess.run(["git", "checkout", "ortus/tmpl-y"], cwd=repo, check=True)
+    (repo / "source.py").write_text("CANDIDATE = True\n")
+    subprocess.run(["git", "commit", "-am", "candidate"], cwd=repo, check=True)
+    # A file dirtied while on the branch survives the ref update untouched.
+    tracker = repo / ".beads" / "issues.jsonl"
+    tracker.write_text("baseline\nasync export\n")
+    assert git.fast_forward("main", "ortus/tmpl-y")
+    assert git.branch_tip("main") == git.head_oid()
+    assert tracker.read_text() == "baseline\nasync export\n"
+    # The checkout that follows switches between two names for one commit.
+    assert git.checkout("main")
+    assert git.current_branch() == "main"
+    # Diverged history is refused, never merged.
+    subprocess.run(["git", "checkout", "-b", "diverged", "main~1"], cwd=repo, check=True)
+    (repo / "other.py").write_text("OTHER = True\n")
+    subprocess.run(["git", "add", "other.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "diverge"], cwd=repo, check=True)
+    assert not git.fast_forward("main", "diverged")
