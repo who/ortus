@@ -52,6 +52,8 @@ Measured over a comparable working period, against the two-day baseline recorded
 | Lines of attribution machinery | ~2,700 | 0 |
 | Issues stranded by an out-of-scope edit to a shared file | 3 | 0 |
 
+Metric 3 cannot move until `ortus-6a0a.1` lands (Phase 2): the Phase 0 branch trigger produces a signal, but only that leaf makes the merge wait for it. Metrics 4 and 5 move at Phase 2. The baseline was measured on a self-modifying repository and is an upper bound, so re-measurement must also be Ortus-on-Ortus for the comparison to hold.
+
 ---
 
 ## Background & context
@@ -141,9 +143,11 @@ Independent review of *something*, the prohibition on self-closing, bounded cont
 
 ### Phase 0 — Keystone (landed by hand)
 
-Finalization commits to a branch and fast-forwards the integration branch. Checks run on the branch. **No worker behavior changes at all.**
+Finalization commits to a branch and fast-forwards the integration branch. The CI trigger for issue branches is added. **No worker behavior changes at all.**
 
-Landed by a human because it modifies the mechanism that would otherwise ship it, and because the branch history it produces is the evidence for Phase 2 — it shows how often two issues actually touch the same lines rather than the same files.
+Landed by a human because it modifies the mechanism that would otherwise ship it.
+
+*Corrected at review, 2026-08-11.* Phase 0 changes no failure mode by itself, and its original evidence claim is withdrawn: issues run one at a time and each branch is fast-forwarded the moment it is committed, so no two live branches ever coexist — the branch history cannot show how often issues collide. Collision evidence arrives in Phase 2, when blocked work first persists on a branch alongside new work. Phase 0's real value is narrower: the branch mechanics (creation, fast-forward, branch-guard interplay, journal fields) are exercised in production before Phase 2 stakes worker behavior on them, and an interrupted finalization gains a durable resume point. The stranding failures in Background are likewise untouched until Phase 2 — blocked work never reaches finalization, so it never reaches a branch here.
 
 ### Phase 1 — Make the next run cheaper (grindable)
 
@@ -153,6 +157,8 @@ Bounded background waits, the prohibition on throwaway worktrees, crew memory re
 
 Workers commit on their branch. The candidate becomes a commit range. The attribution machinery is removed. The heaviest self-modification in the programme.
 
+Phase 2 also lands the leaf that makes Epic B real: finalization pushes the issue branch and gates the fast-forward on the branch's check result (opt-in, bounded wait, blocker on red or timeout). Until that leaf lands, the Phase 0 trigger is inert — nothing pushes issue branches and the fast-forward waits for nothing — and success metric 3 (review-passed, checks-failed changes: 3 → 0) cannot move. Filed as `ortus-6a0a.1`, human-landed because it modifies finalization.
+
 ### Phase 3 — Integrator (grindable)
 
 Conflict ownership, bounded resolution, escalation, and verification of merged results. Mostly new code.
@@ -161,14 +167,16 @@ Conflict ownership, bounded resolution, escalation, and verification of merged r
 
 Re-measure against the Success Metrics. If the agent reviewer catches nothing the branch checks did not, remove it.
 
+*Reframed at review, 2026-08-11.* The two-day record already settles the mechanical half of the question: the reviewer's one irreplaceable catch (the clean-checkout failure) came from testing the committed tree rather than the dirty one, and branch checks supply exactly that vantage in the real environment — so review's mechanical duties transfer to checks with Phases 0–2, not as a Phase 4 finding. What Phase 4 measures is only the semantic half: whether a reviewer judging "did the change do what the packet asked" catches anything CI cannot. Note the cost side of that measurement changes too — the 2,700 lines, the seal and the mutation guard die with the candidate model regardless of the reviewer's fate, so the bar the semantic reviewer must clear is its per-run model cost, which is far lower than the machinery it is currently blamed for. Do not remove the reviewer before Phase 4: removing it alongside the candidate migration would conflate two changes and destroy the measurement.
+
 ---
 
 ## Epic breakdown (proposed; refine at decomposition)
 
 - **Epic A — Branch-scoped finalization.** Branch creation and naming; merge and fast-forward in place of path-scoped commit; journal records branch and head; recovery resumes by checkout. *Phase 0.*
-- **Epic B — Checks before merge.** Branch trigger; gate parity with the integration branch; degradation where no remote exists. *Phase 0.*
+- **Epic B — Checks before merge.** Branch trigger (*Phase 0*); pushing the issue branch and gating the fast-forward on its checks (*Phase 2*, `ortus-6a0a.1`); degradation where no remote exists.
 - **Epic C — Worker cheapness.** Bounded waits; worktree prohibition; parallel sweeps. *Phase 1.*
-- **Epic D — Crew memory.** Read at orientation, propose at completion, curate, prune; the retrospective that feeds it. *Phase 1.*
+- **Epic D — Crew memory.** Read at orientation, propose at completion, curate, prune; the retrospective that feeds it. *Phase 1.* Independent of the branch keystone: its leaves are unblocked in the graph and may grind now, before or alongside Phase 0 — the phase label orders priority, not dependency.
 - **Epic E — Candidate as commit.** Worker commits; commit-range candidate; seal as SHA; verification contract. *Phase 2.*
 - **Epic F — Remove attribution.** Delete the module, the handoff and disowning logic, the mutation guard and their tests. *Phase 2, strictly after E.*
 - **Epic G — Integrator.** Phase, module, bounded resolution, escalation, post-merge verification. *Phase 3.*
