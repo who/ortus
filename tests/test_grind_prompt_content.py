@@ -313,3 +313,62 @@ def test_grind_prompt_keeps_the_sdlc_out_of_source_comments() -> None:
     body = _content()
     assert "Comments explain code, not the Ortus SDLC" in body
     assert "belongs in beads" in body
+
+
+# ---------------------------------------------------------------------------
+# (6) bounded background waits — a wedged check costs one bounded wait, not
+#     the whole worker timeout (ortus-xjdf)
+# ---------------------------------------------------------------------------
+
+
+def test_background_wait_is_bounded() -> None:
+    """AC-1/AC-5: polling caps its attempts; no unbounded wait is described.
+
+    A worker observed 2026-08-10 polled an empty output file for twenty
+    minutes because its job's pipeline never closed; nothing bounded the wait
+    except the ninety-minute worker timeout, which exists to protect finished
+    work, not to diagnose wedged checks.
+    """
+    body = _content()
+    assert "maximum number of polling attempts" in body
+    assert "never wait in an unbounded loop" in body
+    # The observed anti-pattern must not be demonstrated anywhere in the
+    # prompt (AC-5's rg check, asserted here so it cannot quietly return).
+    assert "until [ -s" not in body
+
+
+def test_polled_output_is_redirected_not_piped() -> None:
+    """AC-2: a pipeline through a filter cannot report progress."""
+    body = _content()
+    assert "Redirect output to a file" in body
+    assert "never pipe through a filter" in body
+    assert "emits nothing until its input reaches end of file" in body
+    # Decision 5: the command's own `timeout` kills what it launched, but
+    # surviving children can hold the pipe open — it does not end the wait.
+    assert "Do not rely on the command's own `timeout`" in body
+
+
+def test_silent_job_is_a_failure() -> None:
+    """AC-3: no output at the bound is a failure to report, not more waiting."""
+    body = _content()
+    assert "failure to report, not a reason to keep waiting" in body
+    # Launching a second job to wait on was part of the observed stall; the
+    # bound survives across repeated jobs in one session.
+    assert "never resets the bound" in body
+
+
+def test_abandoned_wait_names_the_command() -> None:
+    """AC-4: an abandoned wait must say what it was waiting for."""
+    body = _content()
+    assert "Name the command when you abandon a wait" in body
+    assert "how many times you polled" in body
+
+
+def test_unfinished_check_is_not_failed_work() -> None:
+    """AC-6: a check that outlived its bound is unfinished, not wrong work."""
+    body = _content()
+    assert "Distinguish an unfinished check from wrong work" in body
+    assert "report it as unfinished rather than as failed work" in body
+    assert "normal completion, not a wedge" in body
+    # Giving up on a check never means giving up the candidate.
+    assert "leave the candidate edits intact" in body

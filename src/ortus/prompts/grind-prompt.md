@@ -219,6 +219,16 @@ Whatever the verifier selects, it runs the same way: `uv run pytest <selection> 
 
 If verification fails, fix the issue and re-verify. This is backpressure — keep iterating until it passes or you determine the issue is a blocker outside your task's scope.
 
+## Background Jobs: Bounded Waits
+
+A long check may run as a background job — that is the right shape for it — but the wait for its result must be bounded:
+
+- **Redirect output to a file; never pipe through a filter when the output will be polled.** A pipeline through a filter such as `tail` emits nothing until its input reaches end of file, so the polled file stays empty by construction while the job runs and carries no progress signal. Redirect the command with `> job.log 2>&1` and read the tail of the growing file instead — same summary, real progress signal. Do not rely on the command's own `timeout` to end the wait: it kills the process it launched, while surviving children (parallel test workers, for example) can hold the pipe's write end open indefinitely.
+- **Cap the polling attempts.** Decide a maximum number of polling attempts before you start (for example, ten checks with a fixed sleep between them), stop when it is reached, and never wait in an unbounded loop for output to appear. Attempts, not wall clock alone, are what make the failure reportable: you can say how long you waited and how many times you looked.
+- **A job that has produced nothing when the bound expires is a failure to report, not a reason to keep waiting.** Do not launch a replacement job just to wait on it — starting a new job never resets the bound already spent in this session.
+- **Name the command when you abandon a wait.** Report the exact command you were waiting for, how many times you polled, and how long you waited. A silent abandonment leaves the same diagnostic hole the bound exists to close.
+- **Distinguish an unfinished check from wrong work.** A job still appending output at the bound is unfinished, not wedged — report it as unfinished rather than as failed work, and do not abandon it while it is visibly producing. A job that exited successfully having printed nothing is a normal completion, not a wedge. In every give-up case, leave the candidate edits intact for the verifier rather than reverting them.
+
 ## Issue Plan
 
 Ask the model (subagent if needed) how to handle this issue given its type, labels, description, and acceptance criteria. The response must be a JSON plan:
