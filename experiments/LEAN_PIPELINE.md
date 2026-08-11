@@ -96,8 +96,9 @@ After the session ends, the harness — deterministic Python, zero model tokens
 
 1. **The AC runner.** The packet's Criterion checks are already exact
    backticked commands; today an agent reads them and runs them. Instead the
-   harness runs them directly, as subprocesses, against a **clean extraction
-   of the branch tree** (`git archive | tar -x`, never a worktree). This
+   harness runs them directly, as subprocesses, against a **clean, disposable
+   materialization of the branch tree** (a shared clone — see Corrections;
+   never a worktree). This
    preserves, mechanically and locally, the one catch the reviewer ever made
    that nothing else would have: the committed tree is tested, not the
    author's dirty one. Every command's exit status and output are recorded as
@@ -343,3 +344,36 @@ expensive answer only where the numbers say so.
 
 The elegant version of trust is not a second opinion on everything. It is a
 first opinion that is cheap to check.
+
+## Corrections (2026-08-11, after external review)
+
+Three findings from an independent review of this document and its filed
+graph, dispositioned. The packets and the PRD carry the fixes; this section
+keeps the record honest.
+
+1. **The archive extraction was a hard blocker, accepted and fixed.** This
+   repository's version derives from vcs metadata (hatch-vcs), so a
+   `git archive` tree cannot build and zero criteria can execute — verified
+   both directions: the same suite dies at build in an archive extraction and
+   passes in 0.74s in a `git clone --shared` tree whose `.git` is 204K. The
+   runner now uses a disposable shared clone: an ordinary directory that
+   removal deletes, not a worktree, so the sandbox prohibition does not apply.
+   The trade is named — an archive could never let a criterion accidentally
+   consult repository state, and a clone can — but a hermetic tree where
+   nothing runs is worth less than a slightly leakier one where the checks
+   execute. Verification also surfaced a fourth fact: a fresh clone has no
+   environment, so the runner prepares one (default `uv sync --all-extras`)
+   before the first criterion. The irony is recorded: the original session's
+   brief warned that archives do not build here, and this document specified
+   one anyway.
+2. **The red–green proof would have been inert until criteria were tagged.**
+   Accepted in substance: the tags are data readiness v1 already tolerates,
+   so the convention is mandatory for packets authored after L1 rather than
+   waiting for schema v2 — now stated in the PRD's FR-5. Pushed back in
+   degree: unlike the superseded programme's inert trigger, the mechanism
+   here lands in the same phase as its consumer (the wiring leaf); only
+   adoption lagged, and only by convention.
+3. **L0 lands as two commits within the hand-landed phase** — harness cuts
+   and merges with workers unchanged, then workers commit — preserving a
+   bisection point at the seam where three failures occurred in two days.
+   Accepted as cheap insurance; recorded in the keystone packet.
