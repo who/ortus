@@ -372,3 +372,87 @@ def test_unfinished_check_is_not_failed_work() -> None:
     assert "normal completion, not a wedge" in body
     # Giving up on a check never means giving up the candidate.
     assert "leave the candidate edits intact" in body
+
+
+# ---------------------------------------------------------------------------
+# (7) throwaway trees — git archive / shared clone, never `git worktree add`
+#     (ortus-z7ib)
+# ---------------------------------------------------------------------------
+
+
+def _verifier_contract() -> str:
+    """The composed verifier prompt, built the way the verification phase builds it."""
+    from ortus.commands.grind import _verifier_prompt
+    from ortus.core.transaction import CandidateJournal
+
+    journal = CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        issue_packet_ref="logs/packet.json",
+        issue_packet_hash="b" * 64,
+        candidate_hash="a" * 64,
+    )
+    return _verifier_prompt(journal, "probe contract")
+
+
+def test_work_issue_forbids_worktree_add() -> None:
+    """AC-1: the per-issue condition names `git worktree add` among the
+    forbidden commands, in the same list as the lifecycle mutations rather
+    than a second list an agent might not read."""
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    body = read_work_issue_condition()
+    assert "`git worktree add`" in body
+    # One prohibition list, not two: it joins the existing lifecycle sentence.
+    assert "`git reset`, or `git worktree add`" in body
+    # A rule that only forbids sends the agent hunting for its own alternative
+    # — which is how the leaked registrations happened. Both tiers are named.
+    assert "git archive" in body
+    assert "git clone --shared" in body
+
+
+def test_implementation_names_git_archive() -> None:
+    """AC-2: the worker contract forbids the worktree and names both tiers.
+
+    Naming only the archive would send every agent that needs a runnable tree
+    straight back to `git worktree add`: this repository's version derives
+    from vcs metadata, so an archive extraction cannot even install.
+    """
+    body = _content()
+    assert "Never run `git worktree add`" in body
+    assert "git archive" in body
+    assert "git clone --shared" in body
+    # An agent needing only part of a tree is not pushed into copying all of it.
+    assert "pathspec" in body.lower()
+    # The tier split is stated, not left for the agent to rediscover at a
+    # failed build.
+    assert "archive extraction cannot even install" in body
+
+
+def test_verifier_contract_forbids_worktree_add() -> None:
+    """AC-3: verification is where a HEAD-plus-candidate tree is most often
+    built — one of the two leaked registrations came from a verifier."""
+    body = _verifier_contract()
+    assert "`git worktree add`" in body
+    assert "git archive" in body
+    assert "git clone --shared" in body
+    assert "archive extraction cannot even install" in body
+
+
+def test_worktree_prohibition_states_the_reason() -> None:
+    """AC-4: each contract states the mechanism, so the rule stays checkable
+    and is not later mistaken for arbitrary by an editor looking for
+    something to simplify."""
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    reason = "read-only bind mounts make the registration unremovable"
+    for name, body in (
+        ("work-issue condition", read_work_issue_condition()),
+        ("grind-prompt.md", _content()),
+        ("verifier contract", _verifier_contract()),
+    ):
+        assert reason in body, (
+            f"{name} does not state why `git worktree add` is forbidden"
+        )

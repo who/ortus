@@ -229,6 +229,15 @@ A long check may run as a background job — that is the right shape for it — 
 - **Name the command when you abandon a wait.** Report the exact command you were waiting for, how many times you polled, and how long you waited. A silent abandonment leaves the same diagnostic hole the bound exists to close.
 - **Distinguish an unfinished check from wrong work.** A job still appending output at the bound is unfinished, not wedged — report it as unfinished rather than as failed work, and do not abandon it while it is visibly producing. A job that exited successfully having printed nothing is a normal completion, not a wedge. In every give-up case, leave the candidate edits intact for the verifier rather than reverting them.
 
+## Throwaway Trees: Archive or Shared Clone, Never `git worktree add`
+
+A check sometimes needs a throwaway copy of a tree — a HEAD snapshot to compare the candidate against, or a clean tree to run a build in. Build it one of two ways:
+
+- **To compare file content**: `git archive <ref> | tar -x -C "$TMPDIR/tree"`. It takes any ref, accepts pathspecs (`git archive HEAD src/ortus README.md`) when only part of the tree is needed, and produces a plain directory — nothing registered, nothing to prune.
+- **When the tree must build or needs git metadata**: `git clone --shared . "$TMPDIR/tree"`. This repository's version derives from vcs metadata (hatch-vcs), so an archive extraction cannot even install; a tree that has to build or test needs the shared clone. A shared clone is not a worktree — it is a plain directory that ordinary removal deletes, so the prohibition below does not apply to it.
+
+**Never run `git worktree add`.** The sandbox bind-mounts individual files inside `.git/worktrees/<name>/` read-only, so removal and pruning both fail with `Device or resource busy` — the sandbox's read-only bind mounts make the registration unremovable, and it survives for as long as any sandbox holds the mounts. Every later session then sees the leaked entry marked prunable, tries to clean it, fails, and pays the investigation again.
+
 ## Issue Plan
 
 Ask the model (subagent if needed) how to handle this issue given its type, labels, description, and acceptance criteria. The response must be a JSON plan:

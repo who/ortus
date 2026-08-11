@@ -1079,7 +1079,18 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "alongside `-n auto` reports breaches that are an artifact of the parallelism. "
         "CI runs the gate single-threaded with the budget enforced and stays the "
         "authority on duration, `slow`-marked tests exempt there exactly as before. "
-        "Judge whether the candidate is correct; leave how fast a test is to CI.\n"
+        "Judge whether the candidate is correct; leave how fast a test is to CI.\n\n"
+        "Build any throwaway comparison tree — HEAD without the candidate, say — "
+        "with `git archive <ref> | tar -x -C \"$TMPDIR/tree\"` (it takes any ref, "
+        "and pathspecs narrow it to the paths you need; always extract outside "
+        "the repository so the snapshot never overwrites the candidate), or with "
+        "`git clone --shared` when the tree "
+        "must build or needs git metadata; this repository's version derives from "
+        "vcs metadata, so an archive extraction cannot even install. Never run "
+        "`git worktree add`: the sandbox's read-only bind mounts make the "
+        "registration unremovable, so cleanup fails with Device or resource busy "
+        "and every later session pays for the leaked entry. A shared clone is a "
+        "plain directory, not a worktree, and ordinary removal deletes it.\n"
         + probe_text
     )
 
