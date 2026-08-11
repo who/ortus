@@ -15,9 +15,11 @@ The first existing file wins; the others are ignored.
 >
 > **Not a worker contract under `ortus grind`.** No step below is handed to a
 > grind worker. Steps 8 and 9 (close, commit, push) describe the retired
-> agent-owned lifecycle only. Under `ortus grind` the worker leaves an
-> uncommitted candidate, a fresh read-only verifier judges it, and Ortus alone
-> reports, closes, commits owned paths, and pushes — see
+> agent-owned lifecycle only. Under `ortus grind` the worker commits its
+> completed work on the issue branch grind handed it (`ortus/<issue-id>`),
+> with its own commit message; a fresh read-only verifier judges the committed
+> range plus any uncommitted edits, and Ortus alone reports, closes,
+> fast-forwards the integration branch, and pushes — see
 > `ortus/prompts/conditions/work-issue.txt` for the contract workers actually
 > receive.
 
@@ -339,7 +341,7 @@ bd comments add bd-a1b2c3 "**Changes**:
 **Verification**: All tests passing (12/12), lint clean, manual login flow tested"
 ```
 
-**These bullets become the commit message body.** Ortus reads the latest `**Changes**` block on the issue and commits it as the body of the one commit this issue produces, so write them as commit prose: each bullet names the file or component it changed and states what changed in it, readable six months from now by someone with no access to the issue. Keep the verification line to one line. **This comment is the only prose the commit can carry** — write no block and the permanent record of this change is the issue title and objective, neither of which knows what you actually did.
+**These bullets are the durable change record, and the fallback commit body.** Under `ortus grind` the worker writes its own commit message when it commits on the issue branch; the `**Changes**` block remains the tracker's record of what shipped, and it becomes the commit body whenever a commit has to be assembled deterministically — a worker that left uncommitted edits, or a message that validation replaced. Write the bullets as commit prose either way: each names the file or component it changed and states what changed in it, readable six months from now by someone with no access to the issue. Keep the verification line to one line.
 
 **If you are correcting a rejected change, add a new comment carrying a refreshed `**Changes**` block** that describes the final shipped state. The block written before the review describes code that has since changed, and committing it would describe something the commit does not contain. Ortus reads the newest block and expects one per round; when a round leaves none, it skips the bullets entirely and commits the thinner `**CodeGraph v1**` record instead.
 

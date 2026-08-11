@@ -71,11 +71,14 @@ from ortus.core.codegraph import (
 )
 from ortus.core.attribution import Ownership, describe, path_ownership
 from ortus.core.compose import (
+    CommitMessage,
     ComposeExceededAuthority,
     ComposeFailed,
+    ComposeRejected,
     compose_commit_message,
     guard_read_only,
     shortened,
+    validate_message,
     with_default_model,
 )
 from ortus.core.config import load_config
@@ -417,9 +420,22 @@ def _capture_codex_candidate(
     if dirty is None:
         output.error("grind: could not capture Codex candidate paths")
         raise typer.Exit(code=1)
-    paths = _candidate_paths(dirty, baseline)
+    # A branch-scoped candidate is everything between the recorded base and
+    # the working tree: commits the worker made on its issue branch as well
+    # as edits it left uncommitted. The base-relative diff names both; the
+    # dirty set still contributes untracked files, which no committed range
+    # can name.
+    base = journal.base_head if journal.issue_branch else ""
+    range_changed: frozenset[str] = frozenset()
+    if base and git.head_oid() != base:
+        changed = git.changed_paths(base)
+        if changed is None:
+            output.error("grind: could not read the candidate's committed range")
+            raise typer.Exit(code=1)
+        range_changed = changed
+    paths = _candidate_paths(dirty | range_changed, baseline)
     try:
-        diff = candidate_diff(git.repo, paths)
+        diff = candidate_diff(git.repo, paths, base=base)
     except RuntimeError as exc:
         output.error(f"grind: could not create candidate diff: {exc}")
         raise typer.Exit(code=1) from exc
@@ -427,8 +443,34 @@ def _capture_codex_candidate(
     updated = journal.with_candidate(
         paths, phase=phase, candidate_hash=digest, diff_ref=diff_ref
     )
+    if updated.issue_branch:
+        updated = updated.with_branch(updated.issue_branch, git.head_oid())
     store.save(updated)
     return updated
+
+
+def _candidate_view(
+    git: GitClient, journal: CandidateJournal, baseline: frozenset[str]
+) -> tuple[frozenset[str], str] | None:
+    """The candidate exactly as capture computes it, plus its diff base.
+
+    Dirty paths union the committed range for a branch-scoped journal, minus
+    the baseline — every integrity re-check must recompute through this same
+    lens, or a worker's legitimate commit reads as the candidate vanishing
+    from the worktree. None when the tree or range cannot be read.
+    """
+
+    dirty = git.dirty_paths()
+    if dirty is None:
+        return None
+    base = journal.base_head if journal.issue_branch else ""
+    extra: frozenset[str] = frozenset()
+    if base and git.head_oid() != base:
+        changed = git.changed_paths(base)
+        if changed is None:
+            return None
+        extra = changed
+    return _candidate_paths(dirty | extra, baseline), base
 
 
 def _candidate_baseline(
@@ -1055,6 +1097,10 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         f"Candidate diff: {journal.candidate_diff_ref}\n"
         f"Candidate SHA-256: {journal.candidate_hash}\n"
         f"Captured evidence: {json.dumps(journal.evidence, ensure_ascii=False)}\n\n"
+        "The candidate is everything between the recorded base commit and the "
+        "working tree — commits the worker made on its issue branch as well as "
+        "any edits it left uncommitted — and the diff artifact above carries "
+        "exactly that. The branch, not the worktree alone, is the subject.\n\n"
         "The JSON object must have exactly these fields: schema (1), candidate_hash, "
         "decision (pass or fail), criteria (non-empty array of objects with exactly id, "
         "status, evidence), and non-empty string arrays commands, reviewed_files, "
@@ -1354,18 +1400,20 @@ def _verify_candidate(
         timeout_failure = f"verifier timed out after {worker_timeout}s without a verdict"
         timeout_phase = VERIFICATION_TIMEOUT
         if git.is_git_repo():
-            post_dirty = git.dirty_paths()
-            if post_dirty is None:
+            view = _candidate_view(git, journal, baseline)
+            if view is None:
                 timeout_failure += "; could not inspect the candidate after timeout"
                 timeout_phase = VERIFICATION_REJECTED
             else:
-                post_paths = _candidate_paths(post_dirty, baseline)
+                post_paths, post_base = view
                 if post_paths != frozenset(journal.candidate_paths):
                     timeout_failure += "; verifier mutated the candidate path set"
                     timeout_phase = VERIFICATION_REJECTED
                 else:
                     try:
-                        post_diff = candidate_diff(repo, post_paths)
+                        post_diff = candidate_diff(
+                            repo, post_paths, base=post_base
+                        )
                         if sha256_bytes(post_diff) != journal.candidate_hash:
                             # No verdict exists to attribute the change to, and
                             # the run is rejected either way; restoring is what
@@ -1456,17 +1504,17 @@ def _verify_candidate(
             expected_criteria=expected_criteria,
         )
         if git.is_git_repo():
-            post_dirty = git.dirty_paths()
-            if post_dirty is None:
+            view = _candidate_view(git, journal, baseline)
+            if view is None:
                 raise VerdictError(
                     "could not inspect the candidate after verification"
                 )
-            post_paths = _candidate_paths(post_dirty, baseline)
+            post_paths, post_base = view
             if post_paths != frozenset(journal.candidate_paths):
                 raise VerdictError(
                     "verifier mutated the candidate path set during read-only review"
                 )
-            post_diff = candidate_diff(repo, post_paths)
+            post_diff = candidate_diff(repo, post_paths, base=post_base)
             if sha256_bytes(post_diff) != journal.candidate_hash:
                 restored = _restore_rebuilt_candidate(
                     repo,
@@ -1588,12 +1636,13 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         f"Failed acceptance criteria:\n{criteria}\n\n"
     )
     footer = (
-        "\n\nKeep the existing candidate edits and correct them in place. Do not close "
-        "the issue, do not run git commit, git push, git stash, or git reset, do not "
-        "switch branches, and do not add a verification comment — a fresh verifier "
-        "reviews your corrected candidate and Ortus alone finalizes it. If a finding "
-        "needs a product or architecture decision the packet does not resolve, do not "
-        "improvise: report it as a PLAN-GAP and stop."
+        "\n\nCorrect the candidate in place and commit the correction on the issue "
+        "branch you are on, with a commit message describing the fix. Do not close "
+        "the issue, do not run git push, git stash, or git reset, do not switch "
+        "branches, and do not add a verification comment — a fresh verifier "
+        "reviews your corrected candidate and Ortus alone merges and finalizes it. "
+        "If a finding needs a product or architecture decision the packet does not "
+        "resolve, do not improvise: report it as a PLAN-GAP and stop."
     )
     # Claude's /goal condition is hard-capped, so drop the least-severe findings
     # (verifiers order them most-severe-first) rather than truncating mid-word
@@ -2095,20 +2144,35 @@ def _finalization_blocker(
             )
     if journal.finalized("commit"):
         return None
+    base = journal.base_head if journal.issue_branch else ""
     if journal.issue_branch:
         tip = git.branch_tip(journal.issue_branch)
+        integration_tip = git.branch_tip(integration_branch)
         if (
             tip
             and tip != journal.base_head
             and git.head_oid() == tip
+            and journal.finalized("close")
         ):
-            # The branch commit and fast-forward landed but the boundary was
-            # never journaled (a crash between the merge and the write). The
-            # candidate legitimately left the worktree by being committed, so
-            # the dirty-path and hash re-checks below would misread it; the
-            # commit step re-journals from this same observable state.
+            # Finalization was already mid-flight (close journaled) and its
+            # own commit — possibly the fast-forward too — landed before a
+            # crash reached the boundary write. The worktree re-checks below
+            # would misread the committed candidate; the commit step
+            # re-journals from this same observable state. This deliberately
+            # skips a second integrity pass on replay: the candidate was
+            # re-validated on the entry that performed the close.
             return None
-    if git.head_oid() != journal.base_head:
+        if journal.branch_head and tip != journal.branch_head:
+            return (
+                f"issue branch {journal.issue_branch} moved after the passing "
+                f"verdict ({journal.branch_head[:12]} → {(tip or 'gone')[:12]})"
+            )
+        if integration_tip not in (journal.base_head, tip):
+            return (
+                f"{integration_branch} moved after the passing verdict; the "
+                f"fast-forward from {journal.base_head[:12]} no longer applies"
+            )
+    elif git.head_oid() != journal.base_head:
         return (
             f"base commit {journal.base_head} is no longer HEAD; the candidate was "
             "verified against a different tree"
@@ -2116,7 +2180,13 @@ def _finalization_blocker(
     dirty = git.dirty_paths()
     if dirty is None:
         return "could not read the worktree before finalization"
-    owned = _candidate_paths(dirty, baseline)
+    range_changed: frozenset[str] = frozenset()
+    if base and git.head_oid() != base:
+        changed = git.changed_paths(base)
+        if changed is None:
+            return "could not read the candidate's committed range"
+        range_changed = changed
+    owned = _candidate_paths(dirty | range_changed, baseline)
     if owned != frozenset(journal.candidate_paths):
         drifted = sorted(owned.symmetric_difference(journal.candidate_paths))
         return (
@@ -2124,7 +2194,10 @@ def _finalization_blocker(
             + ", ".join(drifted)
         )
     try:
-        if sha256_bytes(candidate_diff(repo, owned)) != journal.candidate_hash:
+        if (
+            sha256_bytes(candidate_diff(repo, owned, base=base))
+            != journal.candidate_hash
+        ):
             return "candidate changed after the passing verdict"
     except RuntimeError as exc:
         return f"could not re-hash the candidate ({exc})"
@@ -2270,8 +2343,8 @@ def _finalize_candidate(
         composed = ""
         if compose is None:
             write_log(
-                f"finalization: no commit-message pass configured for {issue_id}; "
-                "the deterministic body stands"
+                f"finalization: commit-message pass retired for {issue_id}; "
+                "the worker's own message or the deterministic assembly stands"
             )
         else:
             before = _authority_state(
@@ -2345,34 +2418,118 @@ def _finalize_candidate(
                     "finalization: leaving unrelated worktree paths untouched: "
                     + ", ".join(sorted(unrelated))
                 )
-            message = _composed_message(journal)
-            if message:
-                write_log(
-                    f"finalization: committing {issue_id} with the composed "
-                    "message"
-                )
-            else:
-                packet = _commit_packet(bd, issue_id)
-                if not packet:
+            worker_committed = bool(
+                journal.issue_branch
+                and git.current_branch() == journal.issue_branch
+                and git.head_oid() != journal.base_head
+            )
+            if not worker_committed:
+                message = _composed_message(journal)
+                if message:
                     write_log(
-                        "finalization: issue packet unreadable; committing "
-                        f"{issue_id} with a degraded subject"
+                        f"finalization: committing {issue_id} with the composed "
+                        "message"
                     )
-                message = _commit_message(
-                    issue_id,
-                    packet,
-                    _change_description(bd, issue_id, journal, write_log=write_log),
-                )
-            committed = git.commit_paths(stage, message)
-            if not committed:
-                # git already said why microseconds ago; carrying its text out
-                # of here is the difference between an operator acting on the
-                # cause and reproducing the failure by hand (ortus-pgqg).
-                blocked = "path-scoped commit of the owned candidate failed"
-                if committed.reason:
-                    blocked = f"{blocked}; {committed.reason}"
-                write_log(f"finalization: HALT — {blocked}")
-                return journal, blocked
+                else:
+                    packet = _commit_packet(bd, issue_id)
+                    if not packet:
+                        write_log(
+                            "finalization: issue packet unreadable; committing "
+                            f"{issue_id} with a degraded subject"
+                        )
+                    message = _commit_message(
+                        issue_id,
+                        packet,
+                        _change_description(
+                            bd, issue_id, journal, write_log=write_log
+                        ),
+                    )
+                committed = git.commit_paths(stage, message)
+                if not committed:
+                    # git already said why microseconds ago; carrying its text
+                    # out of here is the difference between an operator acting
+                    # on the cause and reproducing the failure by hand
+                    # (ortus-pgqg).
+                    blocked = "path-scoped commit of the owned candidate failed"
+                    if committed.reason:
+                        blocked = f"{blocked}; {committed.reason}"
+                    write_log(f"finalization: HALT — {blocked}")
+                    return journal, blocked
+            else:
+                # The head commit is the worker's own. The transaction's late
+                # files — the tracker exports the close step just rewrote, and
+                # any owned edits the worker left uncommitted — fold into that
+                # commit rather than stacking a second one, so an issue still
+                # lands as exactly one commit. The message then passes the
+                # same deterministic gate a composed message did: an over-long
+                # subject is shortened, and a message that is wrong rather
+                # than long is replaced by the deterministic assembly — by
+                # amend, so the tree is never touched beyond the fold.
+                if stage:
+                    if not git.amend_paths(stage):
+                        return journal, (
+                            "could not fold the transaction's late paths into "
+                            "the worker's commit: " + ", ".join(sorted(stage))
+                        )
+                    write_log(
+                        "finalization: folded into the worker's commit: "
+                        + ", ".join(sorted(stage))
+                    )
+                raw = git.head_message().strip()
+                packet = _commit_packet(bd, issue_id)
+                subject_line, _, rest = raw.partition("\n")
+                bare = subject_line.removeprefix(f"{issue_id}: ")
+                try:
+                    diff_text = candidate_diff(
+                        repo,
+                        frozenset(journal.candidate_paths),
+                        base=journal.base_head,
+                    ).decode("utf-8", errors="replace")
+                except RuntimeError:
+                    diff_text = ""
+                try:
+                    validated = validate_message(
+                        CommitMessage(subject=bare, body=rest.strip()),
+                        issue_id=issue_id,
+                        title=str(packet.get("title") or ""),
+                        diff=diff_text,
+                    )
+                    if validated.text != raw:
+                        if not git.amend_message(validated.text):
+                            return journal, (
+                                "could not amend the worker's commit message"
+                            )
+                        note = (
+                            "shortened from "
+                            f"{validated.shortened_from} characters"
+                            if validated.shortened_from
+                            else "normalized"
+                        )
+                        write_log(
+                            f"finalization: worker commit message {note} "
+                            f"for {issue_id}"
+                        )
+                except ComposeRejected as exc:
+                    write_log(
+                        f"finalization: worker commit message rejected ({exc}); "
+                        "replaced by the deterministic assembly"
+                    )
+                    replacement = _commit_message(
+                        issue_id,
+                        packet,
+                        _change_description(
+                            bd, issue_id, journal, write_log=write_log
+                        ),
+                    )
+                    if not git.amend_message(replacement):
+                        return journal, (
+                            "could not amend the worker's commit message"
+                        )
+                # An amend moves the tip; keep the journal's record current so
+                # a crash before the fast-forward replays instead of reading
+                # the amended tip as post-verdict movement.
+                journal = journal.with_branch(journal.issue_branch, git.head_oid())
+                store.save(journal)
             if journal.issue_branch and git.current_branch() == journal.issue_branch:
                 # The commit exists on the issue branch — its durable home.
                 # The integration ref is fast-forwarded first, without
@@ -3075,15 +3232,14 @@ def grind(
             write_log(f"phase profile: {implement_profile.display_name}")
             write_log(f"phase profile: {verify_profile.display_name}")
             write_log(f"phase profile: {finalize_profile.display_name}")
-            compose_message = _message_composer(
-                repo=target,
-                log=log,
-                backend=resolved_backend,
-                profile=finalize_profile,
-                capability=codegraph_probe.capability,
-                timeout=(worker_timeout if worker_timeout > 0 else None),
-                write_log=write_log,
-            )
+            # The commit-message model pass is retired (branch-scoped
+            # candidates, commit B): the worker writes its message at commit
+            # time and finalization repairs or replaces it deterministically.
+            # The journal's compose step vocabulary survives until the
+            # machine-verification deletion leaf so a legacy journal stranded
+            # at finalized-compose still resumes; a None pass journals the
+            # boundary as unavailable and moves on.
+            compose_message: ComposeCallable | None = None
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
@@ -3716,13 +3872,15 @@ def grind(
                         configure_codegraph(implementation_probe.capability)
                     implementation_instruction = (
                         "IMPLEMENTATION PHASE ONLY. These phase rules override any "
-                        "conflicting instruction elsewhere in this prompt. Make candidate "
-                        "edits and run targeted checks, but do not close the issue, do not "
-                        "run git commit or git push, do not select other work, and do not "
-                        "add the final verification comment; a fresh read-only verifier "
-                        "reviews your exact candidate next and Ortus owns finalization. "
-                        "HEAD must be unchanged when you finish — a commit invalidates the "
-                        "candidate."
+                        "conflicting instruction elsewhere in this prompt. Make the "
+                        "change, run targeted checks, and commit the completed work on "
+                        "the issue branch grind handed you, with your own commit "
+                        "message. Do not close the issue, do not run git push, do not "
+                        "switch branches or touch the integration branch, do not "
+                        "select other work, and do not add the final verification "
+                        "comment; a fresh read-only verifier reviews your committed "
+                        "range plus any uncommitted edits next, and Ortus owns "
+                        "merging and finalization."
                     )
                     if recovery_handoff and not resume_candidate_ready:
                         implementation_instruction += handoff.instruction()
@@ -4010,10 +4168,39 @@ def grind(
                         )
                     elif (
                         git.is_git_repo()
+                        and active_journal.issue_branch
+                        and git.current_branch() != active_journal.issue_branch
+                    ):
+                        # Commits on the issue branch are the deliverable now;
+                        # what a worker may never do is carry the work
+                        # somewhere else.
+                        reason = (
+                            "implementation worker left its issue branch "
+                            f"{active_journal.issue_branch} for "
+                            f"{git.current_branch() or 'a detached HEAD'}"
+                        )
+                    elif (
+                        git.is_git_repo()
+                        and active_journal.issue_branch
+                        and git.branch_tip(integration_branch)
+                        != active_journal.base_head
+                    ):
+                        # The branch was cut at the integration head; if that
+                        # ref moved mid-run, the eventual fast-forward cannot
+                        # apply and the verdict would judge a stale base.
+                        reason = (
+                            f"the integration branch {integration_branch} moved "
+                            "during implementation; the candidate base "
+                            f"{active_journal.base_head} is no longer its head"
+                        )
+                    elif (
+                        git.is_git_repo()
+                        and not active_journal.issue_branch
                         and git.head_oid() != active_journal.base_head
                     ):
-                        # A commit moves HEAD, so `git diff HEAD` would report an
-                        # empty candidate and the verifier would review nothing.
+                        # Pre-branch journals keep the old rule: a commit moves
+                        # HEAD, so `git diff HEAD` would report an empty
+                        # candidate and the verifier would review nothing.
                         reason = (
                             "implementation worker committed to the repository; the "
                             f"candidate base {active_journal.base_head} is no longer HEAD"

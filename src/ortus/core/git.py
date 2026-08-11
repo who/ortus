@@ -319,6 +319,48 @@ class GitClient:
         proc = self._run("rev-parse", "--verify", "--quiet", f"refs/heads/{name}")
         return proc.stdout.strip() if proc.returncode == 0 else ""
 
+    def changed_paths(self, base: str) -> frozenset[str] | None:
+        """Every path that differs between `base` and the working tree.
+
+        Committed-and-then-modified files appear once; the caller unions this
+        with :meth:`dirty_paths` to cover untracked files, which no
+        base-relative diff can name. None on error, mirroring `dirty_paths`.
+        """
+        proc = self._run("diff", "--name-only", "-z", base, "--")
+        if proc.returncode != 0:
+            return None
+        return frozenset(path for path in proc.stdout.split("\0") if path)
+
+    def head_message(self) -> str:
+        """The full commit message of HEAD, or "" when unreadable."""
+        proc = self._run("log", "-1", "--format=%B")
+        return proc.stdout if proc.returncode == 0 else ""
+
+    def amend_message(self, message: str) -> bool:
+        """Rewrite HEAD's commit message in place, touching nothing else."""
+        return (
+            self._run("commit", "--amend", "--no-edit", "-m", message).returncode == 0
+        )
+
+    def amend_paths(self, paths: frozenset[str]) -> bool:
+        """Fold the named worktree paths into HEAD, keeping its message.
+
+        Used for the transaction's own late files — the tracker exports the
+        close step rewrites — so an issue still lands as one commit instead of
+        stacking a housekeeping commit on top of the worker's.
+        """
+        if not paths:
+            return True
+        ordered = sorted(paths)
+        if self._run("add", "--", *ordered).returncode != 0:
+            return False
+        return (
+            self._run(
+                "commit", "--amend", "--no-edit", "--only", "--", *ordered
+            ).returncode
+            == 0
+        )
+
     def create_branch(self, name: str, at_ref: str) -> bool:
         """`git branch <name> <at_ref>`, never forced. Returns True on success.
 

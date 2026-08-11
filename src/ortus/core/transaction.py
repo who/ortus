@@ -143,27 +143,48 @@ def fingerprint_paths(repo: Path, paths: Iterable[str]) -> dict[str, str]:
     return {path: _path_fingerprint(repo, path) for path in sorted(set(paths))}
 
 
-def candidate_diff(repo: Path, paths: Iterable[str]) -> bytes:
+def candidate_diff(repo: Path, paths: Iterable[str], *, base: str = "") -> bytes:
     """Return a deterministic, binary-safe diff bundle for candidate paths.
 
     Normal ``git diff HEAD`` covers staged, unstaged, deleted, and binary tracked
     files. Untracked files are appended as binary patches against ``/dev/null``.
     The bundle is complete on disk; prompts refer to it by immutable hash so a
     large or binary candidate is never silently truncated.
+
+    `base` names the commit the candidate is measured against. Empty means
+    HEAD — the pre-branch behavior, where a candidate is worktree state only.
+    A branch-scoped candidate passes its recorded base head instead, so
+    commits the worker made on its issue branch are part of the bundle rather
+    than invisible to it.
     """
 
     selected = tuple(sorted(set(paths)))
     if not selected:
         return b""
+    if base:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", base],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+        )
+        if resolved.returncode != 0:
+            raise RuntimeError(
+                f"candidate base {base!r} does not resolve: "
+                + resolved.stderr.decode("utf-8", errors="replace").strip()
+            )
     head = subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD"],
         cwd=repo,
         capture_output=True,
         check=False,
     )
-    base = (
-        "HEAD" if head.returncode == 0 else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-    )
+    if not base:
+        base = (
+            "HEAD"
+            if head.returncode == 0
+            else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        )
     tracked = subprocess.run(
         ["git", "diff", "--binary", "--no-ext-diff", base, "--", *selected],
         cwd=repo,

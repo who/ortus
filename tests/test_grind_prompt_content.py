@@ -293,12 +293,13 @@ def test_grind_prompt_states_the_changes_bullets_become_the_commit_body() -> Non
     asked for concision produced bullets no reader could use six months later.
     """
     body = _content()
-    assert "become the commit message body" in body
+    assert "the fallback commit body" in body
     assert "six months" in body
     assert "names the file or component" in body
-    # Nothing else describes the change: the file list the fallback used to
-    # print is gone, so a missing block leaves only the issue's own words.
-    assert "only prose the commit can carry" in body
+    # The worker's own commit message is primary now; the block remains the
+    # tracker's record and the body of every deterministically assembled
+    # commit.
+    assert "writes its own commit message" in body
 
 
 def test_grind_prompt_requires_a_refreshed_changes_block_after_a_correction() -> None:

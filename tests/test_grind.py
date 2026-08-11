@@ -464,9 +464,9 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
         ("timeout", "verification-timeout", "timed out"),
         ("nonzero", "verification-rejected", "exited with status 9"),
         (
-            "implementation-commit",
+            "implementation-branch-switch",
             "implementation-rejected",
-            "committed to the repository",
+            "left its issue branch",
         ),
         (
             "implementation-packet",
@@ -512,9 +512,16 @@ def test_verifier_report_and_mutation_isolation(
             if not readonly:
                 (repo / "candidate.py").write_text("VALUE = 1\n")
                 log_path.touch(exist_ok=True)
-                if mutation == "implementation-commit":
-                    # The forbidden move: committing advances HEAD, so the
-                    # captured candidate diff would come back empty.
+                if mutation == "implementation-branch-switch":
+                    # The forbidden move: carrying the work off the issue
+                    # branch. Committing on the branch itself is the
+                    # deliverable now; committing anywhere else strands it.
+                    subprocess.run(
+                        ["git", "checkout", "-b", "rogue"],
+                        cwd=repo,
+                        check=True,
+                        capture_output=True,
+                    )
                     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
                     subprocess.run(
                         ["git", "commit", "-m", "worker commit"],
@@ -527,7 +534,10 @@ def test_verifier_report_and_mutation_isolation(
                     assert journal is not None
                     (repo / journal.issue_packet_ref).write_bytes(b'{"id":"forged"}')
                 return 0
-            assert mutation not in {"implementation-commit", "implementation-packet"}
+            assert mutation not in {
+                "implementation-branch-switch",
+                "implementation-packet",
+            }
             assert calls == 2
             journal = JournalStore(repo).load()
             assert journal is not None

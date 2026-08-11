@@ -153,13 +153,16 @@ def test_work_issue_condition_forbids_agent_owned_lifecycle_mutations() -> None:
     failure the candidate transaction exists to prevent.
     """
     body = read_work_issue_condition()
-    for forbidden in ("bd close", "git commit", "git push", "git stash", "git reset"):
+    for forbidden in ("bd close", "git push", "git stash", "git reset"):
         assert f"`{forbidden}`" in body, (
             f"work-issue condition must name {forbidden!r} in its prohibition list"
         )
     lowered = body.lower()
     assert "do not run" in lowered
-    assert "owns closing, committing, and pushing" in lowered
+    # Committing on the issue branch is the deliverable now; merging, closing
+    # and pushing remain Ortus's alone.
+    assert "commit the completed work on the issue branch" in lowered
+    assert "alone merges, closes, and pushes" in lowered
 
 
 def test_close_one_condition_is_retired() -> None:
@@ -266,7 +269,7 @@ def test_work_issue_condition_is_packaged_and_has_placeholders() -> None:
     assert "bd ready" in lowered, "work-issue.txt should mention not running bd ready"
     assert "PLAN-GAP" in body
     assert "bd comments add <ISSUE_ID>" in body
-    assert "do not commit, discard, or close" in lowered
+    assert "discard and close nothing" in lowered
     assert WORK_ISSUE_CONDITION_FILE == "work-issue.txt"
 
 

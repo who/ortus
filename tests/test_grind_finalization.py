@@ -346,10 +346,10 @@ def test_pass_finalizes_report_close_commit_and_sync(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
+    # No finalize-phase model run: the compose pass is retired.
     assert backend.phases == [
         Phase.IMPLEMENT.value,
         Phase.VERIFY.value,
-        Phase.FINALIZE.value,
     ]
     assert _issue(repo, issue_id)["status"] == "closed"
 
@@ -1182,51 +1182,42 @@ COMPOSED_BODY = (
 )
 
 
-def _composed_envelope(subject: str = COMPOSED_SUBJECT, body: str = COMPOSED_BODY) -> str:
-    return "ORTUS_COMMIT_MESSAGE: " + json.dumps({"subject": subject, "body": body})
+class CommittingRunner(PassingRunner):
+    """A worker that commits its candidate on the issue branch it was handed.
 
+    The branch-scoped contract: the commit, with the worker's own message, is
+    the deliverable, and the verifier judges the committed range.
+    """
 
-class ComposingRunner(PassingRunner):
-    """A passing worker whose finalize phase also writes a commit message."""
-
-    def __init__(self, repo: Path, *, text: str | None = None, rc: int = 0) -> None:
+    def __init__(self, repo: Path, message: str) -> None:
         super().__init__(repo)
-        self.text = _composed_envelope() if text is None else text
-        self.rc = rc
+        self.message = message
 
     def run(self, prompt: str, **kwargs: object) -> int:
         profile = kwargs.get("profile")
-        if getattr(profile, "phase", None) is not Phase.FINALIZE:
+        if getattr(profile, "phase", None) is not Phase.IMPLEMENT:
             return super().run(prompt, **kwargs)  # type: ignore[arg-type]
-        self.phases.append(Phase.FINALIZE.value)
-        self.prompts = getattr(self, "prompts", [])
-        self.prompts.append(prompt)
+        self.phases.append(Phase.IMPLEMENT.value)
         log_path = kwargs["log_path"]
         assert isinstance(log_path, Path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as fh:
-            if self.text:
-                fh.write(
-                    json.dumps(
-                        {
-                            "type": "item.completed",
-                            "item": {"type": "agent_message", "text": self.text},
-                        }
-                    )
-                    + "\n"
-                )
-        return self.rc
+        log_path.touch(exist_ok=True)
+        (self.repo / CANDIDATE).write_text("SHIPPED = True\n")
+        _git(self.repo, "add", CANDIDATE)
+        _git(self.repo, "commit", "-m", self.message)
+        return 0
 
 
-def test_compose_step_order_and_message_used(
+def test_worker_commit_message_survives_finalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-1: `compose` sits immediately before `commit`, and its text lands."""
-    steps = grind_mod.FINALIZATION_STEPS
-    assert steps.index("compose") == steps.index("commit") - 1
-
+    """A valid message the worker wrote lands verbatim; the transaction's own
+    late files fold into the worker's commit instead of stacking a second."""
     repo, issue_id = _seed(tmp_path, "fin-compose1")
-    backend = ComposingRunner(repo)
+    message = (
+        f"{issue_id}: {COMPOSED_SUBJECT}\n\n{COMPOSED_BODY}"
+    )
+    backend = CommittingRunner(repo, message)
     _install(monkeypatch, tmp_path, backend)
 
     result = runner.invoke(
@@ -1237,11 +1228,14 @@ def test_compose_step_order_and_message_used(
     subject, _, body = _head_message(repo).partition("\n\n")
     assert subject == f"{issue_id}: {COMPOSED_SUBJECT}"
     assert "reads once at import" in body
-    # Written from the diff, so the packet objective it replaced is gone.
-    assert "Exercise the behavior owned by this test." not in body
-    # The pass is read-only and sees the sealed candidate, not the worktree.
-    assert backend.prompts[0].startswith("COMMIT MESSAGE COMPOSITION PASS")
-    assert CANDIDATE in backend.prompts[0]
+    # One commit per issue: the tracker exports the close rewrote were folded
+    # into the worker's commit, not stacked on top of it.
+    assert len(_finalization_commits(repo, issue_id)) == 1
+    committed = _committed_paths(repo)
+    assert CANDIDATE in committed
+    assert ".beads/issues.jsonl" in committed
+    # No finalize-phase model run: the compose pass is retired.
+    assert backend.phases == [Phase.IMPLEMENT.value, Phase.VERIFY.value]
 
 
 def test_restart_after_compose_reuses_message(
@@ -1289,36 +1283,14 @@ def test_legacy_journal_without_compose_finalizes(
     assert store.load() is None
 
 
-@pytest.mark.parametrize(
-    "text, rc",
-    [
-        ("", 0),  # the pass said nothing at all
-        ("ORTUS_COMMIT_MESSAGE: {not json}", 0),  # unparseable transcript
-        (None, 2),  # the pass failed outright
-        # A message that names a symbol the diff does not contain.
-        (
-            "ORTUS_COMMIT_MESSAGE: "
-            + json.dumps(
-                {
-                    "subject": "Ship a flag that is not in this diff",
-                    "body": (
-                        "The loader guessed.\n\nNow `nowhere_at_all()` decides "
-                        "instead, reading `src/imaginary.py` for the shape."
-                    ),
-                }
-            ),
-            0,
-        ),
-    ],
-)
-def test_compose_failure_falls_back_to_the_deterministic_body(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str | None, rc: int
+def test_uncommitted_candidate_falls_back_to_the_deterministic_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-4: every failure mode still commits, with the body Ortus can build."""
-    repo, issue_id = _seed(tmp_path, f"fin-compose4-{abs(hash((text, rc))) % 997}")
-    backend = ComposingRunner(
-        repo, text=_composed_envelope() if text is None else text, rc=rc
-    )
+    """A worker that left its candidate uncommitted still lands one commit,
+    with the body Ortus builds deterministically; the retired compose pass is
+    never spawned for it."""
+    repo, issue_id = _seed(tmp_path, "fin-compose4")
+    backend = PassingRunner(repo)
     _install(monkeypatch, tmp_path, backend)
 
     result = runner.invoke(
@@ -1328,12 +1300,12 @@ def test_compose_failure_falls_back_to_the_deterministic_body(
 
     subject, _, body = _head_message(repo).partition("\n\n")
     assert subject == f"{issue_id}: {_issue(repo, issue_id)['title']}"
-    assert COMPOSED_SUBJECT not in subject
     assert "Exercise the behavior owned by this test." in body
     assert len(_finalization_commits(repo, issue_id)) == 1
+    assert backend.phases == [Phase.IMPLEMENT.value, Phase.VERIFY.value]
     logs = sorted((repo / "logs").glob("grind-*.log"))
     assert logs, "the run wrote no log"
-    assert "the deterministic body stands" in logs[-1].read_text(encoding="utf-8")
+    assert "commit-message pass retired" in logs[-1].read_text(encoding="utf-8")
 
 
 def test_subject_shortening_is_logged(
@@ -1341,13 +1313,15 @@ def test_subject_shortening_is_logged(
 ) -> None:
     """ortus-frht AC-1/AC-4: the message lands, and the repair says so.
 
-    The commit keeps the explanation the pass wrote — only the tail of the
+    The commit keeps the explanation the worker wrote — only the tail of the
     subject is spent — and the run log states the length that was written, so a
-    composer drifting past the limit is visible rather than silently patched.
+    worker drifting past the limit is visible rather than silently patched.
     """
     repo, issue_id = _seed(tmp_path, "fin-compose6")
     long_subject = COMPOSED_SUBJECT + " time on every supported platform"
-    backend = ComposingRunner(repo, text=_composed_envelope(subject=long_subject))
+    backend = CommittingRunner(
+        repo, f"{issue_id}: {long_subject}\n\n{COMPOSED_BODY}"
+    )
     _install(monkeypatch, tmp_path, backend)
 
     result = runner.invoke(
@@ -1369,44 +1343,41 @@ def test_subject_shortening_is_logged(
     logs = sorted((repo / "logs").glob("grind-*.log"))
     assert logs, "the run wrote no log"
     log = logs[-1].read_text(encoding="utf-8")
-    assert f"the composed subject ran to {written} characters" in log
-    assert "shortened on a word boundary" in log
+    assert f"shortened from {written} characters" in log
     assert "the deterministic body stands" not in log
 
 
-def test_compose_that_writes_to_the_candidate_blocks_finalization(
+def test_worker_message_that_is_wrong_is_replaced_by_amend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-10: a pass that moved the tree falsified what it was describing.
-
-    This is the one composition failure that does not degrade to a plainer
-    message: the candidate a verifier passed is no longer the candidate on
-    disk, so the commit must not happen at all.
-    """
+    """A message that is wrong rather than long — here, no body at all — is
+    replaced by the deterministic assembly via amend, so the commit still
+    lands as one commit carrying the worker's tree with a usable message."""
     repo, issue_id = _seed(tmp_path, "fin-compose5")
-
-    class WritingRunner(ComposingRunner):
-        def run(self, prompt: str, **kwargs: object) -> int:
-            profile = kwargs.get("profile")
-            if getattr(profile, "phase", None) is Phase.FINALIZE:
-                (self.repo / CANDIDATE).write_text("SHIPPED = False  # edited\n")
-            return super().run(prompt, **kwargs)  # type: ignore[arg-type]
-
-    _install(monkeypatch, tmp_path, WritingRunner(repo))
+    backend = CommittingRunner(repo, f"{issue_id}: bare subject with no body")
+    _install(monkeypatch, tmp_path, backend)
 
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
     assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "closed"
+    message = _head_message(repo)
+    assert message.startswith(f"{issue_id}: ")
+    # The deterministic assembly replaced the bodiless message.
+    assert "bare subject with no body" not in message
+    assert CANDIDATE in _committed_paths(repo)
+    assert len(_finalization_commits(repo, issue_id)) == 1
 
-    # Whitespace-collapsed: the reporter wraps long lines to the terminal.
-    combined = " ".join((result.stdout + result.stderr).split())
-    assert f"changed state it does not own: path:{CANDIDATE}" in combined
-    assert _finalization_commits(repo, issue_id) == []
-    journal = JournalStore(repo).load()
-    assert journal is not None
-    assert journal.phase == "finalization-blocked"
-    assert not journal.finalized("compose") and not journal.finalized("commit")
+    logs = sorted((repo / "logs").glob("grind-*.log"))
+    log = logs[-1].read_text(encoding="utf-8")
+    assert "worker commit message rejected" in log
+
+
+# The compose-pass mutation-guard test retired with the pass itself:
+# `guard_read_only` keeps its unit coverage in tests/test_core_compose.py, and
+# nothing spawns a finalize-phase model run any longer, so there is no
+# in-pipeline writer left for an end-to-end guard test to catch.
 
 
 # ---------------------------------------------------------------------------
@@ -1505,10 +1476,10 @@ def test_rebuilt_artifact_is_restored_and_run_continues(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
+    # No finalize-phase model run: the compose pass is retired.
     assert backend.phases == [
         Phase.IMPLEMENT.value,
         Phase.VERIFY.value,
-        Phase.FINALIZE.value,
     ]
     assert "mutated the candidate" not in _log(repo)
     assert _issue(repo, issue_id)["status"] == "closed"

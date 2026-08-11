@@ -311,8 +311,9 @@ def test_failed_report_forbids_close_commit_and_push_in_the_correction(
     )
     lowered = correction.lower()
     assert "do not close the issue" in lowered
-    assert "git commit" in lowered and "git push" in lowered
-    assert "ortus alone finalizes" in lowered
+    assert "commit the correction on the issue branch" in lowered
+    assert "git push" in lowered
+    assert "ortus alone merges and finalizes" in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +341,8 @@ def test_retry_after_failure_reverifies_and_then_finalizes(
         Phase.VERIFY.value,
         Phase.IMPLEMENT.value,
         Phase.VERIFY.value,
-        # Finalization's own pass, after the second verifier passed the
-        # corrected candidate: it writes the commit message and nothing else.
-        Phase.FINALIZE.value,
+        # No finalize-phase model run follows: the compose pass is retired
+        # and finalization is deterministic.
     ], f"one fresh verifier per attempt; got {phases}"
     assert _issue(repo, issue_id)["status"] == "closed"
     assert JournalStore(repo).load() is None, "a finalized transaction clears itself"
