@@ -5,7 +5,7 @@
 - **Feature ID**: ortus-branch-candidates (proposed; assign at decomposition)
 - **Project Type**: Ortus core scheduler and transaction model
 - **Created**: 2026-08-10
-- **Status**: Proposed. No implementation has begun.
+- **Status**: **Superseded** by `prd/PRD-lean-pipeline.md`, by operator decision on 2026-08-11, before implementation began. The keystone (candidate as commit on a branch), the gate leaves (`ortus-kdqt`, `ortus-6a0a.1`), Epic C, and Epic D carry forward into the lean programme unchanged. The implementer/verifier split this document reforms is retired there instead; the integrator role is replaced by rebase-on-resume. This document remains the reasoning record for everything the lean programme inherits.
 - **Confidence**: High on the problem, measured rather than argued — see Background. Medium on the end state, because no one has yet changed the candidate model while candidates were in flight.
 - **Source material**: `experiments/CANDIDATE_ISOLATION.md`, `experiments/REVIEW_MODEL.md`, `experiments/TEAM_STRUCTURE.md`. Those three remain the reasoning record; this document is the program they converge on.
 
