@@ -25,6 +25,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
+from ortus.core import compose as compose_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.bd import BdClient, BdError
 from ortus.core.git import CommitResult, GitClient
@@ -1153,6 +1154,17 @@ def test_commit_subject_non_ascii_title() -> None:
     subject.encode("utf-8").decode("utf-8")
 
 
+def test_one_shortener_serves_both_subject_producers() -> None:
+    """ortus-frht AC-8: the two producers cut a subject the same way.
+
+    A second copy in this module is how the composed subject came to be
+    rejected for length while the deterministic one was quietly shortened.
+    """
+
+    assert grind_mod.shortened is compose_mod.shortened
+    assert not hasattr(grind_mod, "_shortened")
+
+
 # ---------------------------------------------------------------------------
 # ortus-u1gs — one bounded read-only pass writes the message
 # ---------------------------------------------------------------------------
@@ -1322,6 +1334,44 @@ def test_compose_failure_falls_back_to_the_deterministic_body(
     logs = sorted((repo / "logs").glob("grind-*.log"))
     assert logs, "the run wrote no log"
     assert "the deterministic body stands" in logs[-1].read_text(encoding="utf-8")
+
+
+def test_subject_shortening_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-frht AC-1/AC-4: the message lands, and the repair says so.
+
+    The commit keeps the explanation the pass wrote — only the tail of the
+    subject is spent — and the run log states the length that was written, so a
+    composer drifting past the limit is visible rather than silently patched.
+    """
+    repo, issue_id = _seed(tmp_path, "fin-compose6")
+    long_subject = COMPOSED_SUBJECT + " time on every supported platform"
+    backend = ComposingRunner(repo, text=_composed_envelope(subject=long_subject))
+    _install(monkeypatch, tmp_path, backend)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    message = _head_message(repo)
+    subject = message.splitlines()[0]
+    written = len(f"{issue_id}: ") + len(long_subject)
+    assert written > grind_mod._COMMIT_SUBJECT_LIMIT
+    assert len(subject) <= grind_mod._COMMIT_SUBJECT_LIMIT
+    assert subject.startswith(f"{issue_id}: Ship the candidate flag")
+    assert "..." not in subject
+    # The body is the part worth keeping, and it is untouched.
+    assert "reads once at import" in message
+    assert "Exercise the behavior owned by this test." not in message
+
+    logs = sorted((repo / "logs").glob("grind-*.log"))
+    assert logs, "the run wrote no log"
+    log = logs[-1].read_text(encoding="utf-8")
+    assert f"the composed subject ran to {written} characters" in log
+    assert "shortened on a word boundary" in log
+    assert "the deterministic body stands" not in log
 
 
 def test_compose_that_writes_to_the_candidate_blocks_finalization(

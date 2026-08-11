@@ -110,6 +110,11 @@ class CommitMessage:
 
     subject: str
     body: str
+    #: Length of the subject validation was handed, when that subject was over
+    #: the limit and had to be shortened; 0 when it fit as written. Carried so
+    #: the repair can be logged rather than performed silently — a composer
+    #: drifting long is only visible if each shortening is stated.
+    shortened_from: int = 0
 
     @property
     def text(self) -> str:
@@ -129,6 +134,37 @@ def with_default_model(profile: AgentProfile) -> AgentProfile:
         return profile
     model = DEFAULT_COMPOSE_MODELS.get(profile.backend)
     return profile if model is None else replace(profile, model=model)
+
+
+#: Punctuation that only ever joined the cut word to the words that no longer
+#: follow it. Left in place a subject ends on a dangling `:` or `(` and reads as
+#: a string that was chopped, which is the impression the whole-word cut exists
+#: to avoid.
+_STRANDED_TAIL = " \t:;,-–—([{/&"
+
+
+def shortened(text: str, limit: int) -> str:
+    """`text` bounded to `limit` characters on a word boundary, no ellipsis.
+
+    A trailing `...` reads as corruption and tells a reader nothing they can
+    act on, so an over-long text simply ends on the last whole word that fits.
+    A first word wider than the entire budget is cut where the budget runs out
+    rather than yielding nothing at all. The cut is by character, so a
+    multi-byte character is never split in half. Punctuation stranded by the
+    cut is dropped, because a subject ending in `:` claims a continuation the
+    line no longer has.
+
+    Both producers of a commit subject share this one implementation: the
+    deterministic assembly in ``ortus.commands.grind`` and the composed subject
+    :func:`validate_message` repairs.
+    """
+
+    if len(text) <= limit:
+        return text
+    head = text[: limit + 1].rsplit(" ", 1)[0].rstrip()
+    if not head or len(head) > limit:
+        head = text[:limit].rstrip()
+    return head.rstrip(_STRANDED_TAIL) or head
 
 
 # ---------------------------------------------------------------------------
@@ -243,9 +279,13 @@ RULES
 - The diff is the fact. The packet below is intent, written before the code
   existed. Where they disagree, describe the diff.
 - Subject: imperative mood ("Add", "Stop", "Re-read" — never "Adds" or
-  "Added"), under {SUBJECT_LIMIT} characters including the `{issue_id}: ` prefix
-  Ortus prepends, so leave that prefix off. It describes the change, not the
-  issue, and never restates the issue title. No trailing period, no `...`.
+  "Added"), and a hard bound of {SUBJECT_LIMIT} characters counted over the
+  whole line including the `{issue_id}: ` prefix Ortus prepends, so leave that
+  prefix off and write no more than {SUBJECT_LIMIT - len(issue_id) - 2}
+  characters. Count them before you emit. A longer subject is cut back to the
+  last whole word that fits, so anything past the bound is simply lost — say
+  the whole change in what fits. It describes the change, not the issue, and
+  never restates the issue title. No trailing period, no `...`.
 - Body: paragraphs of prose. Not a bullet list, and never an inventory of the
   files this commit touched — `git show --stat` already prints those.
 - Name at least one function, class, or file that actually appears in the
@@ -484,6 +524,14 @@ def validate_message(
     Every check here is mechanical. The pass is asked for judgement and given
     latitude in the prompt; what reaches a commit is only what can be checked
     against the diff and the issue in front of us.
+
+    Length is the one defect that is repaired rather than refused: an over-long
+    subject is shortened on a word boundary and the message is kept, because a
+    good explanation must not be thrown away over a few characters. Every other
+    rule is about what the message *claims* — a symbol the diff does not
+    contain, a body that narrates its own production — and a message that is
+    wrong is still refused. The repair runs last so a correctness rule always
+    judges the subject the pass actually wrote.
     """
 
     subject = " ".join(_printable(message.subject).split())
@@ -498,11 +546,6 @@ def validate_message(
         raise ComposeRejected("the composed message has a subject and no body")
     if _ELLIPSIS_RE.search(subject):
         raise ComposeRejected("the composed subject trails off in an ellipsis")
-    if len(prefix + subject) > SUBJECT_LIMIT:
-        raise ComposeRejected(
-            f"the composed subject runs to {len(prefix + subject)} characters, "
-            f"over the {SUBJECT_LIMIT}-character limit"
-        )
     first = subject.split()[0]
     if _NON_IMPERATIVE_RE.match(first):
         raise ComposeRejected(
@@ -540,7 +583,17 @@ def validate_message(
             + ", ".join(unsupported)
             + ", which the diff does not contain"
         )
-    return CommitMessage(subject=prefix + subject, body=body)
+
+    # The prefix is Ortus's and stays whole, so only the composed text spends
+    # the budget; an id long enough to eat the whole line still leaves a
+    # character of subject rather than an empty one.
+    written = len(prefix + subject)
+    fitted = shortened(subject, max(SUBJECT_LIMIT - len(prefix), 1))
+    return CommitMessage(
+        subject=prefix + fitted,
+        body=body,
+        shortened_from=written if fitted != subject else 0,
+    )
 
 
 def guard_read_only(before: Mapping[str, str], after: Mapping[str, str]) -> None:
@@ -580,12 +633,18 @@ def compose_commit_message(
     capability: CodeGraphCapability | None = None,
     timeout: float | None = None,
     runner_factory: RunnerFactory = _default_runner_factory,
+    note: Callable[[str], None] | None = None,
 ) -> str:
     """Run one bounded read-only pass and return the message it earned.
 
     Raises :class:`ComposeFailed` for every outcome short of a validated
     message — an unreadable diff, a runner that failed or timed out, a
     transcript with no envelope, a message the validation refused.
+
+    `note` receives one line for each repair the validation made to an
+    otherwise good message. Nothing here decides anything on the strength of a
+    note; it exists so a composer that keeps overrunning the subject limit is
+    visible in the run log instead of being quietly patched up forever.
     """
 
     if not diff.strip():
@@ -623,4 +682,10 @@ def compose_commit_message(
         title=title,
         diff=diff,
     )
+    if message.shortened_from and note is not None:
+        note(
+            f"the composed subject ran to {message.shortened_from} characters, "
+            f"over the {SUBJECT_LIMIT}-character limit; it was shortened on a "
+            "word boundary rather than the message being discarded"
+        )
     return message.text

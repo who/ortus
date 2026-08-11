@@ -75,6 +75,7 @@ from ortus.core.compose import (
     ComposeFailed,
     compose_commit_message,
     guard_read_only,
+    shortened,
     with_default_model,
 )
 from ortus.core.config import load_config
@@ -1718,24 +1719,6 @@ _NON_DESCRIPTIVE_COMMENT_RE = re.compile(r"\bPLAN-GAP\b|\bBLOCKED\b")
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
 
 
-def _shortened(text: str, limit: int) -> str:
-    """`text` bounded to `limit` characters on a word boundary, no ellipsis.
-
-    A trailing `...` reads as corruption and tells a reader nothing they can
-    act on, so an over-long text simply ends on the last whole word that fits.
-    A first word wider than the entire budget is cut where the budget runs out
-    rather than yielding nothing at all. The cut is by character, so a
-    multi-byte character is never split in half.
-    """
-
-    if len(text) <= limit:
-        return text
-    head = text[: limit + 1].rsplit(" ", 1)[0].rstrip()
-    if not head or len(head) > limit:
-        return text[:limit].rstrip()
-    return head
-
-
 def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
     """The authored packet for the commit message, or {} when unreadable.
 
@@ -1780,7 +1763,7 @@ def _commit_subject(issue_id: str, title: str) -> str:
     prefix = f"{issue_id}: "
     collapsed = _undoubled_component(issue_id, " ".join(str(title or "").split()))
     budget = max(_COMMIT_SUBJECT_LIMIT - len(prefix), 1)
-    return prefix + _shortened(collapsed or _DEGRADED_COMMIT_SUBJECT, budget)
+    return prefix + shortened(collapsed or _DEGRADED_COMMIT_SUBJECT, budget)
 
 
 def _printable(text: Any) -> str:
@@ -1885,7 +1868,7 @@ def _bounded_block(entries: list[str], *, prefix: str = "- ") -> str:
     rendered: list[str] = []
     budget = _MAX_COMMIT_CHANGES_CHARS
     for entry in entries:
-        text = _shortened(_printable(entry), _MAX_COMMIT_CHANGES_CHARS)
+        text = shortened(_printable(entry), _MAX_COMMIT_CHANGES_CHARS)
         rendered.append(
             textwrap.fill(
                 text,
@@ -1967,7 +1950,7 @@ def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> 
     if objective:
         blocks.append(
             textwrap.fill(
-                _shortened(objective, _MAX_COMMIT_OBJECTIVE_CHARS),
+                shortened(objective, _MAX_COMMIT_OBJECTIVE_CHARS),
                 width=_COMMIT_BODY_WIDTH,
             )
         )
@@ -2128,12 +2111,18 @@ def _message_composer(
     profile: AgentProfile,
     capability: CodeGraphCapability | None,
     timeout: float | None,
+    write_log: Callable[[str], None],
 ) -> ComposeCallable:
     """Bind the composition pass to this run's backend, log, and profile.
 
     Finalization is handed a callable rather than a runner so it stays a
     tracker-and-git routine: it decides when a message is wanted and what
     happens when there isn't one, and knows nothing about how one is obtained.
+
+    `write_log` is here only so a repaired message says so in the run log. A
+    shortened subject is still a message that landed, so it is not a failure
+    finalization has to react to — but a composer that keeps writing past the
+    limit is worth seeing, and a silent repair would hide it.
     """
 
     def _compose(
@@ -2170,6 +2159,9 @@ def _message_composer(
             # The same indirection every other spawn in this module goes
             # through, so one patch point still swaps the whole backend.
             runner_factory=_make_runner,
+            note=lambda text: write_log(
+                f"finalization: commit-message pass for {issue_id}: {text}"
+            ),
         )
 
     return _compose
@@ -3007,6 +2999,7 @@ def grind(
                 profile=finalize_profile,
                 capability=codegraph_probe.capability,
                 timeout=(worker_timeout if worker_timeout > 0 else None),
+                write_log=write_log,
             )
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 

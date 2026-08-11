@@ -98,9 +98,6 @@ def test_subject_shape_is_imperative_bounded_and_not_the_title() -> None:
     prefixed = _validated(_message(subject=f"{ISSUE}: Write the commit body from the diff"))
     assert prefixed.subject.count(ISSUE) == 1
 
-    assert "over the" in _rejection(
-        _message(subject="Write the commit message body from the diff that a fresh reader can act on")
-    )
     assert "ellipsis" in _rejection(_message(subject="Write the commit body from the..."))
     assert "imperative" in _rejection(_message(subject="Writes the commit body from the diff"))
     assert "imperative" in _rejection(_message(subject="Composed the commit body from the diff"))
@@ -122,6 +119,146 @@ def test_subject_shape_accepts_verbs_the_heuristic_could_have_eaten(subject: str
     """`Address`, `Focus` and `Bring` are imperative despite their endings."""
 
     assert _validated(_message(subject=subject)).subject.endswith(subject)
+
+
+# ---------------------------------------------------------------------------
+# ortus-frht: an over-long subject is shortened, not thrown away
+# ---------------------------------------------------------------------------
+
+#: 73 characters — thirteen over the budget the `ortus-u1gs: ` prefix leaves.
+LONG_SUBJECT = "Write the commit message body from the diff that a fresh reader can act on"
+
+
+def test_over_long_subject_is_shortened_not_rejected() -> None:
+    """AC-1: the message survives; only the subject's tail is spent.
+
+    The defect is the length of one line, and the body underneath it is the
+    explanation the whole pass exists to produce. Discarding both because the
+    first line ran thirteen characters long threw away the good part to punish
+    the formatting.
+    """
+
+    validated = _validated(_message(subject=LONG_SUBJECT))
+
+    assert len(validated.subject) <= SUBJECT_LIMIT
+    written = validated.subject.partition(": ")[2]
+    # Ends on a whole word of the original, with nothing invented after it.
+    assert LONG_SUBJECT.startswith(written + " ")
+    assert written.split() == LONG_SUBJECT.split()[: len(written.split())]
+    # The body — the part worth keeping — is untouched.
+    assert validated.body == BODY
+    assert validated.shortened_from == len(f"{ISSUE}: ") + len(LONG_SUBJECT)
+
+
+def test_shortened_subject_has_no_ellipsis() -> None:
+    """AC-2: a cut is not announced, because `...` says nothing actionable."""
+
+    for subject in (LONG_SUBJECT, "Rewrite " + "the finalization machinery " * 5):
+        validated = _validated(_message(subject=subject))
+        assert "..." not in validated.subject and "…" not in validated.subject
+        assert not validated.subject.rstrip().endswith((":", "(", "[", ",", "-"))
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        LONG_SUBJECT,
+        "Shorten " + "the composed subject " * 6,
+        # A single word wider than the whole budget: cut, never dropped.
+        "Rewrite" + "x" * 200,
+    ],
+)
+def test_shortened_subject_keeps_the_issue_prefix(subject: str) -> None:
+    """AC-3: the greppable `<id>: ` prefix is Ortus's and never spends budget."""
+
+    validated = _validated(_message(subject=subject))
+
+    assert validated.subject.startswith(f"{ISSUE}: ")
+    assert len(validated.subject) <= SUBJECT_LIMIT
+    assert validated.subject.partition(": ")[2].strip()
+
+
+def test_fitting_subject_is_unchanged() -> None:
+    """AC-5: a subject inside the limit is returned exactly as it was written."""
+
+    subject = "Write the commit body from the verified diff"
+    validated = _validated(_message(subject=subject))
+
+    assert validated.subject == f"{ISSUE}: {subject}"
+    assert validated.shortened_from == 0
+    # Exactly at the limit is inside it, so nothing is spent there either.
+    exact = "Shorten " + "x" * (SUBJECT_LIMIT - len(f"{ISSUE}: ") - len("Shorten "))
+    validated = _validated(_message(subject=exact))
+    assert validated.subject == f"{ISSUE}: {exact}"
+    assert len(validated.subject) == SUBJECT_LIMIT
+    assert validated.shortened_from == 0
+    # Over the limit on trailing whitespace alone is trimmed, not shortened:
+    # no word is lost, so there is nothing to report.
+    validated = _validated(_message(subject=exact + "      "))
+    assert validated.subject == f"{ISSUE}: {exact}"
+    assert validated.shortened_from == 0
+
+
+@pytest.mark.parametrize(
+    "reason, subject, body",
+    [
+        # Each subject here is also over the limit: a message that is wrong is
+        # rejected for being wrong, never quietly repaired into an acceptable
+        # one.
+        (
+            "does not contain",
+            LONG_SUBJECT,
+            "The old body restated the packet.\n\nNow `invent_the_world()` writes it.",
+        ),
+        ("no body", LONG_SUBJECT, "   "),
+        (
+            "single paragraph",
+            LONG_SUBJECT,
+            "One paragraph naming `validate_message` and stopping there.",
+        ),
+        (
+            "inventories",
+            LONG_SUBJECT,
+            "The pass writes the body, and `validate_message` checks it.\n\n"
+            "- src/ortus/core/compose.py\n- src/ortus/commands/grind.py\n",
+        ),
+        (
+            "narrates",
+            LONG_SUBJECT,
+            "The change landed on the second attempt.\n\nThe mechanism lives in "
+            "`validate_message`, which checks it against the diff.",
+        ),
+        ("imperative", "Writes " + LONG_SUBJECT, BODY),
+        ("ellipsis", LONG_SUBJECT.removesuffix("on") + "...", BODY),
+        (
+            "restates the issue title",
+            "Finalization composes the commit message with a bounded read-only",
+            BODY,
+        ),
+    ],
+)
+def test_wrong_messages_are_still_rejected(reason: str, subject: str, body: str) -> None:
+    """AC-6: length is repaired; a false or shapeless message still fails.
+
+    The distinction is whether the defect is in what the message claims or in
+    how it is formatted. Shortening must not become a way for a body that names
+    a symbol the diff never had to reach a commit.
+    """
+
+    assert reason in _rejection(_message(subject=subject, body=body))
+
+
+def test_non_ascii_subject_shortens_cleanly() -> None:
+    """AC-7: the cut is by character, so no multi-byte character is split."""
+
+    subject = "Trim das Änderungsprotokoll für den Leser, ohne die Änderungen zu verlieren"
+    validated = _validated(_message(subject=subject))
+
+    assert len(validated.subject) <= SUBJECT_LIMIT
+    assert validated.subject.startswith(f"{ISSUE}: Trim das Änderungsprotokoll")
+    assert "�" not in validated.subject
+    assert validated.subject.encode("utf-8").decode("utf-8") == validated.subject
+    assert subject.startswith(validated.subject.partition(": ")[2])
 
 
 # ---------------------------------------------------------------------------
