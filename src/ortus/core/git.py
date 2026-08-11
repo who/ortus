@@ -114,13 +114,30 @@ class GitClient:
     repo: Path
     binary: str = "git"
 
-    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, *args: str, hooks: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         # `errors="replace"`: git echoes paths and hook output verbatim, which
         # is not guaranteed to be valid UTF-8. Strict decoding would raise
         # inside a helper whose contract is to answer conservatively, and would
         # do it precisely when we are trying to report someone else's failure.
+        #
+        # `hooks=False` disables repository hooks for the transaction's own
+        # branch plumbing (branch creation, checkout, fast-forward). Beads
+        # ≥1.0.4 installs a post-checkout hook that re-imports the exported
+        # JSONL on branch switches; fired from the claim's checkout it
+        # re-imported a stale export over the just-written claim — reverting
+        # the issue to open and silently skipping verification. Commit-time
+        # and push-time hooks stay live: a repository's refusing pre-commit
+        # hook is an answer finalization must carry to the operator
+        # (ortus-pgqg), and both coexisted with the pipeline all along. What
+        # may not fire is a hook that rewrites tracker state on ref moves the
+        # transaction itself performs.
+        command = [self.binary, *args]
+        if not hooks:
+            command = [self.binary, "-c", "core.hooksPath=/dev/null", *args]
         return subprocess.run(
-            [self.binary, *args],
+            command,
             cwd=str(self.repo),
             capture_output=True,
             text=True,
@@ -282,8 +299,8 @@ class GitClient:
     # --- writes ---------------------------------------------------------
 
     def checkout(self, branch: str) -> bool:
-        """`git checkout <branch>`. Returns True on success."""
-        return self._run("checkout", branch).returncode == 0
+        """`git checkout <branch>`, hook-free. Returns True on success."""
+        return self._run("checkout", branch, hooks=False).returncode == 0
 
     def push(self, branch: str) -> bool:
         """`git push origin <branch>`. Returns True on success.
@@ -368,7 +385,7 @@ class GitClient:
         reporting an existing branch is the caller's decision, and silently
         resetting one would invent history nobody made.
         """
-        return self._run("branch", name, at_ref).returncode == 0
+        return self._run("branch", name, at_ref, hooks=False).returncode == 0
 
     def fast_forward(self, branch: str, to_ref: str) -> bool:
         """Fast-forward `branch` (not checked out) to `to_ref`. True on success.
@@ -381,7 +398,10 @@ class GitClient:
         tracker's asynchronous exports made a checkout-then-merge sequence
         racy). Refuses to update the currently checked-out branch.
         """
-        return self._run("fetch", ".", f"{to_ref}:{branch}").returncode == 0
+        return (
+            self._run("fetch", ".", f"{to_ref}:{branch}", hooks=False).returncode
+            == 0
+        )
 
     def commit_paths(self, paths: frozenset[str], message: str) -> CommitResult:
         """Commit only explicitly owned paths, preserving everything else.

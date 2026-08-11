@@ -516,8 +516,19 @@ def test_verifier_report_and_mutation_isolation(
                     # The forbidden move: carrying the work off the issue
                     # branch. Committing on the branch itself is the
                     # deliverable now; committing anywhere else strands it.
+                    # Hooks are disabled for the simulated switch so the test
+                    # pins the branch-switch rejection itself — beads ≥1.0.4
+                    # ships a post-checkout hook whose tracker side effects
+                    # would otherwise trip the lifecycle-state rejection first.
                     subprocess.run(
-                        ["git", "checkout", "-b", "rogue"],
+                        [
+                            "git",
+                            "-c",
+                            "core.hooksPath=/dev/null",
+                            "checkout",
+                            "-b",
+                            "rogue",
+                        ],
                         cwd=repo,
                         check=True,
                         capture_output=True,
