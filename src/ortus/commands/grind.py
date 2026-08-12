@@ -1483,11 +1483,8 @@ def _verify_candidate(
             f"iter {iteration}: preserved verifier-timeout candidate for "
             f"{result.journal.issue_id}: {list(result.journal.candidate_paths)}"
         )
-        output.progress(
-            "grind",
-            f"preserved timed-out candidate {result.journal.issue_id}; "
-            "re-run grind to resume",
-        )
+        # Preservation is part of the retry controller's one terminal
+        # narrative for this failure; no separate console line here.
         return result
 
     if backend == "claude":
@@ -1582,7 +1579,8 @@ def _verify_candidate(
             bd.update_status(issue_id, "in_progress")
         result = _reject(failure, phase=VERIFICATION_REJECTED, summary=summary)
         write_log(f"iter {iteration}: verifier rejected: {failure}")
-        output.error(f"grind: verifier rejected candidate: {failure}")
+        # The retry controller owns the one console narrative for this
+        # rejection; a second line here would double-print the failure.
         return result
 
     report = render_report(
@@ -3126,6 +3124,129 @@ def _fmt_duration(seconds: float) -> str:
     return f"{total // 60}m"
 
 
+# ---------------------------------------------------------------------------
+# Terminal-failure narration (ortus-ipyq). Every error the loop prints answers
+# the operator's three questions — what happened, to which issue, and what to
+# do now — and never states something the journal cannot back.
+# ---------------------------------------------------------------------------
+
+_NO_CHANGES = "no changes were made"
+
+_RESUME_ACTION = (
+    "run `ortus grind` again; it resumes this issue at verification "
+    "with a fresh verifier"
+)
+_DECIDE_ACTION = (
+    "read the issue's newest comment, decide, and relabel it for the queue"
+)
+
+#: Failure class → the operator's next action, keyed by the journal phase a
+#: terminal failure leaves behind. The table lives beside the messages on
+#: purpose: a new failure class must pick its action here — a halt with no
+#: safe next action to name is a missing recovery design, not a wording
+#: problem.
+_NEXT_ACTION_BY_PHASE: dict[str, str] = {
+    VERIFICATION_REJECTED: _RESUME_ACTION,
+    VERIFICATION_TIMEOUT: _RESUME_ACTION,
+    CORRECTION_TIMEOUT: _RESUME_ACTION,
+    CORRECTION_REJECTED: _DECIDE_ACTION,
+    CORRECTIONS_EXHAUSTED: _DECIDE_ACTION,
+    PLAN_GAP_ROUTED: _DECIDE_ACTION,
+    PLAN_GAP_ESCALATED: _DECIDE_ACTION,
+    FINALIZATION_BLOCKED: (
+        "resolve the blocker, then run `ortus grind` again; it resumes "
+        "this exact issue"
+    ),
+}
+
+#: Phases whose halt is a verdict on the candidate, so the narrative opens
+#: with "verification of … failed" rather than the generic "work on … stopped".
+_VERIFICATION_FAILURE_PHASES = frozenset(
+    {VERIFICATION_REJECTED, VERIFICATION_TIMEOUT, CORRECTION_REJECTED}
+)
+
+
+def _issue_reference(issue_id: str, title: str = "") -> str:
+    """`"<title>" (<id>)`, or the id alone when no title is readable."""
+
+    collapsed = " ".join(str(title or "").split())
+    return f'"{collapsed}" ({issue_id})' if collapsed else issue_id
+
+
+def _issue_reference_from_bd(bd: BdClient, issue_id: str) -> str:
+    """A title lookup must never break the error path it decorates."""
+
+    try:
+        return _issue_reference(issue_id, str(bd.show(issue_id).get("title") or ""))
+    except Exception:
+        return issue_id
+
+
+def _candidate_state_phrase(git: GitClient, journal: CandidateJournal | None) -> str:
+    """The candidate's whereabouts, computed from the journal and the repo.
+
+    Never templated: a branch tip ahead of the candidate base means the work
+    is committed on that branch; dirty candidate paths mean uncommitted edits
+    survive in the tree; both mean both; neither means nothing was produced.
+    """
+
+    if journal is None:
+        return _NO_CHANGES
+    in_repo = git.is_git_repo()
+    committed = bool(
+        in_repo
+        and journal.issue_branch
+        and journal.base_head
+        and git.branch_exists(journal.issue_branch)
+        and git.branch_tip(journal.issue_branch) != journal.base_head
+    )
+    dirty = git.dirty_paths() if in_repo else None
+    if dirty is None:
+        # Status is unreadable; the journal's own capture is the best truth.
+        preserved = bool(journal.candidate_paths) and not committed
+    else:
+        preserved = bool(frozenset(journal.candidate_paths) & dirty)
+    if committed and preserved:
+        return (
+            f"committed on {journal.issue_branch}, with further uncommitted "
+            "edits preserved in the tree"
+        )
+    if committed:
+        return f"committed on {journal.issue_branch}"
+    if preserved:
+        return "uncommitted edits preserved in the tree"
+    return _NO_CHANGES
+
+
+def _safety_sentence(state: str, *, claim_kept: bool = False) -> str:
+    """One sentence on the work's whereabouts, never softer than the truth."""
+
+    if state == _NO_CHANGES:
+        kept = ", and the claim is kept" if claim_kept else ""
+        return f"No changes were made{kept}."
+    kept = " — and the claim is kept" if claim_kept else ""
+    return f"Its work is safe — {state}{kept}."
+
+
+def _halt_narrative(
+    *, issue_ref: str, phase: str, cause: str, state: str
+) -> str:
+    """The single terminal message for one halted issue: what happened, to
+    which issue, where its work sits, and what the operator does next."""
+
+    lead = (
+        f"verification of {issue_ref} failed"
+        if phase in _VERIFICATION_FAILURE_PHASES
+        else f"work on {issue_ref} stopped"
+    )
+    action = _NEXT_ACTION_BY_PHASE.get(phase, _RESUME_ACTION)
+    return (
+        f"{lead}: {cause}.\n"
+        f"{_safety_sentence(state, claim_kept=True)}\n"
+        f"Next: {action}."
+    )
+
+
 def _log_writer(log_path: Path) -> Callable[[str], None]:
     """Tee-style logger: write a timestamped line to log_path; terminal stays quiet."""
 
@@ -3491,8 +3612,16 @@ def grind(
                 if blocker is not None:
                     write_log(f"finalization resume: HALT — {blocker}")
                     output.error(
-                        "grind: could not finish the pending finalization — "
-                        + _console_safe(blocker),
+                        _console_safe(
+                            "could not finish the pending finalization of "
+                            + _issue_reference_from_bd(
+                                bd, pending_finalization.issue_id
+                            )
+                            + f" — {blocker}\n"
+                            + _safety_sentence(
+                                _candidate_state_phrase(git, pending_finalization)
+                            )
+                        ),
                         hint=(
                             "the transaction journal under logs/ retains the "
                             "recoverable state; resolve the blocker and re-run grind"
@@ -4695,10 +4824,22 @@ def grind(
                                 active_journal, phase=halt_phase
                             )
                             transaction_store.save(active_journal)
-                        write_log(
-                            f"iter {iters_run}: {halt}; candidate left uncommitted"
+                        write_log(f"iter {iters_run}: {halt}")
+                        output.error(
+                            _console_safe(
+                                _halt_narrative(
+                                    issue_ref=_issue_reference(
+                                        issue_id,
+                                        str(target_issue.get("title") or ""),
+                                    ),
+                                    phase=active_journal.phase,
+                                    cause=halt,
+                                    state=_candidate_state_phrase(
+                                        git, active_journal
+                                    ),
+                                )
+                            )
                         )
-                        output.error(f"grind: {halt}; candidate left uncommitted")
                         break
 
                     # --- Ortus-owned finalization (AC-4..AC-6) ---------------
@@ -4719,8 +4860,17 @@ def grind(
                             f"iter {iters_run}: finalization blocked — {blocker}"
                         )
                         output.error(
-                            "grind: finalization blocked — "
-                            + _console_safe(blocker),
+                            _console_safe(
+                                "finalization of "
+                                + _issue_reference(
+                                    issue_id,
+                                    str(target_issue.get("title") or ""),
+                                )
+                                + f" blocked — {blocker}\n"
+                                + _safety_sentence(
+                                    _candidate_state_phrase(git, active_journal)
+                                )
+                            ),
                             hint=(
                                 "the transaction journal under logs/ retains the "
                                 "recoverable state; re-run grind to resume this "
@@ -4862,8 +5012,13 @@ def grind(
                             )
                             output.progress(
                                 "grind",
-                                f"preserved candidate {active_journal.issue_id}; "
-                                "re-run grind to resume",
+                                "preserved the candidate for "
+                                + _issue_reference_from_bd(
+                                    bd, active_journal.issue_id
+                                )
+                                + " — "
+                                + _candidate_state_phrase(git, active_journal)
+                                + "; run `ortus grind` again to resume it",
                             )
                             break
                         transaction_store.clear()
@@ -4899,8 +5054,13 @@ def grind(
                             )
                             output.progress(
                                 "grind",
-                                f"preserved candidate {active_journal.issue_id}; "
-                                "re-run grind to resume",
+                                "preserved the candidate for "
+                                + _issue_reference_from_bd(
+                                    bd, active_journal.issue_id
+                                )
+                                + " — "
+                                + _candidate_state_phrase(git, active_journal)
+                                + "; run `ortus grind` again to resume it",
                             )
                             break
                         # Nothing was produced, so there is no handoff to hold
@@ -4945,12 +5105,28 @@ def grind(
                 f"in_progress: {final_snapshot.in_progress}, "
                 f"iters_run={iters_run}) ==="
             )
+            # The exit line accounts for unfinished work in words instead of
+            # burying it in a status-count tuple: "awaiting retry" is a
+            # claimed issue whose journal survived the run.
+            # Checked against bd directly, not the label-filtered snapshot: an
+            # escalated issue is excluded from the queue but its claim and
+            # journal still hold unfinished work the operator must hear about.
+            exit_journal = transaction_store.load()
+            awaiting_retry = int(
+                exit_journal is not None
+                and bd.status(exit_journal.issue_id) == "in_progress"
+            )
             output.progress(
                 "grind",
-                f"done; closed {tasks_completed} this session "
-                f"(open: {initial_snapshot.open} → {final_snapshot.open}, "
-                f"in_progress: {final_snapshot.in_progress})",
+                f"done — {tasks_completed} landed this session, "
+                f"{awaiting_retry} awaiting retry, {final_snapshot.open} open",
             )
+            if awaiting_retry and exit_journal is not None:
+                output.progress(
+                    "grind",
+                    "next: "
+                    + _NEXT_ACTION_BY_PHASE.get(exit_journal.phase, _RESUME_ACTION),
+                )
     except FlockBusy as exc:
         output.error(str(exc), hint="another `ortus grind` is already running here")
         raise typer.Exit(code=1)

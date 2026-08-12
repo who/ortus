@@ -413,8 +413,8 @@ def test_failure_at_commit_retains_a_recoverable_journal(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    combined = result.stdout + result.stderr
-    assert "finalization blocked — path-scoped commit" in combined
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert f"({issue_id}) blocked — path-scoped commit" in combined
     journal = JournalStore(repo).load()
     assert journal is not None
     assert journal.finalized("report") and journal.finalized("close")

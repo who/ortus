@@ -372,7 +372,7 @@ def test_retry_exhaustion_flags_a_human_and_commits_nothing(
     issue = _issue(repo, issue_id)
     assert issue["status"] != "closed"
     assert "human" in issue.get("labels", [])
-    combined = result.stdout + result.stderr
+    combined = " ".join((result.stdout + result.stderr).split())
     assert "bounded correction attempts exhausted (1/1)" in combined
     assert "Ortus correction escalation" in _comments(repo, issue_id)
     journal = JournalStore(repo).load()
@@ -384,6 +384,41 @@ def test_retry_exhaustion_flags_a_human_and_commits_nothing(
         ["git", "log", "--oneline"], cwd=repo, capture_output=True, text=True
     ).stdout
     assert "candidate" not in log
+
+
+def test_retry_exhaustion_prints_next_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-ipyq AC-4: exhaustion names its issue, tells the truth about the
+    candidate, and states the see-the-comment next action."""
+    repo, issue_id = _seed(tmp_path, "corr8")
+    scripted = ScriptedRunner(
+        repo,
+        [
+            _fail("still broken", "finding A"),
+            _fail("still broken", "finding A"),
+        ],
+    )
+    _install(monkeypatch, tmp_path, scripted)
+
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0", "--max-corrections", "1"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    console = " ".join((result.stdout + result.stderr).split())
+    title = _issue(repo, issue_id)["title"]
+    assert (
+        f'work on "{title}" ({issue_id}) stopped: '
+        "bounded correction attempts exhausted (1/1)." in console
+    )
+    assert "uncommitted edits preserved in the tree" in console
+    assert (
+        "Next: read the issue's newest comment, decide, and relabel it "
+        "for the queue." in console
+    )
+    assert "1 awaiting retry" in console
 
 
 def test_retry_disabled_escalates_on_the_first_failure(
@@ -403,8 +438,8 @@ def test_retry_disabled_escalates_on_the_first_failure(
     phases = [phase for phase, _ in scripted.prompts]
     assert phases == [Phase.IMPLEMENT.value, Phase.VERIFY.value]
     assert _issue(repo, issue_id)["status"] != "closed"
-    assert "bounded correction attempts exhausted (0/0)" in (
-        result.stdout + result.stderr
+    assert "bounded correction attempts exhausted (0/0)" in " ".join(
+        (result.stdout + result.stderr).split()
     )
 
 
@@ -482,7 +517,9 @@ def test_plan_gap_routing_pass_failure_still_escalates(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    assert "plan-gap routing pass failed (exit 3)" in (result.stdout + result.stderr)
+    assert "plan-gap routing pass failed (exit 3)" in " ".join(
+        (result.stdout + result.stderr).split()
+    )
     issue = _issue(repo, issue_id)
     assert issue["status"] != "closed"
     assert "human" in issue.get("labels", [])

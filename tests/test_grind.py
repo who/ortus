@@ -1526,10 +1526,133 @@ def test_grind_blockers_print_verbatim_on_console(
         max_corrections=0,
     )
     console = _squashed_console(result)
-    assert (
-        "bounded correction attempts exhausted (0/0); candidate left uncommitted"
-        in console
+    assert "bounded correction attempts exhausted (0/0)" in console
+    assert "candidate left uncommitted" not in console
+
+
+def _verdictless_grind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name: str, title: str
+) -> tuple[Path, str, object]:
+    """One harness-claimed run whose fake verifier emits no verdict envelope."""
+    repo = _bd_repo(tmp_path, name)
+    issue_id = _create_ready_issue(repo, title)
+    _baseline_commit(repo)
+
+    class _SilentVerifier:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            if not readonly:
+                (repo / "candidate.py").write_text("VALUE = 1\n")
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _SilentVerifier())
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
+    return repo, issue_id, result
+
+
+@pytest.mark.slow
+def test_verdictless_failure_names_issue_and_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-ipyq AC-1: one message with the title and id, the truthful
+    candidate state, and the re-run next action — never the old double print."""
+    _, issue_id, result = _verdictless_grind(
+        tmp_path, monkeypatch, name="verdictless", title="silent verifier"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    assert (
+        f'verification of "silent verifier" ({issue_id}) failed: '
+        "expected exactly one verdict envelope; found 0." in console
+    )
+    assert (
+        "Its work is safe — uncommitted edits preserved in the tree — "
+        "and the claim is kept." in console
+    )
+    assert (
+        "Next: run `ortus grind` again; it resumes this issue at "
+        "verification with a fresh verifier." in console
+    )
+    assert "verifier rejected candidate" not in console
+    assert "candidate left uncommitted" not in console
+
+
+def test_candidate_state_phrasing_is_computed() -> None:
+    """ortus-ipyq AC-3: candidate-state phrasing derives from the journal and
+    the repository — branch commits, dirty paths, both, or nothing."""
+    from ortus.core.transaction import CandidateJournal
+
+    class _FakeGit:
+        def __init__(self, tip: str, dirty: frozenset[str] | None) -> None:
+            self._tip = tip
+            self._dirty = dirty
+
+        def is_git_repo(self) -> bool:
+            return True
+
+        def branch_exists(self, name: str) -> bool:
+            return True
+
+        def branch_tip(self, name: str) -> str:
+            return self._tip
+
+        def dirty_paths(self) -> frozenset[str] | None:
+            return self._dirty
+
+    journal = CandidateJournal(
+        issue_id="x-1",
+        base_head="base",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        candidate_paths=("a.py",),
+        issue_branch="ortus/x-1",
+    )
+    phrase = grind_mod._candidate_state_phrase
+    assert phrase(_FakeGit("tip2", frozenset()), journal) == "committed on ortus/x-1"
+    assert (
+        phrase(_FakeGit("base", frozenset({"a.py"})), journal)
+        == "uncommitted edits preserved in the tree"
+    )
+    assert phrase(_FakeGit("tip2", frozenset({"a.py"})), journal) == (
+        "committed on ortus/x-1, with further uncommitted edits "
+        "preserved in the tree"
+    )
+    assert phrase(_FakeGit("base", frozenset()), journal) == "no changes were made"
+    assert phrase(_FakeGit("base", frozenset()), None) == "no changes were made"
+
+
+@pytest.mark.slow
+def test_exit_line_accounts_for_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-ipyq AC-5: the exit line speaks operator — landed / awaiting
+    retry / open in words, plus the next action while work awaits retry."""
+    _, _, result = _verdictless_grind(
+        tmp_path, monkeypatch, name="exitline", title="exit accounting"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    assert "done — 0 landed this session, 1 awaiting retry, 0 open" in console
+    assert (
+        "next: run `ortus grind` again; it resumes this issue at "
+        "verification with a fresh verifier" in console
+    )
+    assert "done; closed" not in console
 
 
 @pytest.mark.slow
