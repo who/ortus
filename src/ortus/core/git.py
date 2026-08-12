@@ -302,6 +302,92 @@ class GitClient:
         """`git checkout <branch>`, hook-free. Returns True on success."""
         return self._run("checkout", branch, hooks=False).returncode == 0
 
+    def checkout_reporting(self, branch: str) -> str:
+        """`git checkout <branch>`, hook-free; "" on success, else git's reason.
+
+        The bare-bool `checkout` left an operator reproducing the failure by
+        hand to learn why (the ortus-pgqg lesson, applied late): a claim that
+        cannot switch branches must say what git said.
+        """
+        proc = self._run("checkout", branch, hooks=False)
+        if proc.returncode == 0:
+            return ""
+        return _bounded_failure(proc) or f"git checkout exited {proc.returncode}"
+
+    def delete_merged_branch(self, name: str) -> bool:
+        """`git branch -d <name>` — refuses unmerged work by construction."""
+        return self._run("branch", "-d", name).returncode == 0
+
+    def switch_preserving_exports(
+        self, branch: str, exports: frozenset[str]
+    ) -> str:
+        """Switch branches carrying the worktree's tracker exports along.
+
+        Tracker exports are generated files: regenerable from the database,
+        excluded from every candidate, and continuously rewritten by intake.
+        When the current and target branches disagree about their committed
+        content, a plain checkout refuses rather than overwrite the local
+        copies — the race that halted a claim on 2026-08-11. The worktree's
+        bytes are the newest export, so they win: snapshot them, clear the
+        local modifications, switch hook-free, and write the snapshot back.
+        Only export paths receive this treatment; any other local change
+        still refuses the switch exactly as before.
+
+        Returns "" on success, else the reason the switch failed.
+        """
+
+        snapshot: dict[str, bytes | None] = {}
+        for rel in sorted(exports):
+            path = self.repo / rel
+            try:
+                snapshot[rel] = path.read_bytes()
+            except FileNotFoundError:
+                snapshot[rel] = None
+            except OSError as exc:
+                return f"could not snapshot {rel} before switching ({exc})"
+        # Make index and worktree match the current HEAD for each export, so
+        # the switch sees no local change at all — an unstaged deletion blocks
+        # a checkout exactly like an edit does. Paths HEAD does not track are
+        # unstaged and removed instead; either way the target branch
+        # materializes its own version, which the snapshot then overwrites.
+        for rel in sorted(exports):
+            tracked = (
+                self._run("cat-file", "-e", f"HEAD:{rel}").returncode == 0
+            )
+            if tracked:
+                restored = self._run(
+                    "restore", "--source=HEAD", "--staged", "--worktree", "--", rel
+                )
+                if restored.returncode != 0:
+                    return (
+                        f"could not reset {rel} before switching: "
+                        + (_bounded_failure(restored) or "git restore failed")
+                    )
+            else:
+                self._run("restore", "--staged", "--", rel)
+                try:
+                    (self.repo / rel).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    return f"could not clear {rel} before switching ({exc})"
+        reason = self.checkout_reporting(branch)
+        if reason:
+            # Put the snapshot back where it was; the caller still sees the
+            # failure, but with its exports intact rather than half-cleared.
+            for rel, data in snapshot.items():
+                if data is not None:
+                    (self.repo / rel).write_bytes(data)
+            return reason
+        for rel, data in snapshot.items():
+            target = self.repo / rel
+            if data is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+        return ""
+
     def push(self, branch: str) -> bool:
         """`git push origin <branch>`. Returns True on success.
 

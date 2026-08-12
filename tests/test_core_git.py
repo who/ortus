@@ -460,3 +460,25 @@ def test_fast_forward_updates_the_ref_without_touching_the_tree(
     subprocess.run(["git", "add", "other.py"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "diverge"], cwd=repo, check=True)
     assert not git.fast_forward("main", "diverged")
+
+
+def test_exports_survive_switch_byte_identically(tmp_path: Path) -> None:
+    """ortus-mfyu AC-2: the worktree's newest export bytes cross the switch
+    even when both branches' committed copies diverge from them."""
+    repo = _repo(tmp_path)
+    git = GitClient(repo)
+    exports = repo / ".beads" / "issues.jsonl"
+    subprocess.run(["git", "checkout", "-q", "-b", "ortus/tmpl-s"], cwd=repo, check=True)
+    exports.write_text("baseline\nbranch-commit\n")
+    subprocess.run(["git", "commit", "-aqm", "branch exports"], cwd=repo, check=True)
+    newest = b"baseline\nbranch-commit\nnewest-staged\n"
+    exports.write_bytes(newest)
+    subprocess.run(["git", "add", ".beads/issues.jsonl"], cwd=repo, check=True)
+
+    reason = git.switch_preserving_exports(
+        "main", frozenset({".beads/issues.jsonl"})
+    )
+
+    assert reason == ""
+    assert git.current_branch() == "main"
+    assert exports.read_bytes() == newest

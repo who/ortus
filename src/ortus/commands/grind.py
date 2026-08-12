@@ -2596,6 +2596,116 @@ def _finalize_candidate(
     return journal, None
 
 
+
+def _prepare_issue_branch(
+    git: GitClient,
+    *,
+    issue_id: str,
+    integration_branch: str,
+    journal: CandidateJournal | None,
+    write_log: Callable[[str], None],
+) -> tuple[str, str]:
+    """Put the tree on `ortus/<issue-id>`, or say why that is impossible.
+
+    Returns ``(branch_name, blocker)`` — blocker is "" on success. Owns the
+    whole branch discipline of a claim:
+
+    - A tree stranded on a prior issue's branch is returned to the
+      integration branch first, carrying the tracker exports across (they
+      are generated, candidate-excluded, and continuously rewritten by
+      intake, so their committed copies legitimately diverge from the
+      worktree's newest bytes — a plain checkout refused exactly that on
+      2026-08-11 and halted the run).
+    - Resuming the journal's own issue checks its existing branch out when
+      the tip still matches the journal's recorded head — the branch is the
+      durable home the keystone promised, commits and all.
+    - Any other pre-existing branch is reused only at the integration head,
+      reported otherwise, never reset.
+    - A branch created by this claim is removed again when the claim fails,
+      so a failed claim cannot strand a ref the never-reset rule would later
+      refuse.
+    - Failures carry git's own words (ortus-pgqg).
+    """
+
+    issue_branch = f"ortus/{issue_id}"
+    created_this_claim = False
+    blocker = ""
+
+    resuming_own = bool(
+        journal is not None
+        and journal.issue_id == issue_id
+        and journal.issue_branch == issue_branch
+        and git.branch_exists(issue_branch)
+        and journal.branch_head
+        and git.branch_tip(issue_branch) == journal.branch_head
+    )
+
+    if git.current_branch() != integration_branch and not (
+        resuming_own and git.current_branch() == issue_branch
+    ):
+        switch_reason = git.switch_preserving_exports(
+            integration_branch, _TRACKER_EXPORT_PATHS
+        )
+        if switch_reason:
+            return issue_branch, (
+                f"could not return to {integration_branch} "
+                f"before claiming: {switch_reason}"
+            )
+        write_log(
+            f"iter prep: reasserted {integration_branch} "
+            "(exports carried) before claiming"
+        )
+
+    if not git.valid_branch_name(issue_branch):
+        return issue_branch, (
+            f"issue id {issue_id!r} is not a legal branch "
+            f"name component for {issue_branch!r}"
+        )
+
+    if resuming_own:
+        if git.current_branch() != issue_branch:
+            reason = git.switch_preserving_exports(
+                issue_branch, _TRACKER_EXPORT_PATHS
+            )
+            if reason:
+                return issue_branch, (
+                    f"could not check out {issue_branch} to resume: {reason}"
+                )
+        write_log(
+            f"iter prep: resumed existing {issue_branch} at "
+            f"{git.branch_tip(issue_branch)[:12]}"
+        )
+        return issue_branch, ""
+
+    if git.branch_exists(issue_branch):
+        if git.branch_tip(issue_branch) != git.head_oid():
+            return issue_branch, (
+                f"branch {issue_branch} already exists at "
+                f"{git.branch_tip(issue_branch)[:12]}, not at the "
+                f"integration head {git.head_oid()[:12]}; refusing "
+                "to reuse or reset it — resolve the branch "
+                "manually, then re-run grind"
+            )
+        write_log(
+            f"iter prep: reusing existing {issue_branch} at the integration head"
+        )
+    elif git.create_branch(issue_branch, integration_branch):
+        created_this_claim = True
+    else:
+        blocker = f"could not create {issue_branch}"
+
+    if not blocker:
+        reason = git.checkout_reporting(issue_branch)
+        if reason:
+            blocker = f"could not check out {issue_branch}: {reason}"
+
+    if blocker and created_this_claim and git.delete_merged_branch(issue_branch):
+        write_log(
+            f"iter prep: removed just-created {issue_branch} after the failed claim"
+        )
+    return issue_branch, blocker
+
+
 def _enforce_branch_discipline(
     git: GitClient,
     integration_branch: str,
@@ -3793,31 +3903,13 @@ def grind(
                     # named branch first, and an interrupted finalization
                     # resumes from a ref instead of being reasoned about.
                     if git.is_git_repo() and git.has_commits():
-                        issue_branch = f"ortus/{issue_id}"
-                        branch_blocker = ""
-                        if not git.valid_branch_name(issue_branch):
-                            branch_blocker = (
-                                f"issue id {issue_id!r} is not a legal branch "
-                                f"name component for {issue_branch!r}"
-                            )
-                        elif git.branch_exists(issue_branch):
-                            if git.branch_tip(issue_branch) != git.head_oid():
-                                branch_blocker = (
-                                    f"branch {issue_branch} already exists at "
-                                    f"{git.branch_tip(issue_branch)[:12]}, not at the "
-                                    f"integration head {git.head_oid()[:12]}; refusing "
-                                    "to reuse or reset it — resolve the branch "
-                                    "manually, then re-run grind"
-                                )
-                            else:
-                                write_log(
-                                    f"iter prep: reusing existing {issue_branch} "
-                                    "at the integration head"
-                                )
-                        elif not git.create_branch(issue_branch, integration_branch):
-                            branch_blocker = f"could not create {issue_branch}"
-                        if not branch_blocker and not git.checkout(issue_branch):
-                            branch_blocker = f"could not check out {issue_branch}"
+                        issue_branch, branch_blocker = _prepare_issue_branch(
+                            git,
+                            issue_id=issue_id,
+                            integration_branch=integration_branch,
+                            journal=active_journal,
+                            write_log=write_log,
+                        )
                         if branch_blocker:
                             bd.update_status(issue_id, "open")
                             write_log(f"iter prep: HALT — {branch_blocker}")

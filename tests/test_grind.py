@@ -1157,3 +1157,237 @@ def test_grind_fr003_no_beads(tmp_path: Path) -> None:
     bogus.mkdir()
     result = runner.invoke(app, ["grind", str(bogus)])
     assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Claim-path branch safety (ortus-mfyu): the 2026-08-11 stranded-branch race
+# ---------------------------------------------------------------------------
+
+
+def _baseline_commit(repo: Path) -> None:
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+class _PassingWorker:
+    """Implementation writes one candidate file; the verifier passes it."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        readonly: bool = False,
+        **kwargs: object,
+    ) -> int:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        if readonly:
+            _emit_verdict(self.repo, log_path, criteria=("AC-1", "AC-2"))
+        else:
+            (self.repo / "candidate.py").write_text("VALUE = 1\n")
+        return 0
+
+
+def _run_claim_with_failing_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    preexisting_branch: bool,
+) -> tuple[Path, str, object]:
+    repo = _bd_repo(tmp_path, name)
+    issue_id = _create_ready_issue(repo, "claim that cannot check out")
+    _baseline_commit(repo)
+    if preexisting_branch:
+        subprocess.run(
+            ["git", "branch", f"ortus/{issue_id}", "main"], cwd=repo, check=True
+        )
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _PassingWorker(repo))
+    monkeypatch.setattr(
+        "ortus.core.git.GitClient.checkout_reporting",
+        lambda self, branch: (
+            "simulated: local changes clash" if branch.startswith("ortus/") else ""
+        ),
+    )
+    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
+    return repo, issue_id, result
+
+
+@pytest.mark.slow
+def test_failed_claim_deletes_its_own_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a claim that created its branch and then failed removes it and
+    reverts the claim."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo, issue_id, result = _run_claim_with_failing_checkout(
+        tmp_path, monkeypatch, "mfyu3", preexisting_branch=False
+    )
+    assert result.exit_code == 1
+    gone = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/ortus/{issue_id}"],
+        cwd=repo,
+        capture_output=True,
+    )
+    assert gone.returncode != 0, "the claim-created branch must be removed"
+    assert _issue(repo, issue_id)["status"] == "open"
+
+
+@pytest.mark.slow
+def test_failed_claim_keeps_a_reused_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a pre-existing branch is never deleted by a failed claim."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo, issue_id, result = _run_claim_with_failing_checkout(
+        tmp_path, monkeypatch, "mfyu4", preexisting_branch=True
+    )
+    assert result.exit_code == 1
+    kept = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/ortus/{issue_id}"],
+        cwd=repo,
+        capture_output=True,
+    )
+    assert kept.returncode == 0, "a reused branch survives the failed claim"
+    assert _issue(repo, issue_id)["status"] == "open"
+
+
+@pytest.mark.slow
+def test_checkout_blocker_carries_git_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: the halt names what git said, not just that a checkout failed."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo, _issue_id, result = _run_claim_with_failing_checkout(
+        tmp_path, monkeypatch, "mfyu5", preexisting_branch=False
+    )
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split()) + _grind_log(repo)
+    assert "simulated: local changes clash" in combined
+
+
+def _stranded_claim_repo(tmp_path: Path) -> tuple[Path, object, bytes]:
+    """A git repo manufactured into the observed strand: the tree on a prior
+    issue's branch whose committed exports diverge from main, newer export
+    bytes staged, and a journal owning that prior issue."""
+    from ortus.core.git import GitClient
+    from ortus.core.transaction import CandidateJournal
+
+    repo = tmp_path / "strand"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ortus-tests@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
+    exports = repo / ".beads" / "issues.jsonl"
+    exports.parent.mkdir()
+    exports.write_text("baseline\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "baseline"], cwd=repo, check=True, capture_output=True
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "main"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "-qb", "ortus/tmpl-strand"], cwd=repo, check=True)
+    exports.write_text("baseline\nstranded-commit\n")
+    subprocess.run(["git", "commit", "-aqm", "stranded exports"], cwd=repo, check=True)
+    tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    newest = b"baseline\nstranded-commit\nnewest-staged\n"
+    exports.write_bytes(newest)
+    subprocess.run(["git", "add", ".beads/issues.jsonl"], cwd=repo, check=True)
+    journal = CandidateJournal.start(
+        repo=repo, issue_id="tmpl-strand", base_head=base, baseline_paths=()
+    ).with_branch("ortus/tmpl-strand", tip)
+    return repo, journal, newest
+
+
+def test_claim_after_plan_gap_with_diverged_exports(tmp_path: Path) -> None:
+    """ortus-mfyu AC-1/AC-2: claiming a different issue across the strand
+    reasserts main, carries the newest export bytes, and cuts the new branch
+    at the integration head."""
+    from ortus.core.git import GitClient
+
+    repo, journal, newest = _stranded_claim_repo(tmp_path)
+    git = GitClient(repo)
+    lines: list[str] = []
+
+    branch, blocker = grind_mod._prepare_issue_branch(
+        git,
+        issue_id="tmpl-next",
+        integration_branch="main",
+        journal=journal,
+        write_log=lines.append,
+    )
+
+    assert blocker == ""
+    assert branch == "ortus/tmpl-next"
+    assert git.current_branch() == "ortus/tmpl-next"
+    assert (repo / ".beads" / "issues.jsonl").read_bytes() == newest
+    assert git.branch_tip("ortus/tmpl-next") == git.branch_tip("main")
+    # The stranded branch keeps its commit untouched.
+    assert git.branch_tip("ortus/tmpl-strand") == journal.branch_head
+
+
+def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
+    """ortus-mfyu AC-6: a different issue's claim ends the stranded branch's
+    hold via reassert; the journal's own issue resumes its branch by checkout,
+    commits and all — the keystone's durable-home promise."""
+    from ortus.core.git import GitClient
+
+    repo, journal, newest = _stranded_claim_repo(tmp_path)
+    git = GitClient(repo)
+    lines: list[str] = []
+
+    # Same-issue resume: checkout, never a reset, never a refusal.
+    branch, blocker = grind_mod._prepare_issue_branch(
+        git,
+        issue_id="tmpl-strand",
+        integration_branch="main",
+        journal=journal,
+        write_log=lines.append,
+    )
+    assert blocker == ""
+    assert branch == "ortus/tmpl-strand"
+    assert git.current_branch() == "ortus/tmpl-strand"
+    assert git.branch_tip("ortus/tmpl-strand") == journal.branch_head
+    assert any("resumed existing ortus/tmpl-strand" in line for line in lines)
+
+    # Different-issue claim from the same strand: the hold ends by reassert.
+    lines.clear()
+    branch, blocker = grind_mod._prepare_issue_branch(
+        git,
+        issue_id="tmpl-other",
+        integration_branch="main",
+        journal=journal,
+        write_log=lines.append,
+    )
+    assert blocker == ""
+    assert git.current_branch() == "ortus/tmpl-other"
+    assert any(
+        "reasserted main (exports carried) before claiming" in line for line in lines
+    )
+    assert (repo / ".beads" / "issues.jsonl").read_bytes() == newest
