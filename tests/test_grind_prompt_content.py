@@ -376,6 +376,47 @@ def test_unfinished_check_is_not_failed_work() -> None:
 
 
 # ---------------------------------------------------------------------------
+# (6b) the bound covers harness-tracked task waits too — a running status
+#      with an empty output file past the bound is a failure (ortus-v20y)
+# ---------------------------------------------------------------------------
+
+
+def test_status_is_not_progress() -> None:
+    """AC-1: a `running` status never extends the bound; produced bytes do.
+
+    A worker observed 2026-08-12 blocked on `TaskOutput` for ~40 minutes
+    while the task's output file stayed empty — each timeout's "still
+    running" answer read as progress and reset its judgment, defeating the
+    attempt bound the ortus-xjdf section prescribes for pipe waits.
+    """
+    body = _content()
+    assert "A `running` status does not extend the bound" in body
+    assert "status words are not progress, bytes are" in body
+
+
+def test_foreground_retry_before_blocker() -> None:
+    """AC-2: one foreground re-run of the same command precedes a blocker
+    report; a second silent run IS the blocker, reported with the command
+    named."""
+    body = _content()
+    assert (
+        "re-run the same checks in the foreground once before reporting a blocker"
+        in body
+    )
+    assert "If that single foreground run also produces nothing" in body
+
+
+def test_blocking_waits_count_as_attempts() -> None:
+    """AC-3: the attempt bound is shared across wait mechanisms for the same
+    job — blocking on `TaskOutput` spends an attempt like a file poll does."""
+    body = _content()
+    assert "blocking waits count against the same attempt bound" in body
+    assert "`TaskOutput`" in body
+    # Recovery never reaches for the harness's own tasks.
+    assert "Never kill a harness task you did not start" in body
+
+
+# ---------------------------------------------------------------------------
 # (7) throwaway trees — git archive / shared clone, never `git worktree add`
 #     (ortus-z7ib)
 # ---------------------------------------------------------------------------
