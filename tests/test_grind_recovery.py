@@ -1383,3 +1383,95 @@ def test_candidate_paths_belong_to_the_claimed_issue(
         assert RESUMED not in verified_paths, "the other issue's inherited candidate"
     assert RESUMED not in _committed_paths(repo)
     assert (repo / RESUMED).read_text() == "the first issue's captured candidate\n"
+
+
+# ---------------------------------------------------------------------------
+# Branch-scoped resume (ortus-4fxr): the keystone's records survive a resume
+# ---------------------------------------------------------------------------
+
+
+def _branch_scoped_rejected_workspace(tmp_path: Path):
+    """A workspace whose issue was implemented and committed on its branch,
+    then rejected at verification — the exact state the 23:19 resume poisoned:
+    tree left on the issue branch, candidate committed, journal recorded."""
+    from tests.conftest import copy_bd_workspace
+
+    ws = copy_bd_workspace(tmp_path / "resume4fxr", "leaf")
+    repo, issue_id = ws.path, ws.issues[0]
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "fixture baseline")
+    base = _git(repo, "rev-parse", "main").stdout.strip()
+    subprocess.run(
+        ["bd", "update", issue_id, "--status", "in_progress"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    branch = f"ortus/{issue_id}"
+    _git(repo, "checkout", "-b", branch)
+    (repo / CANDIDATE).write_text("SHIPPED = True\n")
+    _git(repo, "add", CANDIDATE)
+    _git(repo, "commit", "-m", f"{issue_id}: ship the candidate flag")
+    tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    diff = candidate_diff(repo, frozenset({CANDIDATE}), base=base)
+    store = JournalStore(repo)
+    digest, diff_ref = store.save_diff(diff)
+    journal = (
+        CandidateJournal.start(
+            repo=repo, issue_id=issue_id, base_head=base, baseline_paths=()
+        )
+        .with_branch(branch, tip)
+        .with_candidate(
+            {CANDIDATE},
+            phase="verification-rejected",
+            candidate_hash=digest,
+            diff_ref=diff_ref,
+        )
+    )
+    store.save(journal)
+    return repo, issue_id, base, tip, digest
+
+
+def test_branch_candidate_survives_resume(tmp_path: Path) -> None:
+    """ortus-4fxr AC-1: resuming a committed branch candidate keeps its paths
+    and hash — the worktree-only view read it as empty and erased it."""
+    repo, issue_id, base, tip, digest = _branch_scoped_rejected_workspace(tmp_path)
+    from ortus.core.bd import BdClient
+
+    lines: list[str] = []
+    grind_mod._prepare_handoff(
+        BdClient(repo=repo),
+        GitClient(repo),
+        JournalStore(repo),
+        repo=repo,
+        backend="claude",
+        integration_branch="main",
+        write_log=lines.append,
+    )
+    resumed = JournalStore(repo).load()
+    assert resumed is not None
+    assert set(resumed.candidate_paths) == {CANDIDATE}
+    assert resumed.candidate_hash == digest
+    assert not any("the candidate changed" in line for line in lines)
+
+
+def test_resume_preserves_fork_point_base(tmp_path: Path) -> None:
+    """ortus-4fxr AC-2: the handoff keeps the keystone's fork-point base for a
+    branch-scoped journal instead of recording the branch tip as the base."""
+    repo, issue_id, base, tip, digest = _branch_scoped_rejected_workspace(tmp_path)
+    from ortus.core.bd import BdClient
+
+    grind_mod._prepare_handoff(
+        BdClient(repo=repo),
+        GitClient(repo),
+        JournalStore(repo),
+        repo=repo,
+        backend="claude",
+        integration_branch="main",
+        write_log=lambda _line: None,
+    )
+    resumed = JournalStore(repo).load()
+    assert resumed is not None
+    assert resumed.base_head == base
+    assert resumed.base_head != tip

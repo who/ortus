@@ -930,11 +930,28 @@ def _prepare_handoff(
     # so it attributes nothing.
     recorded_candidate = frozenset() if rebuilt else frozenset(journal.candidate_paths)
     baseline = _candidate_baseline(journal, frozenset())
-    candidate = _candidate_paths(dirty, baseline)
+    # The same lens every other integrity site uses: a branch-scoped
+    # candidate is the committed range plus the worktree, measured against
+    # the recorded base. The worktree-only view read a committed candidate
+    # as empty here and "refreshed" the journal to nothing (ortus-4fxr).
+    diff_base = ""
+    if git.is_git_repo():
+        view = _candidate_view(git, journal, baseline)
+        if view is None:
+            moved.append("the candidate's committed range could not be read")
+            candidate = _candidate_paths(dirty, baseline)
+        else:
+            candidate, diff_base = view
+    else:
+        candidate = _candidate_paths(dirty, baseline)
     if prior_phase in _SEALED_PHASES and candidate != frozenset(journal.candidate_paths):
         moved.append("the candidate path set changed since the prior worker")
     try:
-        diff = candidate_diff(repo, candidate) if git.is_git_repo() else b""
+        diff = (
+            candidate_diff(repo, candidate, base=diff_base)
+            if git.is_git_repo()
+            else b""
+        )
     except RuntimeError as exc:
         moved.append(f"the candidate could not be re-diffed ({exc})")
         diff = b""
@@ -953,7 +970,11 @@ def _prepare_handoff(
         repo=repo,
         paths=candidate | frozenset(journal.unrelated_paths),
         notes=moved,
-        base_head=current_head,
+        # A branch-scoped journal's base is the fork point the keystone
+        # recorded at claim; after a mid-run failure the tree sits on the
+        # issue branch, so "current head" is the branch tip — recording it
+        # as the base poisoned the integration-moved guard (ortus-4fxr).
+        base_head=(journal.base_head if journal.issue_branch else current_head),
         owner=journal.issue_id,
         owned=recorded_candidate,
     )
