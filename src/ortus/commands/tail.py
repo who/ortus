@@ -60,6 +60,10 @@ from ortus.core.repo import resolve_repo
 PREFIXES = ("grind-", "goal-", "ralph-", "plan-")
 POLL_SECONDS = 1.0
 
+#: Input lines of existing history rendered when first attaching to a log.
+#: 0 means unlimited. Overridable per run via --lines/-n.
+DEFAULT_ATTACH_LINES = 2000
+
 
 # ---------------------------------------------------------------------------
 # Colour palette — literal ANSI escapes mirroring ortus/tail.sh setup_colors()
@@ -709,6 +713,9 @@ def _format_line(
 class _LogStream:
     path: Path
     pos: int = 0
+    #: The stream's first read has happened, so the attach-time history cap
+    #: no longer applies; everything after this point is live follow output.
+    attached: bool = False
 
 
 def _follow(
@@ -724,8 +731,13 @@ def _follow(
     palette: Optional[_Palette] = None,
     codex: bool = False,
     err: IO[str] | None = None,
+    lines: int = DEFAULT_ATTACH_LINES,
 ) -> None:
-    """Polling tail. `iterations<0` runs forever; finite values for tests."""
+    """Polling tail. `iterations<0` runs forever; finite values for tests.
+
+    `lines` caps how much existing history each stream renders at first
+    attach (0 = unlimited); follow output after attach is never trimmed.
+    """
     out = out or sys.stdout
     err = err or sys.stderr
     if palette is None:
@@ -759,9 +771,26 @@ def _follow(
                 fh.seek(stream.pos)
                 chunk = fh.read()
                 stream.pos = fh.tell()
+            first_read = not stream.attached
+            stream.attached = True
             if not chunk:
                 continue
-            for line in chunk.splitlines():
+            chunk_lines = chunk.splitlines()
+            # The cap trims input lines before rendering and only on the
+            # attach read; position accounting above stays byte-accurate, so
+            # follow reads are untouched.
+            if first_read and lines > 0 and len(chunk_lines) > lines:
+                skipped = len(chunk_lines) - lines
+                chunk_lines = chunk_lines[-lines:]
+                notice = _wrap(
+                    f"=== SKIPPED {skipped} earlier lines: {stream.path.name} "
+                    "(use --lines 0 for full history) ===",
+                    palette.bold,
+                    palette.magenta,
+                    reset=palette.reset,
+                )
+                out.write(f"{notice}\n")
+            for line in chunk_lines:
                 if raw:
                     out.write(line + "\n")
                     continue
@@ -841,6 +870,16 @@ def tail(
         "--backend",
         help="Log backend (claude|codex); defaults from .ortusrc.",
     ),
+    lines: int = typer.Option(
+        DEFAULT_ATTACH_LINES,
+        "--lines",
+        "-n",
+        min=0,
+        help=(
+            "Lines of existing history to render per log at attach "
+            "(0 = unlimited; follow output is never trimmed)."
+        ),
+    ),
 ) -> None:
     """Tail orchestrator log files (grind-*, goal-*, ralph-*, plan-*).
 
@@ -873,4 +912,5 @@ def tail(
         show_system=system,
         assistant_only=assistant,
         codex=resolved_backend == "codex",
+        lines=lines,
     )

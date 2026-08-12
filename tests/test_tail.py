@@ -340,3 +340,148 @@ def test_tail_smoke_picks_up_new_grind_log(tmp_path: Path) -> None:
     out = buf.getvalue()
     assert "working on bd-1" in out
     assert "closed bd-1" in out
+
+
+# --- ortus-fc2q: attach-time history cap (--lines/-n) ----------------------
+
+
+def _assistant_line(i: int) -> str:
+    return json.dumps({"type": "assistant", "message": {"content": f"L{i:05d}"}})
+
+
+def _write_big_log(logs: Path, name: str, total: int) -> Path:
+    log = logs / name
+    log.write_text("".join(_assistant_line(i) + "\n" for i in range(total)))
+    return log
+
+
+def test_attach_caps_history_at_default(tmp_path: Path) -> None:
+    """AC-1: attaching to a long log renders only its last 2,000 lines."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_big_log(logs, "grind-big.log", 2100)
+
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "L00100" in out  # first kept line (2100 - 2000)
+    assert "L00099" not in out  # last trimmed line
+    assert "L02099" in out  # newest line
+
+
+def test_skip_notice_names_count_and_escape_hatch(tmp_path: Path) -> None:
+    """AC-2: the notice names the trimmed count, the log, and --lines 0."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_big_log(logs, "grind-big.log", 2100)
+
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "SKIPPED 100 earlier lines: grind-big.log" in out
+    assert "--lines 0" in out
+
+
+def _expected_full_render(log: Path) -> str:
+    """Today's uncapped output for `log`: banner, then every rendered line."""
+    expected = [f"=== TAILING: {log.name} ==="]
+    for line in log.read_text().splitlines():
+        rendered = _format_line(line, show_tools=False, show_system=False)
+        if rendered is not None:
+            expected.append(rendered)
+    return "\n".join(expected) + "\n"
+
+
+def test_lines_zero_is_byte_identical_full_history(tmp_path: Path) -> None:
+    """AC-3: --lines 0 reproduces the full-history output byte-for-byte."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = _write_big_log(logs, "grind-big.log", 2100)
+
+    buf = io.StringIO()
+    _follow(
+        logs,
+        raw=False,
+        show_tools=False,
+        show_system=False,
+        iterations=1,
+        out=buf,
+        lines=0,
+    )
+    assert buf.getvalue() == _expected_full_render(log)
+
+
+def test_short_log_renders_without_notice(tmp_path: Path) -> None:
+    """AC-4: a log at or under the cap renders identically, with no notice."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = _write_big_log(logs, "grind-small.log", 5)
+
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    assert buf.getvalue() == _expected_full_render(log)
+    assert "SKIPPED" not in buf.getvalue()
+
+
+def test_raw_mode_obeys_the_cap(tmp_path: Path) -> None:
+    """AC-5: --raw trims the same attach backlog as the formatted view."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "grind-raw.log"
+    log.write_text("".join(f"raw-{i:05d}\n" for i in range(2100)))
+
+    buf = io.StringIO()
+    _follow(logs, raw=True, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "raw-00100" in out
+    assert "raw-00099" not in out
+    assert "SKIPPED 100 earlier lines: grind-raw.log" in out
+
+
+def test_follow_after_attach_is_unchanged(tmp_path: Path) -> None:
+    """AC-6: lines appended after attach render in full, with no new notice."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = _write_big_log(logs, "grind-live.log", 2100)
+
+    buf = io.StringIO()
+
+    def _run() -> None:
+        _follow(
+            logs, raw=False, show_tools=False, show_system=False, iterations=2, out=buf
+        )
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    time.sleep(0.3)
+    with log.open("a", encoding="utf-8") as fh:
+        for i in range(3):
+            fh.write(
+                json.dumps(
+                    {"type": "assistant", "message": {"content": f"appended-{i}"}}
+                )
+                + "\n"
+            )
+    thread.join(timeout=5)
+    out = buf.getvalue()
+    for i in range(3):
+        assert f"appended-{i}" in out
+    assert out.count("SKIPPED") == 1  # attach notice only; follow never trims
+
+
+def test_multiple_logs_cap_independently(tmp_path: Path) -> None:
+    """AC-7: each discovered log gets its own cap and its own notice."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _write_big_log(logs, "grind-a.log", 2010)
+    _write_big_log(logs, "grind-b.log", 2020)
+    small = logs / "grind-c.log"
+    small.write_text(_assistant_line(0) + "\n")
+
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "SKIPPED 10 earlier lines: grind-a.log" in out
+    assert "SKIPPED 20 earlier lines: grind-b.log" in out
+    assert out.count("SKIPPED") == 2
+    assert "L00000" in out  # the short log is untouched
