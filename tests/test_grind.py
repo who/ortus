@@ -637,6 +637,7 @@ def test_verifier_report_and_mutation_isolation(
     # The read-only agent verifier and its mutation guard are the reviewer
     # step now — on by flag, judging only after a green machine pipeline.
     _enable_reviewer(repo)
+    primary = repo
     calls = 0
 
     class TransactionRunner:
@@ -657,7 +658,7 @@ def test_verifier_report_and_mutation_isolation(
             if not readonly:
                 (repo / "candidate.py").write_text("VALUE = 1\n")
                 log_path.touch(exist_ok=True)
-                _post_claims(repo)
+                _post_claims(primary)
                 if mutation == "implementation-branch-switch":
                     # The forbidden move: carrying the work off the issue
                     # branch. Committing on the branch itself is the
@@ -687,16 +688,18 @@ def test_verifier_report_and_mutation_isolation(
                         capture_output=True,
                     )
                 elif mutation == "implementation-packet":
-                    journal = JournalStore(repo).load()
+                    journal = JournalStore(primary).load()
                     assert journal is not None
-                    (repo / journal.issue_packet_ref).write_bytes(b'{"id":"forged"}')
+                    (primary / journal.issue_packet_ref).write_bytes(
+                        b'{"id":"forged"}'
+                    )
                 return 0
             assert mutation not in {
                 "implementation-branch-switch",
                 "implementation-packet",
             }
             assert calls == 2
-            journal = JournalStore(repo).load()
+            journal = JournalStore(primary).load()
             assert journal is not None
             if mutation == "timeout":
                 raise subprocess.TimeoutExpired("fake-verifier", 1)
@@ -893,6 +896,7 @@ def _blocked_verifier_grind(
         capture_output=True,
     )
     _enable_reviewer(repo)
+    primary = repo
     prompts: list[str] = []
 
     class BlockedVerifierRunner:
@@ -912,7 +916,7 @@ def _blocked_verifier_grind(
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.touch(exist_ok=True)
             (repo / "candidate.py").write_text("VALUE = 1\n")
-            _post_claims(repo)
+            _post_claims(primary)
             return 0
 
         def preflight_readonly(self, repo: Path, **kwargs: object) -> None:
@@ -1063,6 +1067,7 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
     )
 
     prompts: list[str] = []
+    primary = repo
 
     class ClosingCodex:
         extra_env: dict[str, str] = {}
@@ -1077,7 +1082,7 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
             assert match
             subprocess.run(
                 ["bd", "close", match.group(1), "--reason", "fake codex completed it"],
-                cwd=repo,
+                cwd=primary,
                 check=True,
                 capture_output=True,
             )
@@ -1618,6 +1623,7 @@ def _narrated_grind(
     hashes: list[str] = []
     decisions_left = list(decisions)
     impl_runs = [0]
+    primary = repo
 
     class _NarratingRunner:
         extra_env: dict[str, str] = {}
@@ -1636,7 +1642,7 @@ def _narrated_grind(
             if not readonly:
                 impl_runs[0] += 1
                 (repo / "candidate.py").write_text(f"VALUE = {impl_runs[0]}\n")
-                _post_claims(repo)
+                _post_claims(primary)
             return 0
 
     def scripted_checks(
@@ -1929,6 +1935,7 @@ def test_grind_healthy_codegraph_lines_are_log_only(
     # The verification-phase agent narration only exists when the reviewer
     # step runs; the machine pipeline itself spawns no agent to narrate.
     _enable_reviewer(repo)
+    primary = repo
 
     cg_event = {
         "type": "item.completed",
@@ -1961,10 +1968,10 @@ def test_grind_healthy_codegraph_lines_are_log_only(
             else:
                 log_path.touch(exist_ok=True)
             if readonly:
-                _emit_verdict(repo, log_path, criteria=("AC-1", "AC-2"))
+                _emit_verdict(primary, log_path, criteria=("AC-1", "AC-2"))
             else:
                 (repo / "candidate.py").write_text("VALUE = 1\n")
-                _post_claims(repo)
+                _post_claims(primary)
             return 0
 
     class _AvailableCodeGraph:
@@ -2458,3 +2465,123 @@ def test_acceptance_hash_rechecked_before_judgment(
     assert outcome.journal.phase == "verification-rejected"
     assert any("acceptance criteria changed after claim" in body for body in comments)
     assert statuses == ["in_progress"], "the claim is restored before the report"
+
+
+# ---------------------------------------------------------------------------
+# Worker workspaces (ortus-u4zv.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_primary_checkout_never_leaves_integration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: through claim, implementation, verification and finalization the
+    primary repository's checkout stays on the integration branch."""
+    repo = _bd_repo(tmp_path, "ws1")
+    issue_id = _create_ready_issue(repo, "workspace isolated leaf")
+    _baseline_commit(repo)
+    primary = repo
+    observed: list[str] = []
+
+    class _ObservingWorker:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            observed.append(
+                subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    cwd=primary,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            )
+            assert repo != primary, "the worker must run in its own workspace"
+            (repo / "candidate.py").write_text("VALUE = 1\n")
+            _post_claims(primary)
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: _ObservingWorker())
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert observed == ["main"], "the primary moved during the worker's run"
+    final = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert final == "main"
+    assert _issue(repo, issue_id)["status"] == "closed"
+
+
+@pytest.mark.slow
+def test_primary_side_commit_stays_out_of_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: operator intake in the primary tree during implementation — a
+    file edit, tracker writes — never enters the candidate."""
+    repo = _bd_repo(tmp_path, "ws3")
+    issue_id = _create_ready_issue(repo, "isolated from intake")
+    _baseline_commit(repo)
+    primary = repo
+
+    class _IntakeCollidingWorker:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            # The operator's intake session, mid-run: a scratch note in the
+            # primary tree that a shared-tree worker would have absorbed.
+            (primary / "intake-note.md").write_text("operator scratch\n")
+            (repo / "candidate.py").write_text("VALUE = 1\n")
+            _post_claims(primary)
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _IntakeCollidingWorker()
+    )
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "closed"
+    landed = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "intake-note.md" not in landed
+    assert (repo / "intake-note.md").read_text() == "operator scratch\n"

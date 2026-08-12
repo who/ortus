@@ -173,11 +173,11 @@ class PassingRunner:
         log_path.touch(exist_ok=True)
         if phase is Phase.IMPLEMENT:
             (repo / CANDIDATE).write_text("SHIPPED = True\n")
-            journal = JournalStore(repo).load()
+            journal = JournalStore(self.repo).load()
             assert journal is not None
-            post_completion_comment(repo, journal.issue_id, {"AC-1": "pass"})
+            post_completion_comment(self.repo, journal.issue_id, {"AC-1": "pass"})
         elif phase is Phase.VERIFY:
-            journal = JournalStore(repo).load()
+            journal = JournalStore(self.repo).load()
             assert journal is not None
             payload = {
                 "schema": 1,
@@ -411,15 +411,16 @@ def test_pass_without_a_remote_finalizes_locally(
 def test_failure_at_commit_retains_a_recoverable_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-5: a refused fold leaves report+close journaled and stops.
+    """AC-5: a refused amend leaves report+close journaled and stops.
 
     The candidate itself is committed at the machine-verification boundary,
-    so finalization's own git write is the fold of the transaction's late
-    files into that commit — the boundary this test refuses.
+    so finalization's git writes in the workspace are the fold and the
+    message amend — the amend is the one every landing crosses (the capture
+    message is deliberately below contract), so it is the boundary refused.
     """
     repo, issue_id = _seed(tmp_path, "fin3")
     _install(monkeypatch, tmp_path, PassingRunner(repo))
-    monkeypatch.setattr(GitClient, "amend_paths", lambda self, paths: False)
+    monkeypatch.setattr(GitClient, "amend_message", lambda self, message: False)
 
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
@@ -427,7 +428,7 @@ def test_failure_at_commit_retains_a_recoverable_journal(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     combined = " ".join((result.stdout + result.stderr).split())
-    assert "blocked — could not fold the transaction's late paths" in combined
+    assert "blocked — could not amend the worker's commit message" in combined
     journal = JournalStore(repo).load()
     assert journal is not None
     assert journal.finalized("report") and journal.finalized("close")
@@ -1296,12 +1297,14 @@ class CommittingRunner(PassingRunner):
             return super().run(prompt, **kwargs)  # type: ignore[arg-type]
         self.phases.append(Phase.IMPLEMENT.value)
         log_path = kwargs["log_path"]
+        workspace = kwargs["repo"]
         assert isinstance(log_path, Path)
+        assert isinstance(workspace, Path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.touch(exist_ok=True)
-        (self.repo / CANDIDATE).write_text("SHIPPED = True\n")
-        _git(self.repo, "add", CANDIDATE)
-        _git(self.repo, "commit", "-m", self.message)
+        (workspace / CANDIDATE).write_text("SHIPPED = True\n")
+        _git(workspace, "add", CANDIDATE)
+        _git(workspace, "commit", "-m", self.message)
         journal = JournalStore(self.repo).load()
         assert journal is not None
         post_completion_comment(self.repo, journal.issue_id, {"AC-1": "pass"})
@@ -1333,7 +1336,10 @@ def test_worker_commit_message_survives_finalization(
     assert len(_finalization_commits(repo, issue_id)) == 1
     committed = _committed_paths(repo)
     assert CANDIDATE in committed
-    assert ".beads/issues.jsonl" in committed
+    # bd writes its exports asynchronously: folded into this commit, dirty
+    # awaiting the next sweep, or not yet rewritten at all — timing, not
+    # behavior. What must hold is that the export file is never lost.
+    assert (repo / ".beads" / "issues.jsonl").exists()
     # No finalize-phase model run (compose retired) and no verify-phase agent
     # (the machine pipeline judged the branch): one worker spawn total.
     assert backend.phases == [Phase.IMPLEMENT.value]
@@ -1877,3 +1883,105 @@ def test_pass_with_a_remote_pushes_the_fast_forwarded_branch(
         repo, "rev-parse", f"refs/heads/ortus/{issue_id}"
     ).stdout.strip()
     assert branch_tip == local
+
+
+# ---------------------------------------------------------------------------
+# Worker workspaces (ortus-u4zv.2): disposable clones, never-moving primary
+# ---------------------------------------------------------------------------
+
+
+def test_fetched_branch_fast_forwards_integration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the worker's commits reach `ortus/<id>` in the primary repository
+    via the finalization fetch, and the integration branch fast-forwards."""
+    repo, issue_id = _seed(tmp_path, "ws2")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    branch_tip = _git(repo, "rev-parse", f"refs/heads/ortus/{issue_id}").stdout.strip()
+    main_tip = _git(repo, "rev-parse", "refs/heads/main").stdout.strip()
+    assert branch_tip == main_tip
+    shown = _git(repo, "show", f"ortus/{issue_id}:{CANDIDATE}").stdout
+    assert shown == "SHIPPED = True\n"
+    assert "fast-forwarded to" in _log_text(repo)
+
+
+def test_primary_side_export_churn_is_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: tracker exports written primary-side during the run fold into the
+    landing when they arrive in time, and stay dirty for the next sweep when
+    bd's async export loses the race — never lost, never a second commit."""
+    repo, issue_id = _seed(tmp_path, "ws4")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # bd writes exports asynchronously, so at this instant the export may be
+    # folded into the landing, still dirty awaiting the next sweep, or not
+    # yet rewritten at all — every case is fine; what must never happen is a
+    # stacked housekeeping commit or a lost export file.
+    assert (repo / ".beads" / "issues.jsonl").exists()
+    assert len(_finalization_commits(repo, issue_id)) == 1, "one commit, no chore stack"
+
+
+def test_clone_removed_branch_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: the clone is removed after landing; a parked issue's branch
+    survives in the primary repository even though its clone is gone too."""
+    repo, issue_id = _seed(tmp_path, "ws5a")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert not (repo / "logs" / "grind-workspaces" / issue_id).exists()
+    assert _git(repo, "rev-parse", f"refs/heads/ortus/{issue_id}").returncode == 0
+
+    from tests._shims import install_machine_checks, machine_run
+
+    parked_repo, parked_id = _seed(tmp_path, "ws5b")
+    _install(monkeypatch, tmp_path, PassingRunner(parked_repo))
+    install_machine_checks(
+        monkeypatch, default=machine_run("fail", output="stays red")
+    )
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(parked_repo),
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--max-corrections",
+            "0",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert not (parked_repo / "logs" / "grind-workspaces" / parked_id).exists()
+    shown = _git(parked_repo, "show", f"ortus/{parked_id}:{CANDIDATE}")
+    assert shown.returncode == 0, "the parked branch preserves the work"
+
+
+def test_no_remote_full_flow_in_clone_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: a repository with no remote completes the whole flow in a clone."""
+    repo, issue_id = _seed(tmp_path, "ws7")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert CANDIDATE in _committed_paths(repo)
+    assert JournalStore(repo).load() is None

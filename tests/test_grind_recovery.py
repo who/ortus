@@ -255,10 +255,13 @@ class ScriptedRunner:
         rc = 0 if hook is None else hook(repo, log_path)
         if phase is Phase.IMPLEMENT and rc == 0:
             # A worker that finishes leaves a completion comment with a claims
-            # block; a crashed one (rc != 0) never got that far.
-            journal = JournalStore(repo).load()
+            # block; a crashed one (rc != 0) never got that far. The journal
+            # and the tracker live in the primary repository — the run log's
+            # home — not in the worker's disposable workspace.
+            host = log_path.parent.parent
+            journal = JournalStore(host).load()
             if journal is not None and journal.issue_id:
-                post_completion_comment(repo, journal.issue_id, {"AC-1": "pass"})
+                post_completion_comment(host, journal.issue_id, {"AC-1": "pass"})
         return rc
 
     def prompt_for(self, phase: Phase) -> str:
@@ -280,7 +283,7 @@ def _emit(log_path: Path, text: str) -> None:
 
 def _pass_verdict(repo: Path, log_path: Path) -> int:
     """A verdict bound to whatever candidate the transaction currently owns."""
-    journal = JournalStore(repo).load()
+    journal = JournalStore(log_path.parent.parent).load()
     assert journal is not None
     _emit(
         log_path,
@@ -305,7 +308,7 @@ def _pass_verdict(repo: Path, log_path: Path) -> int:
 
 def _fail_verdict(repo: Path, log_path: Path) -> int:
     """A rejection bound to the same candidate, so a correction attempt follows."""
-    journal = JournalStore(repo).load()
+    journal = JournalStore(log_path.parent.parent).load()
     assert journal is not None
     _emit(
         log_path,
@@ -387,9 +390,19 @@ def test_nonzero_exit_after_edits_preserves_the_claim_and_the_candidate(
     assert journal is not None
     assert journal.issue_id == issue_id
     assert CANDIDATE in journal.candidate_paths
-    assert (repo / CANDIDATE).read_text() == "PARTIAL = True\n"
-    # The candidate may park committed on the issue branch (the machine
-    # boundary's capture commit); what a failed run must never do is land it.
+    # The worker ran in a disposable workspace; its bytes survive either in
+    # that workspace (kept for resume) or committed on the issue branch.
+    if journal.workspace_path:
+        preserved = (repo / journal.workspace_path / CANDIDATE).read_text()
+    else:
+        preserved = subprocess.run(
+            ["git", "show", f"ortus/{issue_id}:{CANDIDATE}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        ).stdout
+    assert preserved == "PARTIAL = True\n"
+    # What a failed run must never do is land anything on main.
     main_subjects = subprocess.run(
         ["git", "log", "--format=%s", "main"],
         cwd=repo,
@@ -421,7 +434,8 @@ def test_parent_interruption_preserves_the_candidate_before_grind_returns(
     assert journal.issue_id == issue_id
     assert CANDIDATE in journal.candidate_paths
     assert journal.phase == "implementation-timeout"
-    assert (repo / CANDIDATE).read_text() == "HALF_DONE = True\n"
+    workspace = repo / journal.workspace_path if journal.workspace_path else repo
+    assert (workspace / CANDIDATE).read_text() == "HALF_DONE = True\n"
     assert journal.evidence and journal.evidence[-1]["timed_out"] is True
 
 
@@ -1674,3 +1688,42 @@ class _PassingResumeWorker:
                     self.repo, journal.issue_id, {"AC-1": "pass"}
                 )
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Worker workspaces (ortus-u4zv.2): the crashed clone comes home
+# ---------------------------------------------------------------------------
+
+
+def test_crashed_clone_is_swept_at_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: a run that died with a live workspace has it swept at the next
+    startup — uncommitted work rescued onto the branch, clone removed."""
+    repo, issue_id = _seed(tmp_path, "ws6")
+
+    def implement(repo: Path, log_path: Path) -> int:
+        (repo / CANDIDATE).write_text("HALF_DONE = True\n")
+        raise subprocess.TimeoutExpired("fake-worker", 1)
+
+    _install(monkeypatch, tmp_path, ScriptedRunner(implement=implement))
+    first = _grind(repo, "--iterations", "1", "--worker-timeout", "5")
+    assert first.exit_code == 0, first.stdout + first.stderr
+    journal = JournalStore(repo).load()
+    assert journal is not None and journal.workspace_path
+    assert (repo / journal.workspace_path).exists(), "the crash left its clone"
+
+    second_backend = ScriptedRunner()
+    _install(monkeypatch, tmp_path, second_backend)
+    second = _grind(repo, "--iterations", "1", "--worker-timeout", "60")
+    assert second.exit_code == 0, second.stdout + second.stderr
+    log = _log(repo)
+    assert "workspace sweep: rescued 1 uncommitted path(s)" in log
+    assert f"preserved in the primary repository" in log
+    shown = subprocess.run(
+        ["git", "show", f"ortus/{issue_id}:{CANDIDATE}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert shown.stdout == "HALF_DONE = True\n"

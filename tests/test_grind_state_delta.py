@@ -136,11 +136,12 @@ class _VerifiedLifecycle:
         log_path.touch(exist_ok=True)
         if not readonly:
             (repo / f"candidate-{self.spawns}.py").write_text(f"N = {self.spawns}\n")
-            journal = JournalStore(repo).load()
+            host = log_path.parent.parent
+            journal = JournalStore(host).load()
             if journal is not None and journal.issue_id:
-                post_completion_comment(repo, journal.issue_id, {"AC-1": "pass"})
+                post_completion_comment(host, journal.issue_id, {"AC-1": "pass"})
             return 0
-        journal = JournalStore(repo).load()
+        journal = JournalStore(log_path.parent.parent).load()
         assert journal is not None
         payload = {
             "schema": 1,

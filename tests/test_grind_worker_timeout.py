@@ -482,7 +482,24 @@ def test_codex_resume_adopts_moved_state_head_mismatch_for_handoff(
     assert result.exit_code == 0, result.stdout + result.stderr
     assert _bd_show(repo, issue_id)["status"] == "in_progress"
     assert any("RECOVERY HANDOFF" in prompt for prompt in prompts)
-    assert (repo / "recovered.py").read_text() == "RECOVERED = True\n"
+    resumed_journal = JournalStore(repo).load()
+    if resumed_journal is not None and resumed_journal.workspace_path:
+        preserved = (
+            repo / resumed_journal.workspace_path / "recovered.py"
+        ).read_text()
+    else:
+        shown = subprocess.run(
+            ["git", "show", f"ortus/{issue_id}:recovered.py"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        preserved = (
+            shown.stdout
+            if shown.returncode == 0
+            else (repo / "recovered.py").read_text()
+        )
+    assert preserved == "RECOVERED = True\n"
     assert f"resuming {issue_id} from implementation" in (
         result.stdout + result.stderr
     )

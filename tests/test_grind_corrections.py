@@ -576,7 +576,7 @@ class _SessionWorker:
                 json.dumps({"type": "system", "session_id": self.session_id}) + "\n"
             )
         attempt = sum(1 for run in self.runs if not run["readonly"])
-        (self.repo / "candidate.py").write_text(f"ATTEMPT = {attempt}\n")
+        (repo / "candidate.py").write_text(f"ATTEMPT = {attempt}\n")
         journal = JournalStore(self.repo).load()
         assert journal is not None
         from tests._shims import post_completion_comment

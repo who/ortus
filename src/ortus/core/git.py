@@ -385,6 +385,132 @@ class GitClient:
         """`git branch -d <name>` — refuses unmerged work by construction."""
         return self._run("branch", "-d", name).returncode == 0
 
+    def config_value(self, key: str) -> str:
+        """The effective config value for `key`, or "" when unset."""
+        proc = self._run("config", "--get", key)
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    def set_config(self, key: str, value: str) -> bool:
+        """Set a repo-local config value. Returns True on success."""
+        return self._run("config", key, value).returncode == 0
+
+    def fetch_branch(self, source: Path, branch: str) -> str:
+        """Fetch `branch` from another local repository into this one.
+
+        ``git fetch <source> <branch>:<branch>`` — fast-forward-only by
+        construction (no ``+`` force prefix), so a divergent local branch is
+        refused rather than reset, mirroring :meth:`fast_forward`. This is how
+        a worker workspace's commits come home: the clone is disposable, the
+        primary repository's ref is the durable record. Returns "" on
+        success, else the reason.
+        """
+        proc = self._run("fetch", str(source), f"{branch}:{branch}", hooks=False)
+        if proc.returncode == 0:
+            return ""
+        return _bounded_failure(proc) or f"git fetch exited {proc.returncode}"
+
+    def replace_branch(
+        self, source: Path, branch: str, *, expected_tip: str
+    ) -> str:
+        """Force-fetch `branch` from `source`, compare-and-swap on our tip.
+
+        A workspace legitimately amends the harness's own capture commits (a
+        message repair, an exports fold), leaving the primary's earlier
+        backup of that branch a non-fast-forward behind a rewrite. Replacing
+        is allowed only while our copy still sits exactly where this
+        transaction last put it — anything else moved the ref, and the
+        never-reset rule stands. Returns "" on success, else the reason.
+        """
+        current = self.branch_tip(branch)
+        if expected_tip and current != expected_tip:
+            return (
+                f"{branch} is at {(current or 'gone')[:12]}, not the expected "
+                f"{expected_tip[:12]}; refusing to replace it"
+            )
+        proc = self._run(
+            "fetch", str(source), f"+{branch}:{branch}", hooks=False
+        )
+        if proc.returncode == 0:
+            return ""
+        return _bounded_failure(proc) or f"git fetch exited {proc.returncode}"
+
+    def merge_ff_only(self, ref: str) -> str:
+        """`git merge --ff-only <ref>`: advance the checked-out branch to `ref`.
+
+        The one integration move a clone-isolated run performs in the primary
+        worktree. Unlike :meth:`fast_forward` (which edits refs without
+        touching files and refuses the checked-out branch), this advances the
+        branch the tree is sitting on, updating the worktree to match.
+        Hook-free for the same reason every branch-plumbing call is: bd's
+        post-merge hook re-imports state mid-transaction. Returns "" on
+        success, else git's reason.
+        """
+        proc = self._run("merge", "--ff-only", ref, hooks=False)
+        if proc.returncode == 0:
+            return ""
+        return _bounded_failure(proc) or f"git merge exited {proc.returncode}"
+
+    def advance_preserving_exports(
+        self, ref: str, exports: frozenset[str]
+    ) -> str:
+        """Fast-forward the checked-out branch to `ref`, exports carried.
+
+        The same overwrite hazard :meth:`switch_preserving_exports` handles,
+        at the landing instead of the claim: intake keeps the tracker exports
+        dirty in the primary worktree, and a fast-forward that updates those
+        paths refuses over any local change. The worktree's bytes are the
+        newest export, so they win — snapshot, clean to HEAD, merge, and put
+        the snapshot back wherever the merged tree does not already carry
+        those exact bytes. Returns "" on success, else the reason.
+        """
+
+        snapshot: dict[str, bytes | None] = {}
+        for rel in sorted(exports):
+            path = self.repo / rel
+            try:
+                snapshot[rel] = path.read_bytes()
+            except FileNotFoundError:
+                snapshot[rel] = None
+            except OSError as exc:
+                return f"could not snapshot {rel} before advancing ({exc})"
+        for rel in sorted(exports):
+            tracked = self._run("cat-file", "-e", f"HEAD:{rel}").returncode == 0
+            if tracked:
+                restored = self._run(
+                    "restore", "--source=HEAD", "--staged", "--worktree", "--", rel
+                )
+                if restored.returncode != 0:
+                    return (
+                        f"could not reset {rel} before advancing: "
+                        + (_bounded_failure(restored) or "git restore failed")
+                    )
+            else:
+                self._run("restore", "--staged", "--", rel)
+                try:
+                    (self.repo / rel).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    return f"could not clear {rel} before advancing ({exc})"
+        reason = self.merge_ff_only(ref)
+        if reason:
+            for rel, data in snapshot.items():
+                if data is not None:
+                    (self.repo / rel).write_bytes(data)
+            return reason
+        for rel, data in snapshot.items():
+            target = self.repo / rel
+            if data is None:
+                continue
+            try:
+                merged = target.read_bytes()
+            except OSError:
+                merged = None
+            if merged != data:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+        return ""
+
     def switch_preserving_exports(
         self, branch: str, exports: frozenset[str]
     ) -> str:

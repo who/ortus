@@ -334,6 +334,11 @@ class CandidateJournal:
     #: by the pre-branch path.
     issue_branch: str = ""
     branch_head: str = ""
+    #: Repo-relative path of the disposable worker workspace (a shared clone)
+    #: this transaction's phases ran in. Recorded so recovery can fetch the
+    #: branch home and discard the clone after a crash; empty for a legacy
+    #: shared-tree run, which recovers by the pre-clone rules.
+    workspace_path: str = ""
     finalization: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)

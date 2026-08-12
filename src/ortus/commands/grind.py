@@ -37,6 +37,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
+import shutil
 import subprocess
 import textwrap
 import time
@@ -1496,7 +1497,7 @@ def _machine_verify_candidate(
             journal=journal, summary=_summarize(), failure=reason
         )
 
-    claim_criteria = _claim_time_criteria(repo, journal)
+    claim_criteria = _claim_time_criteria(store.repo, journal)
     if claim_criteria is None:
         return _reject(
             "the claim-time work-spec artifact is unreadable; the pipeline "
@@ -1517,7 +1518,7 @@ def _machine_verify_candidate(
     if issue_packet_hash(current_packet) != journal.issue_packet_hash:
         return _reject(
             "authoritative work spec changed during verification — "
-            + _packet_drift(repo, journal, current_packet)
+            + _packet_drift(store.repo, journal, current_packet)
         )
     if not git.branch_exists(journal.issue_branch):
         return _reject(
@@ -1696,6 +1697,26 @@ def _verification_pass(
         f"iter {iteration}: machine pipeline green; reviewer flag on — "
         "dispatching the agent reviewer"
     )
+    # The reviewer's prompt references artifacts by repo-relative path; in a
+    # worker workspace those live primary-side, so copies are staged in.
+    store: JournalStore = kwargs["store"]
+    review_repo = Path(kwargs["repo"])
+    if review_repo.resolve() != store.repo.resolve():
+        for ref in (
+            machine_result.journal.issue_packet_ref,
+            machine_result.journal.candidate_diff_ref,
+        ):
+            if not ref:
+                continue
+            try:
+                staged = review_repo / ref
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_bytes((store.repo / ref).read_bytes())
+            except OSError as exc:
+                write_log(
+                    f"iter {iteration}: could not stage {ref} for the "
+                    f"reviewer ({exc})"
+                )
     return _verify_candidate(**{**kwargs, "journal": machine_result.journal})
 
 
@@ -2035,7 +2056,7 @@ def _verify_candidate(
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             timeout_failure += (
                 "; authoritative work spec changed during verification — "
-                + _packet_drift(repo, journal, current_packet)
+                + _packet_drift(store.repo, journal, current_packet)
             )
             timeout_phase = VERIFICATION_REJECTED
             if current_packet.get("status") != "in_progress":
@@ -2125,7 +2146,7 @@ def _verify_candidate(
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             raise VerdictError(
                 "authoritative work spec changed during verification — "
-                + _packet_drift(repo, journal, current_packet)
+                + _packet_drift(store.repo, journal, current_packet)
             )
     except (VerdictError, RuntimeError) as exc:
         failure = str(exc)
@@ -2828,6 +2849,7 @@ def _finalization_blocker(
     issue_id: str,
     integration_branch: str,
     baseline: frozenset[str],
+    candidate_git: GitClient | None = None,
 ) -> str | None:
     """Re-validate every precondition a passing verdict is allowed to assume.
 
@@ -2870,9 +2892,13 @@ def _finalization_blocker(
             )
     if journal.finalized("commit"):
         return None
+    # The candidate's own state — its branch, its worktree, its diff — lives
+    # in the worker workspace when one exists; the integration ref and the
+    # primary checkout are always the primary repository's.
+    side = candidate_git or git
     base = journal.base_head if journal.issue_branch else ""
     if journal.issue_branch:
-        tip = git.branch_tip(journal.issue_branch)
+        tip = side.branch_tip(journal.issue_branch)
         integration_tip = git.branch_tip(integration_branch)
         if (
             tip
@@ -2898,17 +2924,17 @@ def _finalization_blocker(
                 f"{integration_branch} moved after the passing verdict; the "
                 f"fast-forward from {journal.base_head[:12]} no longer applies"
             )
-    elif git.head_oid() != journal.base_head:
+    elif side.head_oid() != journal.base_head:
         return (
             f"base commit {journal.base_head} is no longer HEAD; the candidate was "
             "verified against a different tree"
         )
-    dirty = git.dirty_paths()
+    dirty = side.dirty_paths()
     if dirty is None:
         return "could not read the worktree before finalization"
     range_changed: frozenset[str] = frozenset()
-    if base and git.head_oid() != base:
-        changed = git.changed_paths(base)
+    if base and side.head_oid() != base:
+        changed = side.changed_paths(base)
         if changed is None:
             return "could not read the candidate's committed range"
         range_changed = changed
@@ -2921,7 +2947,7 @@ def _finalization_blocker(
         )
     try:
         if (
-            sha256_bytes(candidate_diff(repo, owned, base=base))
+            sha256_bytes(candidate_diff(side.repo, owned, base=base))
             != journal.candidate_hash
         ):
             return "candidate changed after the passing verdict"
@@ -2994,6 +3020,138 @@ def _message_composer(
     return _compose
 
 
+def _land_from_workspace(
+    bd: BdClient,
+    git: GitClient,
+    workspace_git: GitClient,
+    store: JournalStore,
+    journal: CandidateJournal,
+    *,
+    issue_id: str,
+    integration_branch: str,
+    write_log: Callable[[str], None],
+) -> tuple[CandidateJournal, str | None]:
+    """Land a workspace-isolated candidate without moving the primary checkout.
+
+    Fold the transaction's late files into the branch commit in the worker's
+    clone, hold the message to its contract there, fetch the branch into the
+    primary repository, and fast-forward the integration branch under its own
+    never-moved checkout, exports carried.
+    """
+
+    branch = journal.issue_branch
+    if workspace_git.current_branch() != branch:
+        return journal, (
+            "the worker workspace is on "
+            f"{workspace_git.current_branch() or 'a detached HEAD'}, "
+            f"not {branch}"
+        )
+    if workspace_git.head_oid() == journal.base_head:
+        return journal, (
+            f"{branch} carries no commits beyond the base; nothing to land"
+        )
+    primary_tip_before = git.branch_tip(branch)
+    primary_dirty = git.dirty_paths()
+    if primary_dirty is None:
+        return journal, "could not read the primary worktree before committing"
+    late_exports = sorted(primary_dirty & _TRACKER_EXPORT_PATHS)
+    for rel in late_exports:
+        source = git.repo / rel
+        dest = workspace_git.repo / rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(source.read_bytes())
+        except OSError as exc:
+            return journal, f"could not carry {rel} into the workspace ({exc})"
+    if late_exports:
+        if not workspace_git.amend_paths(frozenset(late_exports)):
+            return journal, (
+                "could not fold the transaction's late paths into "
+                "the worker's commit: " + ", ".join(late_exports)
+            )
+        write_log(
+            "finalization: folded into the worker's commit: "
+            + ", ".join(late_exports)
+        )
+    raw = workspace_git.head_message().strip()
+    packet = _commit_packet(bd, issue_id)
+    subject_line, _, rest = raw.partition("\n")
+    bare = subject_line.removeprefix(f"{issue_id}: ")
+    try:
+        diff_text = candidate_diff(
+            workspace_git.repo,
+            frozenset(journal.candidate_paths),
+            base=journal.base_head,
+        ).decode("utf-8", errors="replace")
+    except RuntimeError:
+        diff_text = ""
+    try:
+        validated = validate_message(
+            CommitMessage(subject=bare, body=rest.strip()),
+            issue_id=issue_id,
+            title=str(packet.get("title") or ""),
+            diff=diff_text,
+        )
+        if validated.text != raw:
+            if not workspace_git.amend_message(validated.text):
+                return journal, "could not amend the worker's commit message"
+            note = (
+                f"shortened from {validated.shortened_from} characters"
+                if validated.shortened_from
+                else "normalized"
+            )
+            write_log(
+                f"finalization: worker commit message {note} for {issue_id}"
+            )
+    except ComposeRejected as exc:
+        write_log(
+            f"finalization: worker commit message rejected ({exc}); "
+            "replaced by the deterministic assembly"
+        )
+        replacement = _commit_message(
+            issue_id,
+            packet,
+            _change_description(bd, issue_id, journal, write_log=write_log),
+        )
+        if not workspace_git.amend_message(replacement):
+            return journal, "could not amend the worker's commit message"
+    branch_head = workspace_git.head_oid()
+    journal = journal.with_branch(branch, branch_head)
+    store.save(journal)
+    fetch_reason = git.fetch_branch(workspace_git.repo, branch)
+    if fetch_reason and primary_tip_before:
+        # The fold and message repair amended the harness's own commits, so
+        # the primary's earlier backup of this branch trails a rewrite; it is
+        # replaced only if it still sits where this transaction last put it.
+        fetch_reason = git.replace_branch(
+            workspace_git.repo, branch, expected_tip=primary_tip_before
+        )
+    if fetch_reason:
+        return journal, (
+            f"could not fetch {branch} from the worker workspace: {fetch_reason}"
+        )
+    advance_reason = git.advance_preserving_exports(
+        branch, _TRACKER_EXPORT_PATHS
+    )
+    if advance_reason:
+        return journal, (
+            f"fast-forward of {integration_branch} to {branch} is not "
+            f"possible ({advance_reason}); the commit is preserved on "
+            f"{branch} — resolve and re-run grind"
+        )
+    write_log(
+        f"finalization: {integration_branch} fast-forwarded to "
+        f"{branch} at {branch_head[:12]}"
+    )
+    journal = journal.with_finalization("commit", git.head_oid())
+    store.save(journal)
+    write_log(
+        f"finalization: committed owned paths for {issue_id}: "
+        + (", ".join(late_exports) or "none")
+    )
+    return journal, None
+
+
 def _finalize_candidate(
     bd: BdClient,
     git: GitClient,
@@ -3006,6 +3164,7 @@ def _finalize_candidate(
     baseline: frozenset[str],
     write_log: Callable[[str], None],
     compose: ComposeCallable | None = None,
+    workspace_git: GitClient | None = None,
 ) -> tuple[CandidateJournal, str | None]:
     """Ortus-owned report → close → compose → commit → sync, journaled by step.
 
@@ -3028,6 +3187,7 @@ def _finalize_candidate(
         issue_id=issue_id,
         integration_branch=integration_branch,
         baseline=baseline,
+        candidate_git=workspace_git,
     )
     if blocker is not None:
         journal = replace(journal, phase=_FINALIZATION_BLOCKED_PHASE)
@@ -3115,6 +3275,26 @@ def _finalize_candidate(
         if not git.is_git_repo():
             journal = journal.with_finalization("commit", "not-a-git-repo")
             store.save(journal)
+        elif workspace_git is not None and journal.issue_branch:
+            # Workspace-isolated landing: the branch and its worktree live in
+            # the worker's clone. The transaction's late files — the tracker
+            # exports the close step rewrote primary-side — fold into the
+            # branch commit there, the message meets its contract there, and
+            # only then does the branch come home: a fetch into the primary
+            # repository and a fast-forward of the integration branch under
+            # the checkout that never moved.
+            journal, workspace_blocker = _land_from_workspace(
+                bd,
+                git,
+                workspace_git,
+                store,
+                journal,
+                issue_id=issue_id,
+                integration_branch=integration_branch,
+                write_log=write_log,
+            )
+            if workspace_blocker is not None:
+                return journal, workspace_blocker
         else:
             # The commit belongs on the issue branch. A resumed finalization
             # may arrive here on the integration branch (the startup guard
@@ -3439,6 +3619,213 @@ def _prepare_issue_branch(
             f"iter prep: removed just-created {issue_branch} after the failed claim"
         )
     return issue_branch, blocker, False
+
+
+#: Where per-issue worker workspaces live: inside the primary repository so
+#: relative journal paths stay portable, under logs/ so git ignores them.
+_WORKSPACES_DIR = Path("logs") / "grind-workspaces"
+
+
+def _materialize_workspace(
+    git: GitClient,
+    *,
+    repo: Path,
+    issue_id: str,
+    integration_branch: str,
+    journal: CandidateJournal | None,
+    write_log: Callable[[str], None],
+) -> tuple[str, Path | None, GitClient | None, str, bool]:
+    """Give the worker a disposable shared clone on `ortus/<issue-id>`.
+
+    Returns ``(branch, workspace, workspace_git, blocker, resumed)`` —
+    blocker is "" on success, ``resumed`` is True only when a pre-existing
+    branch was checked out with its commits intact, and the primary
+    checkout never moves: the same claim discipline `_prepare_issue_branch`
+    owned, executed inside a clone so operator intake and the candidate
+    can no longer collide.
+
+    - The primary tree is returned to the integration branch first if a
+      pre-clone-era crash stranded it elsewhere (exports carried).
+    - The primary repository's branch ref decides resume vs fresh, under
+      the same never-reset rules: a resumed journal's branch is adopted
+      commits and all; any other pre-existing branch is reused only at the
+      integration head.
+    - The clone is cut at the integration head, the branch materializes
+      inside it (from the primary's ref when one exists), and the
+      CodeGraph index — gitignored, so absent from any clone — is
+      symlinked from the primary so workers keep their index.
+    """
+
+    issue_branch = f"ortus/{issue_id}"
+    if git.current_branch() != integration_branch:
+        switch_reason = git.switch_preserving_exports(
+            integration_branch, _TRACKER_EXPORT_PATHS
+        )
+        if switch_reason:
+            return issue_branch, None, None, (
+                f"could not return to {integration_branch} "
+                f"before claiming: {switch_reason}"
+            ), False
+        write_log(
+            f"iter prep: reasserted {integration_branch} "
+            "(exports carried) before claiming"
+        )
+    if not git.valid_branch_name(issue_branch):
+        return issue_branch, None, None, (
+            f"issue id {issue_id!r} is not a legal branch "
+            f"name component for {issue_branch!r}"
+        ), False
+
+    branch_tip = git.branch_tip(issue_branch) if git.branch_exists(issue_branch) else ""
+    resuming_own = bool(
+        journal is not None
+        and journal.issue_id == issue_id
+        and journal.issue_branch == issue_branch
+        and branch_tip
+        and journal.branch_head
+        and branch_tip == journal.branch_head
+    )
+    if branch_tip and not resuming_own and branch_tip != git.head_oid():
+        return issue_branch, None, None, (
+            f"branch {issue_branch} already exists at "
+            f"{branch_tip[:12]}, not at the "
+            f"integration head {git.head_oid()[:12]}; refusing "
+            "to reuse or reset it — resolve the branch "
+            "manually, then re-run grind"
+        ), False
+
+    workspace = repo / _WORKSPACES_DIR / issue_id
+    if workspace.exists():
+        # Anything here is a leftover the startup sweep already rescued (or a
+        # crashed sweep will); a fresh claim starts from the primary's refs.
+        shutil.rmtree(workspace, ignore_errors=True)
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    reason = git.clone_shared(git.head_oid(), workspace)
+    if reason:
+        return issue_branch, None, None, (
+            f"could not materialize the worker workspace: {reason}"
+        ), False
+    workspace_git = _make_git(workspace)
+    # Repo-local config does not clone: a primary whose committer identity
+    # lives in .git/config would leave the workspace unable to commit at all.
+    for key in ("user.name", "user.email"):
+        value = git.config_value(key)
+        if value:
+            workspace_git.set_config(key, value)
+    source = f"origin/{issue_branch}" if branch_tip else git.head_oid()
+    if not workspace_git.create_branch(issue_branch, source):
+        shutil.rmtree(workspace, ignore_errors=True)
+        return issue_branch, None, None, (
+            f"could not create {issue_branch} in the worker workspace"
+        ), False
+    checkout_reason = workspace_git.checkout_reporting(issue_branch)
+    if checkout_reason:
+        shutil.rmtree(workspace, ignore_errors=True)
+        return issue_branch, None, None, (
+            f"could not check out {issue_branch} in the worker "
+            f"workspace: {checkout_reason}"
+        ), False
+    index = repo / ".codegraph"
+    if index.is_dir() and not (workspace / ".codegraph").exists():
+        try:
+            (workspace / ".codegraph").symlink_to(index.resolve())
+        except OSError as exc:
+            write_log(f"iter prep: could not link the CodeGraph index ({exc})")
+    if resuming_own:
+        write_log(
+            f"iter prep: worker workspace resumed {issue_branch} at "
+            f"{branch_tip[:12]} (primary stays on {integration_branch})"
+        )
+    else:
+        write_log(
+            f"iter prep: worker workspace on {issue_branch} at "
+            f"{git.head_oid()[:12]} (primary stays on {integration_branch})"
+        )
+    return issue_branch, workspace, workspace_git, "", resuming_own
+
+
+def _retire_workspace(
+    git: GitClient,
+    journal: CandidateJournal,
+    *,
+    repo: Path,
+    write_log: Callable[[str], None],
+    rescue_uncommitted: bool = False,
+) -> CandidateJournal:
+    """Bring the workspace's branch home and remove the clone.
+
+    The clone is disposable; the primary repository's ref is the durable
+    record. `rescue_uncommitted` additionally commits any dirty candidate
+    work the clone still holds (a crashed run's tail) before fetching, so
+    removal never destroys the only copy of anything.
+    """
+
+    if not journal.workspace_path:
+        return journal
+    workspace = repo / journal.workspace_path
+    if not workspace.exists():
+        return replace(journal, workspace_path="")
+    if journal.issue_branch:
+        workspace_git = _make_git(workspace)
+        if workspace_git.branch_exists(journal.issue_branch):
+            if rescue_uncommitted:
+                dirty = workspace_git.dirty_paths() or frozenset()
+                rescuable = frozenset(
+                    path for path in dirty if not _is_tool_state(path)
+                )
+                if rescuable and workspace_git.current_branch() == (
+                    journal.issue_branch
+                ):
+                    rescued = workspace_git.commit_paths(
+                        rescuable,
+                        f"{journal.issue_id}: capture uncommitted candidate "
+                        "work\n\nPre-retirement rescue of a crashed "
+                        "workspace's dirty paths.\n\nThe finalization pass "
+                        "composes the durable message.",
+                    )
+                    if not rescued:
+                        # Removal must never destroy the only copy of
+                        # anything: an unrescuable workspace is kept whole.
+                        write_log(
+                            "workspace sweep: could not rescue uncommitted "
+                            f"work ({rescued.reason}); the clone is kept for "
+                            "manual recovery"
+                        )
+                        return journal
+                    write_log(
+                        "workspace sweep: rescued "
+                        f"{len(rescuable)} uncommitted path(s) onto "
+                        f"{journal.issue_branch}"
+                    )
+            primary_tip = git.branch_tip(journal.issue_branch)
+            fetch_reason = git.fetch_branch(workspace, journal.issue_branch)
+            if fetch_reason and primary_tip:
+                # A capture-commit unwind or amend rewrote the harness's own
+                # commits; the backup ref is replaced only if untouched.
+                fetch_reason = git.replace_branch(
+                    workspace, journal.issue_branch, expected_tip=primary_tip
+                )
+            if fetch_reason:
+                write_log(
+                    f"workspace sweep: could not fetch {journal.issue_branch} "
+                    f"from {journal.workspace_path}: {fetch_reason}; the clone "
+                    "is kept for manual recovery"
+                )
+                return journal
+            journal = journal.with_branch(
+                journal.issue_branch,
+                git.branch_tip(journal.issue_branch) or journal.branch_head,
+            )
+    shutil.rmtree(workspace, ignore_errors=True)
+    write_log(
+        f"workspace sweep: {journal.workspace_path} removed; "
+        + (
+            f"{journal.issue_branch} preserved in the primary repository"
+            if journal.issue_branch
+            else "no branch to preserve"
+        )
+    )
+    return replace(journal, workspace_path="")
 
 
 def _announced_push(git: GitClient, branch: str) -> bool:
@@ -4333,6 +4720,21 @@ def grind(
             # sanctioned exception is the journal's own issue branch, whose
             # stranded commit the finalization replay below integrates.
             startup_journal = transaction_store.load()
+            if startup_journal is not None and startup_journal.workspace_path:
+                # A crashed run left its worker workspace behind. Rescue any
+                # uncommitted tail onto the issue branch, bring the branch
+                # home, and remove the clone — the resume below then works
+                # from the primary repository's ref like any other.
+                swept = _retire_workspace(
+                    git,
+                    startup_journal,
+                    repo=target,
+                    write_log=write_log,
+                    rescue_uncommitted=True,
+                )
+                if swept is not startup_journal:
+                    transaction_store.save(swept)
+                    startup_journal = swept
             _enforce_branch_discipline(
                 git,
                 integration_branch,
@@ -4519,6 +4921,12 @@ def grind(
             if callable(configure_codegraph):
                 configure_codegraph(codegraph_probe.capability)
             runner.extra_env.update(cache_env)
+            # Workers run in disposable clones but share the primary
+            # repository's tracker: BEADS_DIR pins every bd command to the one
+            # database, so intake and workers never fork state.
+            runner.extra_env.setdefault(
+                "BEADS_DIR", str((target / ".beads").resolve())
+            )
 
             tasks_completed = 0
             iters_run = 0
@@ -4538,6 +4946,11 @@ def grind(
                 # can claim from it. Must precede the `before` snapshot.
                 _rollover_exhausted_epics(bd, write_log)
                 before = _snapshot(bd)
+                # Until a claim materializes a worker workspace, every phase
+                # operates on the primary repository (legacy --condition mode
+                # never leaves it).
+                worker_repo = target
+                candidate_git = git
                 implementation_probe = codegraph_probe
                 # True once Ortus itself completed report/close/commit/sync for
                 # this iteration, so the legacy worker-owned commit path stays
@@ -4900,23 +5313,62 @@ def grind(
                                 active_journal, profiles=phase_profiles
                             )
                             transaction_store.save(active_journal)
-                    # Branch-scoped candidates (Phase L0): every claim works on
-                    # `ortus/<issue-id>`, cut at the integration head. The
-                    # committed result is byte-identical to the path-scoped
-                    # commit; the difference is that the commit exists on a
-                    # named branch first, and an interrupted finalization
-                    # resumes from a ref instead of being reasoned about.
+                    # Branch-scoped candidates (Phase L0) in a disposable
+                    # workspace (ortus-u4zv.2): every claim materializes a
+                    # shared clone on `ortus/<issue-id>`, cut at the
+                    # integration head. The worker's commits accumulate there;
+                    # finalization fetches the branch home. The primary
+                    # checkout never leaves the integration branch, so
+                    # operator intake can no longer collide with a candidate.
                     if git.is_git_repo() and git.has_commits():
-                        issue_branch, branch_blocker, branch_resumed = (
-                            _prepare_issue_branch(
+                        # A journal from the shared-tree era can carry
+                        # uncommitted candidate or handoff state in the
+                        # primary worktree; a fresh clone would never see it.
+                        # Those transactions recover by the pre-workspace
+                        # rules, in the primary tree.
+                        primary_dirty = git.dirty_paths() or frozenset()
+                        legacy_resume = bool(
+                            active_journal is not None
+                            and active_journal.issue_id == issue_id
+                            and not active_journal.workspace_path
+                            and primary_dirty
+                            & (
+                                frozenset(active_journal.candidate_paths)
+                                | frozenset(active_journal.handoff_paths)
+                            )
+                        )
+                        if legacy_resume:
+                            write_log(
+                                "iter prep: legacy shared-tree candidate "
+                                "detected; resuming in the primary worktree"
+                            )
+                            issue_branch, branch_blocker, branch_resumed = (
+                                _prepare_issue_branch(
+                                    git,
+                                    issue_id=issue_id,
+                                    integration_branch=integration_branch,
+                                    journal=active_journal,
+                                    write_log=write_log,
+                                )
+                            )
+                            worker_repo = target
+                            candidate_git = git
+                        else:
+                            (
+                                issue_branch,
+                                worker_repo,
+                                candidate_git,
+                                branch_blocker,
+                                branch_resumed,
+                            ) = _materialize_workspace(
                                 git,
+                                repo=target,
                                 issue_id=issue_id,
                                 integration_branch=integration_branch,
                                 journal=active_journal,
                                 write_log=write_log,
                             )
-                        )
-                        if branch_blocker:
+                        if branch_blocker or worker_repo is None:
                             bd.update_status(issue_id, "open")
                             write_log(f"iter prep: HALT — {branch_blocker}")
                             output.error(f"grind: {branch_blocker}")
@@ -4929,15 +5381,23 @@ def grind(
                             active_journal = replace(
                                 active_journal, base_head=git.head_oid()
                             )
-                        active_journal = active_journal.with_branch(
-                            issue_branch, git.head_oid()
+                        active_journal = replace(
+                            active_journal.with_branch(
+                                issue_branch,
+                                candidate_git.branch_tip(issue_branch)
+                                or git.head_oid(),
+                            ),
+                            workspace_path=(
+                                ""
+                                if worker_repo == target
+                                else str(worker_repo.relative_to(target))
+                            ),
                         )
                         transaction_store.save(active_journal)
-                        write_log(
-                            f"iter prep: working tree on {issue_branch} at "
-                            f"{git.head_oid()[:12]}"
-                        )
-                    dirty_after_claim = git.dirty_paths()
+                    else:
+                        worker_repo = target
+                        candidate_git = git
+                    dirty_after_claim = candidate_git.dirty_paths()
                     if dirty_after_claim is None:
                         output.error("grind: could not record candidate ownership")
                         raise typer.Exit(code=1)
@@ -5053,7 +5513,7 @@ def grind(
                     else:
                         rc = runner.run(
                             iteration_prompt,
-                            repo=target,
+                            repo=worker_repo,
                             log_path=log,
                             fast=fast,
                             profile=implement_profile,
@@ -5081,7 +5541,7 @@ def grind(
                 # committed (AC-5).
                 if active_journal is not None and not resume_candidate_ready:
                     active_journal = _absorb_unrelated_declaration(
-                        target, transaction_store, active_journal, write_log
+                        worker_repo, transaction_store, active_journal, write_log
                     )
                     disowned_paths |= frozenset(active_journal.unrelated_paths)
 
@@ -5091,9 +5551,9 @@ def grind(
                     and active_journal is not None
                     and issue_id in _snapshot(bd).in_progress_ids
                 ):
-                    if git.is_git_repo():
+                    if candidate_git.is_git_repo():
                         active_journal = _capture_codex_candidate(
-                            git,
+                            candidate_git,
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
@@ -5123,7 +5583,7 @@ def grind(
                     and active_journal is not None
                 ):
                     active_journal = _capture_codex_candidate(
-                        git,
+                        candidate_git,
                         transaction_store,
                         active_journal,
                         _candidate_baseline(active_journal, codex_baseline),
@@ -5155,9 +5615,9 @@ def grind(
                     break
 
                 if active_journal is not None and not resume_candidate_ready:
-                    if git.is_git_repo():
+                    if candidate_git.is_git_repo():
                         active_journal = _capture_codex_candidate(
-                            git,
+                            candidate_git,
                             transaction_store,
                             active_journal,
                             _candidate_baseline(active_journal, codex_baseline),
@@ -5283,9 +5743,10 @@ def grind(
                             "implementation"
                         )
                     elif (
-                        git.is_git_repo()
+                        candidate_git.is_git_repo()
                         and active_journal.issue_branch
-                        and git.current_branch() != active_journal.issue_branch
+                        and candidate_git.current_branch()
+                        != active_journal.issue_branch
                     ):
                         # Commits on the issue branch are the deliverable now;
                         # what a worker may never do is carry the work
@@ -5293,7 +5754,7 @@ def grind(
                         reason = (
                             "implementation worker left its issue branch "
                             f"{active_journal.issue_branch} for "
-                            f"{git.current_branch() or 'a detached HEAD'}"
+                            f"{candidate_git.current_branch() or 'a detached HEAD'}"
                         )
                     elif (
                         git.is_git_repo()
@@ -5310,9 +5771,9 @@ def grind(
                             f"{active_journal.base_head} is no longer its head"
                         )
                     elif (
-                        git.is_git_repo()
+                        candidate_git.is_git_repo()
                         and not active_journal.issue_branch
-                        and git.head_oid() != active_journal.base_head
+                        and candidate_git.head_oid() != active_journal.base_head
                     ):
                         # Pre-branch journals keep the old rule: a commit moves
                         # HEAD, so `git diff HEAD` would report an empty
@@ -5347,22 +5808,39 @@ def grind(
                             break
                         # A drifted work spec is an issue-level event, not a
                         # session-level one: the rejected candidate keeps its
-                        # report and its phase, and the queue moves on. The
-                        # candidate is preserved uncommitted, so the next
-                        # iteration inherits it as work it must leave alone
-                        # rather than folding it into another issue's commit.
-                        disowned_paths |= frozenset(active_journal.candidate_paths)
-                        handoff = _HandoffState(
-                            handoff_paths=disowned_paths,
-                            disowned=disowned_paths,
-                            active=bool(disowned_paths),
-                            notes=(
-                                "a candidate rejected by the implementation "
-                                "isolation guard is preserved uncommitted",
-                            ),
-                        )
-                        startup_handoff_paths = handoff.handoff_paths
-                        recovery_handoff = handoff.active
+                        # report and its phase, and the queue moves on.
+                        if active_journal.workspace_path:
+                            # The candidate lives in its own workspace: rescue
+                            # anything uncommitted onto the issue branch, bring
+                            # the branch home, and discard the clone — nothing
+                            # of it can leak into another issue's tree.
+                            active_journal = _retire_workspace(
+                                git,
+                                active_journal,
+                                repo=target,
+                                write_log=write_log,
+                                rescue_uncommitted=True,
+                            )
+                            transaction_store.save(active_journal)
+                        else:
+                            # Legacy shared-tree candidate: preserved
+                            # uncommitted, so the next iteration inherits it as
+                            # work it must leave alone rather than folding it
+                            # into another issue's commit.
+                            disowned_paths |= frozenset(
+                                active_journal.candidate_paths
+                            )
+                            handoff = _HandoffState(
+                                handoff_paths=disowned_paths,
+                                disowned=disowned_paths,
+                                active=bool(disowned_paths),
+                                notes=(
+                                    "a candidate rejected by the implementation "
+                                    "isolation guard is preserved uncommitted",
+                                ),
+                            )
+                            startup_handoff_paths = handoff.handoff_paths
+                            recovery_handoff = handoff.active
                         active_journal = None
                         resume_candidate_ready = False
                         continue
@@ -5408,9 +5886,9 @@ def grind(
                     verify_kwargs = dict(
                         runner=runner,
                         bd=bd,
-                        git=git,
+                        git=candidate_git,
                         store=transaction_store,
-                        repo=target,
+                        repo=worker_repo,
                         log=log,
                         write_log=write_log,
                         backend=resolved_backend,
@@ -5568,7 +6046,7 @@ def grind(
                         try:
                             rc = runner.run(
                                 correction_prompt,
-                                repo=target,
+                                repo=worker_repo,
                                 log_path=log,
                                 fast=fast,
                                 profile=implement_profile,
@@ -5596,7 +6074,7 @@ def grind(
                                 )
                                 rc = runner.run(
                                     correction_prompt,
-                                    repo=target,
+                                    repo=worker_repo,
                                     log_path=log,
                                     fast=fast,
                                     profile=implement_profile,
@@ -5627,7 +6105,7 @@ def grind(
                         # would sit unread until some later resume — and the
                         # path it disowned would be committed in the meantime.
                         active_journal = _absorb_unrelated_declaration(
-                            target, transaction_store, active_journal, write_log
+                            worker_repo, transaction_store, active_journal, write_log
                         )
                         disowned_paths |= frozenset(active_journal.unrelated_paths)
                         # The re-verify below subtracts this baseline to decide
@@ -5638,9 +6116,9 @@ def grind(
                         verify_kwargs["baseline"] = _candidate_baseline(
                             active_journal, codex_baseline
                         )
-                        if git.is_git_repo():
+                        if candidate_git.is_git_repo():
                             active_journal = _capture_codex_candidate(
-                                git,
+                                candidate_git,
                                 transaction_store,
                                 active_journal,
                                 _candidate_baseline(active_journal, codex_baseline),
@@ -5722,6 +6200,18 @@ def grind(
                                 active_journal, phase=halt_phase
                             )
                             transaction_store.save(active_journal)
+                        if active_journal.workspace_path:
+                            # Park durably: whatever the workspace still holds
+                            # is rescued onto the branch, the branch comes home
+                            # to the primary repository, and the clone goes.
+                            active_journal = _retire_workspace(
+                                git,
+                                active_journal,
+                                repo=target,
+                                write_log=write_log,
+                                rescue_uncommitted=True,
+                            )
+                            transaction_store.save(active_journal)
                         write_log(f"iter {iters_run}: {halt}")
                         output.error(
                             _console_safe(
@@ -5732,8 +6222,14 @@ def grind(
                                     ),
                                     phase=active_journal.phase,
                                     cause=halt,
+                                    # A retired workspace's truth lives in the
+                                    # primary repository; a kept one still
+                                    # holds its own state.
                                     state=_candidate_state_phrase(
-                                        git, active_journal
+                                        candidate_git
+                                        if active_journal.workspace_path
+                                        else git,
+                                        active_journal,
                                     ),
                                 )
                             )
@@ -5752,7 +6248,28 @@ def grind(
                         baseline=_candidate_baseline(active_journal, codex_baseline),
                         write_log=write_log,
                         compose=compose_message,
+                        workspace_git=(
+                            candidate_git
+                            if active_journal.workspace_path
+                            and candidate_git is not git
+                            else None
+                        ),
                     )
+                    if active_journal.workspace_path:
+                        # Landed or blocked, the clone is disposable: the
+                        # branch is (or just was) fetched home, and a blocked
+                        # resume re-clones from the primary's ref. A landed
+                        # transaction's journal was already consumed, so only
+                        # a blocked one records the retirement.
+                        active_journal = _retire_workspace(
+                            git,
+                            active_journal,
+                            repo=target,
+                            write_log=write_log,
+                            rescue_uncommitted=blocker is not None,
+                        )
+                        if blocker is not None:
+                            transaction_store.save(active_journal)
                     if blocker is not None:
                         write_log(
                             f"iter {iters_run}: finalization blocked — {blocker}"
