@@ -24,7 +24,7 @@ from tests._platform import (
     skip_unless_bwrap_usable,
     skip_unless_tmp_is_canonical,
 )
-from tests._shims import shim_path
+from tests._shims import make_inline_python_shim, shim_path
 
 FAKE_CLAUDE = shim_path("fake-claude")
 
@@ -308,3 +308,41 @@ def test_timeout_kills_child(tmp_path: Path) -> None:
     log = tmp_path / "log.txt"
     with pytest.raises(subprocess.TimeoutExpired):
         runner.run("hello", repo=tmp_path, log_path=log, timeout=0.5)
+
+
+_ENV_ECHO_SHIM = (
+    "import os\nprint('marker=' + os.environ.get('ORTUS_WORKER', '<unset>'))\n"
+)
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_worker_env_carries_ortus_worker_marker(tmp_path: Path, backend: str) -> None:
+    """AC-7 (ortus-u4zv.1): both backends spawn agents with ORTUS_WORKER=1.
+
+    The marker exempts pipeline sessions from the grind commit guard hook
+    (scripts/grind_commit_guard.py); interactive sessions never carry it.
+    """
+    from ortus.core.agent import CodexRunner
+
+    shim = make_inline_python_shim(tmp_path, "env-echo", _ENV_ECHO_SHIM)
+    runner = (
+        ClaudeRunner(claude_binary=str(shim))
+        if backend == "claude"
+        else CodexRunner(str(shim))
+    )
+    log = tmp_path / "log.txt"
+    rc = runner.run("hello", repo=tmp_path, log_path=log)
+    assert rc == 0
+    assert "marker=1" in log.read_text()
+
+
+def test_extra_env_overrides_worker_marker(tmp_path: Path) -> None:
+    """Operator-supplied extra_env stays authoritative over the marker."""
+    shim = make_inline_python_shim(tmp_path, "env-echo", _ENV_ECHO_SHIM)
+    runner = ClaudeRunner(
+        claude_binary=str(shim), extra_env={"ORTUS_WORKER": "0"}
+    )
+    log = tmp_path / "log.txt"
+    rc = runner.run("hello", repo=tmp_path, log_path=log)
+    assert rc == 0
+    assert "marker=0" in log.read_text()
