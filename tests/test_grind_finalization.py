@@ -36,7 +36,11 @@ from ortus.core.transaction import (
     JournalStore,
     candidate_diff,
 )
-from tests._shims import ready_issue_args
+from tests._shims import (
+    install_machine_checks,
+    post_completion_comment,
+    ready_issue_args,
+)
 from tests.conftest import copy_bd_workspace
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
@@ -169,6 +173,9 @@ class PassingRunner:
         log_path.touch(exist_ok=True)
         if phase is Phase.IMPLEMENT:
             (repo / CANDIDATE).write_text("SHIPPED = True\n")
+            journal = JournalStore(repo).load()
+            assert journal is not None
+            post_completion_comment(repo, journal.issue_id, {"AC-1": "pass"})
         elif phase is Phase.VERIFY:
             journal = JournalStore(repo).load()
             assert journal is not None
@@ -231,6 +238,9 @@ def _install(
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend_runner)
+    # Verification is the machine pipeline now; these tests are about what
+    # happens AFTER a green verdict, so the AC runner is scripted green.
+    install_machine_checks(monkeypatch)
 
 
 def _refuse_commit(
@@ -346,16 +356,14 @@ def test_pass_finalizes_report_close_commit_and_sync(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    # No finalize-phase model run: the compose pass is retired.
-    assert backend.phases == [
-        Phase.IMPLEMENT.value,
-        Phase.VERIFY.value,
-    ]
+    # No finalize-phase model run (compose retired) and no verify-phase agent
+    # spawn (the machine pipeline judged the branch): one worker in total.
+    assert backend.phases == [Phase.IMPLEMENT.value]
     assert _issue(repo, issue_id)["status"] == "closed"
 
     bodies = _comment_bodies(repo, issue_id)
     assert sum(FINALIZATION_MARKER in body for body in bodies) == 1
-    assert any("Ortus verifier report" in body for body in bodies)
+    assert any("Ortus machine verification record" in body for body in bodies)
 
     committed = _committed_paths(repo)
     assert CANDIDATE in committed
@@ -403,10 +411,15 @@ def test_pass_without_a_remote_finalizes_locally(
 def test_failure_at_commit_retains_a_recoverable_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-5: a commit that fails leaves report+close journaled and stops."""
+    """AC-5: a refused fold leaves report+close journaled and stops.
+
+    The candidate itself is committed at the machine-verification boundary,
+    so finalization's own git write is the fold of the transaction's late
+    files into that commit — the boundary this test refuses.
+    """
     repo, issue_id = _seed(tmp_path, "fin3")
     _install(monkeypatch, tmp_path, PassingRunner(repo))
-    _refuse_commit(monkeypatch)
+    monkeypatch.setattr(GitClient, "amend_paths", lambda self, paths: False)
 
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
@@ -414,23 +427,20 @@ def test_failure_at_commit_retains_a_recoverable_journal(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     combined = " ".join((result.stdout + result.stderr).split())
-    assert f"({issue_id}) blocked — path-scoped commit" in combined
+    assert "blocked — could not fold the transaction's late paths" in combined
     journal = JournalStore(repo).load()
     assert journal is not None
     assert journal.finalized("report") and journal.finalized("close")
     assert not journal.finalized("commit")
-    # The compose boundary sits between the close and the commit, so a commit
-    # that failed leaves it as the last one that landed.
-    assert journal.phase == "finalized-compose"
     assert _issue(repo, issue_id)["status"] == "closed"
 
 
 def test_blocker_keeps_its_first_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-1/AC-2/AC-4: the blocker still opens with the sentence operators and
-    tests already match on, and now says which git command refused and what it
-    said — the cause the old message threw away (ortus-pgqg)."""
+    """AC-1/AC-2/AC-4: a refused commit says which git command refused and what
+    it said — the cause the old message threw away (ortus-pgqg). The commit the
+    default pipeline performs is the capture commit at the machine boundary."""
     repo, _issue_id = _seed(tmp_path, "fin3a")
     _install(monkeypatch, tmp_path, PassingRunner(repo))
     _refuse_commit(monkeypatch)
@@ -441,15 +451,15 @@ def test_blocker_keeps_its_first_line(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     log = _log_text(repo)
-    blocked = [line for line in log.splitlines() if "finalization blocked" in line]
-    assert blocked, log
-    sentence = "path-scoped commit of the owned candidate failed"
-    assert blocked[0].split("— ", 1)[1].startswith(sentence)
-    assert "git commit exited 1" in blocked[0]
-    assert "src/odd [name].py is unformatted" in blocked[0]
-    # Step 4: the same detail is written where the failure happened, not only
-    # where the iteration reports it.
-    assert f"finalization: HALT — {sentence}; git commit exited 1" in log
+    rejected = [
+        line
+        for line in log.splitlines()
+        if "machine verification rejected" in line
+    ]
+    assert rejected, log
+    assert "could not commit uncommitted candidate paths" in rejected[0]
+    assert "git commit exited 1" in rejected[0]
+    assert "src/odd [name].py is unformatted" in rejected[0]
     # The console keeps the bracketed text a Rich console would otherwise eat.
     console = " ".join((result.stdout + result.stderr).split())
     assert "[ERROR] src/odd [name].py is unformatted" in console
@@ -470,9 +480,8 @@ def test_blocker_keeps_the_recovery_hint(
 
     # Normalized: output.error hard-wraps its hint at the console width.
     console = " ".join((result.stdout + result.stderr).split())
-    assert (
-        "the transaction journal under logs/ retains the recoverable state; "
-        "re-run grind to resume this exact issue" in console
+    assert "run `ortus grind` again; it resumes this issue at verification" in (
+        console
     )
 
 
@@ -490,11 +499,12 @@ def test_successful_commit_logging_unchanged(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     log = _log_text(repo)
-    # The line names every path the commit staged, sorted — and whether bd has
-    # dirtied its tracker exports by this point is timing, not behavior. Assert
-    # the line is there and names the candidate, rather than that the candidate
-    # is the only path on it: `.beads/…` sorts first, so the stricter form fails
-    # wherever the exports happen to be checkpointed in the same commit.
+    # The candidate itself is committed at the machine-verification boundary
+    # now (the capture commit), so finalization's own commit carries only the
+    # transaction's late files — the tracker exports the close rewrote.
+    assert (
+        f"captured 1 uncommitted candidate path(s) onto ortus/{issue_id}" in log
+    )
     committed = next(
         (
             line
@@ -504,7 +514,6 @@ def test_successful_commit_logging_unchanged(
         "",
     )
     assert committed, log
-    assert CANDIDATE in committed, committed
     assert "git commit exited" not in log
     assert "finalization: HALT" not in log
     assert CANDIDATE in _committed_paths(repo)
@@ -1293,6 +1302,9 @@ class CommittingRunner(PassingRunner):
         (self.repo / CANDIDATE).write_text("SHIPPED = True\n")
         _git(self.repo, "add", CANDIDATE)
         _git(self.repo, "commit", "-m", self.message)
+        journal = JournalStore(self.repo).load()
+        assert journal is not None
+        post_completion_comment(self.repo, journal.issue_id, {"AC-1": "pass"})
         return 0
 
 
@@ -1322,8 +1334,9 @@ def test_worker_commit_message_survives_finalization(
     committed = _committed_paths(repo)
     assert CANDIDATE in committed
     assert ".beads/issues.jsonl" in committed
-    # No finalize-phase model run: the compose pass is retired.
-    assert backend.phases == [Phase.IMPLEMENT.value, Phase.VERIFY.value]
+    # No finalize-phase model run (compose retired) and no verify-phase agent
+    # (the machine pipeline judged the branch): one worker spawn total.
+    assert backend.phases == [Phase.IMPLEMENT.value]
 
 
 def test_restart_after_compose_reuses_message(
@@ -1390,7 +1403,7 @@ def test_uncommitted_candidate_falls_back_to_the_deterministic_body(
     assert subject == f"{issue_id}: {_issue(repo, issue_id)['title']}"
     assert "Exercise the behavior owned by this test." in body
     assert len(_finalization_commits(repo, issue_id)) == 1
-    assert backend.phases == [Phase.IMPLEMENT.value, Phase.VERIFY.value]
+    assert backend.phases == [Phase.IMPLEMENT.value]
     logs = sorted((repo / "logs").glob("grind-*.log"))
     assert logs, "the run wrote no log"
     assert "commit-message pass retired" in logs[-1].read_text(encoding="utf-8")
@@ -1484,6 +1497,22 @@ def _log(repo: Path) -> str:
     )
 
 
+def _enable_reviewer(repo: Path) -> None:
+    """Turn the agent reviewer on for this workspace, committed so the flag
+    file never reads as inherited work.
+
+    The seal and mutation-guard properties belong to the agent reviewer, which
+    is a default-off configured step now; these tests exercise it through the
+    flag exactly as an operator would.
+    """
+
+    config = repo / ".ortusrc"
+    existing = config.read_text(encoding="utf-8") if config.exists() else ""
+    config.write_text(existing + "\nreviewer = true\n", encoding="utf-8")
+    _git(repo, "add", ".ortusrc")
+    _git(repo, "commit", "-m", "fixture: enable the reviewer flag")
+
+
 def _blob(repo: Path, relative: str) -> bytes:
     return subprocess.run(
         ["git", "show", f"HEAD:{relative}"], cwd=repo, capture_output=True, check=True
@@ -1556,6 +1585,7 @@ def test_rebuilt_artifact_is_restored_and_run_continues(
     carries build output.
     """
     repo, issue_id = _seed(tmp_path, "fin-seal1")
+    _enable_reviewer(repo)
     backend = RebuildingRunner(repo)
     _install(monkeypatch, tmp_path, backend)
 
@@ -1580,6 +1610,7 @@ def test_restored_paths_are_logged(
 ) -> None:
     """AC-2: an artifact that differs every run is a finding, not a silence."""
     repo, _ = _seed(tmp_path, "fin-seal2")
+    _enable_reviewer(repo)
     _install(monkeypatch, tmp_path, RebuildingRunner(repo))
 
     result = runner.invoke(
@@ -1601,6 +1632,7 @@ def test_verifier_source_edit_still_fails(
     under review; that property is the whole reason the phase is read-only.
     """
     repo, issue_id = _seed(tmp_path, "fin-seal3")
+    _enable_reviewer(repo)
     _install(monkeypatch, tmp_path, RebuildingRunner(repo, also_edits=CANDIDATE))
 
     result = runner.invoke(
@@ -1610,7 +1642,10 @@ def test_verifier_source_edit_still_fails(
 
     assert "verifier mutated the candidate during read-only review" in _log(repo)
     assert _issue(repo, issue_id)["status"] == "in_progress"
-    assert _finalization_commits(repo, issue_id) == []
+    # The candidate parks committed on the issue branch (the capture
+    # commit); what a rejection must never do is land it on main.
+    main_subjects = _git(repo, "log", "--format=%s", "main").stdout.splitlines()
+    assert [s for s in main_subjects if s.startswith(f"{issue_id}: ")] == []
     journal = JournalStore(repo).load()
     assert journal is not None and journal.phase == "verification-rejected"
 
@@ -1624,6 +1659,7 @@ def test_failed_restore_is_fatal(
     is not misconduct.
     """
     repo, issue_id = _seed(tmp_path, "fin-seal4")
+    _enable_reviewer(repo)
     _install(monkeypatch, tmp_path, RebuildingRunner(repo))
 
     def _unwritable(*args: object, **kwargs: object) -> None:
@@ -1641,7 +1677,10 @@ def test_failed_restore_is_fatal(
     assert GENERATED in log
     assert "verifier mutated the candidate" not in log
     assert _issue(repo, issue_id)["status"] == "in_progress"
-    assert _finalization_commits(repo, issue_id) == []
+    # The candidate parks committed on the issue branch (the capture
+    # commit); what a rejection must never do is land it on main.
+    main_subjects = _git(repo, "log", "--format=%s", "main").stdout.splitlines()
+    assert [s for s in main_subjects if s.startswith(f"{issue_id}: ")] == []
 
 
 def test_path_set_change_still_fatal(
@@ -1649,6 +1688,7 @@ def test_path_set_change_still_fatal(
 ) -> None:
     """AC-5: a path the reviewer added is a different failure, and stays fatal."""
     repo, issue_id = _seed(tmp_path, "fin-seal5")
+    _enable_reviewer(repo)
     _install(monkeypatch, tmp_path, RebuildingRunner(repo, adds_path="reviewer.txt"))
 
     result = runner.invoke(
@@ -1658,7 +1698,10 @@ def test_path_set_change_still_fatal(
 
     assert "mutated the candidate path set during read-only review" in _log(repo)
     assert _issue(repo, issue_id)["status"] == "in_progress"
-    assert _finalization_commits(repo, issue_id) == []
+    # The candidate parks committed on the issue branch (the capture
+    # commit); what a rejection must never do is land it on main.
+    main_subjects = _git(repo, "log", "--format=%s", "main").stdout.splitlines()
+    assert [s for s in main_subjects if s.startswith(f"{issue_id}: ")] == []
 
 
 def test_binary_artifact_restored_byte_exactly(
@@ -1667,6 +1710,7 @@ def test_binary_artifact_restored_byte_exactly(
     """AC-6: an image goes back byte for byte, never through a text path."""
     image = b"\x89PNG\r\n\x1a\n\x00\x01\xff\xfe built\x00"
     repo, _ = _seed(tmp_path, "fin-seal6")
+    _enable_reviewer(repo)
     _install(
         monkeypatch,
         tmp_path,
@@ -1692,6 +1736,7 @@ def test_unchanged_review_is_unaffected(
 ) -> None:
     """AC-7: a review during which nothing moved logs nothing new."""
     repo, issue_id = _seed(tmp_path, "fin-seal7")
+    _enable_reviewer(repo)
     _install(monkeypatch, tmp_path, PassingRunner(repo))
 
     result = runner.invoke(
@@ -1711,6 +1756,7 @@ def test_commit_carries_the_sealed_candidate(
 ) -> None:
     """AC-8: the rebuilt bytes are never adopted, on disk or in the commit."""
     repo, _ = _seed(tmp_path, "fin-seal8")
+    _enable_reviewer(repo)
     _install(monkeypatch, tmp_path, RebuildingRunner(repo))
 
     result = runner.invoke(
@@ -1729,6 +1775,7 @@ def test_deleted_artifact_is_restored_not_taken_as_unchanged(
     candidate whole: the path comes back with its sealed content rather than
     being committed as a deletion nobody reviewed."""
     repo, issue_id = _seed(tmp_path, "fin-seal9")
+    _enable_reviewer(repo)
     (repo / GENERATED).parent.mkdir(parents=True)
     (repo / GENERATED).write_bytes(b"// stale build\n")
     _git(repo, "add", "-A")

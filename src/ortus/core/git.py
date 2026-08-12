@@ -506,10 +506,27 @@ class GitClient:
         proc = self._run("log", "-1", "--format=%B")
         return proc.stdout if proc.returncode == 0 else ""
 
+    def reset_soft(self, ref: str) -> bool:
+        """`git reset --soft <ref>`: move HEAD, keep index and worktree.
+
+        Used only to unwind the harness's own capture commits — a commit the
+        harness made is one it may take back, with every byte of the work
+        left staged exactly as it was before the capture.
+        """
+        return self._run("reset", "--soft", ref).returncode == 0
+
     def amend_message(self, message: str) -> bool:
-        """Rewrite HEAD's commit message in place, touching nothing else."""
+        """Rewrite HEAD's commit message in place, touching nothing else.
+
+        ``--only`` with no pathspec amends from HEAD's tree and ignores the
+        index — without it, anything an operator had staged when the run
+        started would be swept silently into the amended commit.
+        """
         return (
-            self._run("commit", "--amend", "--no-edit", "-m", message).returncode == 0
+            self._run(
+                "commit", "--amend", "--no-edit", "--only", "-m", message
+            ).returncode
+            == 0
         )
 
     def amend_paths(self, paths: frozenset[str]) -> bool:

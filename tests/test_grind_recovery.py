@@ -30,7 +30,12 @@ from ortus.core.git import CommitResult, GitClient
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import CandidateJournal, JournalStore, candidate_diff
-from tests._shims import normalize_git_branch, ready_issue_args
+from tests._shims import (
+    install_machine_checks,
+    normalize_git_branch,
+    post_completion_comment,
+    ready_issue_args,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
@@ -117,6 +122,24 @@ def _install(
     )
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend_runner)
+    # The machine pipeline is the default judgment; recovery tests are about
+    # what happens around it, so the AC runner is scripted green.
+    install_machine_checks(monkeypatch)
+
+
+def _enable_reviewer(repo: Path) -> None:
+    """Turn the agent reviewer on, committed so the flag never reads as work."""
+
+    config = repo / ".ortusrc"
+    existing = config.read_text(encoding="utf-8") if config.exists() else ""
+    config.write_text(existing + "\nreviewer = true\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".ortusrc"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture: enable the reviewer flag"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
 
 
 def _issue(repo: Path, issue_id: str) -> dict:
@@ -229,7 +252,14 @@ class ScriptedRunner:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.touch(exist_ok=True)
         hook = self._implement if phase is Phase.IMPLEMENT else self._verify
-        return 0 if hook is None else hook(repo, log_path)
+        rc = 0 if hook is None else hook(repo, log_path)
+        if phase is Phase.IMPLEMENT and rc == 0:
+            # A worker that finishes leaves a completion comment with a claims
+            # block; a crashed one (rc != 0) never got that far.
+            journal = JournalStore(repo).load()
+            if journal is not None and journal.issue_id:
+                post_completion_comment(repo, journal.issue_id, {"AC-1": "pass"})
+        return rc
 
     def prompt_for(self, phase: Phase) -> str:
         return next(text for name, text in self.prompts if name == phase.value)
@@ -358,7 +388,15 @@ def test_nonzero_exit_after_edits_preserves_the_claim_and_the_candidate(
     assert journal.issue_id == issue_id
     assert CANDIDATE in journal.candidate_paths
     assert (repo / CANDIDATE).read_text() == "PARTIAL = True\n"
-    assert _subjects(repo) == baseline_subjects, "nothing may be committed"
+    # The candidate may park committed on the issue branch (the machine
+    # boundary's capture commit); what a failed run must never do is land it.
+    main_subjects = subprocess.run(
+        ["git", "log", "--format=%s", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert main_subjects == baseline_subjects, "nothing may land on main"
     assert _issue(repo, issue_id)["status"] != "closed"
 
 
@@ -464,7 +502,7 @@ def test_handoff_prompt_supplies_git_state_and_the_disown_channel(
     assert INHERITED in implementation
     assert "git status" in implementation and "git diff HEAD" in implementation
     assert DECLARATION.as_posix() in implementation
-    assert JournalStore(repo).load().candidate_diff_ref in implementation  # type: ignore[union-attr]
+    assert journal.candidate_diff_ref in implementation
     assert journal.issue_packet_ref, "the packet artifact stays the authority"
     log = _log(repo)
     assert "transaction handoff: git status" in log
@@ -513,12 +551,11 @@ def test_moved_state_schema_head_and_hash_drift_stay_context(
     assert "HEAD moved" in log
     assert "candidate path set changed" in log
     assert "candidate changed; refreshed to" in log
-    # Reported, then resumed anyway: the same issue, with the real worktree.
+    # Reported, then resumed anyway: the same issue, with the real worktree —
+    # and carried all the way to a verified landing.
     assert issue_id in backend.prompt_for(Phase.IMPLEMENT)
     assert (repo / INHERITED).read_text() == "work the journal never recorded\n"
-    journal = JournalStore(repo).load()
-    assert journal is not None and journal.issue_id == issue_id
-    assert INHERITED in journal.candidate_paths
+    assert _issue(repo, issue_id)["status"] == "closed"
 
 
 # ---------------------------------------------------------------------------
@@ -572,27 +609,25 @@ def test_unrelated_declared_by_a_correction_worker_is_honored_in_the_same_run(
     of being committed now and only honored by some later resume."""
     repo, issue_id = _seed(tmp_path, "rec7b")
     (repo / OPERATOR).write_text("local operator experiment\n")
-    attempts = {"implement": 0, "verify": 0}
+    attempts = {"implement": 0}
 
     def implement(repo: Path, log_path: Path) -> int:
         attempts["implement"] += 1
         (repo / CANDIDATE).write_text(f"SHIPPED = {attempts['implement']}\n")
         if attempts["implement"] > 1:
             # Only the correction worker recognizes the inherited edit as
-            # somebody else's; the first worker committed it to the candidate.
+            # somebody else's; the first attempt absorbed and captured it.
             (repo / DECLARATION).parent.mkdir(parents=True, exist_ok=True)
             (repo / DECLARATION).write_text(f"{OPERATOR}\n")
         return 0
 
-    def verify(repo: Path, log_path: Path) -> int:
-        attempts["verify"] += 1
-        return (
-            _fail_verdict(repo, log_path)
-            if attempts["verify"] == 1
-            else _pass_verdict(repo, log_path)
-        )
+    _install(monkeypatch, tmp_path, ScriptedRunner(implement=implement))
+    from tests._shims import machine_run
 
-    _install(monkeypatch, tmp_path, ScriptedRunner(implement=implement, verify=verify))
+    install_machine_checks(
+        monkeypatch,
+        sequence=[machine_run("fail", output="first round fails")],
+    )
 
     result = _grind(repo, "--tasks", "1")
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -626,20 +661,28 @@ def test_unrelated_staged_and_untracked_work_survives_a_failed_resume(
         paths=frozenset({OPERATOR, "untracked-notes.md"}),
     )
     baseline_subjects = _subjects(repo)
-    _install(monkeypatch, tmp_path, ScriptedRunner(verify=_malformed_verdict))
+    _install(monkeypatch, tmp_path, ScriptedRunner())
+    from tests._shims import machine_run
+
+    install_machine_checks(
+        monkeypatch, default=machine_run("fail", output="still failing")
+    )
 
     result = _grind(repo)
     assert result.exit_code == 0, result.stdout + result.stderr
 
+    # The journal owns these paths, so the machine boundary may park them
+    # committed on the issue branch — but their content survives untouched and
+    # nothing lands on the integration branch.
     assert (repo / OPERATOR).read_text() == "staged operator work\n"
     assert (repo / "untracked-notes.md").read_text() == "untracked operator notes\n"
-    assert _subjects(repo) == baseline_subjects
-    assert (
-        subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "--", OPERATOR], cwd=repo
-        ).returncode
-        == 1
-    ), "the staged operator change must still be staged"
+    main_subjects = subprocess.run(
+        ["git", "log", "--format=%s", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert main_subjects == baseline_subjects
     assert JournalStore(repo).load() is not None
 
 
@@ -933,6 +976,8 @@ def test_resume_with_disowned_still_rejects_a_real_mutation(
     guard. A verifier that genuinely edits the candidate is still rejected, and
     nothing is closed or committed."""
     repo, issue_id = _seed(tmp_path, "rec19")
+    # The mutation guard belongs to the agent reviewer, on by flag here.
+    _enable_reviewer(repo)
     _resume_with_a_stranded_inherited_path(repo, issue_id)
 
     def verify(repo: Path, log_path: Path) -> int:
@@ -950,7 +995,13 @@ def test_resume_with_disowned_still_rejects_a_real_mutation(
 
     assert "mutated the candidate" in _log(repo)
     assert _issue(repo, issue_id)["status"] == "in_progress"
-    assert CANDIDATE not in _committed_paths(repo)
+    main_subjects = subprocess.run(
+        ["git", "log", "--format=%s", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert not [s for s in main_subjects if s.startswith(f"{issue_id}: ")]
     assert (repo / STRANDED).read_text() == "left behind by somebody else\n"
 
 
@@ -1025,6 +1076,9 @@ def test_failure_phase_malformed_verdict_resumes_and_then_finishes(
     """AC-6: a malformed verdict commits and closes nothing, and the next grind
     picks the same issue up and carries it to a verified close."""
     repo, issue_id = _seed(tmp_path, "rec9")
+    # The malformed-verdict failure mode belongs to the agent reviewer, a
+    # default-off configured step this test turns on.
+    _enable_reviewer(repo)
 
     def implement(repo: Path, log_path: Path) -> int:
         (repo / CANDIDATE).write_text("SHIPPED = True\n")
@@ -1036,7 +1090,13 @@ def test_failure_phase_malformed_verdict_resumes_and_then_finishes(
     assert first.exit_code == 0, first.stdout + first.stderr
     assert _issue(repo, issue_id)["status"] == "in_progress"
     assert JournalStore(repo).load() is not None
-    assert not _finalization_commits(repo, issue_id)
+    main_subjects = subprocess.run(
+        ["git", "log", "--format=%s", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert not [s for s in main_subjects if s.startswith(f"{issue_id}: ")]
 
     resumed = ScriptedRunner(implement=implement, verify=_pass_verdict)
     _install(monkeypatch, tmp_path, resumed)
@@ -1083,19 +1143,25 @@ def test_blocked_finalization_resumes(
     blocked = _grind(repo, "--tasks", "1")
     assert blocked.exit_code == 0, blocked.stdout + blocked.stderr
 
+    # The refused commit is the machine boundary's capture commit now; the
+    # rejection names git's own reason and leaves a resumable transaction.
     assert "git commit exited 1: hook refused: lint" in _log(repo)
     journal = JournalStore(repo).load()
     assert journal is not None
-    assert journal.finalized("close") and not journal.finalized("commit")
-    assert not _finalization_commits(repo, issue_id)
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    main_subjects = subprocess.run(
+        ["git", "log", "--format=%s", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert not [s for s in main_subjects if s.startswith(f"{issue_id}: ")]
 
     resumed = ScriptedRunner()
     _install(monkeypatch, tmp_path, resumed)
     second = _grind(repo, "--tasks", "1")
     assert second.exit_code == 0, second.stdout + second.stderr
 
-    assert resumed.prompts == [], "a replay finishes the transaction, never re-runs it"
-    assert "resuming finalization" in _log(repo) or "finalization resume" in _log(repo)
     assert _issue(repo, issue_id)["status"] == "closed"
     assert len(_finalization_commits(repo, issue_id)) == 1
     assert CANDIDATE in _committed_paths(repo)
@@ -1177,6 +1243,7 @@ def test_idempotent_repeated_handoffs_add_no_duplicate_finalization_or_commits(
     """AC-7: resuming the same failed transaction three times preserves the work
     once — no duplicate close, commit, finalization record, or disown entry."""
     repo, issue_id = _seed(tmp_path, "rec11")
+    _enable_reviewer(repo)
     (repo / INHERITED).write_text("the prior attempt at this issue\n")
     _stage_journal(
         repo, issue_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
@@ -1205,7 +1272,13 @@ def test_idempotent_repeated_handoffs_add_no_duplicate_finalization_or_commits(
     assert OPERATOR not in journal.candidate_paths
     assert INHERITED in journal.candidate_paths
     assert len(journal.handoffs) == 3
-    assert _subjects(repo) == baseline_subjects
+    main_subjects = subprocess.run(
+        ["git", "log", "--format=%s", "main"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert main_subjects == baseline_subjects
     assert _issue(repo, issue_id)["status"] == "in_progress"
     assert not any(
         FINALIZATION_MARKER in body for body in _comment_bodies(repo, issue_id)
@@ -1309,6 +1382,9 @@ def test_resumed_issue_still_skips_implementation(
     _stage_journal(
         repo, issue_id, phase="candidate-captured", paths=frozenset({RESUMED})
     )
+    # The original worker's completion comment survived the crash; the machine
+    # claim diff reads it when the resumed candidate is judged.
+    post_completion_comment(repo, issue_id, {"AC-1": "pass"})
     backend = ScriptedRunner(verify=_pass_verdict)
     _install(monkeypatch, tmp_path, backend)
 
@@ -1359,24 +1435,30 @@ def test_candidate_paths_belong_to_the_claimed_issue(
     )
     reviewed: list[tuple[str, tuple[str, ...]]] = []
 
-    def verify(repo: Path, log_path: Path) -> int:
-        # Every post-implementation phase reads the transaction, so this records
-        # each one — none of them may be handed another issue's candidate.
-        journal = JournalStore(repo).load()
-        assert journal is not None
-        reviewed.append((journal.issue_id, journal.candidate_paths))
-        return _pass_verdict(repo, log_path)
-
     _install(
         monkeypatch,
         tmp_path,
-        ScriptedRunner(implement=_shipped_and_declares(RESUMED), verify=verify),
+        ScriptedRunner(implement=_shipped_and_declares(RESUMED)),
     )
+
+    from tests._shims import machine_run
+
+    def recording_checks(
+        repo_path: Path, acceptance: object, ref: str, **kwargs: object
+    ) -> object:
+        # The machine pipeline is the judging phase now; it must never be
+        # handed another issue's candidate.
+        journal = JournalStore(repo).load()
+        assert journal is not None
+        reviewed.append((journal.issue_id, journal.candidate_paths))
+        return machine_run(ref=str(ref))
+
+    monkeypatch.setattr(grind_mod, "_run_machine_checks", recording_checks)
 
     result = _grind(repo, "--iterations", "2")
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    assert reviewed, "the claimed issue reached a verifier"
+    assert reviewed, "the claimed issue reached verification"
     for verified_id, verified_paths in reviewed:
         assert verified_id == second_id
         assert CANDIDATE in verified_paths, "the claimed issue's own work"
@@ -1522,6 +1604,7 @@ def test_stale_base_refreshes_on_fresh_cut(
     )
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: _PassingResumeWorker(repo))
+    install_machine_checks(monkeypatch)
 
     result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
 
@@ -1552,6 +1635,7 @@ def test_empty_candidate_reimplements(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     worker = _PassingResumeWorker(repo)
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: worker)
+    install_machine_checks(monkeypatch)
 
     result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
 
@@ -1584,4 +1668,9 @@ class _PassingResumeWorker:
         else:
             self.implemented = True
             (self.repo / CANDIDATE).write_text("SHIPPED = True\n")
+            journal = JournalStore(self.repo).load()
+            if journal is not None and journal.issue_id:
+                post_completion_comment(
+                    self.repo, journal.issue_id, {"AC-1": "pass"}
+                )
         return 0

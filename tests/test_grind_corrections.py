@@ -526,3 +526,148 @@ def test_plan_gap_routing_pass_failure_still_escalates(
     assert Phase.IMPLEMENT.value not in [
         phase for phase, prompt in scripted.prompts if "CORRECTION ATTEMPT" in prompt
     ]
+
+
+# ---------------------------------------------------------------------------
+# Machine-era corrections (ortus-l2u9.3): same-session return and the parked
+# branch at the bound
+# ---------------------------------------------------------------------------
+
+
+def _machine_seed(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """A leaf workspace with a committed baseline, so the branch-scoped
+    machine pipeline (not the legacy agent path) judges the candidate."""
+    repo, issue_id = _seed(tmp_path, name)
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, issue_id
+
+
+class _SessionWorker:
+    """Worker that stamps a session id into its transcript and records every
+    spawn's kwargs, so a test can assert what a correction was handed."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, repo: Path, session_id: str = "sess-abc123") -> None:
+        self.repo = repo
+        self.session_id = session_id
+        self.runs: list[dict[str, object]] = []
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        readonly: bool = False,
+        **kwargs: object,
+    ) -> int:
+        self.runs.append({"prompt": prompt, "readonly": readonly, **kwargs})
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps({"type": "system", "session_id": self.session_id}) + "\n"
+            )
+        attempt = sum(1 for run in self.runs if not run["readonly"])
+        (self.repo / "candidate.py").write_text(f"ATTEMPT = {attempt}\n")
+        journal = JournalStore(self.repo).load()
+        assert journal is not None
+        from tests._shims import post_completion_comment
+
+        post_completion_comment(self.repo, journal.issue_id, {"AC-1": "pass"})
+        return 0
+
+
+def test_failure_returns_to_the_same_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4 (ortus-l2u9.3): a failed round returns to the worker's own session
+    — resumed by id, carrying the failing command and its output — instead of
+    a fresh context that has never seen its previous attempt."""
+    from tests._shims import install_machine_checks, machine_run
+
+    repo, issue_id = _machine_seed(tmp_path, "same-session")
+    worker = _SessionWorker(repo)
+    _install(monkeypatch, tmp_path, worker)
+    install_machine_checks(
+        monkeypatch,
+        sequence=[
+            machine_run("fail", output="AssertionError: expected 2, got 1")
+        ],
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    implement_runs = [run for run in worker.runs if not run["readonly"]]
+    assert len(implement_runs) == 2, "one implementation, one correction"
+    correction = implement_runs[1]
+    assert correction.get("resume") == "sess-abc123"
+    prompt = str(correction["prompt"])
+    assert "CORRECTION ATTEMPT 1" in prompt
+    assert "uv run pytest tests/test_grind.py -q" in prompt
+    assert "AssertionError: expected 2, got 1" in prompt
+    log = _grind_log(repo)
+    assert "correction resumes worker session sess-abc123" in log
+    assert _issue(repo, issue_id)["status"] == "closed"
+
+
+def test_bound_parks_committed_with_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5 (ortus-l2u9.3): at the retry bound the branch parks committed and
+    the issue routes to a human with the pipeline record attached — a parked
+    branch plus a diagnosis, never an abandoned dirty tree."""
+    from tests._shims import install_machine_checks, machine_run
+
+    repo, issue_id = _machine_seed(tmp_path, "parked-bound")
+    worker = _SessionWorker(repo)
+    _install(monkeypatch, tmp_path, worker)
+    install_machine_checks(
+        monkeypatch, default=machine_run("fail", output="still red")
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--max-corrections",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    issue = _issue(repo, issue_id)
+    assert issue["status"] == "in_progress"
+    labels = issue.get("labels") or []
+    assert "human" in [
+        label if isinstance(label, str) else label.get("label") for label in labels
+    ]
+    branch = f"ortus/{issue_id}"
+    committed = subprocess.run(
+        ["git", "show", f"{branch}:candidate.py"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert committed.returncode == 0, "the candidate parks committed on its branch"
+    comments = _comments(repo, issue_id)
+    assert "Ortus correction escalation" in comments
+    assert f"parked committed on `{branch}`" in comments
+    assert "Verification records:" in comments
+    assert ".md" in comments, "the pipeline record refs are attached"
+

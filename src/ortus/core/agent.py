@@ -86,9 +86,13 @@ class CodexRunner(ClaudeRunner):
         fast: bool = False,
         profile: AgentProfile | None = None,
         readonly: bool = False,
+        resume: str | None = None,
     ) -> list[str]:
         # `fast` is intentionally ignored. Codex service-tier selection is a
         # Codex configuration concern and is not equivalent to Claude --fast.
+        # `resume` is accepted for signature parity and ignored: grind never
+        # captures a Codex session id, so corrections on this backend run in
+        # a fresh context carrying the pipeline record (logged as degraded).
         argv = [
             self.codex_binary,
             "exec",

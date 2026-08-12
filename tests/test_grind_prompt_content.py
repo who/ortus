@@ -305,7 +305,7 @@ def test_grind_prompt_states_the_changes_bullets_become_the_commit_body() -> Non
 def test_grind_prompt_requires_a_refreshed_changes_block_after_a_correction() -> None:
     """AC-6: bullets authored before a review describe code that has changed."""
     body = _content()
-    assert "refreshed `**Changes**` block" in body
+    assert "refreshed `**Changes**` and `**Claims v1**` blocks" in body
     assert "final shipped state" in body
 
 

@@ -84,6 +84,12 @@ from ortus.core.compose import (
     validate_message,
     with_default_model,
 )
+from ortus.core.checks import (
+    VERDICT_PASS as MACHINE_PASS,
+    CheckRunResult,
+    render_tracker_comment,
+    run_checks,
+)
 from ortus.core.config import load_config
 from ortus.core.lifecycle import (
     CANDIDATE_CAPTURED,
@@ -1180,6 +1186,544 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Machine verification (Phase L1 wiring)
+# ---------------------------------------------------------------------------
+
+#: Header of the worker's per-criterion claims block in the completion
+#: comment. Version-pinned like the CodeGraph block: a future schema is a
+#: missing block to this parser, never a misread one.
+_CLAIMS_HEADER = "**Claims v1**"
+_CLAIM_LINE = re.compile(r"^(AC-\d+)\s*:\s*(pass|fail)\b", re.IGNORECASE)
+
+#: Seam for the AC runner, so a test can script pipeline results the way it
+#: scripts worker behavior — the wiring under test stays the real one.
+_run_machine_checks = run_checks
+
+
+def _acceptance_hash(acceptance_criteria: object) -> str:
+    """Hash of one acceptance_criteria field: the identity judgment binds to."""
+
+    return sha256_bytes(str(acceptance_criteria or "").encode("utf-8", "replace"))
+
+
+def _claim_time_criteria(repo: Path, journal: CandidateJournal) -> str | None:
+    """The acceptance_criteria the work spec carried at claim, or None.
+
+    Read from the frozen claim-time artifact, not from bd: the pipeline runs
+    the commands that were hashed at claim, so an edit landing mid-run can
+    change what the next claim judges but never what this one is judging.
+    """
+
+    if not journal.issue_packet_ref:
+        return None
+    try:
+        payload = json.loads(
+            (repo / journal.issue_packet_ref).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return str(payload.get("acceptance_criteria") or "")
+
+
+def _parse_claims(comment: str) -> dict[str, str] | None:
+    """Per-criterion claims from one comment, or None when it carries no block.
+
+    None and {} differ on purpose: a comment without the header never claimed
+    anything, while a header with no parseable lines claimed and said nothing —
+    both fail the claim diff, with different messages.
+    """
+
+    if _CLAIMS_HEADER not in comment:
+        return None
+    claims: dict[str, str] = {}
+    for line in _block_lines(comment, _CLAIMS_HEADER):
+        stripped = line.strip().lstrip("-*+ ").strip()
+        match = _CLAIM_LINE.match(stripped)
+        if match:
+            claims[match.group(1).upper()] = match.group(2).lower()
+    return claims
+
+
+def _latest_claims(bd: BdClient, issue_id: str) -> dict[str, str] | None:
+    """The newest comment's claims block. Each round supersedes the last."""
+
+    for body in reversed(_issue_comments(bd, issue_id)):
+        claims = _parse_claims(body)
+        if claims is not None:
+            return claims
+    return None
+
+
+def _claim_disagreements(
+    claims: dict[str, str] | None, run: CheckRunResult
+) -> tuple[str, ...]:
+    """Where the worker's word departs from the measured results, per criterion.
+
+    Any disagreement fails the run — in either direction, so a claim can never
+    stand in for a result and lying is strictly worse than silence. A missing
+    block is one failure naming the block; silence about one criterion is a
+    failure naming that criterion.
+    """
+
+    if claims is None:
+        return (
+            f"the completion comment carries no {_CLAIMS_HEADER} block; "
+            "every criterion is unclaimed",
+        )
+    problems: list[str] = []
+    measured = {record.criterion_id: record for record in run.results}
+    for criterion_id, record in measured.items():
+        claimed = claims.get(criterion_id)
+        actual = "pass" if record.verdict == MACHINE_PASS else "fail"
+        if claimed is None:
+            problems.append(
+                f"{criterion_id}: unclaimed; the pipeline measured {record.verdict}"
+            )
+        elif claimed != actual:
+            problems.append(
+                f"{criterion_id}: claimed {claimed}, measured {record.verdict} "
+                f"(`{record.command}`)"
+            )
+    problems.extend(
+        f"{criterion_id}: claimed but not among the work spec's criterion checks"
+        for criterion_id in sorted(set(claims) - set(measured))
+    )
+    return tuple(problems)
+
+
+def _criterion_evidence(record: Any) -> str:
+    """One criterion's measured outcome as report evidence."""
+
+    exit_text = (
+        "no exit code" if record.exit_code is None else f"exit {record.exit_code}"
+    )
+    if record.kind is None:
+        return (
+            f"{record.verdict} — {exit_text} in {record.duration_seconds:.1f}s "
+            f"— `{record.command}`"
+        )
+    base_text = (
+        "no exit code"
+        if record.base_exit_code is None
+        else f"exit {record.base_exit_code}"
+    )
+    return (
+        f"{record.verdict} ({record.kind}) — base {base_text}, branch {exit_text} "
+        f"in {record.duration_seconds:.1f}s — `{record.command}`"
+    )
+
+
+def _failing_finding(record: Any) -> str:
+    """A failed criterion as a correction-ready finding: command, then output.
+
+    The command leads so it survives the correction packet's per-entry bound,
+    and the output keeps its tail — a test run announces its failure at the
+    bottom.
+    """
+
+    detail = " ".join(record.output.split())
+    if len(detail) > 300:
+        detail = "…" + detail[-300:]
+    return (
+        f"{record.criterion_id} {record.verdict}: `{record.command}` — "
+        + (detail or "no output")
+    )
+
+
+def _machine_verdict(
+    journal: CandidateJournal,
+    run: CheckRunResult,
+    disagreements: tuple[str, ...],
+) -> Verdict:
+    """Fold one pipeline run and its claim diff into the verdict shape.
+
+    The retry controller, the correction packet, and finalization all consume
+    `Verdict`, so the machine pipeline speaks it too — one verdict grammar,
+    two producers.
+    """
+
+    criteria = tuple(
+        {
+            "id": record.criterion_id,
+            "status": "pass" if record.verdict == MACHINE_PASS else "fail",
+            "evidence": _criterion_evidence(record),
+        }
+        for record in run.results
+    )
+    findings: list[str] = []
+    if run.environment is not None:
+        findings.append(run.environment.reason)
+    findings.extend(
+        f"work spec: {failure.message}" for failure in run.packet_failures
+    )
+    if not run.results and run.environment is None and not run.packet_failures:
+        findings.append(
+            "no criterion checks parsed from the work spec — nothing verified"
+        )
+    findings.extend(
+        _failing_finding(record)
+        for record in run.results
+        if record.verdict != MACHINE_PASS
+    )
+    findings.extend(
+        f"claims disagree with results — {item}" for item in disagreements
+    )
+    passed = run.ok and not disagreements
+    return Verdict(
+        candidate_hash=journal.candidate_hash,
+        decision="pass" if passed else "fail",
+        criteria=criteria,
+        commands=tuple(record.command for record in run.results),
+        reviewed_files=tuple(journal.candidate_paths),
+        reviewed_interfaces=(),
+        risks=(),
+        findings=tuple(findings),
+        codegraph=(),
+    )
+
+
+def _machine_report(
+    journal: CandidateJournal,
+    issue_id: str,
+    run: CheckRunResult,
+    disagreements: tuple[str, ...],
+    verdict: Verdict,
+) -> str:
+    """The durable verification comment: the runner's own record, then claims.
+
+    Commands, verdicts, and exit codes come verbatim from the runner's
+    rendering — the record the tracker keeps, minus the agent that used to
+    type it.
+    """
+
+    lines = [
+        "## Ortus machine verification record",
+        "",
+        f"Issue: {issue_id}",
+        f"Candidate: `{journal.candidate_hash}`",
+        f"Decision: **{verdict.decision.upper()}**",
+    ]
+    if journal.base_head:
+        lines.append(f"Base commit: `{journal.base_head}`")
+    if journal.issue_packet_hash:
+        lines.append(f"Work spec: `{journal.issue_packet_hash}`")
+    lines.append(f"Verifier attempt: {journal.attempt}")
+    lines.extend(["", render_tracker_comment(run).rstrip(), "", "### Claims"])
+    if disagreements:
+        lines.extend(f"- {item}" for item in disagreements)
+    else:
+        lines.append("- the worker's claims agree with the measured results")
+    return bound_report("\n".join(lines) + "\n")
+
+
+def _machine_verify_candidate(
+    *,
+    bd: BdClient,
+    git: GitClient,
+    store: JournalStore,
+    journal: CandidateJournal,
+    repo: Path,
+    log: Path,
+    write_log: Callable[[str], None],
+    issue_id: str,
+    probe: CodeGraphProbe,
+    baseline: frozenset[str],
+    freshness: str,
+    sync_ms: int,
+    iteration: int,
+    integration_branch: str,
+) -> _VerificationResult:
+    """Judge the candidate with the deterministic pipeline: no agent, no tokens.
+
+    The subject is the committed issue branch: the AC runner executes the
+    claim-time criterion checks in disposable clones (red–green for tagged
+    criteria), and the worker's per-criterion claims are diffed against the
+    measured results. Nothing here executes in the working tree, so there is
+    no seal and no mutation guard — the pipeline cannot touch what it judges.
+    """
+
+    journal = journal.begin_verification()
+    store.save(journal)
+    verify_started = time.monotonic()
+    expected_criteria: dict[str, None] = {}
+
+    def _summarize() -> Any:
+        # No agent ran in this phase; parsing the empty tail of the log keeps
+        # the summary interface the rest of the loop expects, with no events.
+        summary = parse_transcript(
+            log,
+            phase=CodeGraphPhase.VERIFICATION,
+            probe=probe,
+            start_offset=log.stat().st_size if log.exists() else 0,
+        )
+        summary.freshness = freshness
+        summary.sync_duration_ms = sync_ms
+        return summary
+
+    def _reject(reason: str) -> _VerificationResult:
+        nonlocal journal
+        if bd.show(issue_id).get("status") != "in_progress":
+            bd.update_status(issue_id, "in_progress")
+        report = render_rejection_report(
+            issue_id=issue_id,
+            candidate_hash=journal.candidate_hash,
+            failure=reason,
+            expected_criteria=expected_criteria,
+            base_head=journal.base_head,
+            issue_packet_hash=journal.issue_packet_hash,
+            attempt=journal.attempt,
+            profiles=journal.profiles,
+        )
+        report_ref = store.save_report(
+            journal.candidate_hash, report, attempt=journal.attempt
+        )
+        bd.add_comment(issue_id, report)
+        journal = journal.finish_verification(
+            report_ref, phase=VERIFICATION_REJECTED
+        )
+        store.save(journal)
+        _append_verdict_event(
+            log,
+            decision="rejected",
+            candidate_hash=journal.candidate_hash,
+            reason=reason,
+        )
+        write_log(f"iter {iteration}: machine verification rejected: {reason}")
+        return _VerificationResult(
+            journal=journal, summary=_summarize(), failure=reason
+        )
+
+    claim_criteria = _claim_time_criteria(repo, journal)
+    if claim_criteria is None:
+        return _reject(
+            "the claim-time work-spec artifact is unreadable; the pipeline "
+            "judges only criteria whose claim-time identity it can prove"
+        )
+    expected_criteria = dict.fromkeys(re.findall(r"\bAC-\d+\b", claim_criteria))
+    current_packet = bd.show(issue_id)
+    # Judgment is bound to the criteria hashed at claim. An edit landing after
+    # claim is a blocker to resolve, never a silent re-read.
+    if _acceptance_hash(current_packet.get("acceptance_criteria")) != (
+        _acceptance_hash(claim_criteria)
+    ):
+        return _reject(
+            "the acceptance criteria changed after claim; verification judges "
+            "the claim-time criteria — re-run grind to re-claim under the "
+            "edited work spec"
+        )
+    if issue_packet_hash(current_packet) != journal.issue_packet_hash:
+        return _reject(
+            "authoritative work spec changed during verification — "
+            + _packet_drift(repo, journal, current_packet)
+        )
+    if not git.branch_exists(journal.issue_branch):
+        return _reject(
+            f"the issue branch {journal.issue_branch} no longer exists"
+        )
+    # A disown can arrive after a capture commit already swept the path in —
+    # a correction worker recognizing inherited work as somebody else's. The
+    # capture commit is the harness's own, so the harness takes it back: a
+    # soft reset returns its paths to the staged state they were captured
+    # from, and the re-capture below excludes what is now disowned.
+    capture_subject = f"{issue_id}: capture uncommitted candidate work"
+    while journal.unrelated_paths and git.current_branch() == journal.issue_branch:
+        if (git.head_message() or "").partition("\n")[0] != capture_subject:
+            break
+        touched = git.changed_paths(f"{git.head_oid()}~1")
+        if touched is None or not (touched & frozenset(journal.unrelated_paths)):
+            break
+        if not git.reset_soft(f"{git.head_oid()}~1"):
+            return _reject(
+                "could not unwind a capture commit carrying disowned paths"
+            )
+        journal = journal.with_branch(journal.issue_branch, git.head_oid())
+        store.save(journal)
+        write_log(
+            f"iter {iteration}: unwound a capture commit to honor a disown of "
+            + ", ".join(sorted(touched & frozenset(journal.unrelated_paths)))
+        )
+    dirty = git.dirty_paths()
+    if dirty is None:
+        return _reject("could not inspect the working tree before judgment")
+    uncommitted = sorted(dirty & frozenset(journal.candidate_paths))
+    if uncommitted:
+        # The pipeline judges refs, so the harness completes the commit
+        # obligation a worker left unmet — a Codex sandbox cannot commit at
+        # all. The capture message is deliberately below the message contract:
+        # finalization's compose pass replaces it with the durable one.
+        if git.current_branch() != journal.issue_branch:
+            return _reject(
+                f"uncommitted candidate paths exist but the tree is on "
+                f"{git.current_branch() or 'a detached HEAD'}, not "
+                f"{journal.issue_branch}"
+            )
+        committed = git.commit_paths(
+            frozenset(uncommitted),
+            f"{issue_id}: capture uncommitted candidate work\n\n"
+            "Pre-judgment capture of the paths the worker left uncommitted.\n\n"
+            "The finalization pass composes the durable message.",
+        )
+        if not committed:
+            return _reject(
+                "could not commit uncommitted candidate paths for judgment: "
+                + committed.reason
+            )
+        journal = journal.with_branch(journal.issue_branch, git.head_oid())
+        # Recapture the candidate identity: the same content hashes
+        # differently once tracked (an untracked file enters the bundle as a
+        # patch against /dev/null), and the recorded hash must describe the
+        # committed form everything downstream re-checks.
+        view = _candidate_view(git, journal, baseline)
+        if view is None:
+            return _reject(
+                "could not re-inspect the candidate after the capture commit"
+            )
+        paths, base = view
+        try:
+            digest, diff_ref = store.save_diff(
+                candidate_diff(repo, paths, base=base)
+            )
+        except RuntimeError as exc:
+            return _reject(
+                f"could not re-hash the candidate after the capture commit: {exc}"
+            )
+        journal = journal.with_candidate(
+            paths,
+            phase=VERIFICATION,
+            candidate_hash=digest,
+            diff_ref=diff_ref,
+        )
+        store.save(journal)
+        write_log(
+            f"iter {iteration}: captured {len(uncommitted)} uncommitted "
+            f"candidate path(s) onto {journal.issue_branch} for judgment"
+        )
+    ref = git.branch_tip(journal.issue_branch) or journal.issue_branch
+    write_log(
+        f"iter {iteration}: machine checks running against "
+        f"{journal.issue_branch} at {ref}"
+    )
+    run = _run_machine_checks(
+        repo,
+        claim_criteria,
+        str(ref),
+        base_ref=(journal.base_head or integration_branch),
+    )
+    disagreements = _claim_disagreements(_latest_claims(bd, issue_id), run)
+    verdict = _machine_verdict(journal, run, disagreements)
+    report = _machine_report(journal, issue_id, run, disagreements, verdict)
+    report_ref = store.save_report(
+        journal.candidate_hash, report, attempt=journal.attempt
+    )
+    bd.add_comment(issue_id, report)
+    journal = journal.finish_verification(
+        report_ref, phase=(VERIFIED_PASS if verdict.passed else VERIFIED_FAIL)
+    )
+    store.save(journal)
+    _append_verdict_event(
+        log, decision=verdict.decision, candidate_hash=journal.candidate_hash
+    )
+    write_log(
+        f"iter {iteration}: verifier verdict={verdict.decision} "
+        f"candidate={journal.candidate_hash}"
+    )
+    passed_count = sum(1 for r in run.results if r.verdict == MACHINE_PASS)
+    claims_word = "disagree" if disagreements else "agree"
+    output.progress(
+        "grind",
+        f"verdict: {verdict.decision.upper()} — machine checks passed "
+        f"{passed_count}/{len(run.results)} criteria, claims {claims_word} "
+        f"(candidate {journal.candidate_hash[:12]}) after "
+        f"{_fmt_duration(time.monotonic() - verify_started)}",
+    )
+    return _VerificationResult(
+        journal=journal, summary=_summarize(), verdict=verdict
+    )
+
+
+def _verification_pass(
+    *,
+    reviewer_enabled: bool,
+    integration_branch: str,
+    **kwargs: Any,
+) -> _VerificationResult:
+    """Dispatch one verification round: machine pipeline, then reviewer by flag.
+
+    The machine pipeline is the default judgment. The agent reviewer is a
+    configuration-selected step that runs only after a green machine run —
+    review is policy, not architecture, and a red machine run never spends
+    reviewer tokens. A journal with no issue branch predates branch-scoped
+    candidates; the agent verifier remains that legacy candidate's judge.
+    """
+
+    journal: CandidateJournal = kwargs["journal"]
+    write_log: Callable[[str], None] = kwargs["write_log"]
+    iteration: int = kwargs["iteration"]
+    if not journal.issue_branch:
+        write_log(
+            f"iter {iteration}: journal has no issue branch; the agent "
+            "verifier judges this legacy candidate"
+        )
+        return _verify_candidate(**kwargs)
+    machine_result = _machine_verify_candidate(
+        bd=kwargs["bd"],
+        git=kwargs["git"],
+        store=kwargs["store"],
+        journal=journal,
+        repo=kwargs["repo"],
+        log=kwargs["log"],
+        write_log=write_log,
+        issue_id=kwargs["issue_id"],
+        probe=kwargs["probe"],
+        baseline=kwargs["baseline"],
+        freshness=kwargs["freshness"],
+        sync_ms=kwargs["sync_ms"],
+        iteration=iteration,
+        integration_branch=integration_branch,
+    )
+    if not reviewer_enabled:
+        return machine_result
+    if not machine_result.passed:
+        write_log(
+            f"iter {iteration}: reviewer skipped — the machine pipeline is "
+            "red, so no reviewer tokens are spent"
+        )
+        return machine_result
+    write_log(
+        f"iter {iteration}: machine pipeline green; reviewer flag on — "
+        "dispatching the agent reviewer"
+    )
+    return _verify_candidate(**{**kwargs, "journal": machine_result.journal})
+
+
+def _transcript_session_id(log: Path, *, start_offset: int) -> str:
+    """The last session id a transcript segment carries, or empty.
+
+    This is what lets a correction return to the session that produced the
+    candidate instead of a fresh context that has never seen its own attempt.
+    """
+
+    session_id = ""
+    try:
+        with log.open("rb") as fh:
+            fh.seek(start_offset)
+            for raw in fh:
+                try:
+                    event = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(event, dict):
+                    value = event.get("session_id")
+                    if isinstance(value, str) and value:
+                        session_id = value
+    except OSError:
+        return ""
+    return session_id
+
+
 def _declared_reviewed(verdict: Verdict | None, repo: Path) -> frozenset[str]:
     """The candidate paths a verdict claims its author reviewed.
 
@@ -1466,7 +2010,11 @@ def _verify_candidate(
                                 iteration=iteration,
                             )
                             if (
-                                sha256_bytes(candidate_diff(repo, post_paths))
+                                sha256_bytes(
+                                    candidate_diff(
+                                        repo, post_paths, base=post_base
+                                    )
+                                )
                                 != journal.candidate_hash
                             ):
                                 timeout_failure += "; verifier mutated the candidate"
@@ -1560,7 +2108,7 @@ def _verify_candidate(
                     iteration=iteration,
                 )
                 if (
-                    sha256_bytes(candidate_diff(repo, post_paths))
+                    sha256_bytes(candidate_diff(repo, post_paths, base=post_base))
                     != journal.candidate_hash
                 ):
                     # Something moved that the seal does not cover, so the
@@ -1664,9 +2212,9 @@ _IMPLEMENTATION_INSTRUCTION = (
     "you, with your own commit message. " + _MESSAGE_RULES + " Do not close "
     "the issue, do not run git push, do not switch branches or touch the "
     "integration branch, do not select other work, and do not add the final "
-    "verification comment; a fresh read-only verifier reviews your committed "
-    "range plus any uncommitted edits next, and Ortus owns merging and "
-    "finalization."
+    "verification comment; the machine verification pipeline re-runs every "
+    "criterion check against your committed range next, and Ortus owns "
+    "merging and finalization."
 )
 
 
@@ -1704,8 +2252,8 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         for finding in verdict.findings[:_CORRECTION_MAX_FINDINGS]
     ] or ["- (no findings recorded)"]
     header = (
-        f"CORRECTION ATTEMPT {journal.corrections} for bd issue {issue_id}. A fresh "
-        "read-only verifier rejected the current candidate. Ortus already claimed this "
+        f"CORRECTION ATTEMPT {journal.corrections} for bd issue {issue_id}. "
+        "Verification rejected the current candidate. Ortus already claimed this "
         "issue; do not run bd ready, do not select other work, and use only the id "
         f"{issue_id}. Read `bd show {issue_id} --json` for the authoritative work spec, "
         "then correct ONLY the failures below.\n\n"
@@ -1716,10 +2264,14 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         "\n\nCorrect the candidate in place and commit the correction on the issue "
         "branch you are on, with a commit message describing the fix. "
         + _MESSAGE_RULES
-        + " Do not close "
+        + " Then add a fresh completion comment carrying refreshed `**Changes**` "
+        f"and `{_CLAIMS_HEADER}` blocks — one `AC-N: pass` or `AC-N: fail` line "
+        "per criterion, stating the result of the check you actually ran; "
+        "verification re-runs every check and a claim that disagrees with the "
+        "measured result fails the round. Do not close "
         "the issue, do not run git push, git stash, or git reset, do not switch "
-        "branches, and do not add a verification comment — a fresh verifier "
-        "reviews your corrected candidate and Ortus alone merges and finalizes it. "
+        "branches, and do not add a verification comment — verification re-runs "
+        "against your corrected candidate and Ortus alone merges and finalizes it. "
         "If a finding needs a product or architecture decision the work spec does not "
         "resolve, do not improvise: report it as a PLAN-GAP and stop."
     )
@@ -3606,6 +4158,9 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
+        # Verification is the machine pipeline; the agent reviewer is a
+        # default-off configured step, one `.ortusrc` line from returning.
+        reviewer_enabled = bool(config.get("reviewer", False))
         implement_profile = config.resolve_profile(
             resolved_backend,
             Phase.IMPLEMENT,
@@ -4511,6 +5066,14 @@ def grind(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
                     )
+                # The session that produced the candidate is where a correction
+                # returns; captured here because only this segment of the log
+                # is known to be the implementation worker's.
+                worker_session_id = (
+                    _transcript_session_id(log, start_offset=phase_offset)
+                    if resolved_backend == "claude" and implementation_worker_ran
+                    else ""
+                )
 
                 # A recovery worker may have judged some inherited work unrelated
                 # to this issue. Honor that before any ownership snapshot, so a
@@ -4865,7 +5428,9 @@ def grind(
                         baseline=_candidate_baseline(active_journal, codex_baseline),
                         iteration=iters_run,
                     )
-                    verification = _verify_candidate(
+                    verification = _verification_pass(
+                        reviewer_enabled=reviewer_enabled,
+                        integration_branch=integration_branch,
                         journal=active_journal,
                         freshness=freshness,
                         sync_ms=sync_ms,
@@ -4973,14 +5538,36 @@ def grind(
                         )
                         correction_offset = log.stat().st_size if log.exists() else 0
                         correction_timed_out = False
+                        correction_prompt = _compose_correction_prompt(
+                            issue_id,
+                            active_journal,
+                            verdict,
+                            resolved_backend,
+                        )
+                        # The correction returns to the session that produced
+                        # the candidate: the context that already holds its own
+                        # previous attempt is the one that can do better than
+                        # resubmit it. No resumable session — another backend, a
+                        # backend restart — degrades to a fresh context carrying
+                        # the pipeline record: logged, never silent.
+                        resume_kwargs: dict[str, str] = (
+                            {"resume": worker_session_id}
+                            if worker_session_id
+                            else {}
+                        )
+                        if resume_kwargs:
+                            write_log(
+                                f"iter {iters_run}: correction resumes worker "
+                                f"session {worker_session_id}"
+                            )
+                        elif resolved_backend == "claude":
+                            write_log(
+                                f"iter {iters_run}: no worker session to resume; "
+                                "correction runs in a fresh context (degraded)"
+                            )
                         try:
                             rc = runner.run(
-                                _compose_correction_prompt(
-                                    issue_id,
-                                    active_journal,
-                                    verdict,
-                                    resolved_backend,
-                                ),
+                                correction_prompt,
                                 repo=target,
                                 log_path=log,
                                 fast=fast,
@@ -4988,13 +5575,51 @@ def grind(
                                 timeout=(
                                     worker_timeout if worker_timeout > 0 else None
                                 ),
+                                **resume_kwargs,
                             )
+                            if (
+                                resume_kwargs
+                                and rc != 0
+                                and not _transcript_session_id(
+                                    log, start_offset=correction_offset
+                                )
+                            ):
+                                # The resume itself failed before any worker
+                                # turn ran (the CLI could not find the session).
+                                write_log(
+                                    f"iter {iters_run}: could not resume worker "
+                                    f"session {worker_session_id}; retrying the "
+                                    "correction in a fresh context (degraded)"
+                                )
+                                correction_offset = (
+                                    log.stat().st_size if log.exists() else 0
+                                )
+                                rc = runner.run(
+                                    correction_prompt,
+                                    repo=target,
+                                    log_path=log,
+                                    fast=fast,
+                                    profile=implement_profile,
+                                    timeout=(
+                                        worker_timeout
+                                        if worker_timeout > 0
+                                        else None
+                                    ),
+                                )
                         except subprocess.TimeoutExpired:
                             correction_timed_out = True
                             rc = 143
                             write_log(
                                 f"iter {iters_run}: correction worker TIMEOUT after "
                                 f"{worker_timeout}s"
+                            )
+                        if resolved_backend == "claude" and not correction_timed_out:
+                            # The newest worker turn owns any later correction.
+                            worker_session_id = (
+                                _transcript_session_id(
+                                    log, start_offset=correction_offset
+                                )
+                                or worker_session_id
                             )
                         # A correction worker inherits the same tree, so it can
                         # disown inherited work too. Honor that here, before the
@@ -5054,8 +5679,10 @@ def grind(
                             f"CodeGraph refresh: result={freshness} "
                             f"duration_ms={sync_ms}"
                         )
-                        # AC-2: every correction gets its own fresh verifier.
-                        verification = _verify_candidate(
+                        # Every correction gets its own full verification round.
+                        verification = _verification_pass(
+                            reviewer_enabled=reviewer_enabled,
+                            integration_branch=integration_branch,
                             journal=active_journal,
                             freshness=freshness,
                             sync_ms=sync_ms,
@@ -5069,6 +5696,12 @@ def grind(
                             # Exhaustion and unresolved planning gaps leave the issue
                             # human-flagged and OPEN work: no close, no commit.
                             try:
+                                parked = (
+                                    f"The candidate is parked committed on "
+                                    f"`{active_journal.issue_branch}`"
+                                    if active_journal.issue_branch
+                                    else "The candidate was NOT committed"
+                                )
                                 bd.add_comment(
                                     issue_id,
                                     "## Ortus correction escalation\n\n"
@@ -5076,9 +5709,9 @@ def grind(
                                     f"Candidate: `{active_journal.candidate_hash}`\n"
                                     f"Correction attempts: "
                                     f"{active_journal.corrections}/{max_corrections}\n"
-                                    f"Verifier reports: "
+                                    f"Verification records: "
                                     f"{', '.join(active_journal.verifier_refs) or 'none'}"
-                                    "\n\nThe candidate was NOT committed and the issue "
+                                    f"\n\n{parked} and the issue "
                                     "was NOT closed. A human decision is required.\n",
                                 )
                                 bd.add_label(issue_id, "human")

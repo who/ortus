@@ -331,7 +331,11 @@ bd comments add <id> "**Changes**:
 - <file or component modified> - <what was done>
 - <another change>
 
-**Verification**: <test results, lint status, manual checks>"
+**Verification**: <test results, lint status, manual checks>
+
+**Claims v1**:
+AC-1: pass
+AC-2: fail — <one line stating what still fails>"
 ```
 
 **Example:**
@@ -341,12 +345,18 @@ bd comments add bd-a1b2c3 "**Changes**:
 - Created login/logout endpoints in src/routes/auth.ts
 - Added JWT token validation
 
-**Verification**: All tests passing (12/12), lint clean, manual login flow tested"
+**Verification**: All tests passing (12/12), lint clean, manual login flow tested
+
+**Claims v1**:
+AC-1: pass
+AC-2: pass"
 ```
+
+**The `**Claims v1**` block is your per-criterion word, and it is checked.** One `AC-N: pass` or `AC-N: fail` line for every criterion in the work spec's Observable criteria, stating the result of the criterion check you actually ran — never a prediction, never a hope. Under `ortus grind` the machine pipeline re-runs every check itself and diffs your claims against its measured results: a claim that disagrees with the measurement fails the round in either direction, and a completion comment with no block fails the same way. Run the checks, report what you saw.
 
 **These bullets are the durable change record, and the fallback commit body.** Under `ortus grind` the worker writes its own commit message when it commits on the issue branch; the `**Changes**` block remains the tracker's record of what shipped, and it becomes the commit body whenever a commit has to be assembled deterministically — a worker that left uncommitted edits, or a message that validation replaced. Write the bullets as commit prose either way: each names the file or component it changed and states what changed in it, readable six months from now by someone with no access to the issue. Keep the verification line to one line.
 
-**If you are correcting a rejected change, add a new comment carrying a refreshed `**Changes**` block** that describes the final shipped state. The block written before the review describes code that has since changed, and committing it would describe something the commit does not contain. Ortus reads the newest block and expects one per round; when a round leaves none, it skips the bullets entirely and commits the thinner `**CodeGraph v1**` record instead.
+**If you are correcting a rejected change, add a new comment carrying refreshed `**Changes**` and `**Claims v1**` blocks** that describe the final shipped state. The blocks written before the review describe code that has since changed, and committing or judging against them would describe something the candidate no longer contains. Ortus reads the newest of each block and expects one per round; when a round leaves no `**Changes**` block, it skips the bullets entirely and commits the thinner `**CodeGraph v1**` record instead.
 
 **When `codegraph_available`, append a `**CodeGraph v1**` block** to the comment so the structural change record is parseable by future loops. Compute it from the main session using only `codegraph_search`, `codegraph_node`, and `codegraph_impact` against the symbols you modified — bound the work to ≤ 15 tool calls for a typical closure (≤ 5 modified symbols). The larger source-fetching CodeGraph tools remain subagent-only per step 4 and must not be invoked from the main session here.
 

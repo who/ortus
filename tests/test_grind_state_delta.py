@@ -35,7 +35,12 @@ from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
-from tests._shims import make_inline_python_shim, ready_issue_args
+from tests._shims import (
+    install_machine_checks,
+    make_inline_python_shim,
+    post_completion_comment,
+    ready_issue_args,
+)
 from tests.conftest import copy_bd_workspace
 
 
@@ -131,6 +136,9 @@ class _VerifiedLifecycle:
         log_path.touch(exist_ok=True)
         if not readonly:
             (repo / f"candidate-{self.spawns}.py").write_text(f"N = {self.spawns}\n")
+            journal = JournalStore(repo).load()
+            if journal is not None and journal.issue_id:
+                post_completion_comment(repo, journal.issue_id, {"AC-1": "pass"})
             return 0
         journal = JournalStore(repo).load()
         assert journal is not None
@@ -545,6 +553,9 @@ def test_tasks_cap_stops_outer_loop_after_n_closes(
     _force_fake_home(monkeypatch, tmp_path)
     backend = _VerifiedLifecycle()
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
+    # Iteration 1 lands the repo's first commit, so later iterations run the
+    # branch-scoped machine pipeline; script it green.
+    install_machine_checks(monkeypatch)
 
     result = runner.invoke(
         app,

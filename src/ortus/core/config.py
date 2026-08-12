@@ -44,6 +44,11 @@ DEFAULTS: dict[str, Any] = {
     "backend": "claude",
     "codegraph": DEFAULT_CODEGRAPH_MODE,
     "codegraph_refresh_blocking": False,
+    # The agent reviewer is a policy step, not architecture: verification is
+    # the machine pipeline, and this flag adds a read-only agent review after
+    # a green machine run. Off by default per the escape-rate reversal
+    # threshold in prd/PRD-lean-pipeline.md — one config line turns it back on.
+    "reviewer": False,
 }
 
 

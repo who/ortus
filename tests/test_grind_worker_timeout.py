@@ -31,7 +31,11 @@ from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import CandidateJournal, JournalStore
-from tests._shims import make_inline_python_shim
+from tests._shims import (
+    install_machine_checks,
+    make_inline_python_shim,
+    post_completion_comment,
+)
 from tests.conftest import copy_bd_workspace
 
 
@@ -394,6 +398,10 @@ def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
         "_make_runner",
         lambda backend="claude": VerifyRecoveredCandidate(),
     )
+    # The re-claim runs the branch-scoped machine pipeline; script it green
+    # and supply the claims comment the timed-out worker never posted.
+    install_machine_checks(monkeypatch)
+    post_completion_comment(repo, issue_id, {"AC-1": "pass"})
     second = runner.invoke(
         app,
         ["grind", str(repo), "--backend", "codex", "--tasks", "1"],

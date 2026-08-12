@@ -20,13 +20,19 @@ from ortus.core import claude as claude_mod
 from ortus.core import output as output_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
-from ortus.core.git import GitClient
+from ortus.core.git import CommitResult, GitClient
 from ortus.core.readiness import _REQUIRED_SECTIONS
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
 from tests._platform import skip_unless_bwrap_usable
-from tests._shims import make_inline_python_shim, shim_path
+from tests._shims import (
+    install_machine_checks,
+    machine_run,
+    make_inline_python_shim,
+    post_completion_comment,
+    shim_path,
+)
 from tests.conftest import copy_bd_workspace
 from tests.test_readiness import ready_issue
 
@@ -628,6 +634,9 @@ def test_verifier_report_and_mutation_isolation(
         check=True,
         capture_output=True,
     )
+    # The read-only agent verifier and its mutation guard are the reviewer
+    # step now — on by flag, judging only after a green machine pipeline.
+    _enable_reviewer(repo)
     calls = 0
 
     class TransactionRunner:
@@ -648,6 +657,7 @@ def test_verifier_report_and_mutation_isolation(
             if not readonly:
                 (repo / "candidate.py").write_text("VALUE = 1\n")
                 log_path.touch(exist_ok=True)
+                _post_claims(repo)
                 if mutation == "implementation-branch-switch":
                     # The forbidden move: carrying the work off the issue
                     # branch. Committing on the branch itself is the
@@ -723,6 +733,9 @@ def test_verifier_report_and_mutation_isolation(
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: TransactionRunner())
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
 
     result = runner.invoke(app, ["grind", str(repo), "--tasks", "1"])
 
@@ -863,7 +876,12 @@ def test_candidate_paths_exclude_tool_state_written_during_review() -> None:
 def _blocked_verifier_grind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> tuple[object, Path, str, list[str]]:
-    """Run one grind whose verification preflight reports a blocked sandbox."""
+    """Run one grind whose reviewer preflight reports a blocked sandbox.
+
+    The read-only preflight belongs to the agent reviewer, a default-off
+    configured step these tests turn on; the machine pipeline judges first
+    and is scripted green so the reviewer leg is actually reached.
+    """
     repo = _bd_repo(tmp_path, name)
     issue_id = _create_ready_issue(repo, "candidate awaiting a working verifier")
     (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
@@ -874,6 +892,7 @@ def _blocked_verifier_grind(
         check=True,
         capture_output=True,
     )
+    _enable_reviewer(repo)
     prompts: list[str] = []
 
     class BlockedVerifierRunner:
@@ -893,6 +912,7 @@ def _blocked_verifier_grind(
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.touch(exist_ok=True)
             (repo / "candidate.py").write_text("VALUE = 1\n")
+            _post_claims(repo)
             return 0
 
         def preflight_readonly(self, repo: Path, **kwargs: object) -> None:
@@ -905,6 +925,9 @@ def _blocked_verifier_grind(
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: BlockedVerifierRunner())
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
 
     result = runner.invoke(app, ["grind", str(repo), "--tasks", "1"])
     return result, repo, issue_id, prompts
@@ -953,7 +976,9 @@ def test_blocked_verification_spends_no_budget(
     assert journal is not None, "the candidate transaction is preserved"
     assert journal.corrections == 0
     assert journal.plan_gap_routed is False
-    assert journal.verifier_refs == ()
+    # The machine pipeline's own green record is journaled; what the abort
+    # must not have produced is an agent verdict.
+    assert len(journal.verifier_refs) <= 1
     # One implementation worker ran; no correction or plan-gap worker followed.
     assert len(prompts) == 1, prompts
     comments = subprocess.run(
@@ -965,16 +990,16 @@ def test_blocked_verification_spends_no_budget(
     ).stdout
     assert "Ortus correction escalation" not in comments
     assert "ORTUS_VERDICT" not in comments
-    head = subprocess.run(
-        ["git", "log", "--oneline"],
+    main_log = subprocess.run(
+        ["git", "log", "--oneline", "main"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     ).stdout
-    assert head.splitlines()[0].endswith(
-        "fixture baseline"
-    ), f"the abort must not commit the candidate: {head}"
+    assert (
+        "fixture: enable the reviewer flag" in main_log.splitlines()[0]
+    ), f"the abort must not land anything on main: {main_log}"
 
 
 def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
@@ -1311,6 +1336,31 @@ def _baseline_commit(repo: Path) -> None:
     )
 
 
+def _enable_reviewer(repo: Path) -> None:
+    """Turn the agent reviewer on, committed so the flag never reads as work."""
+
+    config = repo / ".ortusrc"
+    existing = config.read_text(encoding="utf-8") if config.exists() else ""
+    config.write_text(existing + "\nreviewer = true\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".ortusrc"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture: enable the reviewer flag"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _post_claims(repo: Path, criteria: tuple[str, ...] = ("AC-1", "AC-2")) -> None:
+    """Post the claims-bearing completion comment a finished worker leaves."""
+
+    journal = JournalStore(repo).load()
+    if journal is not None and journal.issue_id:
+        post_completion_comment(
+            repo, journal.issue_id, {name: "pass" for name in criteria}
+        )
+
+
 class _PassingWorker:
     """Implementation writes one candidate file; the verifier passes it."""
 
@@ -1555,7 +1605,7 @@ def _narrated_grind(
     decisions: tuple[str, ...] = ("pass",),
     max_corrections: int | None = None,
 ) -> tuple[Path, str, object, list[str]]:
-    """One harness-claimed run whose fake verifier emits `decisions` in order.
+    """One harness-claimed run whose machine pipeline emits `decisions` in order.
 
     Returns the repo, the claimed issue id, the CliRunner result, and the
     candidate hash the journal held at each verification, so tests can pin the
@@ -1583,24 +1633,25 @@ def _narrated_grind(
         ) -> int:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.touch(exist_ok=True)
-            if readonly:
-                journal = JournalStore(repo).load()
-                assert journal is not None
-                hashes.append(journal.candidate_hash)
-                _emit_verdict(
-                    repo,
-                    log_path,
-                    criteria=("AC-1", "AC-2"),
-                    decision=decisions_left.pop(0),
-                )
-            else:
+            if not readonly:
                 impl_runs[0] += 1
                 (repo / "candidate.py").write_text(f"VALUE = {impl_runs[0]}\n")
+                _post_claims(repo)
             return 0
+
+    def scripted_checks(
+        repo_path: Path, acceptance: object, ref: str, **kwargs: object
+    ) -> object:
+        journal = JournalStore(repo).load()
+        assert journal is not None
+        hashes.append(journal.candidate_hash)
+        decision = decisions_left.pop(0) if decisions_left else "pass"
+        return machine_run(decision, criteria=("AC-1", "AC-2"), ref=str(ref))
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: _NarratingRunner())
+    monkeypatch.setattr(grind_mod, "_run_machine_checks", scripted_checks)
     args = ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     if max_corrections is not None:
         args += ["--max-corrections", str(max_corrections)]
@@ -1629,9 +1680,12 @@ def test_grind_console_prints_verdict_line(
     mirroring the log so the two channels correlate."""
     repo, _, result, hashes = _narrated_grind(tmp_path, monkeypatch, name="verdict")
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert hashes, "the fake verifier never ran"
+    assert hashes, "the machine pipeline never ran"
     console = _squashed_console(result)
-    assert f"verdict: PASS (candidate {hashes[-1][:12]}) after" in console
+    assert (
+        "verdict: PASS — machine checks passed 2/2 criteria, claims agree "
+        f"(candidate {hashes[-1][:12]}) after" in console
+    )
     assert f"candidate={hashes[-1]}" in _grind_log(repo)
 
 
@@ -1646,7 +1700,10 @@ def test_grind_console_prints_tally_and_finalization(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     console = _squashed_console(result)
-    assert f"verdict: FAIL (candidate {hashes[0][:12]})" in console
+    assert (
+        "verdict: FAIL — machine checks passed 0/2 criteria, claims disagree "
+        f"(candidate {hashes[0][:12]})" in console
+    )
     assert f"correction attempt 1/2 for {issue_id}" in console
     assert f"landed {issue_id} on main — 1 done this run, 0 open" in console
 
@@ -1723,12 +1780,17 @@ def test_guard_backstop_push_announces(
 def _verdictless_grind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name: str, title: str
 ) -> tuple[Path, str, object]:
-    """One harness-claimed run whose fake verifier emits no verdict envelope."""
+    """One harness-claimed run whose verification cannot produce a judgment.
+
+    The machine-era analog of the silent verifier: the capture commit the
+    pipeline needs before it can judge is refused, so verification fails with
+    a named cause and the work stays uncommitted in the tree.
+    """
     repo = _bd_repo(tmp_path, name)
     issue_id = _create_ready_issue(repo, title)
     _baseline_commit(repo)
 
-    class _SilentVerifier:
+    class _Worker:
         extra_env: dict[str, str] = {}
 
         def run(
@@ -1748,7 +1810,14 @@ def _verdictless_grind(
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _SilentVerifier())
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _Worker())
+    monkeypatch.setattr(
+        GitClient,
+        "commit_paths",
+        lambda self, paths, message: CommitResult(
+            ok=False, command="commit", returncode=1, detail="hook refused: lint"
+        ),
+    )
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
@@ -1768,7 +1837,7 @@ def test_verdictless_failure_names_issue_and_action(
     console = _squashed_console(result)
     assert (
         f'verification of "silent verifier" ({issue_id}) failed: '
-        "expected exactly one verdict envelope; found 0." in console
+        "could not commit uncommitted candidate paths for judgment" in console
     )
     assert (
         "Its work is safe — uncommitted edits preserved in the tree — "
@@ -1857,6 +1926,9 @@ def test_grind_healthy_codegraph_lines_are_log_only(
     repo = _bd_repo(tmp_path, f"cg-{'healthy' if healthy else 'fallback'}")
     _create_ready_issue(repo, "codegraph narration")
     _baseline_commit(repo)
+    # The verification-phase agent narration only exists when the reviewer
+    # step runs; the machine pipeline itself spawns no agent to narrate.
+    _enable_reviewer(repo)
 
     cg_event = {
         "type": "item.completed",
@@ -1892,6 +1964,7 @@ def test_grind_healthy_codegraph_lines_are_log_only(
                 _emit_verdict(repo, log_path, criteria=("AC-1", "AC-2"))
             else:
                 (repo / "candidate.py").write_text("VALUE = 1\n")
+                _post_claims(repo)
             return 0
 
     class _AvailableCodeGraph:
@@ -1905,6 +1978,9 @@ def test_grind_healthy_codegraph_lines_are_log_only(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: _NarratingRunner())
     monkeypatch.setattr(grind_mod, "_make_codegraph", lambda: _AvailableCodeGraph())
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
 
     result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -2126,3 +2202,259 @@ def test_retro_does_not_run_in_an_iteration() -> None:
         assert "grind_flock" not in source
         assert "ortus.commands.grind" not in source
         assert "ortus.commands import grind" not in source
+
+
+# ---------------------------------------------------------------------------
+# Machine verification wiring (ortus-l2u9.3)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingWorker:
+    """Implementation-only worker that records every spawn's phase posture."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, repo: Path, claims: dict[str, str] | None = None) -> None:
+        self.repo = repo
+        self.claims = claims if claims is not None else {"AC-1": "pass", "AC-2": "pass"}
+        self.readonly_spawns = 0
+        self.runs: list[dict[str, object]] = []
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        readonly: bool = False,
+        **kwargs: object,
+    ) -> int:
+        self.runs.append({"prompt": prompt, "readonly": readonly, **kwargs})
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        if readonly:
+            self.readonly_spawns += 1
+            _emit_verdict(self.repo, log_path, criteria=("AC-1", "AC-2"))
+            return 0
+        (self.repo / "candidate.py").write_text("VALUE = 1\n")
+        journal = JournalStore(self.repo).load()
+        if journal is not None and journal.issue_id and self.claims:
+            post_completion_comment(self.repo, journal.issue_id, self.claims)
+        return 0
+
+
+def _machine_grind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    claims: dict[str, str] | None = None,
+    checks_default: object | None = None,
+    reviewer: bool = False,
+    max_corrections: int | None = 0,
+) -> tuple[Path, str, object, _RecordingWorker]:
+    """One branch-scoped run judged by the (scripted) machine pipeline."""
+    repo = _bd_repo(tmp_path, name)
+    issue_id = _create_ready_issue(repo, "machine judged leaf")
+    _baseline_commit(repo)
+    if reviewer:
+        _enable_reviewer(repo)
+    worker = _RecordingWorker(repo, claims)
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: worker)
+    install_machine_checks(
+        monkeypatch,
+        default=checks_default
+        if checks_default is not None
+        else machine_run(criteria=("AC-1", "AC-2")),
+    )
+    args = ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    if max_corrections is not None:
+        args += ["--max-corrections", str(max_corrections)]
+    result = runner.invoke(app, args)
+    return repo, issue_id, result, worker
+
+
+def _comments_text(repo: Path, issue_id: str) -> str:
+    return subprocess.run(
+        ["bd", "comments", issue_id, "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+@pytest.mark.slow
+def test_flag_off_spawns_no_verifier_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: with the reviewer flag off, verification is the machine pipeline
+    and no agent is spawned to judge."""
+    repo, issue_id, result, worker = _machine_grind(
+        tmp_path, monkeypatch, name="mach1"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert worker.readonly_spawns == 0, "no read-only verifier agent may launch"
+    log = _grind_log(repo)
+    assert "verification CodeGraph handshake requested" not in log
+    assert "machine checks running against" in log
+
+
+@pytest.mark.slow
+def test_verification_comment_is_the_runner_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the durable comment carries the runner's commands, verdicts, and
+    exit codes — the record minus the agent that used to type it."""
+    repo, issue_id, result, _worker = _machine_grind(
+        tmp_path, monkeypatch, name="mach2"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    comments = _comments_text(repo, issue_id)
+    assert "Ortus machine verification record" in comments
+    assert "Deterministic AC run @" in comments
+    assert "uv run pytest tests/test_grind.py -q" in comments
+    assert "exit 0" in comments
+    assert "claims agree with the measured results" in comments
+
+
+@pytest.mark.slow
+def test_claim_disagreement_fails_per_criterion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a claims/results disagreement fails the run, stated per criterion
+    — in either direction, so a claim can never stand in for a result."""
+    repo, issue_id, result, _worker = _machine_grind(
+        tmp_path,
+        monkeypatch,
+        name="mach3",
+        claims={"AC-1": "pass", "AC-2": "fail"},
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    comments = _comments_text(repo, issue_id)
+    assert "AC-2: claimed fail, measured pass" in comments
+    log = _grind_log(repo)
+    assert "verifier verdict=fail" in log
+
+
+@pytest.mark.slow
+def test_missing_claims_block_fails_with_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: a worker emitting no claims block fails the claim diff with a
+    message naming the block, never a crash."""
+    repo, issue_id, result, _worker = _machine_grind(
+        tmp_path, monkeypatch, name="mach8", claims={}
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    comments = _comments_text(repo, issue_id)
+    assert "carries no **Claims v1** block" in comments
+
+
+@pytest.mark.slow
+def test_reviewer_flag_runs_after_green_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: with the flag on, the agent reviewer runs after a green machine
+    pipeline and is skipped — no tokens spent — on a red one."""
+    repo, issue_id, result, worker = _machine_grind(
+        tmp_path, monkeypatch, name="mach7g", reviewer=True
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert worker.readonly_spawns == 1, "green machine run dispatches the reviewer"
+    assert _issue(repo, issue_id)["status"] == "closed"
+
+    repo, issue_id, result, worker = _machine_grind(
+        tmp_path,
+        monkeypatch,
+        name="mach7r",
+        reviewer=True,
+        checks_default=machine_run("fail", criteria=("AC-1", "AC-2")),
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert worker.readonly_spawns == 0, "a red machine run spends no reviewer tokens"
+    assert "reviewer skipped — the machine pipeline is red" in _grind_log(repo)
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+
+
+@pytest.mark.slow
+def test_acceptance_hash_rechecked_before_judgment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: the acceptance_criteria hash taken at claim is rechecked before
+    judgment; an edit landing mid-run blocks rather than being re-read."""
+    from ortus.core.codegraph import CodeGraphMode, CodeGraphProbe
+
+    repo = _bd_repo(tmp_path, "mach6")
+    issue_id = _create_ready_issue(repo, "hash guarded leaf")
+    _baseline_commit(repo)
+    packet = _issue(repo, issue_id)
+    git = GitClient(repo)
+    store = grind_mod.JournalStore(repo)
+    packet_digest, packet_ref = store.save_packet(issue_id, packet)
+    branch = f"ortus/{issue_id}"
+    subprocess.run(["git", "branch", branch, "main"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "checkout", branch],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    journal = (
+        grind_mod.CandidateJournal.start(
+            repo=repo,
+            issue_id=issue_id,
+            base_head=git.head_oid(),
+            baseline_paths=(),
+            packet_hash=packet_digest,
+            packet_ref=packet_ref,
+        )
+        .with_branch(branch, git.head_oid())
+        .with_candidate((), phase="candidate-captured", candidate_hash="0" * 64)
+    )
+    store.save(journal)
+
+    comments: list[str] = []
+    statuses: list[str] = []
+    edited = dict(packet)
+    edited["acceptance_criteria"] = str(packet["acceptance_criteria"]) + "\n- AC-9: invented later."
+
+    class _EditedBd:
+        def show(self, _issue_id: str) -> dict:
+            return edited
+
+        def add_comment(self, _issue_id: str, body: str) -> None:
+            comments.append(body)
+
+        def update_status(self, _issue_id: str, status: str) -> None:
+            statuses.append(status)
+
+    log = repo / "logs" / "grind-hash.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.touch()
+    outcome = grind_mod._machine_verify_candidate(
+        bd=_EditedBd(),
+        git=git,
+        store=store,
+        journal=journal,
+        repo=repo,
+        log=log,
+        write_log=lambda _line: None,
+        issue_id=issue_id,
+        probe=CodeGraphProbe(CodeGraphMode.OFF, False, False, False),
+        baseline=frozenset(),
+        freshness="not-refreshed",
+        sync_ms=0,
+        iteration=1,
+        integration_branch="main",
+    )
+    assert outcome.failure is not None
+    assert "acceptance criteria changed after claim" in outcome.failure
+    assert outcome.journal.phase == "verification-rejected"
+    assert any("acceptance criteria changed after claim" in body for body in comments)
+    assert statuses == ["in_progress"], "the claim is restored before the report"

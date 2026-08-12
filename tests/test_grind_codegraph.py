@@ -236,6 +236,11 @@ def test_resume_candidate_skips_handshake_gate(
     """
     repo, issue_id = _seed(tmp_path, "cgres1")
     _stage_resume(repo, issue_id)
+    # The crashed worker's completion comment survived; the machine claim
+    # diff reads it when the resumed candidate is judged.
+    from tests._shims import post_completion_comment
+
+    post_completion_comment(repo, issue_id, {"AC-1": "pass"})
     backend = ScriptedRunner(verify=_querying_verify)
     _install_loop(monkeypatch, tmp_path, backend)
 
@@ -243,7 +248,7 @@ def test_resume_candidate_skips_handshake_gate(
 
     assert result.exit_code == 0, result.stdout + result.stderr
     assert Phase.IMPLEMENT.value not in _phases(backend)
-    assert Phase.VERIFY.value in _phases(backend)
+    assert "implementation CodeGraph handshake not required" in _log(repo)
     assert _issue(repo, issue_id)["status"] == "closed"
 
 

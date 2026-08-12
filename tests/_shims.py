@@ -39,6 +39,100 @@ _CANNED_DIR = _FIXTURES / "canned-claude-responses"
 IS_WINDOWS = sys.platform == "win32"
 
 
+def machine_run(
+    verdict: str = "pass",
+    *,
+    criteria: tuple[str, ...] = ("AC-1",),
+    ref: str = "fixture-ref",
+    output: str = "",
+):
+    """One scripted AC-runner result: every criterion carries `verdict`."""
+
+    from ortus.core.checks import CheckRunResult, CriterionResult
+
+    return CheckRunResult(
+        ref=ref,
+        results=tuple(
+            CriterionResult(
+                criterion_id=criterion_id,
+                command="uv run pytest tests/test_grind.py -q",
+                exit_code=0 if verdict == "pass" else 1,
+                duration_seconds=0.1,
+                output=output,
+                verdict=verdict,
+            )
+            for criterion_id in criteria
+        ),
+    )
+
+
+def install_machine_checks(
+    monkeypatch, sequence: list | None = None, default=None
+) -> list[dict]:
+    """Script grind's AC runner the way tests script worker backends.
+
+    Each call pops the next result from `sequence`; an exhausted sequence
+    returns `default` (a green single-criterion run unless given). Returns the
+    recorded calls so tests can assert what ref and criteria were judged.
+    """
+
+    from ortus.commands import grind as grind_mod
+
+    calls: list[dict] = []
+    remaining = list(sequence or [])
+
+    def _scripted(repo, acceptance_criteria, ref, *, base_ref=None, **kwargs):
+        calls.append(
+            {
+                "repo": repo,
+                "acceptance_criteria": acceptance_criteria,
+                "ref": ref,
+                "base_ref": base_ref,
+            }
+        )
+        if remaining:
+            return remaining.pop(0)
+        return default if default is not None else machine_run(ref=str(ref))
+
+    monkeypatch.setattr(grind_mod, "_run_machine_checks", _scripted)
+    return calls
+
+
+def claims_comment_body(
+    claims: dict[str, str] | None = None, *, changes: str = "- fixture change"
+) -> str:
+    """A completion comment carrying **Changes** and the **Claims v1** block."""
+
+    lines = [
+        "**Changes**:",
+        changes,
+        "",
+        "**Verification**: fixture checks run",
+        "",
+        "**Claims v1**:",
+    ]
+    for criterion_id, status in (claims or {"AC-1": "pass"}).items():
+        lines.append(f"{criterion_id}: {status}")
+    return "\n".join(lines)
+
+
+def post_completion_comment(
+    repo: Path,
+    issue_id: str,
+    claims: dict[str, str] | None = None,
+    *,
+    changes: str = "- fixture change",
+) -> None:
+    """Post the completion comment a real worker leaves, claims block included."""
+
+    subprocess.run(
+        ["bd", "comments", "add", issue_id, claims_comment_body(claims, changes=changes)],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+
+
 def ready_issue_args() -> list[str]:
     """Return bd-create fields for a minimal readiness-schema-v1 test leaf."""
 

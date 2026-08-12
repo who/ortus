@@ -63,8 +63,14 @@ class ClaudeRunner:
         fast: bool = False,
         profile: AgentProfile | None = None,
         readonly: bool = False,
+        resume: str | None = None,
     ) -> list[str]:
         argv: list[str] = [self.claude_binary, "-p", prompt]
+        if resume:
+            # Continue an existing session so a correction lands in the context
+            # that produced the candidate, not in a fresh one that has never
+            # seen its own previous attempt.
+            argv.extend(["--resume", resume])
         argv.extend(STANDARD_FLAGS)
         if profile is not None and profile.model is not None:
             argv.extend(["--model", profile.model])
@@ -96,13 +102,16 @@ class ClaudeRunner:
         profile: AgentProfile | None = None,
         timeout: float | None = None,
         readonly: bool = False,
+        resume: str | None = None,
     ) -> int:
         """Spawn claude, tee output to log_path (NOT stdout), return exit code.
 
         Raises subprocess.TimeoutExpired if timeout is exceeded; the child
         and its process group are SIGKILL'd before the exception propagates.
         """
-        argv = self.build_argv(prompt, fast=fast, profile=profile, readonly=readonly)
+        argv = self.build_argv(
+            prompt, fast=fast, profile=profile, readonly=readonly, resume=resume
+        )
         if readonly:
             argv = self._readonly_argv(argv, repo)
         log_path.parent.mkdir(parents=True, exist_ok=True)
