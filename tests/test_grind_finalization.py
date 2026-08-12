@@ -1985,3 +1985,86 @@ def test_no_remote_full_flow_in_clone_mode(
     assert _issue(repo, issue_id)["status"] == "closed"
     assert CANDIDATE in _committed_paths(repo)
     assert JournalStore(repo).load() is None
+
+
+# ---------------------------------------------------------------------------
+# Explicit tracker exports (ortus-k46v.4)
+# ---------------------------------------------------------------------------
+
+
+def test_exporting_bd_regenerates_before_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: under an exporting bd, finalization regenerates the export at
+    its staging moment and the landing carries the regenerated record."""
+    repo, issue_id = _seed(tmp_path, "exp1")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    marker = '{"id": "regenerated-by-export"}\n'
+    calls: list[str] = []
+
+    monkeypatch.setattr(BdClient, "supports_export", lambda self: True)
+
+    def fake_export(self: BdClient) -> str:
+        calls.append("export")
+        (self.repo / ".beads" / "issues.jsonl").write_text(
+            marker, encoding="utf-8"
+        )
+        return ""
+
+    monkeypatch.setattr(BdClient, "export_issues", fake_export)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert calls, "the export must run"
+    assert "tracker exports regenerated via bd export" in _log_text(repo)
+    committed = _git(repo, "show", "HEAD:.beads/issues.jsonl").stdout
+    assert committed == marker, "the landing carries the regenerated record"
+
+
+def test_ambient_bd_behavior_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a bd without export support keeps today's ambient regime — the
+    explicit export is never attempted."""
+    repo, issue_id = _seed(tmp_path, "exp2")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    monkeypatch.setattr(BdClient, "supports_export", lambda self: False)
+
+    def never(self: BdClient) -> str:
+        raise AssertionError("the ambient regime must not invoke bd export")
+
+    monkeypatch.setattr(BdClient, "export_issues", never)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert "tracker exports regenerated" not in _log_text(repo)
+
+
+def test_export_failure_blocks_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: an export failure is a blocker — the issue is never committed
+    with a knowingly stale tracker record."""
+    repo, issue_id = _seed(tmp_path, "exp4")
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    monkeypatch.setattr(BdClient, "supports_export", lambda self: True)
+    monkeypatch.setattr(
+        BdClient, "export_issues", lambda self: "database locked"
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert (
+        "could not regenerate the tracker exports: database locked" in combined
+    )
+    main_subjects = _git(repo, "log", "--format=%s", "main").stdout.splitlines()
+    assert not [s for s in main_subjects if s.startswith(f"{issue_id}: ")]
+    assert JournalStore(repo).load() is not None, "the transaction is resumable"

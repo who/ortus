@@ -8,6 +8,7 @@ workspaces.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,6 +108,60 @@ class BdClient:
         return proc.stdout, parsed
 
     # --- typed surface --------------------------------------------------
+
+    def supports_export(self) -> bool:
+        """Whether this bd can regenerate its JSONL export on demand.
+
+        Probed once by behavior, never by version parsing: `bd export --help`
+        exits 0 exactly where the exporting path is available. A bd without
+        it maintains the export ambiently, and the caller leaves that regime
+        byte-identical.
+        """
+        cached = getattr(self, "_supports_export", None)
+        if cached is None:
+            proc = subprocess.run(
+                [self.binary, "export", "--help"],
+                cwd=str(self.repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            cached = proc.returncode == 0
+            self._supports_export = cached
+        return cached
+
+    def export_issues(self) -> str:
+        """Regenerate `.beads/issues.jsonl` from the database, atomically.
+
+        Ortus owns export timing: this runs at the exact moments the export's
+        bytes are consumed, so the ambient-timing race class cannot recur.
+        The write lands in a temp file first and is renamed into place — a
+        crash mid-export can never commit a truncated record. A locked-out
+        tracker gets one retry. Returns "" on success, else the reason.
+        """
+        target = self.repo / ".beads" / "issues.jsonl"
+        scratch = target.with_name(".issues.jsonl.export-tmp")
+        last = ""
+        for _attempt in (1, 2):
+            proc = subprocess.run(
+                [self.binary, "export", "-o", str(scratch)],
+                cwd=str(self.repo),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                try:
+                    os.replace(scratch, target)
+                except OSError as exc:
+                    return f"could not move the export into place ({exc})"
+                return ""
+            last = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or [
+                f"bd export exited {proc.returncode}"
+            ]
+            last = last[0]
+        scratch.unlink(missing_ok=True)
+        return last
 
     def list_ready(
         self, *, exclude_labels: tuple[str, ...] = ()

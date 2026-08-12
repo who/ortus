@@ -299,3 +299,78 @@ def test_accepted_proposal_is_readable(bd_workspace: Path) -> None:
     assert not client.propose_lesson("sandbox-sweep", body)
     assert not client.propose_lesson("another-key", body)
     assert client.pending_proposals() == {}
+
+
+# ---------------------------------------------------------------------------
+# Explicit exports (ortus-k46v.4)
+# ---------------------------------------------------------------------------
+
+
+def test_supports_export_probes_by_behavior(tmp_path: Path) -> None:
+    """The regime is decided by `bd export --help`'s exit status, probed once."""
+    from tests._shims import make_inline_python_shim
+
+    real = BdClient(tmp_path)
+    assert real.supports_export() is True, "the machine bd carries export"
+
+    exportless = make_inline_python_shim(
+        tmp_path,
+        "bd-without-export",
+        "import sys\nsys.exit(1)\n",
+    )
+    legacy = BdClient(tmp_path, binary=str(exportless))
+    assert legacy.supports_export() is False
+
+
+def test_export_write_is_atomic(tmp_path: Path) -> None:
+    """AC-3: a failing export never touches the tracked file; a succeeding one
+    replaces it whole via rename."""
+    from tests._shims import make_inline_python_shim
+
+    beads = tmp_path / ".beads"
+    beads.mkdir()
+    target = beads / "issues.jsonl"
+    target.write_text('{"id": "orig-1"}\n', encoding="utf-8")
+
+    # A bd that writes half a record to -o and dies: the tracked file must
+    # keep its original bytes and no scratch file may linger.
+    dying = make_inline_python_shim(
+        tmp_path,
+        "bd-dying-export",
+        (
+            "import sys\n"
+            "out = sys.argv[sys.argv.index('-o') + 1]\n"
+            "open(out, 'w').write('{\"id\": \"trunc')\n"
+            "sys.exit(1)\n"
+        ),
+    )
+    client = BdClient(tmp_path, binary=str(dying))
+    reason = client.export_issues()
+    assert reason, "a failed export must report why"
+    assert target.read_text(encoding="utf-8") == '{"id": "orig-1"}\n'
+    assert not (beads / ".issues.jsonl.export-tmp").exists()
+
+    healthy = make_inline_python_shim(
+        tmp_path,
+        "bd-healthy-export",
+        (
+            "import sys\n"
+            "out = sys.argv[sys.argv.index('-o') + 1]\n"
+            "open(out, 'w').write('{\"id\": \"fresh-1\"}\\n')\n"
+            "sys.exit(0)\n"
+        ),
+    )
+    client = BdClient(tmp_path, binary=str(healthy))
+    assert client.export_issues() == ""
+    assert target.read_text(encoding="utf-8") == '{"id": "fresh-1"}\n'
+
+
+def test_interactions_disposition_matches_probe() -> None:
+    """AC-5: probed on bd 1.2.1 (2026-08-12): `bd audit` writes
+    .beads/interactions.jsonl as an append-only, git-versioned sidecar —
+    ambient by design, so it stays in the swept tracker-export set while
+    issues.jsonl alone is regenerated explicitly."""
+    from ortus.commands.grind import _TRACKER_EXPORT_PATHS
+
+    assert ".beads/interactions.jsonl" in _TRACKER_EXPORT_PATHS
+    assert ".beads/issues.jsonl" in _TRACKER_EXPORT_PATHS

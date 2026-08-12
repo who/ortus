@@ -3020,6 +3020,31 @@ def _message_composer(
     return _compose
 
 
+def _refresh_tracker_exports(
+    bd: BdClient, write_log: Callable[[str], None]
+) -> str | None:
+    """Regenerate the tracker exports right before they are staged.
+
+    Under a bd that supports on-demand export, Ortus owns export timing:
+    the file is rewritten at the exact moment its bytes are consumed, so
+    ambient-timing races cannot recur and bd releases that no longer write
+    the export as a side effect stay compatible. A bd without the command
+    keeps its ambient regime byte-identical. Failure is a blocker: an issue
+    must never commit knowingly stale tracker state.
+    """
+
+    try:
+        if not bd.supports_export():
+            return None
+        reason = bd.export_issues()
+    except Exception as exc:  # noqa: BLE001 - a broken bd is a blocker, not a crash
+        reason = str(exc)
+    if reason:
+        return f"could not regenerate the tracker exports: {reason}"
+    write_log("finalization: tracker exports regenerated via bd export")
+    return None
+
+
 def _land_from_workspace(
     bd: BdClient,
     git: GitClient,
@@ -3051,6 +3076,9 @@ def _land_from_workspace(
             f"{branch} carries no commits beyond the base; nothing to land"
         )
     primary_tip_before = git.branch_tip(branch)
+    export_blocker = _refresh_tracker_exports(bd, write_log)
+    if export_blocker is not None:
+        return journal, export_blocker
     primary_dirty = git.dirty_paths()
     if primary_dirty is None:
         return journal, "could not read the primary worktree before committing"
@@ -3311,6 +3339,9 @@ def _finalize_candidate(
                         f"could not check out {journal.issue_branch} to commit "
                         "the candidate"
                     )
+            export_blocker = _refresh_tracker_exports(bd, write_log)
+            if export_blocker is not None:
+                return journal, export_blocker
             dirty = git.dirty_paths()
             if dirty is None:
                 return journal, "could not read the worktree before committing"
