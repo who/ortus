@@ -182,6 +182,28 @@ def test_section_without_guidance_fails_loudly() -> None:
         RequiredSection("design", "Scope", "scope", "  ")
 
 
+def test_kind_tags_are_accepted_not_required() -> None:
+    """AC-5 (l2u9.2): tagged and untagged criterion lines both validate, so
+    every pre-existing (untagged) packet keeps validating exactly as before."""
+    untagged = validate_issue(ready_issue())
+    assert untagged.ready and untagged.failures == ()
+
+    tagged = ready_issue("demo-tagged")
+    tagged["acceptance_criteria"] = (
+        tagged["acceptance_criteria"]
+        .replace(
+            "- AC-1: Preview performs no writes.",
+            "- AC-1 (proves-new): Preview performs no writes.",
+        )
+        .replace(
+            "- AC-2: Normal execution is unchanged.",
+            "- AC-2 (guards-existing): Normal execution is unchanged.",
+        )
+    )
+    report = validate_issue(tagged)
+    assert report.ready and report.failures == ()
+
+
 def test_contradiction_guidance_must_be_actionable() -> None:
     issue = deepcopy(ready_issue())
     issue["design"] = issue["design"].replace(

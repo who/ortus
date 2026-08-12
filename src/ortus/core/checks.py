@@ -13,7 +13,12 @@ build derives its version from git metadata an archive strips, so nothing in
 an archive tree could run; measured both ways on 2026-08-11).
 
 The runner judges nothing a command's exit code does not state: no model
-calls, no heuristics about flaky output. Results are data first, rendering
+calls, no heuristics about flaky output. The red–green proof stays inside
+that rule: a criterion tagged `proves-new` on its Observable-criteria line
+runs on a second clone at the merge base too, and its verdict is an
+inequality between two exit codes — fail on the base, pass on the branch.
+`guards-existing` must pass on both; an untagged criterion runs branch-only,
+exactly as before kinds existed. Results are data first, rendering
 second — :func:`render_tracker_comment` turns a run into durable tracker text.
 Nothing in the live pipeline calls this yet; wiring is a separate,
 human-landed leaf.
@@ -33,15 +38,32 @@ from pathlib import Path
 from ortus.core import readiness
 from ortus.core.git import GitClient
 
-# The readiness grammar, shared by reference: an AC identifier and a
-# backticked command mean here exactly what the validator enforced at claim.
+# The readiness grammar, shared by reference: an AC identifier, a backticked
+# command, and a kind tag mean here exactly what the validator accepted at
+# claim.
 _CRITERION_ID = readiness._CRITERION_ID
 _CODE_SPAN = readiness._CODE_SPAN
+_CRITERION_KIND = readiness._CRITERION_KIND
 _CHECKS_HEADING = readiness._section("criterion_mapped_checks").heading
+_OBSERVABLE_HEADING = readiness._section("observable_criteria").heading
+
+#: The red–green criterion kinds. `proves-new` must fail on the merge base
+#: and pass on the branch — a test that also passes without the change proves
+#: nothing and is rejected mechanically. `guards-existing` must pass on both.
+#: An untagged criterion runs on the branch only, exactly as before kinds.
+KIND_PROVES_NEW = readiness.CRITERION_KIND_PROVES_NEW
+KIND_GUARDS_EXISTING = readiness.CRITERION_KIND_GUARDS_EXISTING
 
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_TIMEOUT = "timeout"
+#: A `proves-new` criterion that passed on the merge base too: the test
+#: proves nothing about the change. Distinct from fail because "your test
+#: proves nothing" is more actionable than "failed" — and never a pass.
+VERDICT_VACUOUS = "vacuous"
+#: A `guards-existing` criterion that failed on the merge base, which usually
+#: indicts the criterion or the base, not the change.
+VERDICT_BROKEN_BASE = "broken-base"
 
 #: Generous by default: a wedged check is reported as timed out rather than
 #: waited on forever (the ortus-xjdf lesson applied mechanically).
@@ -58,10 +80,16 @@ _TRUNCATION_MARKER = "\n[... output truncated ...]\n"
 
 @dataclass(frozen=True)
 class CriterionCheck:
-    """One runnable check: a criterion identifier and its exact command."""
+    """One runnable check: a criterion identifier and its exact command.
+
+    ``kind`` is the optional red–green tag from the Observable-criteria line
+    (:data:`KIND_PROVES_NEW` or :data:`KIND_GUARDS_EXISTING`); ``None`` keeps
+    the criterion branch-only. Never inferred — the tag is the packet's word.
+    """
 
     criterion_id: str
     command: str
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +106,14 @@ class PacketFailure:
 
 @dataclass(frozen=True)
 class CriterionResult:
-    """Outcome of one criterion command. ``exit_code`` is None on timeout."""
+    """Outcome of one criterion command. ``exit_code`` is None on timeout.
+
+    ``exit_code``, ``duration_seconds`` and ``output`` describe the branch
+    run, exactly as before kinds existed. A tagged criterion additionally
+    carries its merge-base run: ``base_exit_code`` is None when the base run
+    timed out, and the folded ``verdict`` may then be
+    :data:`VERDICT_VACUOUS` or :data:`VERDICT_BROKEN_BASE`.
+    """
 
     criterion_id: str
     command: str
@@ -86,6 +121,9 @@ class CriterionResult:
     duration_seconds: float
     output: str
     verdict: str
+    kind: str | None = None
+    base_exit_code: int | None = None
+    base_output: str = ""
 
 
 @dataclass(frozen=True)
@@ -146,7 +184,11 @@ def parse_criterion_checks(
     with the same identifier and code-span grammar. Lines without an ``AC-N``
     are section prose and skipped; a line with an identifier must carry
     exactly one backticked command, and each identifier may appear only once.
+    Each check also carries the optional kind tag from its Observable-criteria
+    line — the tag is data on the criterion, so a packet claimed before kinds
+    existed parses correctly, just untagged.
     """
+    kinds = _criterion_kinds(acceptance_criteria)
     body = readiness.section_text(acceptance_criteria, _CHECKS_HEADING)
     parsed: list[CriterionCheck] = []
     failures: list[PacketFailure] = []
@@ -186,8 +228,24 @@ def parse_criterion_checks(
                 PacketFailure(criterion_id, f"{criterion_id}: empty command")
             )
             continue
-        parsed.append(CriterionCheck(criterion_id, command))
+        parsed.append(
+            CriterionCheck(criterion_id, command, kinds.get(criterion_id))
+        )
     return tuple(parsed), tuple(failures)
+
+
+def _criterion_kinds(acceptance_criteria: object) -> dict[str, str]:
+    """Kind tags by criterion identifier, from the Observable-criteria lines.
+
+    Only the two known kinds match; any other parenthesised text is section
+    prose, so a pre-kind packet's asides stay asides and its criteria stay
+    branch-only. A kind is never inferred for an untagged criterion.
+    """
+    body = readiness.section_text(acceptance_criteria, _OBSERVABLE_HEADING)
+    return {
+        criterion_id.upper(): kind.lower()
+        for criterion_id, kind in _CRITERION_KIND.findall(body)
+    }
 
 
 @dataclass(frozen=True)
@@ -264,6 +322,26 @@ def _bounded_read(path: Path, limit: int) -> str:
     return text[:half] + _TRUNCATION_MARKER + text[-half:]
 
 
+def _fold_verdicts(kind: str, base: _Execution, branch: _Execution) -> str:
+    """Fold a tagged criterion's two runs into one verdict.
+
+    A timeout on either tree is a timeout, never anything else: a wedged
+    command is not evidence, so it can never stand in for the base failure
+    `proves-new` requires. `proves-new` passes only as fail-on-base AND
+    pass-on-branch; pass-on-both is vacuous. `guards-existing` passes only
+    as pass-on-both; fail-on-base is broken-base.
+    """
+    if base.timed_out or branch.timed_out:
+        return VERDICT_TIMEOUT
+    if kind == KIND_PROVES_NEW:
+        if branch.exit_code != 0:
+            return VERDICT_FAIL
+        return VERDICT_PASS if base.exit_code != 0 else VERDICT_VACUOUS
+    if base.exit_code != 0:
+        return VERDICT_BROKEN_BASE
+    return VERDICT_PASS if branch.exit_code == 0 else VERDICT_FAIL
+
+
 def _sync_command_for(tree: Path, configured: str | None) -> str | None:
     """Resolve the environment-preparation command for a materialized tree.
 
@@ -277,11 +355,55 @@ def _sync_command_for(tree: Path, configured: str | None) -> str | None:
     return configured or None
 
 
+def _materialize_tree(
+    git: GitClient,
+    ref: str,
+    target: Path,
+    log_path: Path,
+    *,
+    sync_command: str | None,
+    timeout_seconds: float,
+    output_limit: int,
+) -> EnvironmentFailure | None:
+    """Clone `ref` at `target` and prepare its environment; None on success.
+
+    Both trees of a red–green run are built exactly this way — disposable
+    shared clones with prepared environments, never archives, which cannot
+    build here (the version derives from vcs metadata an archive strips).
+    """
+    reason = git.clone_shared(ref, target)
+    if reason:
+        return EnvironmentFailure(
+            command=f"git clone --shared @ {ref}",
+            exit_code=None,
+            output=reason,
+        )
+    prepare = _sync_command_for(target, sync_command)
+    if prepare is None:
+        return None
+    prepared = _execute(
+        prepare,
+        target,
+        log_path,
+        timeout_seconds=timeout_seconds,
+        output_limit=output_limit,
+    )
+    if prepared.timed_out or prepared.exit_code != 0:
+        return EnvironmentFailure(
+            command=prepare,
+            exit_code=prepared.exit_code,
+            output=prepared.output,
+            timed_out=prepared.timed_out,
+        )
+    return None
+
+
 def run_checks(
     repo: Path,
     acceptance_criteria: object,
     ref: str,
     *,
+    base_ref: str | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     output_limit: int = DEFAULT_OUTPUT_LIMIT,
     sync_command: str | None = None,
@@ -294,43 +416,77 @@ def run_checks(
     a per-command timeout, and removes the scratch tree afterwards. The clone
     lives outside the repository, so accidental writes stay out of the source
     tree; one clone serves every command of the run.
+
+    When the packet tags criteria with kinds, `base_ref` names the other end
+    of the ref pair: a second shared clone is checked out once per run at the
+    merge base of `base_ref` and `ref`, tagged commands run on both trees,
+    and the two exit codes fold into one verdict. Tagged criteria with no
+    establishable merge base are an environment failure — reported, never
+    improvised around by running branch-only.
     """
     parsed, packet_failures = parse_criterion_checks(acceptance_criteria)
     if not parsed:
         return CheckRunResult(ref=ref, packet_failures=packet_failures)
+    git = GitClient(repo)
     scratch = Path(tempfile.mkdtemp(prefix="ortus-checks-", dir=scratch_root))
     try:
         clone = scratch / "tree"
-        reason = GitClient(repo).clone_shared(ref, clone)
-        if reason:
+        environment = _materialize_tree(
+            git,
+            ref,
+            clone,
+            scratch / "environment.log",
+            sync_command=sync_command,
+            timeout_seconds=timeout_seconds,
+            output_limit=output_limit,
+        )
+        if environment is not None:
             return CheckRunResult(
-                ref=ref,
-                packet_failures=packet_failures,
-                environment=EnvironmentFailure(
-                    command=f"git clone --shared @ {ref}",
-                    exit_code=None,
-                    output=reason,
-                ),
+                ref=ref, packet_failures=packet_failures, environment=environment
             )
-        prepare = _sync_command_for(clone, sync_command)
-        if prepare is not None:
-            prepared = _execute(
-                prepare,
-                clone,
-                scratch / "environment.log",
-                timeout_seconds=timeout_seconds,
-                output_limit=output_limit,
-            )
-            if prepared.timed_out or prepared.exit_code != 0:
+        base_clone: Path | None = None
+        if any(check.kind is not None for check in parsed):
+            if base_ref is None:
                 return CheckRunResult(
                     ref=ref,
                     packet_failures=packet_failures,
                     environment=EnvironmentFailure(
-                        command=prepare,
-                        exit_code=prepared.exit_code,
-                        output=prepared.output,
-                        timed_out=prepared.timed_out,
+                        command="git merge-base",
+                        exit_code=None,
+                        output=(
+                            "the packet tags criteria with kinds, but no "
+                            "base ref was supplied to take a merge base with"
+                        ),
                     ),
+                )
+            base_oid = git.merge_base(base_ref, ref)
+            if not base_oid:
+                return CheckRunResult(
+                    ref=ref,
+                    packet_failures=packet_failures,
+                    environment=EnvironmentFailure(
+                        command=f"git merge-base {base_ref} {ref}",
+                        exit_code=None,
+                        output=(
+                            f"no merge base between {base_ref!r} and {ref!r}"
+                        ),
+                    ),
+                )
+            base_clone = scratch / "base"
+            environment = _materialize_tree(
+                git,
+                base_oid,
+                base_clone,
+                scratch / "environment.base.log",
+                sync_command=sync_command,
+                timeout_seconds=timeout_seconds,
+                output_limit=output_limit,
+            )
+            if environment is not None:
+                return CheckRunResult(
+                    ref=ref,
+                    packet_failures=packet_failures,
+                    environment=environment,
                 )
         records: list[CriterionResult] = []
         for check in parsed:
@@ -341,12 +497,31 @@ def run_checks(
                 timeout_seconds=timeout_seconds,
                 output_limit=output_limit,
             )
-            if outcome.timed_out:
-                verdict = VERDICT_TIMEOUT
-            elif outcome.exit_code == 0:
-                verdict = VERDICT_PASS
-            else:
-                verdict = VERDICT_FAIL
+            if check.kind is None or base_clone is None:
+                if outcome.timed_out:
+                    verdict = VERDICT_TIMEOUT
+                elif outcome.exit_code == 0:
+                    verdict = VERDICT_PASS
+                else:
+                    verdict = VERDICT_FAIL
+                records.append(
+                    CriterionResult(
+                        criterion_id=check.criterion_id,
+                        command=check.command,
+                        exit_code=outcome.exit_code,
+                        duration_seconds=outcome.duration_seconds,
+                        output=outcome.output,
+                        verdict=verdict,
+                    )
+                )
+                continue
+            base_outcome = _execute(
+                check.command,
+                base_clone,
+                scratch / f"{check.criterion_id}.base.log",
+                timeout_seconds=timeout_seconds,
+                output_limit=output_limit,
+            )
             records.append(
                 CriterionResult(
                     criterion_id=check.criterion_id,
@@ -354,7 +529,10 @@ def run_checks(
                     exit_code=outcome.exit_code,
                     duration_seconds=outcome.duration_seconds,
                     output=outcome.output,
-                    verdict=verdict,
+                    verdict=_fold_verdicts(check.kind, base_outcome, outcome),
+                    kind=check.kind,
+                    base_exit_code=base_outcome.exit_code,
+                    base_output=base_outcome.output,
                 )
             )
         return CheckRunResult(
@@ -397,10 +575,34 @@ def render_tracker_comment(result: CheckRunResult) -> str:
         exit_text = (
             "no exit code" if record.exit_code is None else f"exit {record.exit_code}"
         )
+        if record.kind is None:
+            lines.append(
+                f"- {record.criterion_id}: {record.verdict} — {exit_text} "
+                f"in {record.duration_seconds:.1f}s — `{record.command}`"
+            )
+            if record.verdict != VERDICT_PASS and record.output.strip():
+                lines.extend(["", "```", record.output.strip(), "```", ""])
+            continue
+        base_text = (
+            "no exit code"
+            if record.base_exit_code is None
+            else f"exit {record.base_exit_code}"
+        )
         lines.append(
-            f"- {record.criterion_id}: {record.verdict} — {exit_text} "
+            f"- {record.criterion_id} ({record.kind}): {record.verdict} — "
+            f"base {base_text}, branch {exit_text} "
             f"in {record.duration_seconds:.1f}s — `{record.command}`"
         )
-        if record.verdict != VERDICT_PASS and record.output.strip():
-            lines.extend(["", "```", record.output.strip(), "```", ""])
+        if record.verdict != VERDICT_PASS:
+            # Quote the tree that indicts: the base run for a vacuous,
+            # broken-base, or base-timeout verdict, the branch run otherwise.
+            blames_base = record.verdict in (
+                VERDICT_VACUOUS,
+                VERDICT_BROKEN_BASE,
+            ) or (
+                record.verdict == VERDICT_TIMEOUT and record.exit_code is not None
+            )
+            output = record.base_output if blames_base else record.output
+            if output.strip():
+                lines.extend(["", "```", output.strip(), "```", ""])
     return "\n".join(lines).rstrip() + "\n"

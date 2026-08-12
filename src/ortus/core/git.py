@@ -284,6 +284,16 @@ class GitClient:
         """
         return self._count(f"origin/{branch}..{branch}")
 
+    def merge_base(self, ref_a: str, ref_b: str) -> str:
+        """The merge-base commit of the two refs, or "" when none resolves.
+
+        Empty on any error (unknown ref, unrelated histories, not a git
+        repo), matching this client's conservative-answer convention; the
+        caller decides whether a missing base is fatal.
+        """
+        proc = self._run("merge-base", ref_a, ref_b)
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
     def branch_state(
         self, integration_branch: str = DEFAULT_INTEGRATION_BRANCH
     ) -> BranchState:

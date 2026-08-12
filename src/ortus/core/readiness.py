@@ -181,6 +181,18 @@ _PLACEHOLDER = re.compile(
     re.IGNORECASE,
 )
 _CRITERION_ID = re.compile(r"\bAC-\d+\b", re.IGNORECASE)
+#: The optional criterion kinds the red–green proof recognises. The tag rides
+#: the Observable-criteria line (`- AC-3 (proves-new): ...`) — accepted here,
+#: never required: an untagged criterion keeps its branch-only meaning, so
+#: every packet that validated before kinds existed validates identically.
+CRITERION_KIND_PROVES_NEW = "proves-new"
+CRITERION_KIND_GUARDS_EXISTING = "guards-existing"
+_CRITERION_KIND = re.compile(
+    rf"\b(AC-\d+)\s*\(\s*"
+    rf"({CRITERION_KIND_PROVES_NEW}|{CRITERION_KIND_GUARDS_EXISTING})"
+    rf"\s*\)",
+    re.IGNORECASE,
+)
 _ORDERED_STEP = re.compile(r"^\s*\d+[.)]\s+\S+", re.MULTILINE)
 _CODE_SPAN = re.compile(r"`[^`\n]+`")
 _TEST_COMMAND = re.compile(
