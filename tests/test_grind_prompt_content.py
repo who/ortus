@@ -442,6 +442,132 @@ def test_verifier_contract_forbids_worktree_add() -> None:
     assert "archive extraction cannot even install" in body
 
 
+# ---------------------------------------------------------------------------
+# (8) worker commit-message rules — the contract states what the gate enforces
+#     (ortus-ogfu)
+# ---------------------------------------------------------------------------
+#
+# The first two fully autonomous landings both had their worker-written commit
+# messages rejected by `validate_message` — "the composed body names nothing
+# from the diff" — because the gate enforced rules the worker contract never
+# stated. Each rejection reason the validator can raise maps here to a phrase
+# every writer-facing contract must carry; a validator rule added or removed
+# without the contracts catching up fails `test_message_rules_cannot_drift`.
+
+_MESSAGE_RULE_PHRASES: dict[str, str] = {
+    # rejection-reason literal in validate_message -> contract phrase
+    "the composed subject is empty": "imperative subject",
+    "the composed message has a subject and no body": "then a body",
+    "the composed subject trails off in an ellipsis": "no `...`",
+    "the composed subject opens with {first!r}, which is not imperative": (
+        "imperative"
+    ),
+    "the composed subject restates the issue title": "restate",
+    "the composed message runs to {len(body)} characters of body, past ": "8,000",
+    "the composed {label} carries control tokens": "plain-text",
+    "the composed body is a single paragraph": "at least two paragraphs",
+    "the composed body inventories the committed files": "inventory",
+    "the composed message narrates {narration}": "narrat",
+    "the composed body names nothing from the diff": (
+        "at least one function, class, or file"
+    ),
+    "the composed body names ": "none that does not",
+}
+
+
+def _correction_contract() -> str:
+    """The correction task, footer included, built the way grind builds it."""
+    from ortus.commands.grind import _correction_task
+    from ortus.core.transaction import CandidateJournal
+    from ortus.core.verdict import Verdict
+
+    journal = CandidateJournal(
+        issue_id="repo-1",
+        base_head="abc123",
+        baseline_paths=(),
+        baseline_fingerprints={},
+        issue_packet_ref="logs/packet.json",
+        issue_packet_hash="b" * 64,
+        candidate_hash="a" * 64,
+    )
+    verdict = Verdict(
+        candidate_hash="a" * 64,
+        decision="fail",
+        criteria=({"id": "AC-1", "status": "fail", "evidence": "check failed"},),
+        commands=("uv run pytest -m fast -q",),
+        reviewed_files=("src/x.py",),
+        reviewed_interfaces=("x",),
+        risks=("none",),
+        findings=("AC-1: the check fails",),
+        codegraph=("probe",),
+    )
+    return _correction_task("repo-1", journal, verdict)
+
+
+def _message_rule_surfaces() -> tuple[tuple[str, str], ...]:
+    """Every contract that tells a worker what commit message to write."""
+    from ortus.commands.grind import _IMPLEMENTATION_INSTRUCTION
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    return (
+        ("work-issue condition", read_work_issue_condition()),
+        ("correction footer", _correction_contract()),
+        ("implementation phase instruction", _IMPLEMENTATION_INSTRUCTION),
+    )
+
+
+def test_work_issue_contract_states_the_message_rules() -> None:
+    """AC-1: the step-2 instruction states every rule `validate_message` checks."""
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    body = read_work_issue_condition()
+    for reason, phrase in _MESSAGE_RULE_PHRASES.items():
+        assert phrase in body, (
+            f"work-issue condition does not state the rule behind the "
+            f"rejection {reason!r} (expected the phrase {phrase!r})"
+        )
+    # The repair the gate performs instead of rejecting is stated too, so a
+    # writer knows the one defect that does not cost it the whole message.
+    assert "72" in body
+    assert "repaired in place" in body
+
+
+def test_correction_footer_states_the_message_rules() -> None:
+    """AC-2: a correction worker writes a message under the same gate."""
+    body = _correction_contract()
+    for reason, phrase in _MESSAGE_RULE_PHRASES.items():
+        assert phrase in body, (
+            f"correction footer does not state the rule behind the "
+            f"rejection {reason!r} (expected the phrase {phrase!r})"
+        )
+
+
+def test_message_rules_cannot_drift() -> None:
+    """AC-3: every rejection `validate_message` can raise is mapped and stated.
+
+    The reason literals are read out of the validator's own source, so adding
+    a rejection there (or retiring one) fails here until `_MESSAGE_RULE_PHRASES`
+    and every writer-facing contract catch up.
+    """
+    import inspect
+
+    from ortus.core import compose
+
+    source = inspect.getsource(compose.validate_message)
+    reasons = set(re.findall(r'ComposeRejected\(\s*f?"([^"]*)"', source))
+    assert reasons == set(_MESSAGE_RULE_PHRASES), (
+        "validate_message's rejection reasons and _MESSAGE_RULE_PHRASES have "
+        f"drifted apart.\nonly in validator: {sorted(reasons - set(_MESSAGE_RULE_PHRASES))}\n"
+        f"only in mapping: {sorted(set(_MESSAGE_RULE_PHRASES) - reasons)}"
+    )
+    for name, text in _message_rule_surfaces():
+        for reason, phrase in _MESSAGE_RULE_PHRASES.items():
+            assert phrase in text, (
+                f"{name} does not state the rule behind the rejection "
+                f"{reason!r} (expected the phrase {phrase!r})"
+            )
+
+
 def test_worktree_prohibition_states_the_reason() -> None:
     """AC-4: each contract states the mechanism, so the rule stays checkable
     and is not later mistaken for arbitrary by an editor looking for

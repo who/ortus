@@ -1592,6 +1592,40 @@ _PLAN_GAP_MARKER = re.compile(r"(?i)plan[\s_-]?gap")
 _CORRECTION_ENTRY_CHARS = 400
 _CORRECTION_MAX_FINDINGS = 6
 
+#: The rules `validate_message` enforces on a worker's own commit message,
+#: stated where the writer writes. The first two autonomous landings both had
+#: their messages rejected for breaking rules the contract never stated, so
+#: every writer-facing contract carries this same rule set;
+#: tests/test_grind_prompt_content.py pins it against the validator's.
+_MESSAGE_RULES = (
+    "Commit-message rules (a message that breaks one is replaced by a weaker "
+    "deterministic assembly; only an over-long subject is repaired in place): "
+    "an imperative subject of at most 72 characters counted with the "
+    "`<issue-id>: ` prefix — describe the change, do not restate the issue "
+    "title, no trailing period, no `...` — then a body of at least two "
+    "paragraphs of plain-text prose, under 8,000 characters in all, naming in "
+    "backticks at least one function, class, or file that actually appears in "
+    "your diff and none that does not (a diff with no nameable symbol still "
+    "names one of its files), never an inventory of the files touched, and "
+    "never narration of how the commit was produced (attempt counts, verifier "
+    "verdicts, phase names, candidate hashes)."
+)
+
+#: The implementation phase rules injected ahead of the worker's condition.
+#: Module-level so the prompt-content tests can hold its message guidance to
+#: the same rule set the finalization gate enforces.
+_IMPLEMENTATION_INSTRUCTION = (
+    "IMPLEMENTATION PHASE ONLY. These phase rules override any conflicting "
+    "instruction elsewhere in this prompt. Make the change, run targeted "
+    "checks, and commit the completed work on the issue branch grind handed "
+    "you, with your own commit message. " + _MESSAGE_RULES + " Do not close "
+    "the issue, do not run git push, do not switch branches or touch the "
+    "integration branch, do not select other work, and do not add the final "
+    "verification comment; a fresh read-only verifier reviews your committed "
+    "range plus any uncommitted edits next, and Ortus owns merging and "
+    "finalization."
+)
+
 
 def _plan_gap_findings(verdict: Verdict) -> tuple[str, ...]:
     """Findings the verifier attributed to an unresolved planning decision.
@@ -1637,7 +1671,9 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
     )
     footer = (
         "\n\nCorrect the candidate in place and commit the correction on the issue "
-        "branch you are on, with a commit message describing the fix. Do not close "
+        "branch you are on, with a commit message describing the fix. "
+        + _MESSAGE_RULES
+        + " Do not close "
         "the issue, do not run git push, git stash, or git reset, do not switch "
         "branches, and do not add a verification comment — a fresh verifier "
         "reviews your corrected candidate and Ortus alone merges and finalizes it. "
@@ -3962,18 +3998,7 @@ def grind(
                         raise typer.Exit(code=1)
                     if callable(configure_codegraph):
                         configure_codegraph(implementation_probe.capability)
-                    implementation_instruction = (
-                        "IMPLEMENTATION PHASE ONLY. These phase rules override any "
-                        "conflicting instruction elsewhere in this prompt. Make the "
-                        "change, run targeted checks, and commit the completed work on "
-                        "the issue branch grind handed you, with your own commit "
-                        "message. Do not close the issue, do not run git push, do not "
-                        "switch branches or touch the integration branch, do not "
-                        "select other work, and do not add the final verification "
-                        "comment; a fresh read-only verifier reviews your committed "
-                        "range plus any uncommitted edits next, and Ortus owns "
-                        "merging and finalization."
-                    )
+                    implementation_instruction = _IMPLEMENTATION_INSTRUCTION
                     if recovery_handoff and not resume_candidate_ready:
                         implementation_instruction += handoff.instruction()
                     try:
