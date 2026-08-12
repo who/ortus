@@ -1928,3 +1928,40 @@ def test_grind_healthy_codegraph_lines_are_log_only(
             "implementation CodeGraph fallback: agent MCP capability handshake "
             "not observed" in console
         )
+
+
+# ---------------------------------------------------------------------------
+# prior lessons — a failed tracker read degrades to no lessons (ortus-s0tj)
+# ---------------------------------------------------------------------------
+
+
+def test_failed_lesson_read_degrades_to_no_lessons(tmp_path: Path) -> None:
+    """AC-6: a tracker read that fails must not fail the run — the worker
+    starts on today's contract, and the log says why."""
+    from ortus.core.bd import BdClient
+
+    # A bd binary that cannot be executed makes the read raise, without
+    # mocking bd: the subprocess itself fails to launch.
+    client = BdClient(tmp_path, binary=str(tmp_path / "missing-bd"))
+    lines: list[str] = []
+    section = grind_mod._lessons_contract(client, lines.append)
+    assert section == ""
+    assert any(
+        "lessons" in line and "without stored lessons" in line for line in lines
+    ), lines
+
+
+def test_failed_lesson_read_degrades_on_bd_error(tmp_path: Path) -> None:
+    """A bd exit failure (not just a missing binary) degrades the same way,
+    and the log line stays single-line even though BdError carries stderr."""
+    from ortus.core.bd import BdClient
+
+    fake_bd = tmp_path / "failing-bd"
+    fake_bd.write_text("#!/bin/sh\necho 'boom' >&2\nexit 3\n")
+    fake_bd.chmod(0o755)
+    client = BdClient(tmp_path, binary=str(fake_bd))
+    lines: list[str] = []
+    section = grind_mod._lessons_contract(client, lines.append)
+    assert section == ""
+    assert len(lines) == 1
+    assert "\n" not in lines[0]

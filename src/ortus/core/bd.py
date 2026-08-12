@@ -26,6 +26,48 @@ class BdError(RuntimeError):
         )
 
 
+def _clip_lesson(text: str, max_chars: int) -> str:
+    """Collapse a lesson body to one line and truncate on a word boundary.
+
+    Collapsing removes every newline, so a lesson carrying phase-contract
+    delimiters (`## ...` headings) can never open a section of its own once
+    composed. Truncation is marked with `[…]` rather than silent, and falls
+    back to a hard cut only when the first word alone exceeds the bound.
+    """
+    flat = " ".join(text.split())
+    if len(flat) <= max_chars:
+        return flat
+    cut = flat.rfind(" ", 0, max_chars + 1)
+    if cut <= 0:
+        cut = max_chars
+    return flat[:cut].rstrip() + " […]"
+
+
+def select_lessons(
+    memories: dict[str, str],
+    *,
+    exclude_keys: frozenset[str] = frozenset(),
+    limit: int,
+    max_chars: int,
+) -> tuple[tuple[str, str], ...]:
+    """Deterministic bounded selection over a raw memory mapping.
+
+    Keys sort lexically so two selections over the same store always compose
+    the same contract; each body is clipped by :func:`_clip_lesson`.
+    """
+    selected: list[tuple[str, str]] = []
+    for key in sorted(memories):
+        if key in exclude_keys:
+            continue
+        body = _clip_lesson(memories[key], max_chars)
+        if not body:
+            continue
+        selected.append((key, body))
+        if len(selected) >= limit:
+            break
+    return tuple(selected)
+
+
 @dataclass
 class BdClient:
     """Thin typed surface over the bd CLI, scoped to a single repo workspace."""
@@ -90,6 +132,46 @@ class BdClient:
     def add_comment(self, issue_id: str, body: str) -> None:
         """Append a durable comment without interpreting its Markdown."""
         self._run("comments", "add", issue_id, body)
+
+    def memories(self) -> dict[str, str]:
+        """`bd --readonly --sandbox memories --json`: the raw memory store.
+
+        Read-only plus sandbox keep the query off bd's write and auto-sync
+        paths (mirrors `ortus check`'s readiness-memory probe), so reading
+        during a run can never disturb a candidate.
+        """
+        _, data = self._run(
+            "--readonly", "--sandbox", "memories", "--json", parse_json=True
+        )
+        if not isinstance(data, dict):
+            return {}
+        # The store carries a `schema_version` metadata entry alongside the
+        # memories; it is not a memory even if a future bd stringifies it.
+        return {
+            str(key): value
+            for key, value in data.items()
+            if isinstance(value, str) and key != "schema_version"
+        }
+
+    def lessons(
+        self,
+        *,
+        exclude_keys: frozenset[str] = frozenset(),
+        limit: int,
+        max_chars: int,
+    ) -> tuple[tuple[str, str], ...]:
+        """Bounded, deterministic read of stored crew lessons.
+
+        The bounds are the caller's context budget: every lesson costs
+        context in every session that receives it, so an unbounded read
+        would turn the store into a tax rather than an asset.
+        """
+        return select_lessons(
+            self.memories(),
+            exclude_keys=exclude_keys,
+            limit=limit,
+            max_chars=max_chars,
+        )
 
     def show(self, issue_id: str) -> dict[str, Any]:
         """Return the issue's full JSON dict. `bd show --json` returns a list

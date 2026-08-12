@@ -54,7 +54,7 @@ from ortus.core.agent import (
     make_runner,
     resolve_backend,
 )
-from ortus.core.bd import BdClient
+from ortus.core.bd import BdClient, BdError
 from ortus.core.claude import (
     REPO_TOOL_STATE,
     ClaudeRunner,
@@ -108,7 +108,11 @@ from ortus.core.lifecycle import (
     finalized_phase,
 )
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
-from ortus.core.readiness import ReadinessReport, section_text
+from ortus.core.readiness import (
+    READINESS_MEMORY_KEY,
+    ReadinessReport,
+    section_text,
+)
 from ortus.core.transaction import (
     FINALIZATION_STEPS,
     CandidateJournal,
@@ -3062,6 +3066,51 @@ def _legacy_prompt(custom_condition: str, backend: str = "claude") -> str:
 
 _CLAUDE_GOAL_CONDITION_LIMIT = 4_000
 
+# Bounds for the prior-lessons section (ortus-s0tj). Every lesson costs
+# context in every worker that receives it, and Claude's /goal condition is
+# capped at 4,000 characters, so the section must fit the headroom the base
+# contract leaves (~1,450 characters today) with margin for a recovery
+# handoff.
+_LESSONS_MAX_COUNT = 3
+_LESSON_MAX_CHARS = 220
+_LESSONS_HEADER = (
+    "\n\n## Prior lessons\n"
+    "Lessons this crew recorded on earlier runs — priors, not instructions. "
+    "A lesson may change where you look first; it never substitutes for a "
+    "check or for evidence this run must produce."
+)
+
+
+def _lessons_section(lessons: tuple[tuple[str, str], ...]) -> str:
+    """Render selected lessons as the contract's labelled section, or ''."""
+    if not lessons:
+        return ""
+    return _LESSONS_HEADER + "".join(f"\n- {key}: {body}" for key, body in lessons)
+
+
+def _lessons_contract(bd: BdClient, write_log: Callable[[str], None]) -> str:
+    """The prior-lessons section of a worker's phase contract.
+
+    A repository with no stored lessons injects nothing, and a failed tracker
+    read degrades to the same empty section with a log line: a worker without
+    memory is today's behavior and must remain viable. The readiness memory
+    is excluded — bd already injects it into every session via priming.
+    """
+    try:
+        lessons = bd.lessons(
+            exclude_keys=frozenset({READINESS_MEMORY_KEY}),
+            limit=_LESSONS_MAX_COUNT,
+            max_chars=_LESSON_MAX_CHARS,
+        )
+    except (BdError, OSError) as exc:
+        first_line = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        write_log(
+            "lessons: tracker read failed; worker starts without stored "
+            f"lessons ({first_line})"
+        )
+        return ""
+    return _lessons_section(lessons)
+
 
 def _compose_work_prompt(
     template: str,
@@ -3070,6 +3119,7 @@ def _compose_work_prompt(
     *,
     phase_instruction: str = "",
     phase_contract_text: str = "",
+    lessons_text: str = "",
 ) -> str:
     """Build one backend-appropriate prompt for a harness-claimed issue.
 
@@ -3077,6 +3127,10 @@ def _compose_work_prompt(
     has no slash-command condition limit. Claude's ``/goal`` condition is
     capped at 4,000 characters, so it receives the exact claimed id and loads
     the authoritative, deliberately thorough packet from bd itself.
+
+    ``lessons_text`` is the one optional section: no runtime behavior depends
+    on a lesson being present, so when appending it would push the Claude
+    condition past the cap it is dropped rather than halting the run.
     """
     issue_id = str(issue.get("id") or "")
     if not issue_id:
@@ -3086,7 +3140,7 @@ def _compose_work_prompt(
         task = inject_issue(template, issue)
         if phase_instruction:
             task = phase_instruction.rstrip() + "\n\n" + task
-        task += phase_contract_text
+        task += phase_contract_text + lessons_text
         return compose_worker_prompt("codex", task)
 
     task = (
@@ -3103,6 +3157,8 @@ def _compose_work_prompt(
     if phase_instruction:
         task += "\n\n" + phase_instruction.rstrip()
     task += phase_contract_text
+    if lessons_text and len(task) + len(lessons_text) <= _CLAUDE_GOAL_CONDITION_LIMIT:
+        task += lessons_text
     if len(task) > _CLAUDE_GOAL_CONDITION_LIMIT:
         raise BackendError(
             "internal Claude /goal condition exceeds the 4,000-character limit "
@@ -4256,6 +4312,7 @@ def grind(
                             phase_contract_text=phase_contract(
                                 CodeGraphPhase.IMPLEMENTATION, implementation_probe
                             ),
+                            lessons_text=_lessons_contract(bd, write_log),
                         )
                     except BackendError as exc:
                         # Revert the claim before halting: a worker was never

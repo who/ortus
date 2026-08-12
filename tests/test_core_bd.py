@@ -217,3 +217,35 @@ def test_create_with_all_optional_fields(bd_workspace: Path) -> None:
     assert detail["acceptance_criteria"] == "acc here"
     assert detail["notes"] == "notes here"
     assert set(detail["labels"]) == {"alpha", "beta"}
+
+
+def _remember(workspace: Path, text: str, key: str) -> None:
+    subprocess.run(
+        ["bd", "remember", text, "--key", key],
+        cwd=str(workspace),
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_memories_round_trip_and_lessons_are_bounded(bd_workspace: Path) -> None:
+    """`memories()` reads what `bd remember` stored; `lessons()` selects
+    deterministically, excludes the given keys, and clips each body."""
+    client = BdClient(bd_workspace)
+    _remember(bd_workspace, "copy the tree before sweeping it", "sandbox-sweep")
+    _remember(bd_workspace, "the scheduler holds the code it started with " * 20, "stale-scheduler")
+    _remember(bd_workspace, "pointer to the readiness contract", "readiness-pointer")
+
+    memories = client.memories()
+    assert memories["sandbox-sweep"] == "copy the tree before sweeping it"
+
+    lessons = client.lessons(
+        exclude_keys=frozenset({"readiness-pointer"}), limit=2, max_chars=60
+    )
+    assert [key for key, _ in lessons] == ["sandbox-sweep", "stale-scheduler"]
+    assert all(len(body) <= 60 + len(" […]") for _, body in lessons)
+    assert dict(lessons)["stale-scheduler"].endswith(" […]")
+    # Two reads of the same store select the same lessons.
+    assert lessons == client.lessons(
+        exclude_keys=frozenset({"readiness-pointer"}), limit=2, max_chars=60
+    )
