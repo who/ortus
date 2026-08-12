@@ -63,6 +63,17 @@ def _seed_repo(tmp_path: Path, n_issues: int = 1) -> Path:
     """
     assert n_issues >= 1, "the leaf template always carries one ready task"
     repo = copy_bd_workspace(tmp_path / "repo", "leaf").path
+    # A committed baseline makes verifier dispatch deterministic on every
+    # platform: macOS runners' git fabricates an identity for bd's init
+    # commit, so an unborn-HEAD assumption selects different paths per OS.
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
     for i in range(1, n_issues):
         subprocess.run(
             [
@@ -192,10 +203,11 @@ class _PacketDriftThenVerified(_VerifiedLifecycle):
         **kwargs: object,
     ) -> int:
         if not readonly and not self.drifted:
+            host = log_path.parent.parent
             claimed = json.loads(
                 subprocess.run(
                     ["bd", "list", "--status", "in_progress", "--json"],
-                    cwd=str(repo),
+                    cwd=str(host),
                     check=True,
                     capture_output=True,
                     text=True,
@@ -210,7 +222,7 @@ class _PacketDriftThenVerified(_VerifiedLifecycle):
                     "--description",
                     "## Objective\nA completely different ask.",
                 ],
-                cwd=str(repo),
+                cwd=str(host),
                 check=True,
                 capture_output=True,
             )
@@ -245,6 +257,7 @@ def test_packet_drift_does_not_end_the_loop(
     _force_fake_home(monkeypatch, tmp_path)
     backend = _PacketDriftThenVerified()
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
+    install_machine_checks(monkeypatch)
 
     result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
     log = _read_log(repo)
@@ -327,6 +340,7 @@ def test_closed_branch_when_ortus_finalizes_a_verified_candidate(
     _force_fake_home(monkeypatch, tmp_path)
     backend = _VerifiedLifecycle()
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: backend)
+    install_machine_checks(monkeypatch)
 
     result = runner.invoke(
         app,

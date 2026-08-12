@@ -217,6 +217,9 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
         pytest.skip("bd not on PATH")
     repo = _bd_repo(tmp_path, "rpair")
     issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    _baseline_commit(repo)
+    _enable_reviewer(repo)
+    primary = repo
     ids_before = _issue_ids(repo)
     phases: list[Phase] = []
 
@@ -240,16 +243,21 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
                 assert f"Repair ONLY these existing issue IDs: {issue_id}" in prompt
                 # Grind has no PRD, so the pass is grounded in the packet itself.
                 assert "which has no PRD" in prompt
-                _repair_packet_into(repo, issue_id)
+                _repair_packet_into(primary, issue_id)
+            elif profile.phase is Phase.IMPLEMENT:  # type: ignore[union-attr]
+                _post_claims(primary)
             elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
                 # The verifier is read-only: it emits a verdict rather than
                 # closing. Ortus finalizes on the strength of that verdict.
-                _emit_verdict(repo, log_path, criteria=("AC-1", "AC-2"))
+                _emit_verdict(primary, log_path, criteria=("AC-1", "AC-2"))
             return 0
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: RepairingClaude())
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
 
     result = runner.invoke(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
@@ -548,9 +556,12 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     repo = _bd_repo(tmp_path, "profile-routing")
     issue_id = _create_ready_issue(repo, "route profiles")
     (repo / ".ortusrc").write_text(
+        "reviewer = true\n"
         '[profiles.claude.implement]\nmodel = "sonnet"\n'
         '[profiles.claude.verify]\nmodel = "opus"\n'
     )
+    _baseline_commit(repo)
+    primary = repo
     calls: list[dict[str, object]] = []
 
     class RoutingRunner:
@@ -561,10 +572,12 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.touch(exist_ok=True)
             profile = kwargs["profile"]
+            if profile.phase is Phase.IMPLEMENT:  # type: ignore[union-attr]
+                _post_claims(primary)
             if profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
                 subprocess.run(
                     ["bd", "close", issue_id, "--reason", "verified"],
-                    cwd=repo,
+                    cwd=primary,
                     check=True,
                     capture_output=True,
                 )
@@ -573,6 +586,9 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: RoutingRunner())
+    install_machine_checks(
+        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
+    )
     result = runner.invoke(
         app, ["grind", str(repo), "--fast", "--tasks", "1", "--idle-sleep", "0"]
     )

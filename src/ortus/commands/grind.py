@@ -3303,7 +3303,15 @@ def _finalize_candidate(
         if not git.is_git_repo():
             journal = journal.with_finalization("commit", "not-a-git-repo")
             store.save(journal)
-        elif workspace_git is not None and journal.issue_branch:
+        elif (
+            workspace_git is not None
+            and journal.issue_branch
+            and workspace_git.head_oid() != journal.base_head
+        ):
+            # A workspace whose branch never advanced (a verified no-op —
+            # e.g. a repaired work spec whose behavior was already correct)
+            # has nothing to fetch; the legacy primary-side path below
+            # commits the transaction's late files and closes as before.
             # Workspace-isolated landing: the branch and its worktree live in
             # the worker's clone. The transaction's late files — the tracker
             # exports the close step rewrote primary-side — fold into the

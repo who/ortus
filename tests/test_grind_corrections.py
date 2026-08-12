@@ -171,6 +171,13 @@ class ScriptedRunner:
             self.comments_at_start.append(("implement", self._comment_count()))
             index = sum(1 for name, _ in self.prompts if name == phase.value)
             (repo / f"candidate-{index}.py").write_text(f"ATTEMPT = {index}\n")
+            from tests._shims import post_completion_comment
+
+            journal = JournalStore(self.repo).load()
+            if journal is not None and journal.issue_id:
+                post_completion_comment(
+                    self.repo, journal.issue_id, {"AC-1": "pass"}
+                )
         elif phase is Phase.VERIFY:
             self._emit(repo, log_path)
         elif phase is Phase.PLAN:
@@ -178,7 +185,7 @@ class ScriptedRunner:
         return 0
 
     def _emit(self, repo: Path, log_path: Path) -> None:
-        journal = JournalStore(repo).load()
+        journal = JournalStore(self.repo).load()
         assert journal is not None
         spec = self.verdicts.pop(0) if self.verdicts else self.verdicts_default()
         payload = {
@@ -226,9 +233,14 @@ def _pass() -> dict:
 def _install(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scripted: ScriptedRunner
 ) -> None:
+    from tests._shims import install_machine_checks
+
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: scripted)
+    # The machine pipeline judges first on every platform; these tests drive
+    # the retry controller through the reviewer's scripted verdicts.
+    install_machine_checks(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +253,7 @@ def test_failed_report_is_persisted_before_the_correction_packet(
 ) -> None:
     """AC-1: the full verifier report reaches bd BEFORE the retry, and the
     correction packet carries the hash, failed criteria, and findings only."""
-    repo, issue_id = _seed(tmp_path, "corr1")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr1")
     scripted = ScriptedRunner(
         repo,
         [
@@ -298,7 +310,7 @@ def test_failed_report_forbids_close_commit_and_push_in_the_correction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-1/AC-4: the correction packet grants no lifecycle authority."""
-    repo, _issue_id = _seed(tmp_path, "corr2")
+    repo, _issue_id = _reviewer_seed(tmp_path, "corr2")
     scripted = ScriptedRunner(repo, [_fail("nope", "finding one"), _pass()])
     _install(monkeypatch, tmp_path, scripted)
 
@@ -325,7 +337,7 @@ def test_retry_after_failure_reverifies_and_then_finalizes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-2: fail → fresh correction → fresh verifier → pass → Ortus closes."""
-    repo, issue_id = _seed(tmp_path, "corr3")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr3")
     scripted = ScriptedRunner(repo, [_fail("broken", "fix src/demo.py"), _pass()])
     _install(monkeypatch, tmp_path, scripted)
 
@@ -353,7 +365,7 @@ def test_retry_exhaustion_flags_a_human_and_commits_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-2: a candidate that never passes is escalated, never committed."""
-    repo, issue_id = _seed(tmp_path, "corr4")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr4")
     scripted = ScriptedRunner(
         repo,
         [
@@ -378,10 +390,16 @@ def test_retry_exhaustion_flags_a_human_and_commits_nothing(
     journal = JournalStore(repo).load()
     assert journal is not None and journal.phase == "corrections-exhausted"
     assert journal.corrections == 1
-    # Nothing was committed: the candidate is still an uncommitted worktree file.
-    assert (repo / "candidate-2.py").is_file()
+    # The candidate parks committed on its branch; main never receives it.
+    shown = subprocess.run(
+        ["git", "show", f"ortus/{issue_id}:candidate-2.py"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert shown.returncode == 0, "the parked branch preserves the work"
     log = subprocess.run(
-        ["git", "log", "--oneline"], cwd=repo, capture_output=True, text=True
+        ["git", "log", "--oneline", "main"], cwd=repo, capture_output=True, text=True
     ).stdout
     assert "candidate" not in log
 
@@ -391,7 +409,7 @@ def test_retry_exhaustion_prints_next_action(
 ) -> None:
     """ortus-ipyq AC-4: exhaustion names its issue, tells the truth about the
     candidate, and states the see-the-comment next action."""
-    repo, issue_id = _seed(tmp_path, "corr8")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr8")
     scripted = ScriptedRunner(
         repo,
         [
@@ -413,7 +431,7 @@ def test_retry_exhaustion_prints_next_action(
         f'work on "{title}" ({issue_id}) stopped: '
         "bounded correction attempts exhausted (1/1)." in console
     )
-    assert "uncommitted edits preserved in the tree" in console
+    assert f"committed on ortus/{issue_id}" in console
     assert (
         "Next: read the issue's newest comment, decide, and relabel it "
         "for the queue." in console
@@ -425,7 +443,7 @@ def test_retry_disabled_escalates_on_the_first_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-2: --max-corrections 0 spends no attempt and never re-implements."""
-    repo, issue_id = _seed(tmp_path, "corr5")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr5")
     scripted = ScriptedRunner(repo, [_fail("broken", "finding A")])
     _install(monkeypatch, tmp_path, scripted)
 
@@ -453,7 +471,7 @@ def test_plan_gap_routes_once_to_the_planning_profile(
 ) -> None:
     """AC-3: a planning gap consumes no correction attempt and reaches the
     planning profile exactly once before human escalation."""
-    repo, issue_id = _seed(tmp_path, "corr6")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr6")
     scripted = ScriptedRunner(
         repo,
         [
@@ -500,7 +518,7 @@ def test_plan_gap_routing_pass_failure_still_escalates(
 ) -> None:
     """AC-3: a planning pass that cannot resolve the gap escalates to a human
     rather than falling back to implementation improvisation."""
-    repo, issue_id = _seed(tmp_path, "corr7")
+    repo, issue_id = _reviewer_seed(tmp_path, "corr7")
 
     class FailingPlan(ScriptedRunner):
         def run(self, prompt: str, *, profile: object, **kwargs: object) -> int:
@@ -532,6 +550,30 @@ def test_plan_gap_routing_pass_failure_still_escalates(
 # Machine-era corrections (ortus-l2u9.3): same-session return and the parked
 # branch at the bound
 # ---------------------------------------------------------------------------
+
+
+def _reviewer_seed(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """A committed-baseline workspace with the agent reviewer enabled.
+
+    The retry controller under test is driven by scripted agent verdicts, and
+    the agent verifier is the reviewer step now — flag-enabled, dispatched
+    after a green machine pipeline. The baseline commit makes the dispatch
+    deterministic on every platform: an unborn HEAD (Linux bd inits) and a
+    committed one (macOS runners, whose git fabricates an identity for bd's
+    init commit) previously selected different verifiers.
+    """
+    repo, issue_id = _machine_seed(tmp_path, name)
+    config = repo / ".ortusrc"
+    existing = config.read_text(encoding="utf-8") if config.exists() else ""
+    config.write_text(existing + "\nreviewer = true\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".ortusrc"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture: enable the reviewer flag"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, issue_id
 
 
 def _machine_seed(tmp_path: Path, name: str) -> tuple[Path, str]:
