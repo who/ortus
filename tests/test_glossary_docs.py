@@ -29,24 +29,24 @@ README = REPO / "README.md"
 #: `TERMS` fails instead of quietly shrinking what is documented.
 REQUIRED_TERMS = frozenset(
     {
-        "boundary",
         "candidate",
         "degraded",
         "disown",
         "finalization",
         "handoff",
+        "happy path",
         "harness",
         "journal",
-        "leaf",
-        "main path",
         "orphan",
-        "packet",
         "phase",
-        "plan-gap",
+        "phase transition",
+        "planning gap",
         "readiness",
         "seal",
+        "task",
         "tracker export",
         "verdict",
+        "work spec",
         "worker",
     }
 )
@@ -107,7 +107,7 @@ def test_readme_block_matches_renderer() -> None:
 
 def test_hand_edit_inside_the_markers_is_detected() -> None:
     tampered = _readme_text().replace(
-        "| **packet** |", "| **packet (hand-edited)** |", 1
+        "| **work spec** |", "| **work spec (hand-edited)** |", 1
     )
     assert tampered != _readme_text()
 

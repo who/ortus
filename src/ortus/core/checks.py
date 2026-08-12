@@ -1,12 +1,12 @@
 """Deterministic acceptance-criteria runner (Phase L1 of the lean pipeline).
 
-Executes a packet's Criterion checks as subprocesses in a disposable shared
+Executes a work spec's Criterion checks as subprocesses in a disposable shared
 clone of a git ref and records every command, exit code, and bounded output —
 the machine that replaces the verifier's mechanical half at zero model tokens.
 
 The command grammar is exactly what readiness v1 validates: the identifier and
 code-span regexes are imported from :mod:`ortus.core.readiness`, not restated,
-so any packet that passes readiness is runnable here. The tree the commands
+so any work spec that passes readiness is runnable here. The tree the commands
 run in is a ``git clone --shared`` — never a worktree (cleanup is
 unrecoverable under the sandbox, ortus-z7ib) and never an archive (a hatch-vcs
 build derives its version from git metadata an archive strips, so nothing in
@@ -21,7 +21,7 @@ inequality between two exit codes — fail on the base, pass on the branch.
 exactly as before kinds existed. Results are data first, rendering
 second — :func:`render_tracker_comment` turns a run into durable tracker text.
 Nothing in the live pipeline calls this yet; wiring is a separate,
-human-landed leaf.
+human-landed task.
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ class CriterionCheck:
 
     ``kind`` is the optional red–green tag from the Observable-criteria line
     (:data:`KIND_PROVES_NEW` or :data:`KIND_GUARDS_EXISTING`); ``None`` keeps
-    the criterion branch-only. Never inferred — the tag is the packet's word.
+    the criterion branch-only. Never inferred — the tag is the work spec's word.
     """
 
     criterion_id: str
@@ -94,10 +94,10 @@ class CriterionCheck:
 
 @dataclass(frozen=True)
 class PacketFailure:
-    """A structural defect in the packet's Criterion checks section.
+    """A structural defect in the work spec's Criterion checks section.
 
     The runner never guesses a command: a criterion it cannot parse is
-    reported as the packet's failure, not skipped or improvised around.
+    reported as the work spec's failure, not skipped or improvised around.
     """
 
     criterion_id: str
@@ -185,7 +185,7 @@ def parse_criterion_checks(
     are section prose and skipped; a line with an identifier must carry
     exactly one backticked command, and each identifier may appear only once.
     Each check also carries the optional kind tag from its Observable-criteria
-    line — the tag is data on the criterion, so a packet claimed before kinds
+    line — the tag is data on the criterion, so a work spec claimed before kinds
     existed parses correctly, just untagged.
     """
     kinds = _criterion_kinds(acceptance_criteria)
@@ -238,7 +238,7 @@ def _criterion_kinds(acceptance_criteria: object) -> dict[str, str]:
     """Kind tags by criterion identifier, from the Observable-criteria lines.
 
     Only the two known kinds match; any other parenthesised text is section
-    prose, so a pre-kind packet's asides stay asides and its criteria stay
+    prose, so a pre-kind work spec's asides stay asides and its criteria stay
     branch-only. A kind is never inferred for an untagged criterion.
     """
     body = readiness.section_text(acceptance_criteria, _OBSERVABLE_HEADING)
@@ -264,7 +264,7 @@ def _execute(
     timeout_seconds: float,
     output_limit: int,
 ) -> _Execution:
-    """Run one packet command through the shell; file-captured, bounded read.
+    """Run one work-spec command through the shell; file-captured, bounded read.
 
     The command runs exactly as written — readiness validated it, and its
     shell metacharacters are part of its meaning. Output goes to a file and
@@ -409,7 +409,7 @@ def run_checks(
     sync_command: str | None = None,
     scratch_root: Path | None = None,
 ) -> CheckRunResult:
-    """Execute a packet's Criterion checks against `ref`, one record per AC-N.
+    """Execute a work spec's Criterion checks against `ref`, one record per AC-N.
 
     Materializes `ref` as a disposable shared clone under a scratch
     directory, prepares its environment, runs each parsed command there with
@@ -417,7 +417,7 @@ def run_checks(
     lives outside the repository, so accidental writes stay out of the source
     tree; one clone serves every command of the run.
 
-    When the packet tags criteria with kinds, `base_ref` names the other end
+    When the work spec tags criteria with kinds, `base_ref` names the other end
     of the ref pair: a second shared clone is checked out once per run at the
     merge base of `base_ref` and `ref`, tagged commands run on both trees,
     and the two exit codes fold into one verdict. Tagged criteria with no
@@ -454,7 +454,7 @@ def run_checks(
                         command="git merge-base",
                         exit_code=None,
                         output=(
-                            "the packet tags criteria with kinds, but no "
+                            "the work spec tags criteria with kinds, but no "
                             "base ref was supplied to take a merge base with"
                         ),
                     ),
@@ -569,7 +569,7 @@ def render_tracker_comment(result: CheckRunResult) -> str:
         if result.environment.output.strip():
             lines.extend(["", "```", result.environment.output.strip(), "```", ""])
     lines.extend(
-        f"- packet failure: {failure.message}" for failure in result.packet_failures
+        f"- work-spec failure: {failure.message}" for failure in result.packet_failures
     )
     for record in result.results:
         exit_text = (

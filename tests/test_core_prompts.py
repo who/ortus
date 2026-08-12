@@ -47,7 +47,7 @@ def test_bundled_plan_prompt_resolves_by_default(tmp_path: Path) -> None:
         "## Targeted tests",
     ):
         assert heading in assembled
-    assert "Complete executable-leaf example" in result.text
+    assert "Complete executable-task example" in result.text
 
 
 def test_substitute_fills_the_placeholder_and_spares_shell_dollars() -> None:

@@ -27,7 +27,7 @@ _MISSING_SECTION_MESSAGE = "missing, empty, or placeholder section"
 
 @dataclass(frozen=True)
 class ReadinessFailure:
-    """One actionable defect in an implementation packet."""
+    """One actionable defect in an implementation work spec."""
 
     code: str
     field: str
@@ -58,7 +58,7 @@ class ReadinessReport:
 
     @property
     def packet_missing(self) -> bool:
-        """True when the issue carries no readiness packet at all."""
+        """True when the issue carries no readiness work spec at all."""
 
         codes = {failure.code for failure in self.failures}
         return (
@@ -73,7 +73,7 @@ class ReadinessReport:
     def summary(self) -> str:
         """One clause at console altitude; ``diagnostic()`` keeps the detail.
 
-        An empty packet has one problem, not fifteen, so a full miss collapses
+        An empty work spec has one problem, not fifteen, so a full miss collapses
         to a count against the schema total. A partial miss names only the
         failing sections; a single failing section skips the count clause.
         """
@@ -82,7 +82,7 @@ class ReadinessReport:
             return "ready"
         total = len(_REQUIRED_SECTIONS)
         if self.packet_missing:
-            return f"no readiness packet ({total} of {total} sections missing)"
+            return f"no readiness work spec ({total} of {total} sections missing)"
         sections = [
             f"{failure.field}/{failure.section}" for failure in self.failures
         ]
@@ -121,7 +121,7 @@ _REQUIRED_SECTIONS: tuple[RequiredSection, ...] = (
         "description",
         "Objective",
         "objective",
-        "the single outcome this leaf owns.",
+        "the single outcome this task owns.",
     ),
     RequiredSection(
         "description",
@@ -139,7 +139,7 @@ _REQUIRED_SECTIONS: tuple[RequiredSection, ...] = (
         "design",
         "Scope",
         "scope",
-        "work included in this leaf.",
+        "work included in this task.",
     ),
     RequiredSection(
         "design",
@@ -225,7 +225,7 @@ _CRITERION_ID = re.compile(r"\bAC-\d+\b", re.IGNORECASE)
 #: The optional criterion kinds the red–green proof recognises. The tag rides
 #: the Observable-criteria line (`- AC-3 (proves-new): ...`) — accepted here,
 #: never required: an untagged criterion keeps its branch-only meaning, so
-#: every packet that validated before kinds existed validates identically.
+#: every work spec that validated before kinds existed validates identically.
 CRITERION_KIND_PROVES_NEW = "proves-new"
 CRITERION_KIND_GUARDS_EXISTING = "guards-existing"
 _CRITERION_KIND = re.compile(
@@ -270,9 +270,9 @@ def _sections(value: Any) -> dict[str, str]:
 def section_text(value: Any, heading: str) -> str:
     """Body of one Markdown section of `value`, or "" when it has no such heading.
 
-    Exposed because the packet's authored sections are useful outside readiness
+    Exposed because the work spec's authored sections are useful outside readiness
     validation — the finalization commit message quotes the objective — and a
-    second heading parser would drift from the one that validates the packet.
+    second heading parser would drift from the one that validates the work spec.
     """
 
     return _sections(value).get(_normalise_heading(heading), "")
@@ -453,7 +453,7 @@ def spec_markdown() -> str:
     """Render readiness schema v1 exactly as ``validate_issue`` enforces it."""
 
     lines = [
-        f"## Readiness schema {READINESS_SCHEMA_VERSION} for executable leaves",
+        f"## Readiness schema {READINESS_SCHEMA_VERSION} for executable tasks",
         "",
         "Use these exact Markdown headings inside the existing bd fields. Every "
         "section must contain concrete information. `TODO`, `TBD`, `N/A`, an "

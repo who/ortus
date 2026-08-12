@@ -105,9 +105,9 @@ def test_mermaid_state_ids_are_hyphen_free() -> None:
         (CANDIDATE_MACHINE, mermaid_candidate_graph()),
     ):
         assert graph.startswith("stateDiagram-v2")
-        # Only the main path is drawn, so only the main path needs aliasing;
+        # Only the happy path is drawn, so only the happy path needs aliasing;
         # the states left out are carried by the transition table instead.
-        for state in machine.main_path or machine.states:
+        for state in machine.happy_path or machine.states:
             if "-" not in state:
                 continue
             assert f'state "{state}" as {state.replace("-", "_")}' in graph

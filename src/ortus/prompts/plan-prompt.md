@@ -6,13 +6,13 @@ Prompt resolution precedence (loaded by core/prompts.py, FR-025):
 The first existing file wins; the others are ignored.
 -->
 
-Read $prd_path. Decompose the provided PRD Markdown into a Beads issue graph using existing bd fields. Epics may summarize broad outcomes, but every non-epic issue is an executable leaf for a fast implementation worker and MUST satisfy readiness schema v1 below. Resolve architecture and product choices during planning; never leave them for the implementer to infer.
+Read $prd_path. Decompose the provided PRD Markdown into a Beads issue graph using existing bd fields. Epics may summarize broad outcomes, but every non-epic issue is an executable task for a fast implementation worker and MUST satisfy readiness schema v1 below. Resolve architecture and product choices during planning; never leave them for the implementer to infer.
 
-Structure hierarchically: epics for major features, decomposed into leaves via parent-child dependencies; use `blocks` for execution-order constraints and `related` for shared context. Give every issue a title, priority (0-4, 0=critical), type, labels, and estimated minutes. Emit all `bd create` and `bd dep add` commands as one sequential bash script and execute the entire script in one process. Do not fan out bd writes: Dolt enforces a single-writer lock.
+Structure hierarchically: epics for major features, decomposed into tasks via parent-child dependencies; use `blocks` for execution-order constraints and `related` for shared context. Give every issue a title, priority (0-4, 0=critical), type, labels, and estimated minutes. Emit all `bd create` and `bd dep add` commands as one sequential bash script and execute the entire script in one process. Do not fan out bd writes: Dolt enforces a single-writer lock.
 
 $readiness_spec
 
-## Complete executable-leaf example
+## Complete executable-task example
 
 ```bash
 ID_FLAG=$(bd create --silent \
@@ -48,7 +48,7 @@ Normal invocations keep stdout and exit-code behavior unchanged on Linux and mac
 4. Add focused tests and documentation.
 
 ## Dependencies
-No issue dependency — standalone leaf. Callers are `cli.app` and `Executor.apply()` consumers.
+No issue dependency — standalone task. Callers are `cli.app` and `Executor.apply()` consumers.
 
 ## Edge cases
 Empty plans still exit zero; render failures remain nonzero; dry-run must not create state directories.
@@ -68,7 +68,7 @@ Run `uv run pytest tests/test_run.py -q`.' \
   --notes='CodeGraph confirmed `cli.app -> run -> Executor.apply`; no out-of-scope callers.')
 ```
 
-End the turn after the complete issue graph exists. The caller mechanically validates every new leaf and may run one fresh planning-profile repair pass against the exact defective IDs. Repair must update those IDs in place: never create replacements, close originals, or silently duplicate work.
+End the turn after the complete issue graph exists. The caller mechanically validates every new task and may run one fresh planning-profile repair pass against the exact defective IDs. Repair must update those IDs in place: never create replacements, close originals, or silently duplicate work.
 
 ## Issue ID handling (PREFIX-AGNOSTIC — read before generating any script)
 

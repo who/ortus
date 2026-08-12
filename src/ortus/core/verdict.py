@@ -49,7 +49,7 @@ class Verdict:
     findings: tuple[str, ...]
     codegraph: tuple[str, ...]
     schema: int = VERDICT_SCHEMA
-    # Criterion ids that did not line up with the authoritative packet. Only a
+    # Criterion ids that did not line up with the authoritative work spec. Only a
     # fail verdict can carry these — a pass verdict with any of them is fatal —
     # and they are appended last so existing positional construction is safe.
     missing_criteria: tuple[str, ...] = ()
@@ -225,14 +225,14 @@ def validate_verdict(
             actual_ids, expected_ids
         )
         # Asymmetric on purpose. Accepting a pass whose ids were never mapped to
-        # the packet would close an issue and commit code against criteria
+        # the work spec would close an issue and commit code against criteria
         # nobody authorized, so that stays fatal. A fail commits nothing and
         # leaves the issue open either way, so it is recorded with the
         # discrepancy attached instead of aborting the run over a schema detail
         # the correction loop could otherwise act on.
         if (missing or unexpected or duplicated) and decision == "pass":
             raise VerdictError(
-                "verdict criteria do not match the authoritative issue packet; "
+                "verdict criteria do not match the authoritative work spec; "
                 f"missing: {_named_ids(missing)}; "
                 f"unexpected: {_named_ids(unexpected)}; "
                 f"duplicated: {_named_ids(duplicated)}"
@@ -356,7 +356,7 @@ def _mismatch_entries(verdict: Verdict) -> tuple[str, ...]:
 
     labelled = (
         ("missing from the verdict", verdict.missing_criteria),
-        ("not in the issue packet", verdict.unexpected_criteria),
+        ("not in the work spec", verdict.unexpected_criteria),
         ("reported more than once", verdict.duplicated_criteria),
     )
     return tuple(
@@ -385,7 +385,7 @@ def render_report(
     if base_head:
         lines.append(f"Base commit: `{base_head}`")
     if issue_packet_hash:
-        lines.append(f"Issue packet: `{issue_packet_hash}`")
+        lines.append(f"Work spec: `{issue_packet_hash}`")
     if attempt is not None:
         lines.append(f"Verifier attempt: {attempt}")
     for phase, profile in sorted((profiles or {}).items()):
@@ -445,7 +445,7 @@ def render_rejection_report(
     if base_head:
         lines.append(f"Base commit: `{base_head}`")
     if issue_packet_hash:
-        lines.append(f"Issue packet: `{issue_packet_hash}`")
+        lines.append(f"Work spec: `{issue_packet_hash}`")
     if attempt is not None:
         lines.append(f"Verifier attempt: {attempt}")
     for phase, profile in sorted((profiles or {}).items()):

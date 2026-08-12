@@ -4,7 +4,7 @@ Path-level ownership is too coarse for a file two issues both touched, and a
 worker's "this is not mine" declaration is made once, before it goes on to edit
 the very path it disowned. This module answers the narrower question the absorb
 step actually needs: *of the lines this path changes against HEAD, which
-enclosing regions does the claimed issue's packet name?*
+enclosing regions does the claimed issue's work spec name?*
 
 A region is a symbol from the CodeGraph index (code), or a heading span or
 ``<!-- BEGIN GENERATED: name -->`` block (Markdown). Anything that encloses no
@@ -35,7 +35,7 @@ INDEX_RELATIVE = Path(".codegraph") / "codegraph.db"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 
 #: A whole-file node is a legitimate region: module-level work in a file the
-#: packet names as a concrete location is that issue's, and demanding an
+#: work spec names as a concrete location is that issue's, and demanding an
 #: enclosing symbol for every import and constant would refuse nearly every
 #: real edit.
 _FILE_KIND = "file"
@@ -62,7 +62,7 @@ class Region:
     """One enclosing region of at least one changed line.
 
     `aliases` carries the other names the same region answers to — a symbol's
-    qualified name, a file node's repository-relative path — so a packet that
+    qualified name, a file node's repository-relative path — so a work spec that
     names the region either way still matches it.
     """
 
@@ -376,7 +376,7 @@ def decide_ownership(
     """Split `regions` into ours and everyone else's against Concrete locations.
 
     Identifiers are matched against the section's backticked spans when it has
-    any, because that is how a packet names a symbol or a file and prose around
+    any, because that is how a work spec names a symbol or a file and prose around
     them would match far too much. Heading and marker names are phrases rather
     than identifiers, so they are matched as a word sequence anywhere in the
     section.

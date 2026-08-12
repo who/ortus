@@ -1162,11 +1162,11 @@ def test_verdict_identifier_mismatch_renders_both_sets(tmp_path: Path) -> None:
             in panel
         )
     assert "AC-9" in panel
-    assert "not in packet" in panel
+    assert "not in work spec" in panel
     assert "identifier the packet never named" in panel
 
     mismatch = dash.criteria_mismatch(app.verdict)
-    assert "not in the issue packet: AC-9" in mismatch
+    assert "not in the work spec: AC-9" in mismatch
     assert "missing from the verdict: AC-2, AC-3" in mismatch
     assert mismatch in panel
 

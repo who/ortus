@@ -1,7 +1,7 @@
 """Bounded readiness repair pass shared by the plan and grind verbs.
 
 `ortus plan` owned this pass privately, which meant the only way to repair an
-unready packet was to run the plan verb. It lives in core so grind can reuse
+unready work spec was to run the plan verb. It lives in core so grind can reuse
 the identical update-in-place repair without importing a command module.
 
 The pass is deliberately narrow: it may only fill the description, design, and
@@ -60,7 +60,7 @@ def readiness_repair_prompt(reports: tuple[ReadinessReport, ...]) -> str:
 
     The section list is rendered from ``spec_markdown()`` rather than restated,
     so the repair pass can never teach a contract the validator that rejected
-    the packet no longer enforces.
+    the work spec no longer enforces.
     """
 
     diagnostics = "\n".join(f"- {report.diagnostic()}" for report in reports)
@@ -76,7 +76,7 @@ Exact failures:
 Use `bd show <id> --json` and `bd update <id>` to fill the existing
 description, design, and acceptance-criteria fields. Do not run `bd create`,
 do not close, replace, supersede, or rename an issue, and do not change issue
-dependencies. Preserve all sound detail already present. Every repaired leaf
+dependencies. Preserve all sound detail already present. Every repaired task
 must use readiness schema v1 with these exact field headings:
 
 {spec_markdown()}
@@ -113,7 +113,7 @@ def repair_readiness(
     timeout: float | None = None,
     runner_factory: RunnerFactory = _default_runner_factory,
 ) -> int:
-    """Run one fresh planning-profile subprocess to repair existing packets.
+    """Run one fresh planning-profile subprocess to repair existing work specs.
 
     `context` is extra grounding appended after the repair request (grind has
     no PRD, so it names each issue's parent epic instead). `timeout` bounds the

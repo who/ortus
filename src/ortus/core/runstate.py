@@ -54,11 +54,11 @@ LOG_GLOB = "grind-*.log"
 #: state, not an error, so panels render idle rather than a fabricated phase.
 PHASE_IDLE = "idle"
 #: Journal phases that mean the run is over. `finalized-*` is written per
-#: finalization boundary, the rest are the halts grind records before it
+#: finalization phase transition, the rest are the halts grind records before it
 #: leaves a candidate uncommitted. Anything else — including the resumable
 #: `*-timeout` phases — is reported verbatim and treated as live. Every member
 #: is a state declared in `ortus.core.lifecycle`; the graph there also records
-#: why grind still treats the non-final `finalized-*` boundaries as resumable.
+#: why grind still treats the non-final `finalized-*` phases as resumable.
 TERMINAL_PHASES = frozenset(
     {
         CORRECTIONS_EXHAUSTED,
@@ -78,7 +78,7 @@ WARNING_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("exhausted", re.compile(r"attempts exhausted", re.IGNORECASE)),
     ("escalation", re.compile(r"escalat(?:ed|ion)", re.IGNORECASE)),
     ("rejected", re.compile(r"\brejected\b", re.IGNORECASE)),
-    ("plan-gap", re.compile(r"plan gap", re.IGNORECASE)),
+    ("plan-gap", re.compile(r"plan(?:ning)? gap", re.IGNORECASE)),
 )
 #: Warnings accumulate across refreshes for the life of a run; keeping the
 #: most recent ones bounds a long session without losing what just happened.
@@ -144,9 +144,9 @@ class RunSnapshot:
     plan_gap_routed: bool = False
     base_head: str = ""
     candidate_hash: str = ""
-    #: Where the authoritative issue packet for this run was persisted, and its
+    #: Where the authoritative work spec for this run was persisted, and its
     #: digest. A panel that has to list what the run is being judged against
-    #: reads the packet the run is bound to rather than re-querying bd, which
+    #: reads the work spec the run is bound to rather than re-querying bd, which
     #: would answer for the issue as it is now instead of as it was claimed.
     issue_packet_ref: str = ""
     issue_packet_hash: str = ""

@@ -310,7 +310,7 @@ class BdClient:
         """True when any existing comment body contains `marker`.
 
         Grind restarts replay finalization from the journal, but a run killed
-        between writing a comment and journaling that boundary has no journal
+        between writing a comment and journaling that phase transition has no journal
         evidence. Matching on the marker makes the replay idempotent anyway.
         """
         try:
@@ -329,7 +329,7 @@ class BdClient:
         """Close `issue_id` unless it is already closed. Returns True if closed.
 
         The observable status is checked first so a restart after a close that
-        landed — but whose journal boundary never got written — does not issue
+        landed — but whose journal phase transition never got written — does not issue
         a second `bd close`.
         """
         if self.status(issue_id) == "closed":

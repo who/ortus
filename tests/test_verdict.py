@@ -104,7 +104,7 @@ def test_invalid_verdicts_are_rejected(payload: dict, match: str) -> None:
 def test_verdict_must_cover_each_authoritative_criterion_once(
     criteria: list[dict[str, str]],
 ) -> None:
-    with pytest.raises(VerdictError, match="authoritative issue packet"):
+    with pytest.raises(VerdictError, match="authoritative work spec"):
         validate_verdict(
             valid_payload(criteria=criteria),
             HASH,
@@ -133,7 +133,7 @@ def test_verdict_must_cover_each_authoritative_criterion_once(
 )
 def test_pass_verdict_mismatch_is_fatal(criteria: list[dict[str, str]]) -> None:
     """AC-4: accepting a pass would close an issue against unmapped criteria."""
-    with pytest.raises(VerdictError, match="authoritative issue packet"):
+    with pytest.raises(VerdictError, match="authoritative work spec"):
         validate_verdict(
             valid_payload(criteria=criteria),
             HASH,
@@ -386,7 +386,7 @@ def test_fail_verdict_unknown_id_degrades() -> None:
     assert "Decision: **FAIL**" in report
     assert "### Criterion id mismatch" in report
     assert "missing from the verdict: AC-2" in report
-    assert "not in the issue packet: AC-TESTS" in report
+    assert "not in the work spec: AC-TESTS" in report
     assert len(report) <= MAX_REPORT_CHARS
 
 

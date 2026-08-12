@@ -189,15 +189,15 @@ def phase_contract(phase: CodeGraphPhase, probe: CodeGraphProbe) -> str:
         CodeGraphPhase.PLANNING: (
             "Orient to the repository; validate every file and symbol reference; trace "
             "dependencies and callers. Put concrete files, symbols, dependencies, callers, "
-            "and unresolved references in each implementation-ready leaf issue."
+            "and unresolved references in each implementation-ready task issue."
         ),
         CodeGraphPhase.IMPLEMENTATION: (
-            "Confirm the issue packet against repository reality and run an impact query "
+            "Confirm the work spec against repository reality and run an impact query "
             "before editing. Do not close the issue; leave candidate edits for verification."
         ),
         CodeGraphPhase.VERIFICATION: (
             "Independently query changed symbols, callers, callees, and impact radius. Compare "
-            "the actual blast radius with the issue packet and diff, report out-of-scope callers, "
+            "the actual blast radius with the work spec and diff, report out-of-scope callers, "
             "then add the verification comment and close only if all criteria pass."
         ),
     }[phase]

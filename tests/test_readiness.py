@@ -108,7 +108,7 @@ def test_full_miss_collapses_to_no_packet() -> None:
     total = len(_REQUIRED_SECTIONS)
     assert report.packet_missing
     assert report.summary() == (
-        f"no readiness packet ({total} of {total} sections missing)"
+        f"no readiness work spec ({total} of {total} sections missing)"
     )
 
 

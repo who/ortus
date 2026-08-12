@@ -30,9 +30,9 @@ _MAX_HANDOFFS = 8
 # `FINALIZATION_STEPS` is imported above and re-exported from here for the
 # callers that already read it off this module. `lifecycle` owns the
 # declaration so the phase graph can derive its `finalized-*` states without
-# importing the journal. Each boundary is still journaled *after* it lands, so
-# a restart replays only the steps that never completed and can never
-# duplicate a comment, close, commit, or push.
+# importing the journal. Each phase transition is still journaled *after* it
+# lands, so a restart replays only the steps that never completed and can
+# never duplicate a comment, close, commit, or push.
 
 
 def _now() -> str:
@@ -67,7 +67,7 @@ def sha256_bytes(value: bytes) -> str:
 #:   correction's re-verification by construction.
 #:
 #: Status is excluded too: it is re-checked directly against bd at each
-#: lifecycle boundary, where a stale-status failure can be reported precisely
+#: lifecycle phase transition, where a stale-status failure can be reported precisely
 #: instead of hiding inside an opaque hash mismatch.
 CONTRACT_PACKET_FIELDS: tuple[str, ...] = (
     "acceptance_criteria",
@@ -79,7 +79,7 @@ CONTRACT_PACKET_FIELDS: tuple[str, ...] = (
 
 
 def authoritative_packet(packet: dict[str, Any]) -> dict[str, Any]:
-    """The packet fields a verdict is legitimately bound to.
+    """The work-spec fields a verdict is legitimately bound to.
 
     Every contract field is always present in the projection, so an issue that
     omits one and an issue that leaves it empty hash identically.
@@ -89,13 +89,13 @@ def authoritative_packet(packet: dict[str, Any]) -> dict[str, Any]:
 
 
 def issue_packet_hash(packet: dict[str, Any]) -> str:
-    """Bind verification to the exact authoritative issue packet."""
+    """Bind verification to the exact authoritative work spec."""
 
     return sha256_bytes(canonical_json(authoritative_packet(packet)))
 
 
 def _excerpt(value: Any, width: int) -> str:
-    """One packet value, collapsed to a single quoted line for a message."""
+    """One work-spec value, collapsed to a single quoted line for a message."""
 
     text = " ".join(str(value).split())
     if len(text) > width:
@@ -536,7 +536,7 @@ class CandidateJournal:
         )
 
     def route_plan_gap(self) -> CandidateJournal:
-        """Mark the one planning route a plan gap is allowed to consume."""
+        """Mark the one planning route a planning gap is allowed to consume."""
 
         return replace(
             self, plan_gap_routed=True, phase=PLAN_GAP_ROUTED, updated_at=_now()
@@ -550,7 +550,7 @@ class CandidateJournal:
         )
 
     def with_finalization(self, step: str, value: Any = True) -> CandidateJournal:
-        """Journal one completed finalization boundary."""
+        """Journal one completed finalization phase transition."""
 
         if step not in FINALIZATION_STEPS:
             raise ValueError(f"unknown finalization step {step!r}")
@@ -620,7 +620,7 @@ class JournalStore:
         # Schema 1 was written by the parent process while an implementation
         # worker was upgrading this module to schema 2. Its path ownership and
         # baseline fingerprints remain authoritative; the outer grind migrates
-        # the missing candidate and issue-packet hashes before verification
+        # the missing candidate and work-spec hashes before verification
         # resumes.
         payload["schema"] = JOURNAL_SCHEMA
         for key in ("baseline_paths", "candidate_paths", "evidence", "verifier_refs"):
@@ -633,7 +633,7 @@ class JournalStore:
         ):
             payload[key] = tuple(payload.get(key, ()))
         # Schemas 1 and 2 predate correction accounting and finalization
-        # boundaries. Defaulting them to "nothing has landed yet" is the safe
+        # phase transitions. Defaulting them to "nothing has landed yet" is the safe
         # migration: a resumed run re-checks observable bd and git state before
         # repeating any step.
         payload["finalization"] = dict(payload.get("finalization", {}))
@@ -680,7 +680,7 @@ class JournalStore:
 
     def save_packet(self, issue_id: str, packet: dict[str, Any]) -> tuple[str, str]:
         # Normalized, so the artifact bytes and the advertised digest agree —
-        # and so the verifier is handed the packet without the prior attempts'
+        # and so the verifier is handed the work spec without the prior attempts'
         # reports, which it must not read as part of its own instructions.
         payload = canonical_json(authoritative_packet(packet))
         digest = issue_packet_hash(packet)

@@ -242,7 +242,7 @@ def test_packet_drift_does_not_end_the_loop(
     assert result.exit_code == 0, (
         result.stdout + result.stderr + "\n--- log ---\n" + log
     )
-    assert "the immutable issue packet changed during implementation" in log, log
+    assert "the immutable work spec changed during implementation" in log, log
     assert backend.drifted, "the fake never claimed an issue to drift"
     # The whole point: a second issue was claimed, verified and finalized after
     # the rejection instead of the run stopping there.
@@ -293,7 +293,7 @@ def test_packet_drift_message_names_fields(
         text=True,
     ).stdout
     finding = next(
-        line for line in log.splitlines() if "issue packet changed during" in line
+        line for line in log.splitlines() if "work spec changed during" in line
     )
     assert "description: " in finding, finding
     assert "A completely different ask" in finding, finding

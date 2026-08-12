@@ -517,7 +517,7 @@ def test_plan_gap_routing_pass_failure_still_escalates(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    assert "plan-gap routing pass failed (exit 3)" in " ".join(
+    assert "planning-gap routing pass failed (exit 3)" in " ".join(
         (result.stdout + result.stderr).split()
     )
     issue = _issue(repo, issue_id)

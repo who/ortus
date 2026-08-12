@@ -47,7 +47,8 @@ One asymmetry between them is deliberate and pre-existing: ``runstate`` treats
 every ``finalized-*`` phase as terminal for dashboard display, while grind
 treats all but the last of them as resumable (they are in
 ``_FINALIZABLE_PHASES``). The dashboard is reporting "this transaction reached
-a finalization boundary"; grind is deciding "this transaction still owes work".
+a finalization phase transition"; grind is deciding "this transaction still
+owes work".
 :data:`CANDIDATE_MACHINE` models grind's view, because that is the one that
 governs transitions.
 """
@@ -139,7 +140,8 @@ FINALIZING = "finalizing"
 #: A finalization precondition failed; the journal is kept for the replay.
 FINALIZATION_BLOCKED = "finalization-blocked"
 
-#: Ordered finalization boundaries. Each one is journaled *after* it lands, so
+#: Ordered finalization phase transitions. Each one is journaled *after* it
+#: lands, so
 #: a restart replays only the steps that never completed and can never
 #: duplicate a comment, close, commit, or push. Declared here rather than in
 #: :mod:`ortus.core.transaction` (which re-exports it) so the phase graph can
@@ -164,7 +166,7 @@ LOG_LABELS: tuple[str, ...] = (
 
 
 def finalized_phase(step: str) -> str:
-    """The journal phase written once finalization boundary `step` lands."""
+    """The journal phase written once finalization phase transition `step` lands."""
 
     return f"{FINALIZED_PREFIX}{step}"
 
@@ -200,7 +202,7 @@ class StateMachine:
     #: and halt alongside it answers that question worse than no graph at all.
     #: Nothing is hidden: the table beneath the diagram carries every
     #: transition, and rows are exhaustive where pictures stop scaling.
-    main_path: tuple[str, ...] = ()
+    happy_path: tuple[str, ...] = ()
 
     def outgoing(self, state: str) -> tuple[Transition, ...]:
         """Transitions that leave `state`, excluding self-loops."""
@@ -299,7 +301,7 @@ ISSUE_MACHINE = StateMachine(
     initial=ISSUE_OPEN,
     states=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
     terminal=frozenset({ISSUE_CLOSED}),
-    main_path=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
+    happy_path=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
     transitions=(
         Transition(ISSUE_OPEN, ISSUE_IN_PROGRESS, "grind claims the selected issue"),
         Transition(
@@ -332,8 +334,9 @@ def build_candidate_machine(
     """Declare the candidate phase machine for a given finalization sequence.
 
     The ``finalized-*`` states and the chain between them are derived from
-    `finalization_steps`, so adding a boundary to :data:`FINALIZATION_STEPS`
-    adds a state and its edges without anyone editing this declaration.
+    `finalization_steps`, so adding a phase transition to
+    :data:`FINALIZATION_STEPS` adds a state and its edges without anyone
+    editing this declaration.
     """
 
     if not finalization_steps:
@@ -503,7 +506,7 @@ def build_candidate_machine(
         Transition(
             VERIFIED_PASS,
             finalized[0],
-            f"finalization boundary {finalization_steps[0]} landed",
+            f"finalization phase transition {finalization_steps[0]} landed",
         ),
         Transition(
             VERIFIED_PASS,
@@ -513,7 +516,7 @@ def build_candidate_machine(
     ]
     for previous, step, state in zip(finalized, finalization_steps[1:], finalized[1:]):
         transitions.append(
-            Transition(previous, state, f"finalization boundary {step} landed")
+            Transition(previous, state, f"finalization phase transition {step} landed")
         )
     for state in finalized[:-1]:
         transitions.append(
@@ -528,7 +531,7 @@ def build_candidate_machine(
             Transition(
                 FINALIZATION_BLOCKED,
                 state,
-                "a restart replays the first boundary that has not landed",
+                "a restart replays the first phase transition that has not landed",
             )
         )
 
@@ -557,7 +560,7 @@ def build_candidate_machine(
         # finalized-* steps are listed individually because their order is the
         # crash-resume contract, and a reader who cannot see it in the diagram
         # has to reconstruct it from the table.
-        main_path=(
+        happy_path=(
             IMPLEMENTATION,
             CANDIDATE_CAPTURED,
             VERIFICATION,
@@ -641,9 +644,9 @@ def _node_id(state: str) -> str:
 
 
 def render_mermaid(machine: StateMachine) -> str:
-    """Render `machine`'s main path as deterministic ``stateDiagram-v2`` text.
+    """Render `machine`'s happy path as deterministic ``stateDiagram-v2`` text.
 
-    Only main-path states and the transitions between them are drawn. The
+    Only happy-path states and the transitions between them are drawn. The
     declaration holds 29 states and 57 transitions across the two machines,
     and a diagram carrying all of them routes edges around each other until
     the main line is impossible to trace — the picture stops being a picture.
@@ -653,7 +656,7 @@ def render_mermaid(machine: StateMachine) -> str:
     environment, so the output is stable across runs.
     """
 
-    drawn = machine.main_path or machine.states
+    drawn = machine.happy_path or machine.states
     included = frozenset(drawn)
     lines = ["stateDiagram-v2", "    direction TB"]
     for state in drawn:
@@ -711,12 +714,12 @@ def mermaid_candidate_graph() -> str:
 
 
 def _machine_section(machine: StateMachine, graph: str) -> list[str]:
-    drawn = len(machine.main_path or machine.states)
+    drawn = len(machine.happy_path or machine.states)
     total = len(machine.states)
     note = (
         f"The diagram is the path through when nothing goes wrong — {drawn} of "
-        f"{total} states. Timeouts, refusals, plan gaps and halts are real and "
-        "are listed in full beneath it."
+        f"{total} states. Timeouts, refusals, planning gaps and halts are real "
+        "and are listed in full beneath it."
         if drawn < total
         else ""
     )

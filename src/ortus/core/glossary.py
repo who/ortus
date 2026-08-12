@@ -1,11 +1,21 @@
 """Ortus's vocabulary, declared once as data.
 
-Ortus runs on a private vocabulary. ``packet``, ``candidate``, ``boundary``,
-``disown`` and the rest appear in operator-facing log lines, in the phase
-contracts handed to workers, and in error messages — always with a precise
-sense a reader cannot recover from context. A *packet* is the authored bd
-issue content a worker treats as authoritative, not a message on a queue; a
-*boundary* is one journaled finalization step, not a limit.
+Ortus's words appear in operator-facing log lines, in the phase contracts
+handed to workers, and in error messages — always with a precise sense a
+reader cannot recover from context alone. Most are standard
+software-engineering vocabulary carrying one Ortus-specific sense: a *work
+spec* is the authored bd issue content a worker treats as authoritative, a
+*phase transition* is one journaled finalization step. A few
+(``candidate``, ``disown``, ``seal``) name concepts with no standard term.
+
+Naming bar
+----------
+
+A new coinage must state why no standard software-engineering term fits
+before it may join this glossary. When an established term carries the
+meaning, the established term wins and its entry records only the one
+Ortus-specific sense it is used in; novelty is spent solely on concepts
+that are themselves genuinely novel.
 
 The terms are declared here and rendered into ``README.md`` between the
 ``glossary`` generated markers by :func:`render_readme_block`, exactly the
@@ -70,8 +80,8 @@ class Term:
 def sort_key(term: str) -> str:
     """Order terms by their words, so hyphenation cannot move a row.
 
-    `plan-gap` and `main path` have to land where a reader looking the word
-    up expects them, not wherever the punctuation happens to sort.
+    A hyphenated coinage has to land where a reader looking the word up
+    expects it, not wherever the punctuation happens to sort.
     """
 
     return term.lower().replace("-", " ")
@@ -80,25 +90,9 @@ def sort_key(term: str) -> str:
 #: Ortus's vocabulary, alphabetically. Any grouping by subsystem would only
 #: invite an argument about which group a word belongs to, and helps nobody
 #: looking a word up. This declaration is the source of truth for spelling,
-#: including hyphenation: `plan-gap` and `tracker export` appear in logs
+#: including hyphenation: `planning gap` and `tracker export` appear in logs
 #: exactly as they are glossed here.
 TERMS: tuple[Term, ...] = (
-    Term(
-        term="boundary",
-        definition=(
-            "One finalization step that is journaled as it lands, so a restart "
-            "resumes at the first step that did not — not a limit or an edge."
-        ),
-        home="`FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py`",
-        team_role=(
-            "A ticked line on the release manager's checklist. Interrupt the "
-            "release and the next person resumes at the first line not ticked."
-        ),
-        analogy=(
-            "A passport stamp at each border. The last stamp says where the "
-            "journey resumes, not where it began."
-        ),
-    ),
     Term(
         term="candidate",
         definition=(
@@ -119,7 +113,7 @@ TERMS: tuple[Term, ...] = (
         term="degraded",
         definition=(
             "A step that completed with less information than usual instead of "
-            "failing, such as a commit subject written without a readable packet."
+            "failing, such as a commit subject written without a readable work spec."
         ),
         home="finalization logging in `src/ortus/commands/grind.py`",
         team_role=(
@@ -152,7 +146,8 @@ TERMS: tuple[Term, ...] = (
         term="finalization",
         definition=(
             "The commit-and-close sequence grind runs itself after a passing "
-            "verdict, one journaled boundary at a time; no worker closes an issue."
+            "verdict, one journaled phase transition at a time; no worker closes "
+            "an issue."
         ),
         home="`finalized_phase()` in `src/ortus/core/lifecycle.py`",
         team_role=(
@@ -179,6 +174,22 @@ TERMS: tuple[Term, ...] = (
         analogy=(
             "The night shift arriving to find the day shift's notes and "
             "half-finished paperwork on the desk."
+        ),
+    ),
+    Term(
+        term="happy path",
+        definition=(
+            "The route through a state machine taken when nothing goes wrong, "
+            "which is the only part the README diagrams draw."
+        ),
+        home="`StateMachine.happy_path` in `src/ortus/core/lifecycle.py`",
+        team_role=(
+            "The walkthrough a runbook documents first, with the failure modes "
+            "in an appendix."
+        ),
+        analogy=(
+            "The route drawn on a map, with the diversions listed on the back "
+            "instead of drawn over the top of it."
         ),
     ),
     Term(
@@ -214,38 +225,6 @@ TERMS: tuple[Term, ...] = (
         ),
     ),
     Term(
-        term="leaf",
-        definition=(
-            "A non-epic bd issue small and complete enough for one implementation "
-            "worker to execute end to end, which is what readiness validates."
-        ),
-        home="`src/ortus/core/readiness.py`",
-        team_role=(
-            "A story an engineer can finish in one sitting, as opposed to an "
-            "epic that has to be broken down first."
-        ),
-        analogy=(
-            "An errand you can finish on one trip, rather than a house move "
-            "that has to be broken into trips first."
-        ),
-    ),
-    Term(
-        term="main path",
-        definition=(
-            "The route through a state machine taken when nothing goes wrong, "
-            "which is the only part the README diagrams draw."
-        ),
-        home="`StateMachine.main_path` in `src/ortus/core/lifecycle.py`",
-        team_role=(
-            "The happy path a runbook documents first, with the failure modes "
-            "in an appendix."
-        ),
-        analogy=(
-            "The route drawn on a map, with the diversions listed on the back "
-            "instead of drawn over the top of it."
-        ),
-    ),
-    Term(
         term="orphan",
         definition=(
             "An issue left claimed but unclosed by a worker that ended without "
@@ -259,23 +238,6 @@ TERMS: tuple[Term, ...] = (
         analogy=(
             "A library book still on loan to someone who has left town and is "
             "not coming back for it."
-        ),
-    ),
-    Term(
-        term="packet",
-        definition=(
-            "The authored bd issue content — description, design, acceptance "
-            "criteria, notes — that a worker treats as authoritative, not any "
-            "message on a queue."
-        ),
-        home="`authoritative_packet()` in `src/ortus/core/transaction.py`",
-        team_role=(
-            "The ticket as the analyst wrote it: the spec of record a developer "
-            "builds from and argues with, not a chat message."
-        ),
-        analogy=(
-            "The blueprint handed to the builder. What is on the paper governs, "
-            "not what anyone remembers saying."
         ),
     ),
     Term(
@@ -295,9 +257,25 @@ TERMS: tuple[Term, ...] = (
         ),
     ),
     Term(
-        term="plan-gap",
+        term="phase transition",
         definition=(
-            "A defect in the issue packet that no amount of implementing can "
+            "One finalization step that is journaled as it lands, so a restart "
+            "resumes at the first step that did not."
+        ),
+        home="`FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py`",
+        team_role=(
+            "A ticked line on the release manager's checklist. Interrupt the "
+            "release and the next person resumes at the first line not ticked."
+        ),
+        analogy=(
+            "A passport stamp at each border. The last stamp says where the "
+            "journey resumes, not where it began."
+        ),
+    ),
+    Term(
+        term="planning gap",
+        definition=(
+            "A defect in the work spec that no amount of implementing can "
             "resolve, which routes back to planning instead of producing a candidate."
         ),
         home="`PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py`",
@@ -343,6 +321,22 @@ TERMS: tuple[Term, ...] = (
         ),
     ),
     Term(
+        term="task",
+        definition=(
+            "A non-epic bd issue small and complete enough for one implementation "
+            "worker to execute end to end, which is what readiness validates."
+        ),
+        home="`src/ortus/core/readiness.py`",
+        team_role=(
+            "A story an engineer can finish in one sitting, as opposed to an "
+            "epic that has to be broken down first."
+        ),
+        analogy=(
+            "An errand you can finish on one trip, rather than a house move "
+            "that has to be broken into trips first."
+        ),
+    ),
+    Term(
         term="tracker export",
         definition=(
             "The generated beads files under `.beads/` that bd rewrites whenever "
@@ -372,6 +366,23 @@ TERMS: tuple[Term, ...] = (
         analogy=(
             "A building inspector's pass or fail, marked against each item of "
             "the code rather than as a general impression."
+        ),
+    ),
+    Term(
+        term="work spec",
+        definition=(
+            "The authored bd issue content — description, design, acceptance "
+            "criteria, notes — that a worker treats as authoritative, not any "
+            "message on a queue."
+        ),
+        home="`src/ortus/core/transaction.py`",
+        team_role=(
+            "The ticket as the analyst wrote it: the spec of record a developer "
+            "builds from and argues with, not a chat message."
+        ),
+        analogy=(
+            "The blueprint handed to the builder. What is on the paper governs, "
+            "not what anyone remembers saying."
         ),
     ),
     Term(

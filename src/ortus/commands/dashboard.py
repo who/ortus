@@ -13,9 +13,9 @@ flags `ortus check` uses for its own memory query). `tests/test_dashboard.py`
 asserts both properties rather than trusting the convention, because a
 convention is exactly what a later panel would forget.
 
-This leaf is the shell: the verb, the layout, and the refresh loop. The five
+This task is the shell: the verb, the layout, and the refresh loop. The five
 regions it names — header, current action, candidate, verdict, warnings — are
-filled by their own leaves. What the shell does own is the pulse: one element
+filled by their own tasks. What the shell does own is the pulse: one element
 that advances on every tick, so a healthy run looks alive and a stalled one is
 obvious by its stillness. An operator once watched a silent tail for hours
 unable to tell progress from death.
@@ -60,7 +60,7 @@ exited. The region therefore lists the criteria the run is being judged on
 before any verdict exists, so four outstanding of seven is a visible fact, and
 shows the decision as pending until an envelope appears, because a missing
 envelope is itself the failure mode that cost that run. Expectation comes from
-the authoritative issue packet the journal names — read off disk rather than
+the authoritative work spec the journal names — read off disk rather than
 re-queried, which would answer for the issue as it is now rather than as it was
 claimed — and is derived exactly as `ortus.commands.grind` derives the ids it
 holds the verdict to, so the panel and the validator cannot drift apart.
@@ -242,8 +242,8 @@ VERDICT_PENDING = "decision pending - no verdict envelope emitted yet"
 #: No verifier report has been written for this run yet, so every criterion is
 #: outstanding rather than failing.
 NO_REPORT = "no verifier report yet"
-#: The packet the criteria would come from is not on disk.
-NO_PACKET = "issue packet unavailable - criteria cannot be listed"
+#: The work spec the criteria would come from is not on disk.
+NO_PACKET = "work spec unavailable - criteria cannot be listed"
 
 #: How many criterion rows the region shows. A criterion is never split across
 #: the boundary: a report too large to display is summarised by dropping whole
@@ -282,11 +282,11 @@ _PACKET_GLOB = "{issue}-*.issue.json"
 OUTCOMES: dict[str, str] = {
     "corrections-exhausted": "correction attempts exhausted",
     "correction-rejected": "correction rejected",
-    "plan-gap-escalated": "escalated as a plan gap",
+    "plan-gap-escalated": "escalated as a planning gap",
     "orphaned-candidate": "candidate left orphaned",
     "incomplete-candidate": "candidate left incomplete",
 }
-#: A `finalized-*` phase is the run reaching a finalization boundary, which is
+#: A `finalized-*` phase is the run reaching a finalization phase transition, which is
 #: the only clean ending there is. Replay must say so rather than invent a
 #: failure for a run that simply finished.
 CLEAN_OUTCOME = "finished cleanly"
@@ -336,7 +336,7 @@ class RegionSpec:
     title: str
 
 
-#: The agreed layout, in render order. Each region is filled by its own leaf.
+#: The agreed layout, in render order. Each region is filled by its own task.
 REGIONS: tuple[RegionSpec, ...] = (
     RegionSpec("header", "run"),
     RegionSpec("current-action", "current action"),
@@ -572,7 +572,7 @@ class Criterion:
     id: str
     status: str
     evidence: str = ""
-    #: False for an identifier a verdict reported that the packet never named.
+    #: False for an identifier a verdict reported that the work spec never named.
     #: Such a row is still rendered: dropping either set would hide a mismatch
     #: the verdict validator already treats as a real condition.
     in_packet: bool = True
@@ -622,10 +622,10 @@ class VerdictState:
 
 
 def packet_path(repo: Path, snapshot: RunSnapshot) -> Path | None:
-    """The authoritative issue packet artifact for this run, if it is on disk.
+    """The authoritative work-spec artifact for this run, if it is on disk.
 
     The journal names it exactly. The glob is the fallback for a journal
-    written before that reference was recorded: the store prefixes a packet
+    written before that reference was recorded: the store prefixes a work spec
     with its issue, so the newest one for this issue is the run's own.
     """
 
@@ -648,7 +648,7 @@ def packet_path(repo: Path, snapshot: RunSnapshot) -> Path | None:
 
 
 def read_packet(path: Path) -> dict[str, Any] | None:
-    """The packet artifact as a mapping; None when it cannot be read as one."""
+    """The work-spec artifact as a mapping; None when it cannot be read as one."""
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -658,7 +658,7 @@ def read_packet(path: Path) -> dict[str, Any] | None:
 
 
 def packet_criteria(packet: dict[str, Any]) -> tuple[str, ...]:
-    """The criterion identifiers this run is judged on, in packet order.
+    """The criterion identifiers this run is judged on, in work-spec order.
 
     Derived exactly as grind derives the expected set it hands the verdict
     validator, so what the panel says is outstanding and what the validator
@@ -670,9 +670,9 @@ def packet_criteria(packet: dict[str, Any]) -> tuple[str, ...]:
 
 
 def criteria_defect(packet: dict[str, Any]) -> str:
-    """Why a packet names no criterion, in readiness's words.
+    """Why a work spec names no criterion, in readiness's words.
 
-    A packet with no identifiers is a readiness failure rather than a verdict
+    A work spec with no identifiers is a readiness failure rather than a verdict
     with nothing in it, and the region says which so the operator knows the
     issue is the defect and not the run.
     """
@@ -680,7 +680,7 @@ def criteria_defect(packet: dict[str, Any]) -> str:
     for failure in validate_issue(packet).failures:
         if failure.code == "observable_criteria":
             return f"readiness failure - {failure.section}: {failure.message}"
-    return "readiness failure - the issue packet names no criterion identifier"
+    return "readiness failure - the work spec names no criterion identifier"
 
 
 def parse_report(text: str, *, ref: str = "") -> VerifierReport:
@@ -800,8 +800,8 @@ def read_verdict(
     path = packet_path(repo, snapshot)
     packet = read_packet(path) if path is not None else None
     criteria = packet_criteria(packet) if packet is not None else ()
-    # Only a packet that is present and names nothing is a readiness failure. A
-    # packet that is simply not on disk is an absence, and the region says which.
+    # Only a work spec that is present and names nothing is a readiness failure.
+    # One that is simply not on disk is an absence, and the region says which.
     readiness = criteria_defect(packet) if packet is not None and not criteria else ""
 
     return VerdictState(
@@ -815,9 +815,9 @@ def read_verdict(
 
 
 def criterion_rows(state: VerdictState) -> tuple[Criterion, ...]:
-    """Every criterion to render: the packet's, in its order, then any extras.
+    """Every criterion to render: the work spec's, in its order, then any extras.
 
-    A packet criterion no report has covered is not-yet-reached rather than
+    A work-spec criterion no report has covered is not-yet-reached rather than
     failing — before any report exists that is every one of them — and an
     identifier only the verdict named is kept rather than dropped.
     """
@@ -859,7 +859,7 @@ def criteria_mismatch(state: VerdictState) -> str:
     missing = tuple(name for name in state.criteria if name.upper() not in reported)
     parts = []
     if unexpected:
-        parts.append(f"not in the issue packet: {', '.join(unexpected)}")
+        parts.append(f"not in the work spec: {', '.join(unexpected)}")
     if missing:
         parts.append(f"missing from the verdict: {', '.join(missing)}")
     return f"id mismatch - {'; '.join(parts)}" if parts else ""
@@ -917,7 +917,7 @@ def criterion_line(row: Criterion) -> str:
 
     line = f"{row.id:<{_ID_WIDTH}}{row.status:<{_STATUS_WIDTH}}"
     if not row.in_packet:
-        line += "not in packet   "
+        line += "not in work spec   "
     return (line + clip(row.evidence, CRITERION_TEXT_CHARS)).rstrip()
 
 
@@ -926,12 +926,12 @@ def verdict_panel(
 ) -> str:
     """The verdict region: every criterion, its outcome, and the decision.
 
-    Criteria are listed from the packet rather than from the verdict, so an
+    Criteria are listed from the work spec rather than from the verdict, so an
     operator watching a seven-criterion issue can see that four are still
     outstanding instead of only what has already been reported.
     """
 
-    # No journal, no packet and no envelope is a repository with nothing to
+    # No journal, no work spec and no envelope is a repository with nothing to
     # judge. A replayed run whose journal is gone still has its log, and the
     # decision in it is the one thing worth reading, so that is not idle.
     if snapshot.idle and not state.criteria and state.envelope is None:
@@ -1369,10 +1369,10 @@ def worker_started_at(snapshot: RunSnapshot) -> _dt.datetime | None:
 
     A resumed run inherits a journal whose transaction timestamps predate the
     worker being watched, so a countdown taken from the transaction would be
-    wrong by however long the earlier attempt ran. Every phase boundary appends
+    wrong by however long the earlier attempt ran. Every phase transition appends
     an attempt record carrying its own start, so the newest of those is this
     worker's. A journal written before attempts were kept falls back to the
-    later of the two phase timestamps, which each boundary rewrites for the
+    later of the two phase timestamps, which each transition rewrites for the
     same reason.
     """
 
@@ -1434,7 +1434,7 @@ def iteration(snapshot: RunSnapshot) -> int:
 
     The journal's counter starts at one and a journal in flight is always on at
     least its first pass, so a journal that recorded a zero — an older schema,
-    or one saved before the first boundary — reads as one rather than as a run
+    or one saved before the first phase transition — reads as one rather than as a run
     that has not started.
     """
 
@@ -1473,7 +1473,7 @@ def state_line(snapshot: RunSnapshot) -> str:
 def budget_line(snapshot: RunSnapshot, *, cap: int | None = None) -> str:
     """Correction attempts spent against the cap that will escalate the issue.
 
-    Spent silently is how the budget was consumed in the session this leaf
+    Spent silently is how the budget was consumed in the session this task
     exists for, so it leads its own line and is never the field that gives way
     to a narrow terminal.
     """
@@ -1678,7 +1678,7 @@ def _shell() -> dict[str, type]:
         raise TextualUnavailable(MISSING_TEXTUAL) from exc
 
     class Region(Static):
-        """One bordered region of the layout, filled by its own leaf."""
+        """One bordered region of the layout, filled by its own task."""
 
         def __init__(self, spec: RegionSpec) -> None:
             # Markup off: a region renders data read off disk, and a path or an

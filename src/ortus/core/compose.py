@@ -46,7 +46,7 @@ MAX_MESSAGE_CHARS = 8_000
 #: How much diff the prompt carries. Beyond this the bundle is cut at a hunk
 #: boundary and marked, so the pass always sees whole hunks.
 MAX_DIFF_CHARS = 60_000
-#: Bound on each supplied packet field, so an essay-length objective or
+#: Bound on each supplied work-spec field, so an essay-length objective or
 #: completion comment cannot crowd the diff out of the prompt.
 MAX_CONTEXT_CHARS = 2_000
 
@@ -276,7 +276,7 @@ The body answers these four questions, in this order, as prose paragraphs:
 
 RULES
 
-- The diff is the fact. The packet below is intent, written before the code
+- The diff is the fact. The work spec below is intent, written before the code
   existed. Where they disagree, describe the diff.
 - Subject: imperative mood ("Add", "Stop", "Re-read" — never "Adds" or
   "Added"), and a hard bound of {SUBJECT_LIMIT} characters counted over the
@@ -307,7 +307,7 @@ Note what the example does: it opens with the concrete failure and its cost,
 states the new behaviour in one line, then explains the mechanism by naming the
 functions that implement it, and closes on the limit the design chose.
 
---- ISSUE PACKET ---
+--- WORK SPEC ---
 {chr(10).join(packet)}
 
 --- VERIFIED DIFF ---

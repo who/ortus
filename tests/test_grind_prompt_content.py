@@ -149,7 +149,7 @@ def test_verifier_states_criterion_ids_come_from_the_packet() -> None:
     body = _verifier_prompt(journal, "probe contract").lower()
 
     assert "ac-n" in body
-    assert "issue packet" in body
+    assert "work spec" in body
     assert "exactly once" in body
     assert "invented" in body
     assert "evidence of the criterion" in body

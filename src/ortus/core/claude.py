@@ -405,7 +405,7 @@ def _repo_source_readonly(repo: Path) -> list[str]:
 
     The result states the property directly: the verifier cannot modify the code
     under test. It is also not the only guard. `_verify_candidate` re-hashes the
-    candidate diff, the candidate path set and the issue packet after the verdict
+    candidate diff, the candidate path set and the work spec after the verdict
     and discards any verdict where a byte moved, so mutation is caught even where
     the mount is not.
     """

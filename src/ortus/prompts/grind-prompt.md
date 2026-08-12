@@ -268,7 +268,7 @@ Do not re-derive behavior from the issue's classification in the scheduler; the 
 ## Subagent Strategy
 
 **Three principles:**
-1. **Main context = scheduler only** — never do leaf work in the main context
+1. **Main context = scheduler only** — never do task work in the main context
 2. **Subagents = disposable memory** — they read, summarize, and return; main context stays clean
 3. **Simplicity wins** — prefer many simple subagents over few complex ones
 

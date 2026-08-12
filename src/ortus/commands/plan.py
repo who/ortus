@@ -294,7 +294,7 @@ def plan(
         repair_log = log_path.with_name(f"{log_path.stem}-repair{log_path.suffix}")
         output.progress(
             "plan",
-            "repairing incomplete packets via one fresh planning pass "
+            "repairing incomplete work specs via one fresh planning pass "
             "(this typically takes 1-3 min)",
         )
         repair_rc = repair_readiness(
@@ -331,7 +331,7 @@ def plan(
             output.error(str(exc))
             raise typer.Exit(code=1)
 
-        output.progress("plan", "revalidating repaired issue packets")
+        output.progress("plan", "revalidating repaired work specs")
         defects = failed_reports(_issue_reports(client, new_ids))
         if defects:
             for report in defects:
@@ -342,7 +342,7 @@ def plan(
             )
             raise typer.Exit(code=1)
 
-    # Plan metadata travels with every implementation packet. This remains
+    # Plan metadata travels with every implementation work spec. This remains
     # useful in auto/off mode because an explicit fallback is durable evidence.
     for issue_id in new_ids:
         client.add_comment(issue_id, summary.report())

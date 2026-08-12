@@ -190,24 +190,24 @@ to Claude implementation workers and never to verification.
 
 ### Implementation readiness
 
-`ortus plan` writes executable leaves using readiness schema v1 in the existing
-Beads description, design, and acceptance-criteria fields. Leaves must state
+`ortus plan` writes executable tasks using readiness schema v1 in the existing
+Beads description, design, and acceptance-criteria fields. Tasks must state
 their objective and behavioral context; scope and non-goals; concrete files and
 symbols; resolved decisions and compatibility constraints; ordered steps,
-dependencies, edge cases, and plan-gap handling; and AC-numbered observable
+dependencies, edge cases, and planning-gap handling; and AC-numbered observable
 criteria mapped one-to-one to exact checks plus targeted tests. Epics are
 containers and are exempt.
 
-After decomposition, `ortus plan` validates every new leaf mechanically. It may
+After decomposition, `ortus plan` validates every new task mechanically. It may
 run one fresh repair subprocess with the resolved planning profile, updating
 only the named issues in place. A repair that creates replacement issues, or
-leaves any packet incomplete, makes planning exit nonzero before work is
+leaves any work spec incomplete, makes planning exit nonzero before work is
 claimed.
 
 `ortus grind` applies the same guard immediately before claim. Unready legacy or
-manually authored leaves remain open, and their exact missing sections are
+manually authored tasks remain open, and their exact missing sections are
 printed and written to the grind log for planning or human repair; grind may
-continue to a later ready leaf. If implementation discovers a repository
+continue to a later ready task. If implementation discovers a repository
 contradiction or unresolved material choice, the worker records a `PLAN-GAP`
 comment, preserves candidate edits, flags the issue for human handling, and
 stops without committing or closing it.
@@ -228,14 +228,14 @@ correction gets its own fresh verifier. `--max-corrections` bounds the loop
 the issue `human`, records an escalation comment, and leaves the candidate
 uncommitted and the issue open.
 
-**Plan gaps.** A finding that names an unresolved product or architecture
+**Planning gaps.** A finding that names an unresolved product or architecture
 decision never reaches a correction worker — that would be improvisation. It
-routes once through the `plan` profile to repair the packet in place, then to
+routes once through the `plan` profile to repair the work spec in place, then to
 human escalation. A routing pass may not create, close, or rename issues.
 
 **Finalization.** Only a passing verdict bound to the *current* candidate hash
 authorizes it. Grind re-validates issue identity and status, the authoritative
-packet, the base commit, the integration branch, report persistence, and the
+work spec, the base commit, the integration branch, report persistence, and the
 candidate hash, then performs — itself — four steps in order: write the final
 record, close exactly the assigned issue, commit the transaction-owned paths
 plus the generated tracker exports, and synchronize the integration branch (a
@@ -244,8 +244,9 @@ path-scoped; grind never runs `git add -A`. Uncommitted work outside the
 transaction halts finalization with the exact path list rather than being
 swept into the commit.
 
-**Recovery.** Each boundary is journaled under `logs/grind-transaction.json`
-after it lands. A run killed between any two boundaries resumes on the next
+**Recovery.** Each phase transition is journaled under
+`logs/grind-transaction.json` after it lands. A run killed between any two of
+them resumes on the next
 invocation: grind replays only the outstanding steps, before selecting any new
 work, and re-checks observable bd and git state first — so a replayed close,
 comment, commit, or push that already happened is a no-op. A blocked
@@ -258,7 +259,7 @@ to pick up other work.
 
 **Cost.** The floor is two subprocesses per issue (implement + verify). Each
 correction adds two more, so `--max-corrections 2` bounds one issue at six;
-a plan gap adds one planning-profile pass. Verification runs on the `verify`
+a planning gap adds one planning-profile pass. Verification runs on the `verify`
 profile, which is normally the slow, expensive one — lowering
 `--max-corrections` is the cheapest lever on a noisy queue, and
 `--verify-model` / `--verify-reasoning-effort` is the next. Omitting the
@@ -305,7 +306,7 @@ stateDiagram-v2
 
 `CandidateJournal.phase` for one candidate transaction, from the first worker edit to a committed candidate or a halt a human owns.
 
-The diagram is the path through when nothing goes wrong — 9 of 25 states. Timeouts, refusals, plan gaps and halts are real and are listed in full beneath it.
+The diagram is the path through when nothing goes wrong — 9 of 25 states. Timeouts, refusals, planning gaps and halts are real and are listed in full beneath it.
 
 ```mermaid
 stateDiagram-v2
@@ -321,11 +322,11 @@ stateDiagram-v2
     implementation --> candidate_captured: the worker returned and grind sealed its diff
     candidate_captured --> verification: a fresh read-only verifier starts
     verification --> verified_pass: the verifier returned a passing verdict
-    verified_pass --> finalized_report: finalization boundary report landed
-    finalized_report --> finalized_close: finalization boundary close landed
-    finalized_close --> finalized_compose: finalization boundary compose landed
-    finalized_compose --> finalized_commit: finalization boundary commit landed
-    finalized_commit --> finalized_sync: finalization boundary sync landed
+    verified_pass --> finalized_report: finalization phase transition report landed
+    finalized_report --> finalized_close: finalization phase transition close landed
+    finalized_close --> finalized_compose: finalization phase transition compose landed
+    finalized_compose --> finalized_commit: finalization phase transition commit landed
+    finalized_commit --> finalized_sync: finalization phase transition sync landed
     finalized_sync --> [*]
 ```
 
@@ -361,21 +362,21 @@ stateDiagram-v2
 | `correction` | the correction worker ran out of wall clock | `correction-timeout` |
 | `correction-timeout` | a restart re-implements the timed-out correction | `candidate-captured` |
 | `plan-gap-routed` | a restart re-implements against the replanned issue | `candidate-captured` |
-| `verified-pass` | finalization boundary report landed | `finalized-report` |
+| `verified-pass` | finalization phase transition report landed | `finalized-report` |
 | `verified-pass` | a finalization precondition failed | `finalization-blocked` |
-| `finalized-report` | finalization boundary close landed | `finalized-close` |
-| `finalized-close` | finalization boundary compose landed | `finalized-compose` |
-| `finalized-compose` | finalization boundary commit landed | `finalized-commit` |
-| `finalized-commit` | finalization boundary sync landed | `finalized-sync` |
+| `finalized-report` | finalization phase transition close landed | `finalized-close` |
+| `finalized-close` | finalization phase transition compose landed | `finalized-compose` |
+| `finalized-compose` | finalization phase transition commit landed | `finalized-commit` |
+| `finalized-commit` | finalization phase transition sync landed | `finalized-sync` |
 | `finalized-report` | a finalization precondition failed on replay | `finalization-blocked` |
 | `finalized-close` | a finalization precondition failed on replay | `finalization-blocked` |
 | `finalized-compose` | a finalization precondition failed on replay | `finalization-blocked` |
 | `finalized-commit` | a finalization precondition failed on replay | `finalization-blocked` |
-| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-report` |
-| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-close` |
-| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-compose` |
-| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-commit` |
-| `finalization-blocked` | a restart replays the first boundary that has not landed | `finalized-sync` |
+| `finalization-blocked` | a restart replays the first phase transition that has not landed | `finalized-report` |
+| `finalization-blocked` | a restart replays the first phase transition that has not landed | `finalized-close` |
+| `finalization-blocked` | a restart replays the first phase transition that has not landed | `finalized-compose` |
+| `finalization-blocked` | a restart replays the first phase transition that has not landed | `finalized-commit` |
+| `finalization-blocked` | a restart replays the first phase transition that has not landed | `finalized-sync` |
 
 </details>
 
@@ -408,7 +409,7 @@ gitignores `.codegraph/` (the index is local, machine-specific, and often
 large). Because it is gitignored, a fresh clone has no index: run
 `codegraph init` once, which `ortus check` names as the remediation. Register
 the CodeGraph MCP server for the selected Claude or Codex backend. Planning
-validates issue packets,
+validates work specs,
 implementation confirms references and runs impact analysis, the parent refreshes
 the index after candidate edits, and a fresh verifier independently checks changed
 symbols and callers.
@@ -440,10 +441,10 @@ Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md`
 
 ## Glossary
 
-Ortus's vocabulary is small, load-bearing, and largely made of ordinary
-English words carrying one specific sense — a packet is authored issue
-content, not a message on a queue; a boundary is a finalization step, not a
-limit. These words appear in log lines, prompt contracts and error messages,
+Ortus's vocabulary is small, load-bearing, and largely made of standard
+software-engineering terms carrying one specific sense — a work spec is
+authored issue content, not a message on a queue; a phase transition is a
+journaled finalization step. These words appear in log lines, prompt contracts and error messages,
 so guessing at one misreads the run. The table below is generated from the
 declaration in `src/ortus/core/glossary.py`; changing a term without
 regenerating it fails the test suite.
@@ -453,24 +454,24 @@ regenerating it fails the test suite.
 
 | Term | What it means | On a team without agents | Analogy | Where it lives |
 | --- | --- | --- | --- | --- |
-| **boundary** | One finalization step that is journaled as it lands, so a restart resumes at the first step that did not — not a limit or an edge. | A ticked line on the release manager's checklist. Interrupt the release and the next person resumes at the first line not ticked. | A passport stamp at each border. The last stamp says where the journey resumes, not where it began. | `FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py` |
 | **candidate** | The uncommitted edit set one worker produced for one issue, which a fresh verifier judges before anything is committed. | The branch a developer has pushed but not merged: complete enough to review, and not yet anyone else's problem. | A plated dish waiting under the pass. Finished, not yet carried out, and still the kitchen's to fix. | `CandidateJournal.candidate_paths` in `src/ortus/core/transaction.py` |
-| **degraded** | A step that completed with less information than usual instead of failing, such as a commit subject written without a readable packet. | Shipping the release notes with a section missing rather than holding the release for it. | A flight that departs with the entertainment system broken rather than cancelling the flight. | finalization logging in `src/ortus/commands/grind.py` |
+| **degraded** | A step that completed with less information than usual instead of failing, such as a commit subject written without a readable work spec. | Shipping the release notes with a section missing rather than holding the release for it. | A flight that departs with the entertainment system broken rather than cancelling the flight. | finalization logging in `src/ortus/commands/grind.py` |
 | **disown** | A worker declaring that an inherited uncommitted path is not its issue's work, which keeps the path out of the candidate rather than merely leaving it alone. | Telling your reviewer that half the diff on this shared branch belongs to someone else's ticket, so please do not attribute it. | Labelling a shelf in a shared fridge so nobody cooks with someone else's ingredients by mistake. | `src/ortus/core/attribution.py` |
-| **finalization** | The commit-and-close sequence grind runs itself after a passing verdict, one journaled boundary at a time; no worker closes an issue. | The release manager merging, closing the ticket and updating the board — never the developer who wrote the code. | The registrar signing the certificate. The couple do not marry themselves, however much of the wedding they did. | `finalized_phase()` in `src/ortus/core/lifecycle.py` |
+| **finalization** | The commit-and-close sequence grind runs itself after a passing verdict, one journaled phase transition at a time; no worker closes an issue. | The release manager merging, closing the ticket and updating the board — never the developer who wrote the code. | The registrar signing the certificate. The couple do not marry themselves, however much of the wedding they did. | `finalized_phase()` in `src/ortus/core/lifecycle.py` |
 | **handoff** | The uncommitted paths a fresh worker inherits from whoever edited the tree before it, recorded so attribution can tell them apart from the worker's own edits. | Sitting down at a shared machine and finding a colleague's half-finished work still in the editor. | The night shift arriving to find the day shift's notes and half-finished paperwork on the desk. | `CandidateJournal.with_handoff()` in `src/ortus/core/transaction.py` |
+| **happy path** | The route through a state machine taken when nothing goes wrong, which is the only part the README diagrams draw. | The walkthrough a runbook documents first, with the failure modes in an appendix. | The route drawn on a map, with the diversions listed on the back instead of drawn over the top of it. | `StateMachine.happy_path` in `src/ortus/core/lifecycle.py` |
 | **harness** | The grind scheduler process that selects and claims the issue and launches each worker against it; the worker never chooses its own work. | The team lead who assigns the ticket and books the room. Engineers do not pick their own work here. | A taxi dispatcher assigning the next fare. The driver does not choose which call comes in. | `src/ortus/core/grind_loop.py` |
 | **journal** | The one JSON file holding a candidate transaction's phase, paths, hashes and evidence, which is what lets an interrupted run resume. | The build log a pipeline keeps so an interrupted run can resume where it stopped, rather than the code it was building. | A ship's log, kept so a relieving officer knows exactly where the voyage stands without asking anyone. | `JOURNAL_RELATIVE_PATH` in `src/ortus/core/transaction.py` |
-| **leaf** | A non-epic bd issue small and complete enough for one implementation worker to execute end to end, which is what readiness validates. | A story an engineer can finish in one sitting, as opposed to an epic that has to be broken down first. | An errand you can finish on one trip, rather than a house move that has to be broken into trips first. | `src/ortus/core/readiness.py` |
-| **main path** | The route through a state machine taken when nothing goes wrong, which is the only part the README diagrams draw. | The happy path a runbook documents first, with the failure modes in an appendix. | The route drawn on a map, with the diversions listed on the back instead of drawn over the top of it. | `StateMachine.main_path` in `src/ortus/core/lifecycle.py` |
 | **orphan** | An issue left claimed but unclosed by a worker that ended without finishing, which the configured orphan policy then releases or keeps. | A ticket left In Progress by someone who went on holiday without updating the board. | A library book still on loan to someone who has left town and is not coming back for it. | `src/ortus/core/grind_loop.py` |
-| **packet** | The authored bd issue content — description, design, acceptance criteria, notes — that a worker treats as authoritative, not any message on a queue. | The ticket as the analyst wrote it: the spec of record a developer builds from and argues with, not a chat message. | The blueprint handed to the builder. What is on the paper governs, not what anyone remembers saying. | `authoritative_packet()` in `src/ortus/core/transaction.py` |
 | **phase** | The candidate journal's current state, which lives only as long as one candidate transaction and is never a bd issue status. | Where a pull request sits right now — draft, in review, approved — which is not the same thing as the ticket's status on the board. | Where a dish is right now — prepping, cooking, plating — which is not the same as whether the table has been served. | `CandidateJournal.phase` in `src/ortus/core/transaction.py` |
-| **plan-gap** | A defect in the issue packet that no amount of implementing can resolve, which routes back to planning instead of producing a candidate. | A developer handing a ticket back to the analyst because it cannot be built as written. | A builder downing tools because the blueprint gives no dimension for a wall. No amount of building resolves it. | `PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py` |
+| **phase transition** | One finalization step that is journaled as it lands, so a restart resumes at the first step that did not. | A ticked line on the release manager's checklist. Interrupt the release and the next person resumes at the first line not ticked. | A passport stamp at each border. The last stamp says where the journey resumes, not where it began. | `FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py` |
+| **planning gap** | A defect in the work spec that no amount of implementing can resolve, which routes back to planning instead of producing a candidate. | A developer handing a ticket back to the analyst because it cannot be built as written. | A builder downing tools because the blueprint gives no dimension for a wall. No amount of building resolves it. | `PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py` |
 | **readiness** | The schema an issue must satisfy before an implementation worker may be launched at it, checked mechanically when the issue is planned. | Definition of Ready: the checklist a story passes before planning will let anyone start it. | The pre-flight checklist an aircraft passes before pushback, not an opinion about whether it looks ready. | `validate_issue()` in `src/ortus/core/readiness.py` |
 | **seal** | Recording the candidate's diff hash, so every later phase can prove the edit set it is judging is the one the worker produced. | Approving a pull request at a named commit, so the sign-off refers to one exact diff rather than to whatever the branch holds later. | A tamper-evident evidence bag. The signature refers to what was inside at the moment it was sealed. | `CandidateJournal.candidate_hash` in `src/ortus/core/transaction.py` |
+| **task** | A non-epic bd issue small and complete enough for one implementation worker to execute end to end, which is what readiness validates. | A story an engineer can finish in one sitting, as opposed to an epic that has to be broken down first. | An errand you can finish on one trip, rather than a house move that has to be broken into trips first. | `src/ortus/core/readiness.py` |
 | **tracker export** | The generated beads files under `.beads/` that bd rewrites whenever an issue changes, checkpointed apart from a worker's own edits. | The issue tracker's own database, as distinct from the source code — written by the tool, not by the engineer. | The library's catalogue as opposed to the books: written by the librarian's system, not by an author. | `src/ortus/commands/grind.py` |
 | **verdict** | The structured pass-or-fail judgement a fresh read-only verifier emits about a candidate, with one entry per acceptance criterion. | The reviewer's formal approve or request-changes, with a note against each acceptance criterion. | A building inspector's pass or fail, marked against each item of the code rather than as a general impression. | `parse_verdict()` in `src/ortus/core/verdict.py` |
+| **work spec** | The authored bd issue content — description, design, acceptance criteria, notes — that a worker treats as authoritative, not any message on a queue. | The ticket as the analyst wrote it: the spec of record a developer builds from and argues with, not a chat message. | The blueprint handed to the builder. What is on the paper governs, not what anyone remembers saying. | `src/ortus/core/transaction.py` |
 | **worker** | One agent subprocess running one phase for one issue, started fresh with no memory of any worker before it. | A contractor hired for exactly one ticket, who has never seen the codebase before and will not be back. | A temp who works exactly one shift, has never seen the building before, and will not be back tomorrow. | `compose_worker_prompt()` in `src/ortus/core/agent.py` |
 <!-- END GENERATED: glossary -->
 

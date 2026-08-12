@@ -167,8 +167,8 @@ def select_ready_issue(
     work — a worker can't implement+close it, so claiming one would strand it
     in_progress while the worker closes a child instead. This mirrors the
     long-standing worker behavior (it always skipped epics in `bd ready`).
-    Executable leaves must also satisfy readiness schema v1. Invalid legacy or
-    manually authored leaves are left open and reported through ``on_unready``
+    Executable tasks must also satisfy readiness schema v1. Invalid legacy or
+    manually authored tasks are left open and reported through ``on_unready``
     rather than being handed to an implementer. Returns None when nothing
     workable is ready.
     """

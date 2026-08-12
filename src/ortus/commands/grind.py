@@ -589,13 +589,13 @@ def _absorb_unrelated_declaration(
         # Ownership is unresolved, so nothing moves: the path keeps the
         # declaration and a human is told which regions collided. Splitting a
         # file across owners, or guessing which claimant wins, is exactly the
-        # improvisation the plan-gap route exists to prevent.
+        # improvisation the planning-gap route exists to prevent.
         updated = updated.route_plan_gap()
         for gap in gaps[:_HANDOFF_PROMPT_PATHS]:
             write_log(f"handoff: PLAN-GAP — mixed ownership in a disowned path; {gap}")
         output.progress(
             "grind",
-            f"plan gap: {len(gaps)} disowned path(s) carry regions owned by more "
+            f"planning gap: {len(gaps)} disowned path(s) carry regions owned by more "
             "than one issue",
         )
     if honored:
@@ -624,8 +624,8 @@ def _reclassify_edited_declarations(
     handoff is nobody's work and keeps today's behavior exactly. One whose
     content moved was picked back up deliberately, so its changed regions decide
     it: all of them the claimed issue's re-adopts the whole path, a mix of
-    owners is a plan gap, and anything else — including a region nothing in the
-    index or the packet can name — leaves the declaration standing.
+    owners is a planning gap, and anything else — including a region nothing in
+    the index or the work spec can name — leaves the declaration standing.
     """
 
     if not honored:
@@ -651,9 +651,9 @@ def _reclassify_edited_declarations(
 
 
 def _concrete_locations(repo: Path, journal: CandidateJournal) -> str:
-    """The claimed issue's Concrete locations, read from the frozen packet.
+    """The claimed issue's Concrete locations, read from the frozen work spec.
 
-    The packet artifact is the authoritative copy this attempt is bound to, so
+    The work-spec artifact is the authoritative copy this attempt is bound to, so
     ownership is judged against the same text the verifier will read rather
     than against whatever bd holds now. An unreadable or unauthored section
     names nothing, which makes every region foreign and honors the declaration.
@@ -703,7 +703,7 @@ class _HandoffState:
             + (f"; the captured diff is {self.diff_ref}" if self.diff_ref else "")
             + ". Inherited paths: "
             + (rendered or "none")
-            + ". Assess every change against the issue packet: keep and finish what "
+            + ". Assess every change against the work spec: keep and finish what "
             "advances it, correct what is wrong, and leave unrelated work untouched — "
             f"list each unrelated path in {_UNRELATED_DECLARATION.as_posix()}, one per "
             "line, and Ortus will never commit it. Continue from this state instead of "
@@ -1039,11 +1039,11 @@ def _prepare_handoff(
 
 
 def _packet_artifact_intact(repo: Path, journal: CandidateJournal) -> bool:
-    """Rehash the on-disk issue packet the verifier is about to be handed.
+    """Rehash the on-disk work spec the verifier is about to be handed.
 
-    The packet reference is a plain file under ``logs/``, so a worker that
+    The work-spec reference is a plain file under ``logs/``, so a worker that
     ignores the phase contract could rewrite it and verify itself against a
-    packet nobody authorized. bd being unchanged is not enough — the artifact
+    work spec nobody authorized. bd being unchanged is not enough — the artifact
     bytes must still hash to the advertised digest.
     """
 
@@ -1059,9 +1059,9 @@ def _packet_artifact_intact(repo: Path, journal: CandidateJournal) -> bool:
 def _packet_drift(
     repo: Path, journal: CandidateJournal, current: dict[str, Any]
 ) -> str:
-    """Name the contract fields that moved since this packet was frozen.
+    """Name the contract fields that moved since this work spec was frozen.
 
-    The frozen packet is on disk as the very artifact the verifier is handed, so
+    The frozen work spec is on disk as the very artifact the verifier is handed, so
     the *before* values are readable even though bd only ever reports the after.
     """
 
@@ -1072,7 +1072,7 @@ def _packet_drift(
         except (OSError, ValueError):
             stored = None
     if not isinstance(stored, dict):
-        return "the frozen packet artifact is unreadable, so the fields cannot be named"
+        return "the frozen work-spec artifact is unreadable, so the fields cannot be named"
     changes = contract_packet_changes(stored, current)
     return "; ".join(changes) if changes else "no contract field differs"
 
@@ -1117,7 +1117,7 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
 
     return (
         "FRESH READ-ONLY VERIFICATION PHASE. You cannot edit source or bd state. "
-        "Independently inspect the exact issue packet and candidate diff at the paths "
+        "Independently inspect the exact work spec and candidate diff at the paths "
         "below, run bounded read-only checks (disable pytest cache writes), and emit "
         "exactly one final assistant line beginning ORTUS_VERDICT: followed by one JSON "
         "object. Do not emit that prefix anywhere else.\n\n"
@@ -1131,8 +1131,8 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "If new information arrives after you have decided, fold it into the "
         "evidence and emit; do not restart the review.\n\n"
         f"Issue: {journal.issue_id}\n"
-        f"Issue packet: {journal.issue_packet_ref}\n"
-        f"Issue packet SHA-256: {journal.issue_packet_hash}\n"
+        f"Work spec: {journal.issue_packet_ref}\n"
+        f"Work spec SHA-256: {journal.issue_packet_hash}\n"
         f"Candidate diff: {journal.candidate_diff_ref}\n"
         f"Candidate SHA-256: {journal.candidate_hash}\n"
         f"Captured evidence: {json.dumps(journal.evidence, ensure_ascii=False)}\n\n"
@@ -1146,7 +1146,7 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "reviewed_interfaces, risks, findings, codegraph. A pass requires every criterion "
         "to pass; a fail requires at least one failed criterion. Bind candidate_hash to "
         "the supplied SHA-256 exactly.\n\n"
-        "Criterion ids must be exactly the AC-N identifiers listed in the issue packet's "
+        "Criterion ids must be exactly the AC-N identifiers listed in the work spec's "
         "acceptance criteria — every one of them, each used exactly once, and no invented "
         "id of your own. If a check could not be run at all, record that in the evidence "
         "of the criterion it blocks and fail that criterion; do not add a criterion to "
@@ -1219,7 +1219,7 @@ def _restore_rebuilt_candidate(
 
     A read-only reviewer must not change what it is judging, so a path it
     declared reviewing that moved anyway is misconduct and stays fatal. But the
-    packet also tells that reviewer to run the project's checks, and a
+    work spec also tells that reviewer to run the project's checks, and a
     repository that commits build output — a bundled image, a transpiled
     sibling of a TypeScript source, a lockfile a dependency install rewrites —
     has those checks rewrite candidate paths nobody edited. Ortus cannot see
@@ -1486,7 +1486,7 @@ def _verify_candidate(
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             timeout_failure += (
-                "; authoritative issue packet changed during verification — "
+                "; authoritative work spec changed during verification — "
                 + _packet_drift(repo, journal, current_packet)
             )
             timeout_phase = VERIFICATION_REJECTED
@@ -1576,7 +1576,7 @@ def _verify_candidate(
         current_packet = bd.show(issue_id)
         if issue_packet_hash(current_packet) != journal.issue_packet_hash:
             raise VerdictError(
-                "authoritative issue packet changed during verification — "
+                "authoritative work spec changed during verification — "
                 + _packet_drift(repo, journal, current_packet)
             )
     except (VerdictError, RuntimeError) as exc:
@@ -1688,10 +1688,10 @@ def _failed_criteria(verdict: Verdict) -> tuple[dict[str, str], ...]:
 
 
 def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict) -> str:
-    """The minimal correction packet: issue, hash, failed criteria, findings.
+    """The minimal correction work spec: issue, hash, failed criteria, findings.
 
     Deliberately excludes the verifier transcript and the full report. The
-    worker re-reads the authoritative packet from bd; everything else here is
+    worker re-reads the authoritative work spec from bd; everything else here is
     the precise delta it has to close.
     """
 
@@ -1707,7 +1707,7 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         f"CORRECTION ATTEMPT {journal.corrections} for bd issue {issue_id}. A fresh "
         "read-only verifier rejected the current candidate. Ortus already claimed this "
         "issue; do not run bd ready, do not select other work, and use only the id "
-        f"{issue_id}. Read `bd show {issue_id} --json` for the authoritative packet, "
+        f"{issue_id}. Read `bd show {issue_id} --json` for the authoritative work spec, "
         "then correct ONLY the failures below.\n\n"
         f"Current candidate SHA-256: {journal.candidate_hash}\n\n"
         f"Failed acceptance criteria:\n{criteria}\n\n"
@@ -1720,7 +1720,7 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         "the issue, do not run git push, git stash, or git reset, do not switch "
         "branches, and do not add a verification comment — a fresh verifier "
         "reviews your corrected candidate and Ortus alone merges and finalizes it. "
-        "If a finding needs a product or architecture decision the packet does not "
+        "If a finding needs a product or architecture decision the work spec does not "
         "resolve, do not improvise: report it as a PLAN-GAP and stop."
     )
     # Claude's /goal condition is hard-capped, so drop the least-severe findings
@@ -1747,7 +1747,7 @@ def _plan_gap_task(issue_id: str, findings: tuple[str, ...]) -> str:
     return (
         "PLAN-GAP ROUTING PASS (one pass only).\n\n"
         f"Verification of bd issue {issue_id} surfaced findings that need a product or "
-        "architecture decision the issue packet never resolved. An implementation "
+        "architecture decision the work spec never resolved. An implementation "
         "worker is not allowed to improvise them.\n\n"
         f"Unresolved findings:\n{rendered}\n\n"
         f"Read `bd show {issue_id} --json`, resolve each gap against repository "
@@ -1755,7 +1755,7 @@ def _plan_gap_task(issue_id: str, findings: tuple[str, ...]) -> str:
         "description, design, and acceptance criteria state the resolved decision. "
         "Do not run `bd create`, do not close, replace, or rename any issue, do not "
         "change dependencies, do not edit source files, and do not commit or push. If "
-        "the decision genuinely requires a human, leave the packet unchanged and say "
+        "the decision genuinely requires a human, leave the work spec unchanged and say "
         "so plainly."
     )
 
@@ -1773,7 +1773,7 @@ def _run_plan_gap_pass(
     issue_id: str,
     findings: tuple[str, ...],
 ) -> int:
-    """Route one plan gap through the planning profile; return its exit code.
+    """Route one planning gap through the planning profile; return its exit code.
 
     Mirrors the readiness-repair guard: a pass that grows the queue instead of
     updating the named issue is a hard error, not a silent skip.
@@ -1800,11 +1800,11 @@ def _run_plan_gap_pass(
                 prompt, repo=repo, log_path=gap_log, profile=profile, timeout=timeout
             )
     except subprocess.TimeoutExpired:
-        write_log(f"plan-gap routing: TIMEOUT after {timeout}s; see {gap_log}")
+        write_log(f"planning-gap routing: TIMEOUT after {timeout}s; see {gap_log}")
         return 143
     guard_no_replacements(ids_before, {issue["id"] for issue in bd.list_all()})
     if rc != 0:
-        write_log(f"plan-gap routing: failed ({backend} exit {rc}); see {gap_log}")
+        write_log(f"planning-gap routing: failed ({backend} exit {rc}); see {gap_log}")
     return rc
 
 
@@ -1867,7 +1867,7 @@ _PROPOSAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
-    """The authored packet for the commit message, or {} when unreadable.
+    """The authored work spec for the commit message, or {} when unreadable.
 
     Every read failure — a tracker that will not answer, a malformed response,
     a missing issue — collapses to the empty dict, so the caller formats a
@@ -1945,7 +1945,7 @@ def _issue_comments(bd: BdClient, issue_id: str) -> list[str]:
 def _describes_the_change(text: str) -> bool:
     """True when a comment is an implementer's record of what it changed.
 
-    A routed plan gap, a stopped-work note and Ortus's own finalization record
+    A routed planning gap, a stopped-work note and Ortus's own finalization record
     are excluded even when they quote a `**Changes**` header: committing one of
     those as the description would say something the change does not contain.
     """
@@ -2173,8 +2173,8 @@ def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> 
     """`<id>: <title>`, the issue's objective, and what the commit changed.
 
     Both body blocks are text someone else already wrote down — the authored
-    packet and `description` — so the message states nothing that was not
-    recorded before the commit ran. An unreadable packet still commits: the
+    work spec and `description` — so the message states nothing that was not
+    recorded before the commit ran. An unreadable work spec still commits: the
     subject degrades and the description stands alone.
     """
 
@@ -2197,18 +2197,18 @@ def _commit_message(issue_id: str, packet: dict[str, Any], description: str) -> 
 
 
 #: Journaled in place of a message when the composition pass produced none, so
-#: the boundary still reads as landed and a restart does not spend a second
+#: the phase transition still reads as landed and a restart does not spend a second
 #: model call re-asking a question that already failed.
 _COMPOSE_UNAVAILABLE = "unavailable"
 
 #: What the composition pass is handed and what it returns: the journal it is
-#: describing plus the authored packet fields, and the full commit message text
+#: describing plus the authored work-spec fields, and the full commit message text
 #: or a `ComposeFailed`.
 ComposeCallable = Callable[..., str]
 
 
 def _composed_message(journal: CandidateJournal) -> str:
-    """The message a prior compose boundary journaled, if it produced one."""
+    """The message a prior compose phase transition journaled, if it produced one."""
 
     value = journal.finalization.get("compose")
     if not isinstance(value, str) or value == _COMPOSE_UNAVAILABLE:
@@ -2255,7 +2255,7 @@ def _finalization_report(issue_id: str, journal: CandidateJournal) -> str:
         f"Issue: {issue_id}\n"
         f"Candidate: `{journal.candidate_hash}`\n"
         f"Base commit: `{journal.base_head}`\n"
-        f"Issue packet: `{journal.issue_packet_hash}`\n"
+        f"Work spec: `{journal.issue_packet_hash}`\n"
         f"Verifier attempts: {len(journal.verifier_refs)}\n"
         f"Correction attempts: {journal.corrections}\n"
         f"Plan-gap routed: {'yes' if journal.plan_gap_routed else 'no'}\n"
@@ -2294,7 +2294,7 @@ def _finalization_blocker(
     if not journal.candidate_hash:
         return "candidate transaction has no recorded hash"
     # Identity and status only: the verifier already bound its verdict to the
-    # authoritative packet hash, and grind's own report comment legitimately
+    # authoritative work-spec hash, and grind's own report comment legitimately
     # moves the issue's `bd show` bytes between that check and this one.
     status = bd.status(issue_id)
     if not journal.finalized("close") and status != "in_progress":
@@ -2330,7 +2330,7 @@ def _finalization_blocker(
         ):
             # Finalization was already mid-flight (close journaled) and its
             # own commit — possibly the fast-forward too — landed before a
-            # crash reached the boundary write. The worktree re-checks below
+            # crash reached the phase-transition write. The worktree re-checks below
             # would misread the committed candidate; the commit step
             # re-journals from this same observable state. This deliberately
             # skips a second integrity pass on replay: the candidate was
@@ -2458,9 +2458,9 @@ def _finalize_candidate(
     """Ortus-owned report → close → compose → commit → sync, journaled by step.
 
     Returns the updated journal and a blocker string when finalization could
-    not complete. Every step is skipped when its boundary is already journaled
-    OR when observable state already shows it landed, so a restart at any
-    boundary produces no duplicate comment, close, commit, or push.
+    not complete. Every step is skipped when its phase transition is already
+    journaled OR when observable state already shows it landed, so a restart at
+    any phase transition produces no duplicate comment, close, commit, or push.
 
     `compose` is the one place a model participates in finalization: it writes
     the commit message from the sealed diff and returns text. It is optional,
@@ -2608,7 +2608,7 @@ def _finalize_candidate(
                     packet = _commit_packet(bd, issue_id)
                     if not packet:
                         write_log(
-                            "finalization: issue packet unreadable; committing "
+                            "finalization: work spec unreadable; committing "
                             f"{issue_id} with a degraded subject"
                         )
                     message = _commit_message(
@@ -3028,9 +3028,9 @@ def _log_path(repo: Path) -> Path:
 
 
 def _repair_context(bd: BdClient, reports: tuple[ReadinessReport, ...]) -> str:
-    """Ground a grind-side repair in each packet plus its parent epic.
+    """Ground a grind-side repair in each work spec plus its parent epic.
 
-    A grind run has no PRD, and guessing one would repair the packet against
+    A grind run has no PRD, and guessing one would repair the work spec against
     the wrong document, so the parent epic is the only extra context the pass
     gets beyond the issue's own `bd show` output.
     """
@@ -3048,7 +3048,7 @@ def _repair_context(bd: BdClient, reports: tuple[ReadinessReport, ...]) -> str:
         )
     return (
         "CONTEXT. This pass runs inside `ortus grind`, which has no PRD. Repair "
-        "each packet from its own `bd show <id> --json` output and the parent "
+        "each work spec from its own `bd show <id> --json` output and the parent "
         "epic named below; do not look for or invent a PRD.\n" + "\n".join(lines) + "\n"
     )
 
@@ -3068,7 +3068,7 @@ def _run_readiness_repair(
     """Run one bounded readiness repair pass; return (exit code, transcript).
 
     Raises :class:`RepairCreatedReplacements` when the pass grew the queue
-    instead of updating the packets it was named — that is a hard error, not a
+    instead of updating the work specs it was named — that is a hard error, not a
     skip, because silent queue growth is the failure mode the guard exists for.
     """
     repair_log = log.with_name(f"{log.stem}-repair{log.suffix}")
@@ -3234,10 +3234,10 @@ def _compose_work_prompt(
 ) -> str:
     """Build one backend-appropriate prompt for a harness-claimed issue.
 
-    Codex receives the complete issue packet because its plain ``exec`` prompt
+    Codex receives the complete work spec because its plain ``exec`` prompt
     has no slash-command condition limit. Claude's ``/goal`` condition is
     capped at 4,000 characters, so it receives the exact claimed id and loads
-    the authoritative, deliberately thorough packet from bd itself.
+    the authoritative, deliberately thorough work spec from bd itself.
 
     ``lessons_text`` is the one optional section: no runtime behavior depends
     on a lesson being present, so when appending it would push the Claude
@@ -3259,7 +3259,7 @@ def _compose_work_prompt(
         "this exact issue. Do not run bd ready, select another issue, or operate on "
         f"any other id. First run `bd show {issue_id} --json`; its description, "
         "design, acceptance criteria, and notes are the authoritative implementation "
-        "packet. Follow that packet and the repository instructions. Run the required "
+        "work spec. Follow that work spec and the repository instructions. Run the required "
         "checks, use only the exact claimed id in bd commands, and do not invoke another "
         "queue orchestrator. If a human decision is required, flag this exact issue and "
         "stop. Otherwise complete only this issue, leave the result as uncommitted "
@@ -3508,7 +3508,7 @@ def grind(
     ),
     worker_timeout: int = typer.Option(
         # 1800 predated the candidate transaction, when a worker implemented and
-        # stopped. A worker now runs the packet's targeted suite during
+        # stopped. A worker now runs the work spec's targeted suite during
         # implementation and a fresh verifier runs it again, and bd costs about
         # a second per invocation, so the changed-surface suites here take 10-15
         # minutes each. Real workers were killed mid-verification at 30 minutes
@@ -3548,7 +3548,7 @@ def grind(
         True,
         "--repair-unready/--no-repair-unready",
         help=(
-            "When the ready queue holds only leaves that fail readiness schema "
+            "When the ready queue holds only tasks that fail readiness schema "
             "v1, repair them in place with one planning-profile pass and keep "
             "going. --no-repair-unready restores the skip-and-stop behavior."
         ),
@@ -3618,7 +3618,7 @@ def grind(
             model=verify_model,
             reasoning_effort=verify_reasoning_effort,
         )
-        # Repairing an unready packet is authoring work, not implementation, so
+        # Repairing an unready work spec is authoring work, not implementation, so
         # the self-heal pass runs on the planning profile.
         plan_profile = config.resolve_profile(resolved_backend, Phase.PLAN)
         # Writing the commit message is bounded prose over material the pass is
@@ -3706,7 +3706,7 @@ def grind(
             + (
                 f"{plan_profile.display_name}, budget {repair_budget} pass(es)"
                 if repair_unready and repair_budget > 0
-                else "off (unready leaves are skipped)"
+                else "off (unready tasks are skipped)"
             )
         )
         output.info(f"codegraph:      {codegraph_mode.value}")
@@ -3762,9 +3762,9 @@ def grind(
             # candidates, commit B): the worker writes its message at commit
             # time and finalization repairs or replaces it deterministically.
             # The journal's compose step vocabulary survives until the
-            # machine-verification deletion leaf so a legacy journal stranded
+            # machine-verification deletion task so a legacy journal stranded
             # at finalized-compose still resumes; a None pass journals the
-            # boundary as unavailable and moves on.
+            # phase transition as unavailable and moves on.
             compose_message: ComposeCallable | None = None
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
@@ -3787,10 +3787,10 @@ def grind(
                     startup_journal.issue_branch if startup_journal else ""
                 ),
             )
-            # AC-6: a run killed between any two finalization boundaries left a
+            # AC-6: a run killed between any two finalization phase transitions left a
             # journal that still owes work. Replay it BEFORE selecting anything,
             # and never select another issue while one is outstanding. Each step
-            # re-checks observable bd/git state, so a replay of a boundary that
+            # re-checks observable bd/git state, so a replay of a phase transition that
             # actually landed is a no-op rather than a duplicate.
             pending_finalization = transaction_store.load()
             if (
@@ -3800,7 +3800,7 @@ def grind(
                 write_log(
                     "finalization resume: journal for "
                     f"{pending_finalization.issue_id} stopped at "
-                    f"{pending_finalization.phase}; replaying remaining boundaries"
+                    f"{pending_finalization.phase}; replaying remaining phase transitions"
                 )
                 output.progress(
                     "grind",
@@ -3972,7 +3972,7 @@ def grind(
             repair_attempted: set[str] = set()
             repairs_run = 0
             # Console-only dedupe for readiness-skip warnings, keyed on issue
-            # id plus summary text so a packet that re-fails differently warns
+            # id plus summary text so a work spec that re-fails differently warns
             # again. The log keeps every occurrence.
             warned_unready: set[tuple[str, str]] = set()
 
@@ -4047,7 +4047,7 @@ def grind(
                             time.sleep(idle_sleep)
                         continue
                     # `bd ready` can return a compact projection. Load each
-                    # authoritative packet before the readiness guard decides
+                    # authoritative work spec before the readiness guard decides
                     # whether a fast implementer may claim it.
                     ready_packets: list[dict] = []
                     for candidate in ready:
@@ -4074,7 +4074,7 @@ def grind(
                         except Exception as exc:
                             message = (
                                 f"readiness skip: {candidate_id}: could not load full "
-                                f"issue packet ({exc})"
+                                f"work spec ({exc})"
                             )
                             write_log(message)
                             output.warn(message)
@@ -4101,7 +4101,7 @@ def grind(
                         output.warn(
                             f"{_unready_skip_line(title, report)}; grind will "
                             f"{fix} automatically when the queue has nothing "
-                            "ready, or run ortus plan / edit the packet "
+                            "ready, or run ortus plan / edit the work spec "
                             "yourself. It stays open and unclaimed."
                         )
 
@@ -4110,10 +4110,10 @@ def grind(
                     )
 
                     # Nothing claimable, but the queue is NOT drained and the
-                    # only thing between the loop and real work is packets that
+                    # only thing between the loop and real work is work specs that
                     # fail readiness schema v1. Repair those in place and
                     # revalidate rather than dead-ending on an authoring defect
-                    # (ortus-xhrj.7). A queue that also holds a ready leaf never
+                    # (ortus-xhrj.7). A queue that also holds a ready task never
                     # reaches here, so it spends no repair budget; epics never
                     # reach here either, because select_ready_issue skips them
                     # without reporting them unready.
@@ -4148,7 +4148,7 @@ def grind(
                             )
                             output.progress(
                                 "grind",
-                                "repairing unready packet(s) via one planning pass "
+                                "repairing unready work spec(s) via one planning pass "
                                 "(this typically takes 1-3 min)",
                             )
                             try:
@@ -4176,7 +4176,7 @@ def grind(
                                     f"readiness repair pass failed (exit {repair_rc})"
                                 )
                             else:
-                                # Reload the authoritative packets the pass
+                                # Reload the authoritative work specs the pass
                                 # touched, then re-run the pure selector over
                                 # the same queue.
                                 reloaded: list[dict] = []
@@ -4264,7 +4264,7 @@ def grind(
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
-                    # Freeze the post-claim authoritative packet. Verification
+                    # Freeze the post-claim authoritative work spec. Verification
                     # is bound to this exact JSON identity, including status.
                     target_issue = bd.show(issue_id)
                     phase_profiles = {
@@ -4324,15 +4324,15 @@ def grind(
                             transaction_store.save(active_journal)
                             write_log(
                                 "transaction migration: bound schema-v1 candidate "
-                                f"to issue packet {packet_digest}"
+                                f"to work spec {packet_digest}"
                             )
                         elif (
                             active_journal.issue_packet_hash != packet_digest
                             or active_journal.issue_packet_ref != packet_ref
                         ):
                             write_log(
-                                "transaction handoff: issue packet changed since the "
-                                "prior worker; adopting the current authoritative packet"
+                                "transaction handoff: work spec changed since the "
+                                "prior worker; adopting the current authoritative work spec"
                             )
                             active_journal = replace(
                                 active_journal,
@@ -4707,7 +4707,7 @@ def grind(
                         # cannot know who wrote the edit. It reports the fields.
                         packet_drift = True
                         reason = (
-                            "the immutable issue packet changed during "
+                            "the immutable work spec changed during "
                             "implementation — "
                             + _packet_drift(
                                 target, active_journal, implementation_packet
@@ -4716,7 +4716,7 @@ def grind(
                     elif not _packet_artifact_intact(target, active_journal):
                         packet_drift = True
                         reason = (
-                            "the immutable issue packet artifact changed during "
+                            "the immutable work-spec artifact changed during "
                             "implementation"
                         )
                     elif (
@@ -4782,7 +4782,7 @@ def grind(
                         output.error(f"grind: {reason}; candidate rejected")
                         if not packet_drift:
                             break
-                        # A drifted packet is an issue-level event, not a
+                        # A drifted work spec is an issue-level event, not a
                         # session-level one: the rejected candidate keeps its
                         # report and its phase, and the queue moves on. The
                         # candidate is preserved uncommitted, so the next
@@ -4902,7 +4902,7 @@ def grind(
                             break
                         gaps = _plan_gap_findings(verdict)
                         if gaps and active_journal.plan_gap_routed:
-                            halt = "plan gap persists after one planning-profile pass"
+                            halt = "planning gap persists after one planning-profile pass"
                             halt_phase = PLAN_GAP_ESCALATED
                             escalate = True
                             break
@@ -4911,12 +4911,12 @@ def grind(
                             # fast implementer to improvise; it gets exactly one
                             # planning route, then a human.
                             write_log(
-                                f"iter {iters_run}: plan gap in verifier findings; "
+                                f"iter {iters_run}: planning gap in verifier findings; "
                                 "routing once through the planning profile"
                             )
                             output.progress(
                                 "grind",
-                                f"routing plan gap for {issue_id} to the planning "
+                                f"routing planning gap for {issue_id} to the planning "
                                 "profile (one pass)",
                             )
                             active_journal = active_journal.route_plan_gap()
@@ -4937,13 +4937,13 @@ def grind(
                                     findings=gaps,
                                 )
                             except RepairCreatedReplacements as exc:
-                                write_log(f"plan-gap routing: HALT — {exc}")
+                                write_log(f"planning-gap routing: HALT — {exc}")
                                 output.error(str(exc))
                                 raise typer.Exit(code=1)
                             halt = (
-                                "routed one plan gap to the planning profile"
+                                "routed one planning gap to the planning profile"
                                 if gap_rc == 0
-                                else f"plan-gap routing pass failed (exit {gap_rc})"
+                                else f"planning-gap routing pass failed (exit {gap_rc})"
                             )
                             halt_phase = PLAN_GAP_ROUTED
                             escalate = True
@@ -5066,7 +5066,7 @@ def grind(
 
                     if halt is not None:
                         if escalate:
-                            # Exhaustion and unresolved plan gaps leave the issue
+                            # Exhaustion and unresolved planning gaps leave the issue
                             # human-flagged and OPEN work: no close, no commit.
                             try:
                                 bd.add_comment(

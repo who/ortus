@@ -409,7 +409,7 @@ def test_grind_readiness_warning_dedupes_per_run(
     skip_line = re.sub(
         r"\s+",
         "",
-        f'skipped "hand authored leaf" ({issue_id}) — no readiness packet '
+        f'skipped "hand authored leaf" ({issue_id}) — no readiness work spec '
         f"({total} of {total} sections missing)",
     )
     # Once as the warn, once in the exit listing — a second warn would make 3.
@@ -490,7 +490,7 @@ def test_grind_queue_blocked_exit_uses_summary(
             r"\s+",
             "",
             f'readiness: skipped "hand authored leaf" ({issue_id}) — '
-            f"no readiness packet ({total} of {total} sections missing)",
+            f"no readiness work spec ({total} of {total} sections missing)",
         )
         in squashed
     )
@@ -607,7 +607,7 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
         (
             "implementation-packet",
             "implementation-rejected",
-            "issue packet artifact changed during implementation",
+            "work-spec artifact changed during implementation",
         ),
     ],
 )
