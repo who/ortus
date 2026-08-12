@@ -115,11 +115,26 @@ app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0',
     )
     # The driver script may exit non-zero from typer.Exit; we care about the
     # streams, not the rc.
+    #
+    # The quiet-terminal invariant is about TRANSCRIPTS, not milestones
+    # (ortus-kawu): worker stream-json must never reach the parent's streams,
+    # while per-issue milestone lines (claim with title, verdicts, tallies)
+    # MUST reach the console. Both directions are asserted here.
     leaked = _stream_json_lines(proc.stdout)
     assert leaked == [], (
         f"REGRESSION: claude stream-json leaked to parent stdout:\n"
         f"  leaked lines: {leaked!r}\n"
         f"  full stdout: {proc.stdout!r}"
+    )
+    leaked_err = _stream_json_lines(proc.stderr)
+    assert leaked_err == [], (
+        f"REGRESSION: claude stream-json leaked to parent stderr:\n"
+        f"  leaked lines: {leaked_err!r}\n"
+        f"  full stderr: {proc.stderr!r}"
+    )
+    assert 'claimed "leak test"' in proc.stderr, (
+        "the claim milestone (issue title + id) must reach the console\n"
+        f"driver stderr: {proc.stderr!r}"
     )
 
     log_dir = repo / "logs"

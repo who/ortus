@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -30,8 +31,9 @@ def test_spec_prints_contract_verbatim_on_stdout() -> None:
 def test_spec_emits_progress_lines_on_stderr() -> None:
     result = runner.invoke(app, ["spec"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "[ortus spec]" in result.stderr
-    assert "[ortus spec] done" in result.stderr
+    assert "[ortus spec]" not in result.stderr
+    assert "readiness schema" in result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
 
 
 def test_spec_succeeds_without_workspace(

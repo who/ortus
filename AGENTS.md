@@ -20,8 +20,8 @@ Linux + macOS only. Windows was dropped 2026-05-17. Do not add Windows-specific 
 Every non-interactive `ortus` verb emits per-phase progress lines so the operator can tell "running" from "hung." Convention:
 
 - Progress lines go to **stderr** so they don't pollute machine-readable stdout.
-- Format: `[YYYY-MM-DD HH:MM:SS] [ortus <verb>] <phase>` — e.g. `[2026-08-08 13:28:45] [ortus plan] reading PRD from <path>`. The timestamp is local time in the same shape the grind log file writes, so console and log lines can be compared without mental reformatting.
-- One line per logical phase; close with a `[ortus <verb>] done (<short summary>)` line.
+- Format: `[YYYY-MM-DD HH:MM:SS] <phase>` — e.g. `[2026-08-08 13:28:45] reading PRD from <path>`. The operator invoked the verb themselves, so the old `[ortus <verb>]` tag was per-line reading tax and was dropped (ortus-kawu). The timestamp is local time in the same shape the grind log file writes, so console and log lines can be compared without mental reformatting.
+- One line per logical phase; close with a `done (<short summary>)` line.
 - For phases that legitimately take >5s, include a coarse expectation in the message (`... (this typically takes 1-3 min)`) so silence doesn't get misread as hang.
 - Use `ortus.core.output.progress(verb, phase)` — do NOT roll your own `print(...)`.
 

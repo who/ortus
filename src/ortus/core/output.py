@@ -38,18 +38,20 @@ def error(message: str, *, hint: str | None = None) -> None:
 def progress(verb: str, phase: str) -> None:
     """Emit a per-phase progress line to stderr in the canonical CLI format.
 
-    Format: `[YYYY-MM-DD HH:MM:SS] [ortus <verb>] <phase>`. See AGENTS.md "CLI
-    output convention" — silence-equals-hung is the perceived default, so
-    every non-trivial phase of a non-interactive verb must call this so the
-    operator sees motion. The timestamp is local time in the same shape the
-    grind log file writes, so console and log lines can be compared without
-    mental reformatting.
+    Format: `[YYYY-MM-DD HH:MM:SS] <phase>`. See AGENTS.md "CLI output
+    convention" — silence-equals-hung is the perceived default, so every
+    non-trivial phase of a non-interactive verb must call this so the operator
+    sees motion. The operator invoked the verb themselves, so the old
+    `[ortus <verb>]` tag was per-line reading tax and is gone (ortus-kawu);
+    `verb` stays in the signature so call sites keep naming their channel. The
+    timestamp is local time in the same shape the grind log file writes, so
+    console and log lines can be compared without mental reformatting.
     """
+    del verb  # kept for call-site uniformity; no longer rendered
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    safe_verb = _escape_markup(verb)
     safe_phase = _escape_markup(phase)
     _err.print(
-        f"[dim]\\[{stamp}] \\[ortus {safe_verb}][/dim] {safe_phase}",
+        f"[dim]\\[{stamp}][/dim] {safe_phase}",
         highlight=False,
     )
 

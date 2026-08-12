@@ -59,21 +59,24 @@ def test_error_without_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "solo error" in err.getvalue()
 
 
-def test_progress_writes_to_stderr_with_canonical_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_progress_writes_to_stderr_without_verb_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator invoked the verb; repeating `[ortus <verb>]` per line is
+    reading tax, so the tag is gone (ortus-kawu)."""
     out, err = _patched_consoles(monkeypatch)
     output.progress("init", "creating .beads/ workspace")
     rendered = err.getvalue()
-    assert "[ortus init] creating .beads/ workspace" in rendered
+    assert "creating .beads/ workspace" in rendered
+    assert "[ortus init]" not in rendered
     assert out.getvalue() == ""
 
 
-def test_progress_timestamp_format_precedes_verb_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A line opens with `[YYYY-MM-DD HH:MM:SS]`, zero-padded, then the verb tag."""
+def test_progress_timestamp_format_precedes_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A line opens with `[YYYY-MM-DD HH:MM:SS]`, zero-padded, then the phase."""
     out, err = _patched_consoles(monkeypatch)
     output.progress("grind", "picking next issue")
     rendered = err.getvalue().strip()
     assert re.fullmatch(
-        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[ortus grind\] picking next issue",
+        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] picking next issue",
         rendered,
     ), rendered
 
@@ -129,7 +132,7 @@ def test_progress_timestamp_is_local_time(monkeypatch: pytest.MonkeyPatch) -> No
     out2, err2 = _patched_consoles(monkeypatch)
     monkeypatch.setattr(output, "_dt", SimpleNamespace(datetime=_FakeDatetime))
     output.progress("grind", "picking next issue")
-    assert "[2026-08-08 13:28:45] [ortus grind] picking next issue" in err2.getvalue()
+    assert "[2026-08-08 13:28:45] picking next issue" in err2.getvalue()
     assert tz_args == [None]
 
 
@@ -137,7 +140,7 @@ def test_progress_goes_to_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
     """Progress stays on stderr so machine-readable stdout is untouched."""
     out, err = _patched_consoles(monkeypatch)
     output.progress("grind", "picking next issue")
-    assert "[ortus grind] picking next issue" in err.getvalue()
+    assert "picking next issue" in err.getvalue()
     assert out.getvalue() == ""
 
 
@@ -146,7 +149,7 @@ def test_progress_escapes_markup_in_phase(monkeypatch: pytest.MonkeyPatch) -> No
     out, err = _patched_consoles(monkeypatch)
     output.progress("plan", "writing [1/3] of N issues")
     rendered = err.getvalue()
-    assert "[ortus plan] writing [1/3] of N issues" in rendered
+    assert "writing [1/3] of N issues" in rendered
 
 
 def test_table_writes_to_stdout(monkeypatch: pytest.MonkeyPatch) -> None:

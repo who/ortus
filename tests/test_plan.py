@@ -402,13 +402,14 @@ def test_plan_missing_repo_error_names_path(tmp_path: Path) -> None:
 def test_plan_emits_progress_lines(
     bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance for ortus-s60a: plan emits `[ortus plan] <phase>` to stderr."""
+    """Acceptance for ortus-s60a: plan emits timestamped `<phase>` lines to
+    stderr (the `[ortus plan]` tag was dropped in ortus-kawu)."""
     _swap_runner(monkeypatch, str(FAKE_CLAUDE_PLAN))
     result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "[ortus plan]" in result.stderr
+    assert "[ortus plan]" not in result.stderr
     assert "reading PRD" in result.stderr
-    assert "[ortus plan] done" in result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
 
 
 def test_plan_writes_timestamped_log(

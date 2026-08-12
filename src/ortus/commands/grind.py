@@ -20,7 +20,10 @@ Preserved invariants from the prior shape:
   - hook precheck (refuse to launch if disableAllHooks=true anywhere)
   - cache env-var exports (relocate ~/.cache into project-local)
   - process-group cleanup via the shared runner implementation
-  - tee to logs/grind-<ts>.log; terminal stays quiet (ortus-6q8v invariant)
+  - tee to logs/grind-<ts>.log; worker transcripts never reach the terminal
+    (ortus-6q8v invariant, narrowed by ortus-kawu: the console DOES narrate
+    per-issue milestones — claim, verdict, corrections, landings — while
+    healthy CodeGraph plumbing narrates to the log only)
 
 New behavior:
   - --orphan-policy={warn,revert,escalate} (default warn)
@@ -254,11 +257,14 @@ def _codex_codegraph_handshake(
         return probe
     handshake = getattr(runner, "run_codegraph_handshake", None)
     offset = log_path.stat().st_size if log_path.exists() else 0
+    # Healthy handshake plumbing narrates to the log, not the console
+    # (ortus-kawu); only a failure below earns a console line.
+    log_line = _log_writer(log_path)
     reason: str | None = None
     if not callable(handshake):
         reason = "Codex runner does not support the CodeGraph child handshake"
     else:
-        output.progress("grind", f"{phase.value} CodeGraph child handshake probe")
+        log_line(f"{phase.value} CodeGraph child handshake probe")
         try:
             rc = handshake(
                 phase=phase.value,
@@ -282,9 +288,7 @@ def _codex_codegraph_handshake(
         elif not summary.capability_observed:
             reason = "; ".join(summary.fallbacks[:3])
         else:
-            output.progress(
-                "grind", f"{phase.value} CodeGraph child handshake succeeded"
-            )
+            log_line(f"{phase.value} CodeGraph child handshake succeeded")
             _append_handshake(log_path, phase, success=True)
             return probe
 
@@ -1332,11 +1336,11 @@ def _verify_candidate(
         journal, phase_contract(CodeGraphPhase.VERIFICATION, verification_probe)
     )
     verify_offset = log.stat().st_size if log.exists() else 0
-    output.progress(
-        "grind",
-        "verification CodeGraph handshake "
-        + ("requested" if probe.available else "fallback active"),
-    )
+    if probe.available:
+        write_log("verification CodeGraph handshake requested")
+    else:
+        output.progress("grind", "verification CodeGraph handshake fallback active")
+    verify_started = time.monotonic()
     timed_out = False
     try:
         rc = runner.run(
@@ -1481,7 +1485,7 @@ def _verify_candidate(
 
     summary = _summarize()
     if summary.capability_observed:
-        output.progress("grind", "verification CodeGraph handshake succeeded")
+        write_log("verification CodeGraph handshake succeeded")
     elif mode is not CodeGraphMode.OFF:
         output.progress(
             "grind",
@@ -1584,6 +1588,12 @@ def _verify_candidate(
     write_log(
         f"iter {iteration}: verifier verdict={verdict.decision} "
         f"candidate={journal.candidate_hash}"
+    )
+    output.progress(
+        "grind",
+        f"verdict: {verdict.decision.upper()} "
+        f"(candidate {journal.candidate_hash[:12]}) after "
+        f"{_fmt_duration(time.monotonic() - verify_started)}",
     )
     return _VerificationResult(journal=journal, summary=summary, verdict=verdict)
 
@@ -3084,6 +3094,17 @@ def _console_safe(text: str) -> str:
     return escape_markup(text)
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Elapsed time the way a colleague would say it: `47s` under a minute,
+    whole minutes after that. Console milestones only; the log keeps exact
+    timestamps."""
+
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    return f"{total // 60}m"
+
+
 def _log_writer(log_path: Path) -> Callable[[str], None]:
     """Tee-style logger: write a timestamped line to log_path; terminal stays quiet."""
 
@@ -4023,6 +4044,13 @@ def grind(
                         f"iter {iters_run + 1}: harness selected+claimed {issue_id}; "
                         f"injected into {resolved_backend} worker prompt"
                     )
+                    # output.progress escapes markup itself, so a bracketed
+                    # title survives the console without pre-escaping.
+                    output.progress(
+                        "grind",
+                        f'claimed "{target_issue.get("title") or "untitled"}" '
+                        f"({issue_id}) — implementing",
+                    )
                 else:
                     iteration_prompt = _legacy_prompt(condition, resolved_backend)
 
@@ -4044,16 +4072,15 @@ def grind(
                 # the worker is exempt from the handshake gate below.
                 implementation_worker_ran = True
                 phase_offset = log.stat().st_size if log.exists() else 0
+                impl_started = time.monotonic()
                 try:
-                    output.progress(
-                        "grind",
-                        "implementation CodeGraph handshake "
-                        + (
-                            "requested"
-                            if implementation_probe.available
-                            else "fallback active"
-                        ),
-                    )
+                    if implementation_probe.available:
+                        write_log("implementation CodeGraph handshake requested")
+                    else:
+                        output.progress(
+                            "grind",
+                            "implementation CodeGraph handshake fallback active",
+                        )
                     if resume_candidate_ready:
                         implementation_worker_ran = False
                         rc = int(
@@ -4211,9 +4238,7 @@ def grind(
                 )
                 append_normalized(log, implementation_summary)
                 if implementation_summary.capability_observed:
-                    output.progress(
-                        "grind", "implementation CodeGraph handshake succeeded"
-                    )
+                    write_log("implementation CodeGraph handshake succeeded")
                 elif not implementation_worker_ran:
                     # The transcript segment is empty by construction: no agent
                     # was asked to perform this handshake. Reporting a fallback
@@ -4371,9 +4396,7 @@ def grind(
                 # Candidate edits are indexed by the parent before a fresh
                 # verifier starts. Refresh failure is blocking only in required
                 # mode (auto records the stale fallback and continues).
-                output.progress(
-                    "grind", "refreshing CodeGraph index before verification"
-                )
+                write_log("refreshing CodeGraph index before verification")
                 freshness, sync_ms = codegraph_adapter.refresh(target, codegraph_probe)
                 implementation_summary.freshness = freshness
                 implementation_summary.sync_duration_ms = sync_ms
@@ -4396,6 +4419,18 @@ def grind(
                     if active_journal is None:
                         output.error("grind: verifier has no candidate transaction")
                         raise typer.Exit(code=1)
+                    if implementation_worker_ran:
+                        output.progress(
+                            "grind",
+                            "implementation done in "
+                            f"{_fmt_duration(time.monotonic() - impl_started)}; "
+                            "fresh verifier reviewing the candidate",
+                        )
+                    else:
+                        output.progress(
+                            "grind",
+                            "inherited candidate ready; fresh verifier reviewing it",
+                        )
                     verify_kwargs = dict(
                         runner=runner,
                         bd=bd,
@@ -4695,17 +4730,17 @@ def grind(
                         f"iter {iters_run}: Ortus finalized {issue_id} "
                         "(report, close, commit, sync)"
                     )
-                    output.progress("grind", f"finalized {issue_id}")
+                    # The console's landing line prints below, once the
+                    # post-iteration snapshot can carry the running tally.
                 else:
                     # Compatibility/safety: if an implementation worker closed
                     # despite the phase contract, still leave durable evidence.
                     verification_summary = implementation_summary
                     verification_summary.phase = CodeGraphPhase.VERIFICATION.value
 
-                output.progress(
-                    "grind",
+                write_log(
                     f"CodeGraph phase summary: {len(verification_summary.events)} queries, "
-                    f"freshness={freshness}",
+                    f"freshness={freshness}"
                 )
 
                 after = _snapshot(bd)
@@ -4716,6 +4751,16 @@ def grind(
                     write_log(
                         f"iter {iters_run}: closed +{delta.closed_delta} "
                         f"(tasks_completed={tasks_completed}, rc={rc})"
+                    )
+                    landed = (
+                        f"landed {issue_id} on {integration_branch}"
+                        if finalized
+                        else "an issue closed"
+                    )
+                    output.progress(
+                        "grind",
+                        f"{landed} — {tasks_completed} done this run, "
+                        f"{after.open} open",
                     )
                     # `finalized` means Ortus already reported, closed, committed
                     # the owned paths, and synchronized. Only the legacy

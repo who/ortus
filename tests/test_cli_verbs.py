@@ -146,9 +146,10 @@ def test_repo_arg_with_beads_dir_proceeds_past_fr003(tmp_path: Path) -> None:
 
 # --- CLI output convention (ortus-s60a) -------------------------------------
 #
-# Every non-interactive verb must emit `[YYYY-MM-DD HH:MM:SS] [ortus <verb>] <phase>`
-# lines to stderr so the operator can tell "running" from "hung." These tests
-# guard the convention per-verb. See AGENTS.md "CLI output convention".
+# Every non-interactive verb must emit `[YYYY-MM-DD HH:MM:SS] <phase>` lines to
+# stderr so the operator can tell "running" from "hung." The `[ortus <verb>]`
+# tag was dropped as per-line reading tax (ortus-kawu). These tests guard the
+# convention per-verb. See AGENTS.md "CLI output convention".
 
 
 def _bd_repo(tmp_path: Path) -> Path:
@@ -174,23 +175,26 @@ def test_init_emits_progress_lines(tmp_path: Path) -> None:
     # and the codegraph CLI is absent on hermetic runners.
     result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "[ortus init]" in result.stderr
-    assert "[ortus init] done" in result.stderr
+    assert "[ortus init]" not in result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] target: ", result.stderr, re.M), result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
 
 
-def test_verb_progress_lines_open_with_timestamp_then_verb_tag(tmp_path: Path) -> None:
-    """Every progress line a real verb emits carries the stamp ahead of the tag."""
+def test_verb_progress_lines_open_with_timestamp_then_phase(tmp_path: Path) -> None:
+    """Every progress line a real verb emits opens with the stamp, then the
+    phase — no `[ortus <verb>]` tag in between (ortus-kawu)."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     target = tmp_path / "stamped"
     result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    tagged = [line for line in result.stderr.splitlines() if "[ortus init]" in line]
-    assert tagged, result.stderr
-    for line in tagged:
-        assert re.match(
-            r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] \[ortus init\] ", line
-        ), line
+    stamped = [
+        line
+        for line in result.stderr.splitlines()
+        if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ", line)
+    ]
+    assert stamped, result.stderr
+    assert "[ortus " not in result.stderr
 
 
 def test_check_emits_progress_lines(tmp_path: Path) -> None:
@@ -198,16 +202,16 @@ def test_check_emits_progress_lines(tmp_path: Path) -> None:
     # check may fail individual sub-checks in this hermetic env (no claude,
     # no real sandbox); we only assert the convention output is present.
     result = runner.invoke(app, ["check", str(repo)])
-    assert "[ortus check]" in result.stderr
-    assert "[ortus check] done" in result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] backend: ", result.stderr, re.M), result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
 
 
 def test_human_emits_progress_lines(tmp_path: Path) -> None:
     repo = _bd_repo(tmp_path)
     result = runner.invoke(app, ["human", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "[ortus human]" in result.stderr
-    assert "[ortus human] done" in result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] target: ", result.stderr, re.M), result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
 
 
 def test_grind_dry_run_keeps_dry_run_output_on_stdout(tmp_path: Path) -> None:

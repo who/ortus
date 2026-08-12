@@ -1391,3 +1391,230 @@ def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
         "reasserted main (exports carried) before claiming" in line for line in lines
     )
     assert (repo / ".beads" / "issues.jsonl").read_bytes() == newest
+
+
+# --- console milestones (ortus-kawu) -----------------------------------------
+#
+# The console narrates the run at executive altitude — claim with title,
+# verdicts with the short candidate hash, corrections, landings with a running
+# tally — while healthy CodeGraph plumbing narrates only to the log. Blockers
+# and escalations always reach the console.
+
+
+def _squashed_console(result: object) -> str:
+    """stderr with rich's soft-wrapping collapsed, so assertions survive the
+    80-column test console."""
+    return " ".join((result.stderr or "").split())  # type: ignore[attr-defined]
+
+
+def _narrated_grind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    title: str = "narrated",
+    decisions: tuple[str, ...] = ("pass",),
+    max_corrections: int | None = None,
+) -> tuple[Path, str, object, list[str]]:
+    """One harness-claimed run whose fake verifier emits `decisions` in order.
+
+    Returns the repo, the claimed issue id, the CliRunner result, and the
+    candidate hash the journal held at each verification, so tests can pin the
+    console's short-hash rendering to the real value.
+    """
+    repo = _bd_repo(tmp_path, name)
+    issue_id = _create_ready_issue(repo, title)
+    _baseline_commit(repo)
+
+    hashes: list[str] = []
+    decisions_left = list(decisions)
+    impl_runs = [0]
+
+    class _NarratingRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            if readonly:
+                journal = JournalStore(repo).load()
+                assert journal is not None
+                hashes.append(journal.candidate_hash)
+                _emit_verdict(
+                    repo,
+                    log_path,
+                    criteria=("AC-1", "AC-2"),
+                    decision=decisions_left.pop(0),
+                )
+            else:
+                impl_runs[0] += 1
+                (repo / "candidate.py").write_text(f"VALUE = {impl_runs[0]}\n")
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _NarratingRunner())
+    args = ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    if max_corrections is not None:
+        args += ["--max-corrections", str(max_corrections)]
+    result = runner.invoke(app, args)
+    return repo, issue_id, result, hashes
+
+
+@pytest.mark.slow
+def test_grind_console_prints_claim_with_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the claim milestone leads with the issue title, id in parens."""
+    _, issue_id, result, _ = _narrated_grind(
+        tmp_path, monkeypatch, name="claim", title="narrate the run"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    assert f'claimed "narrate the run" ({issue_id}) — implementing' in console
+
+
+@pytest.mark.slow
+def test_grind_console_prints_verdict_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the verdict line carries the decision and the 12-char hash,
+    mirroring the log so the two channels correlate."""
+    repo, _, result, hashes = _narrated_grind(tmp_path, monkeypatch, name="verdict")
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert hashes, "the fake verifier never ran"
+    console = _squashed_console(result)
+    assert f"verdict: PASS (candidate {hashes[-1][:12]}) after" in console
+    assert f"candidate={hashes[-1]}" in _grind_log(repo)
+
+
+@pytest.mark.slow
+def test_grind_console_prints_tally_and_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: correction attempts, the landing, and the running tally all
+    reach the console."""
+    _, issue_id, result, hashes = _narrated_grind(
+        tmp_path, monkeypatch, name="tally", decisions=("fail", "pass")
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    assert f"verdict: FAIL (candidate {hashes[0][:12]})" in console
+    assert f"correction attempt 1/2 for {issue_id}" in console
+    assert f"landed {issue_id} on main — 1 done this run, 0 open" in console
+
+
+@pytest.mark.slow
+def test_grind_blockers_print_verbatim_on_console(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: quiet applies to health, never to trouble — an escalation's own
+    words reach the console."""
+    _, _, result, _ = _narrated_grind(
+        tmp_path,
+        monkeypatch,
+        name="blocker",
+        decisions=("fail",),
+        max_corrections=0,
+    )
+    console = _squashed_console(result)
+    assert (
+        "bounded correction attempts exhausted (0/0); candidate left uncommitted"
+        in console
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("healthy", [True, False], ids=["healthy", "no-handshake"])
+def test_grind_healthy_codegraph_lines_are_log_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, healthy: bool
+) -> None:
+    """AC-4: healthy handshake/refresh/summary lines narrate to the log only;
+    a missing handshake still earns its console fallback line."""
+    from ortus.core.codegraph import CodeGraphProbe
+
+    repo = _bd_repo(tmp_path, f"cg-{'healthy' if healthy else 'fallback'}")
+    _create_ready_issue(repo, "codegraph narration")
+    _baseline_commit(repo)
+
+    cg_event = {
+        "type": "item.completed",
+        "item": {
+            "id": "cg1",
+            "type": "mcp_tool_call",
+            "server": "codegraph",
+            "tool": "codegraph_explore",
+            "arguments": {"query": "orientation"},
+            "result": "symbols: run",
+        },
+    }
+
+    class _NarratingRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            repo: Path,
+            log_path: Path,
+            readonly: bool = False,
+            **kwargs: object,
+        ) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            if healthy:
+                with log_path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(cg_event) + "\n")
+            else:
+                log_path.touch(exist_ok=True)
+            if readonly:
+                _emit_verdict(repo, log_path, criteria=("AC-1", "AC-2"))
+            else:
+                (repo / "candidate.py").write_text("VALUE = 1\n")
+            return 0
+
+    class _AvailableCodeGraph:
+        def probe(self, repo: Path, mode: object, *, backend: str = "claude") -> object:
+            return CodeGraphProbe(mode, True, True, True)
+
+        def refresh(self, repo: Path, probe: object) -> tuple[str, int]:
+            return ("fresh", 3)
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _NarratingRunner())
+    monkeypatch.setattr(grind_mod, "_make_codegraph", lambda: _AvailableCodeGraph())
+
+    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    log_text = _grind_log(repo)
+
+    # Healthy plumbing never prints to the console...
+    assert "CodeGraph handshake requested" not in console
+    assert "CodeGraph handshake succeeded" not in console
+    assert "refreshing CodeGraph index" not in console
+    assert "CodeGraph phase summary" not in console
+    # ...but stays in the log, the complete record (AC-7).
+    assert "implementation CodeGraph handshake requested" in log_text
+    assert "verification CodeGraph handshake requested" in log_text
+    assert "refreshing CodeGraph index before verification" in log_text
+    assert "CodeGraph phase summary" in log_text
+    if healthy:
+        assert "implementation CodeGraph handshake succeeded" in log_text
+        assert "verification CodeGraph handshake succeeded" in log_text
+        assert "CodeGraph fallback" not in console
+    else:
+        # Trouble still prints: the missing handshake earns its console line.
+        assert (
+            "implementation CodeGraph fallback: agent MCP capability handshake "
+            "not observed" in console
+        )

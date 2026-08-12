@@ -414,7 +414,7 @@ the index after candidate edits, and a fresh verifier independently checks chang
 symbols and callers.
 
 ```text
-[ortus grind] CodeGraph probe (mode=required)
+[2026-08-08 13:28:45] CodeGraph probe (mode=required)
 error: CodeGraph required but unavailable: project index .codegraph/ is missing.
 ```
 

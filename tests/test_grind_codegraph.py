@@ -101,9 +101,16 @@ def test_codex_handshake_succeeds_for_both_fresh_worker_postures(
         timeout=10,
     )
     assert result.available
-    records = [json.loads(line) for line in log.read_text().splitlines()]
+    # The healthy probe/succeeded lines narrate to this same log as plain
+    # timestamped text (ortus-kawu), alongside the structured records.
+    records = [
+        json.loads(line)
+        for line in log.read_text().splitlines()
+        if line.startswith("{")
+    ]
     assert any(record.get("kind") == "handshake" and record["success"] for record in records)
     assert any(record.get("kind") == "query" for record in records)
+    assert f"{phase.value} CodeGraph child handshake succeeded" in log.read_text()
 
 
 def test_auto_child_missing_records_precise_fallback(tmp_path: Path) -> None:
