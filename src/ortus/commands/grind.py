@@ -3113,6 +3113,17 @@ def _console_safe(text: str) -> str:
     return escape_markup(text)
 
 
+def _unready_skip_line(title: str, report: ReadinessReport) -> str:
+    """Console-altitude skip line: title first, id in parentheses, one clause.
+
+    The full section-by-section enumeration keeps serving the log and the
+    repair prompt; the console gets the summary a colleague would say aloud.
+    """
+
+    label = _console_safe(title) if title.strip() else report.issue_id
+    return f'skipped "{label}" ({report.issue_id}) — {report.summary()}'
+
+
 def _fmt_duration(seconds: float) -> str:
     """Elapsed time the way a colleague would say it: `47s` under a minute,
     whole minutes after that. Console milestones only; the log keeps exact
@@ -3754,6 +3765,10 @@ def grind(
             # at most `repair_budget` passes overall.
             repair_attempted: set[str] = set()
             repairs_run = 0
+            # Console-only dedupe for readiness-skip warnings, keyed on issue
+            # id plus summary text so a packet that re-fails differently warns
+            # again. The log keeps every occurrence.
+            warned_unready: set[tuple[str, str]] = set()
 
             while True:
                 # Milestone rollover: an epic whose children are all closed
@@ -3859,18 +3874,30 @@ def grind(
                             output.warn(message)
 
                     unready: list[ReadinessReport] = []
+                    unready_titles: dict[str, str] = {}
 
                     def report_unready(
                         candidate: dict, report: ReadinessReport
                     ) -> None:
                         unready.append(report)
+                        title = str(candidate.get("title") or "").strip()
+                        unready_titles[report.issue_id] = title
                         diagnostic = report.diagnostic()
-                        message = (
+                        write_log(
                             f"readiness skip (left open for planning/human repair): "
                             f"{diagnostic}"
                         )
-                        write_log(message)
-                        output.warn(message)
+                        key = (report.issue_id, report.summary())
+                        if key in warned_unready:
+                            return
+                        warned_unready.add(key)
+                        fix = "draft one" if report.packet_missing else "repair it"
+                        output.warn(
+                            f"{_unready_skip_line(title, report)}; grind will "
+                            f"{fix} automatically when the queue has nothing "
+                            "ready, or run ortus plan / edit the packet "
+                            "yourself. It stays open and unclaimed."
+                        )
 
                     target_issue = select_ready_issue(
                         ready_packets, on_unready=report_unready
@@ -4009,7 +4036,16 @@ def grind(
                             )
                             write_log(diagnostic)
                             write_log(follow_up)
-                            output.error(diagnostic)
+                            # The exit listing is the run's explanation, so it
+                            # always prints regardless of the warn dedupe — but
+                            # at summary altitude; the log keeps the detail.
+                            output.error(
+                                "readiness: "
+                                + _unready_skip_line(
+                                    unready_titles.get(report.issue_id, ""),
+                                    report,
+                                )
+                            )
                             output.error(follow_up)
                         break
                     issue_id = target_issue["id"]

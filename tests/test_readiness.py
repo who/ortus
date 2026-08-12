@@ -102,6 +102,43 @@ def test_placeholder_and_unmapped_checks_are_rejected() -> None:
     assert "criterion_mapped_checks" in codes
 
 
+def test_full_miss_collapses_to_no_packet() -> None:
+    """AC-1: an empty packet has one problem, not fifteen."""
+    report = validate_issue({"id": "legacy-1", "issue_type": "task"})
+    total = len(_REQUIRED_SECTIONS)
+    assert report.packet_missing
+    assert report.summary() == (
+        f"no readiness packet ({total} of {total} sections missing)"
+    )
+
+
+def test_partial_miss_names_only_failures() -> None:
+    """AC-2: the summary names failing sections only; one failure drops the
+    count clause; passing sections are never mentioned."""
+    issue = ready_issue()
+    issue["design"] = issue["design"].replace(
+        "## Non-goals\nNo output redesign.\n\n", ""
+    )
+    issue["design"] = issue["design"].replace(
+        "1. Parse the flag.\n2. Bypass writes.", "Parse, then bypass."
+    )
+    report = validate_issue(issue)
+    total = len(_REQUIRED_SECTIONS)
+    assert not report.packet_missing
+    assert report.summary() == (
+        f"failing sections (2 of {total}): design/non goals, design/ordered steps"
+    )
+    assert "design/scope" not in report.summary()
+
+    single = ready_issue()
+    single["design"] = single["design"].replace(
+        "1. Parse the flag.\n2. Bypass writes.", "Parse, then bypass."
+    )
+    assert validate_issue(single).summary() == (
+        "failing section: design/ordered steps"
+    )
+
+
 def test_epic_is_exempt_and_mixed_graph_only_fails_bad_leaf() -> None:
     epic = {"id": "demo-e", "issue_type": "epic", "description": "broad"}
     bad = {"id": "demo-bad", "issue_type": "bug"}

@@ -19,6 +19,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import claude as claude_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
+from ortus.core.readiness import _REQUIRED_SECTIONS
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
 from ortus.core.transaction import JournalStore
@@ -356,12 +357,145 @@ def test_grind_repair_budget_exhausted_prints_diagnostics_and_follow_up(
     assert _issue(repo, second)["status"] == "open"
     combined = result.stdout + result.stderr
     assert "readiness repair budget exhausted (0/0 pass(es) used)" in combined
-    assert f"readiness: {first}" in combined
-    assert f"readiness: {second}" in combined
     # Rich hard-wraps long lines mid-token, so compare whitespace-free.
     squashed = re.sub(r"\s+", "", combined)
+    assert (
+        re.sub(r"\s+", "", f'skipped "first hand authored leaf" ({first})')
+        in squashed
+    )
+    assert (
+        re.sub(r"\s+", "", f'skipped "second hand authored leaf" ({second})')
+        in squashed
+    )
     assert re.sub(r"\s+", "", f"follow-up: bd update {second}") in squashed
     assert re.sub(r"\s+", "", f"then re-run: ortus grind {repo}") in squashed
+
+
+@pytest.mark.slow
+def test_grind_readiness_warning_dedupes_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: the console warns once per issue per run; the log keeps every
+    occurrence. A repair pass that fixes nothing forces a second selection
+    pass over the same unready leaf inside one run."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "dedupe")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+
+    class NoFixClaude:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoFixClaude())
+
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    log_text = _grind_log(repo)
+    assert (
+        log_text.count("readiness skip (left open for planning/human repair)") == 2
+    ), "the log must record every occurrence"
+    squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
+    total = len(_REQUIRED_SECTIONS)
+    skip_line = re.sub(
+        r"\s+",
+        "",
+        f'skipped "hand authored leaf" ({issue_id}) — no readiness packet '
+        f"({total} of {total} sections missing)",
+    )
+    # Once as the warn, once in the exit listing — a second warn would make 3.
+    assert squashed.count(skip_line) == 2
+    assert squashed.count(re.sub(r"\s+", "", "It stays open and unclaimed.")) == 1
+
+
+@pytest.mark.slow
+def test_grind_repair_prompt_keeps_full_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: the console summary does not leak into the repair pass — its
+    prompt still carries the section-by-section work order."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "renum")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    prompts: list[str] = []
+
+    class NoFixClaude:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
+            prompts.append(prompt)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(exist_ok=True)
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoFixClaude())
+
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(prompts) == 1, "exactly one repair pass runs for one unready leaf"
+    prompt = prompts[0]
+    assert "READINESS REPAIR PASS" in prompt
+    assert (
+        f"{issue_id}: description/objective: missing, empty, or placeholder section"
+        in prompt
+    )
+    assert prompt.count("missing, empty, or placeholder section") == len(
+        _REQUIRED_SECTIONS
+    )
+
+
+@pytest.mark.slow
+def test_grind_queue_blocked_exit_uses_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: the run's exit explanation names the issue at summary altitude and
+    keeps the follow-up command; the fifteen-clause wall stays in the log."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "exitsum")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+
+    class NeverRuns:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, **kwargs: object) -> int:
+            raise AssertionError("--no-repair-unready must not spawn any subprocess")
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--no-repair-unready", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
+    total = len(_REQUIRED_SECTIONS)
+    assert (
+        re.sub(
+            r"\s+",
+            "",
+            f'readiness: skipped "hand authored leaf" ({issue_id}) — '
+            f"no readiness packet ({total} of {total} sections missing)",
+        )
+        in squashed
+    )
+    assert re.sub(r"\s+", "", f"follow-up: bd update {issue_id}") in squashed
+    # The enumeration's clauses stay off the console but in the log.
+    assert re.sub(r"\s+", "", "description/behavioral context:") not in squashed
+    assert "description/behavioral context: missing" in _grind_log(repo)
 
 
 def test_grind_dry_run_prints_resolved_flags_and_exits(

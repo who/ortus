@@ -20,6 +20,10 @@ READINESS_SCHEMA_VERSION = "v1"
 # a memory with a matching key in place, so re-seeding it never duplicates.
 READINESS_MEMORY_KEY = "ortus-readiness-contract"
 
+# The presence-failure message, shared with ``ReadinessReport.packet_missing``
+# so "every section absent" is recognised by identity, not string guesswork.
+_MISSING_SECTION_MESSAGE = "missing, empty, or placeholder section"
+
 
 @dataclass(frozen=True)
 class ReadinessFailure:
@@ -51,6 +55,43 @@ class ReadinessReport:
             for failure in self.failures
         )
         return f"{self.issue_id}: {details}"
+
+    @property
+    def packet_missing(self) -> bool:
+        """True when the issue carries no readiness packet at all."""
+
+        codes = {failure.code for failure in self.failures}
+        return (
+            not self.exempt
+            and codes == {section.code for section in _REQUIRED_SECTIONS}
+            and all(
+                failure.message == _MISSING_SECTION_MESSAGE
+                for failure in self.failures
+            )
+        )
+
+    def summary(self) -> str:
+        """One clause at console altitude; ``diagnostic()`` keeps the detail.
+
+        An empty packet has one problem, not fifteen, so a full miss collapses
+        to a count against the schema total. A partial miss names only the
+        failing sections; a single failing section skips the count clause.
+        """
+
+        if self.ready:
+            return "ready"
+        total = len(_REQUIRED_SECTIONS)
+        if self.packet_missing:
+            return f"no readiness packet ({total} of {total} sections missing)"
+        sections = [
+            f"{failure.field}/{failure.section}" for failure in self.failures
+        ]
+        if len(sections) == 1:
+            return f"failing section: {sections[0]}"
+        return (
+            f"failing sections ({len(sections)} of {total}): "
+            + ", ".join(sections)
+        )
 
 
 @dataclass(frozen=True)
@@ -295,7 +336,7 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
                     section.code,
                     section.field,
                     section.key,
-                    "missing, empty, or placeholder section",
+                    _MISSING_SECTION_MESSAGE,
                 )
             )
 
