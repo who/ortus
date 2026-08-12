@@ -1471,7 +1471,7 @@ def test_claim_after_plan_gap_with_diverged_exports(tmp_path: Path) -> None:
     git = GitClient(repo)
     lines: list[str] = []
 
-    branch, blocker = grind_mod._prepare_issue_branch(
+    branch, blocker, resumed = grind_mod._prepare_issue_branch(
         git,
         issue_id="tmpl-next",
         integration_branch="main",
@@ -1480,6 +1480,7 @@ def test_claim_after_plan_gap_with_diverged_exports(tmp_path: Path) -> None:
     )
 
     assert blocker == ""
+    assert resumed is False
     assert branch == "ortus/tmpl-next"
     assert git.current_branch() == "ortus/tmpl-next"
     assert (repo / ".beads" / "issues.jsonl").read_bytes() == newest
@@ -1499,7 +1500,7 @@ def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
     lines: list[str] = []
 
     # Same-issue resume: checkout, never a reset, never a refusal.
-    branch, blocker = grind_mod._prepare_issue_branch(
+    branch, blocker, resumed = grind_mod._prepare_issue_branch(
         git,
         issue_id="tmpl-strand",
         integration_branch="main",
@@ -1507,6 +1508,7 @@ def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
         write_log=lines.append,
     )
     assert blocker == ""
+    assert resumed is True
     assert branch == "ortus/tmpl-strand"
     assert git.current_branch() == "ortus/tmpl-strand"
     assert git.branch_tip("ortus/tmpl-strand") == journal.branch_head
@@ -1514,7 +1516,7 @@ def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
 
     # Different-issue claim from the same strand: the hold ends by reassert.
     lines.clear()
-    branch, blocker = grind_mod._prepare_issue_branch(
+    branch, blocker, resumed = grind_mod._prepare_issue_branch(
         git,
         issue_id="tmpl-other",
         integration_branch="main",
@@ -1522,6 +1524,7 @@ def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
         write_log=lines.append,
     )
     assert blocker == ""
+    assert resumed is False
     assert git.current_branch() == "ortus/tmpl-other"
     assert any(
         "reasserted main (exports carried) before claiming" in line for line in lines

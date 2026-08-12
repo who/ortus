@@ -471,7 +471,14 @@ def _candidate_view(
     dirty = git.dirty_paths()
     if dirty is None:
         return None
-    base = journal.base_head if journal.issue_branch else ""
+    # The recorded base is meaningful only while the branch it forked still
+    # exists; against a deleted branch it would attribute the integration
+    # branch's own later commits to the candidate (ortus-ti4i).
+    base = (
+        journal.base_head
+        if journal.issue_branch and git.branch_exists(journal.issue_branch)
+        else ""
+    )
     extra: frozenset[str] = frozenset()
     if base and git.head_oid() != base:
         changed = git.changed_paths(base)
@@ -1019,8 +1026,11 @@ def _prepare_handoff(
         resume_issue_id=journal.issue_id,
         # Implementation already produced a reviewable candidate for these
         # phases, so the resume goes straight to a fresh verifier.
-        candidate_ready=prior_phase
-        in {CANDIDATE_CAPTURED, VERIFICATION, VERIFICATION_TIMEOUT},
+        # A captured-but-empty candidate has nothing for a verifier to
+        # judge; resuming it to verification traps the transaction
+        # (ortus-ti4i). It re-implements instead.
+        candidate_ready=bool(candidate)
+        and prior_phase in {CANDIDATE_CAPTURED, VERIFICATION, VERIFICATION_TIMEOUT},
         active=True,
         prior_phase=prior_phase,
         diff_ref=journal.candidate_diff_ref,
@@ -2771,10 +2781,16 @@ def _prepare_issue_branch(
     integration_branch: str,
     journal: CandidateJournal | None,
     write_log: Callable[[str], None],
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """Put the tree on `ortus/<issue-id>`, or say why that is impossible.
 
-    Returns ``(branch_name, blocker)`` — blocker is "" on success. Owns the
+    Returns ``(branch_name, blocker, resumed)`` — blocker is "" on success,
+    and ``resumed`` is True only when an existing branch was checked out with
+    its commits intact. Callers use it to keep one invariant true: the
+    journal's ``base_head`` equals the branch's fork point — preserved when
+    the branch survives, refreshed when it is (re)established at the
+    integration head (ortus-ti4i: a preserved base for a re-cut branch made
+    the integration-moved guard reject every retry). Owns the
     whole branch discipline of a claim:
 
     - A tree stranded on a prior issue's branch is returned to the
@@ -2817,7 +2833,7 @@ def _prepare_issue_branch(
             return issue_branch, (
                 f"could not return to {integration_branch} "
                 f"before claiming: {switch_reason}"
-            )
+            ), False
         write_log(
             f"iter prep: reasserted {integration_branch} "
             "(exports carried) before claiming"
@@ -2827,7 +2843,7 @@ def _prepare_issue_branch(
         return issue_branch, (
             f"issue id {issue_id!r} is not a legal branch "
             f"name component for {issue_branch!r}"
-        )
+        ), False
 
     if resuming_own:
         if git.current_branch() != issue_branch:
@@ -2837,12 +2853,12 @@ def _prepare_issue_branch(
             if reason:
                 return issue_branch, (
                     f"could not check out {issue_branch} to resume: {reason}"
-                )
+                ), False
         write_log(
             f"iter prep: resumed existing {issue_branch} at "
             f"{git.branch_tip(issue_branch)[:12]}"
         )
-        return issue_branch, ""
+        return issue_branch, "", True
 
     if git.branch_exists(issue_branch):
         if git.branch_tip(issue_branch) != git.head_oid():
@@ -2852,7 +2868,7 @@ def _prepare_issue_branch(
                 f"integration head {git.head_oid()[:12]}; refusing "
                 "to reuse or reset it — resolve the branch "
                 "manually, then re-run grind"
-            )
+            ), False
         write_log(
             f"iter prep: reusing existing {issue_branch} at the integration head"
         )
@@ -2870,7 +2886,7 @@ def _prepare_issue_branch(
         write_log(
             f"iter prep: removed just-created {issue_branch} after the failed claim"
         )
-    return issue_branch, blocker
+    return issue_branch, blocker, False
 
 
 def _announced_push(git: GitClient, branch: str) -> bool:
@@ -4336,18 +4352,28 @@ def grind(
                     # named branch first, and an interrupted finalization
                     # resumes from a ref instead of being reasoned about.
                     if git.is_git_repo() and git.has_commits():
-                        issue_branch, branch_blocker = _prepare_issue_branch(
-                            git,
-                            issue_id=issue_id,
-                            integration_branch=integration_branch,
-                            journal=active_journal,
-                            write_log=write_log,
+                        issue_branch, branch_blocker, branch_resumed = (
+                            _prepare_issue_branch(
+                                git,
+                                issue_id=issue_id,
+                                integration_branch=integration_branch,
+                                journal=active_journal,
+                                write_log=write_log,
+                            )
                         )
                         if branch_blocker:
                             bd.update_status(issue_id, "open")
                             write_log(f"iter prep: HALT — {branch_blocker}")
                             output.error(f"grind: {branch_blocker}")
                             raise typer.Exit(code=1)
+                        if not branch_resumed:
+                            # A branch (re)established at the integration head
+                            # has a new fork point; a journal carrying an older
+                            # one would trip the integration-moved guard on a
+                            # branch that never diverged (ortus-ti4i).
+                            active_journal = replace(
+                                active_journal, base_head=git.head_oid()
+                            )
                         active_journal = active_journal.with_branch(
                             issue_branch, git.head_oid()
                         )

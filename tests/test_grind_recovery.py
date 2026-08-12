@@ -1475,3 +1475,113 @@ def test_resume_preserves_fork_point_base(tmp_path: Path) -> None:
     assert resumed is not None
     assert resumed.base_head == base
     assert resumed.base_head != tip
+
+
+# ---------------------------------------------------------------------------
+# Stale fork points and empty candidates (ortus-ti4i)
+# ---------------------------------------------------------------------------
+
+
+def _stale_journal_workspace(tmp_path: Path):
+    """The state that trapped ortus-f26b: an OPEN issue whose branch-scoped
+    journal survived its branch's deletion — empty candidate, stale base —
+    while the integration branch advanced."""
+    from tests.conftest import copy_bd_workspace
+
+    ws = copy_bd_workspace(tmp_path / "ti4i", "leaf")
+    repo, issue_id = ws.path, ws.issues[0]
+    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "fixture baseline")
+    stale_base = _git(repo, "rev-parse", "main").stdout.strip()
+    journal = CandidateJournal.start(
+        repo=repo, issue_id=issue_id, base_head=stale_base, baseline_paths=()
+    ).with_branch(f"ortus/{issue_id}", stale_base)
+    journal = journal.with_candidate((), phase="candidate-captured")
+    JournalStore(repo).save(journal)
+    # The integration branch advances past the recorded fork point, and the
+    # branch itself is gone (an operator adjudication deleted it).
+    (repo / "advance.txt").write_text("integration moved\n")
+    _git(repo, "add", "advance.txt")
+    _git(repo, "commit", "-m", "integration advances")
+    return repo, issue_id, stale_base
+
+
+@pytest.mark.slow
+def test_stale_base_refreshes_on_fresh_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-ti4i AC-1: the claim re-cuts the branch at the current head,
+    refreshes the fork point, and the run lands instead of looping on the
+    integration-moved rejection."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo, issue_id, stale_base = _stale_journal_workspace(tmp_path)
+    monkeypatch.setattr(
+        sandbox_mod, "smoke_test", lambda: SandboxInfo(platform="Linux", binary="bwrap")
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _PassingResumeWorker(repo))
+
+    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "is no longer its head" not in combined
+    shown = subprocess.run(
+        ["bd", "show", issue_id, "--json"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert '"closed"' in shown
+
+
+@pytest.mark.slow
+def test_empty_candidate_reimplements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-ti4i AC-3: a captured-but-empty candidate re-implements — the
+    implementation worker runs rather than a verifier reviewing nothing."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo, issue_id, _stale = _stale_journal_workspace(tmp_path)
+    monkeypatch.setattr(
+        sandbox_mod, "smoke_test", lambda: SandboxInfo(platform="Linux", binary="bwrap")
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    worker = _PassingResumeWorker(repo)
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: worker)
+
+    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert worker.implemented, "the implementation phase must run for an empty candidate"
+
+
+class _PassingResumeWorker:
+    """Implements one candidate file, then passes it at verification."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo
+        self.implemented = False
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        readonly: bool = False,
+        **kwargs: object,
+    ) -> int:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        if readonly:
+            _pass_verdict(self.repo, log_path)
+        else:
+            self.implemented = True
+            (self.repo / CANDIDATE).write_text("SHIPPED = True\n")
+        return 0
