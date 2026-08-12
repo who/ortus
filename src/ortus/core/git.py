@@ -314,6 +314,49 @@ class GitClient:
             return ""
         return _bounded_failure(proc) or f"git checkout exited {proc.returncode}"
 
+    def clone_shared(self, ref: str, target: Path) -> str:
+        """Materialize `ref` as a disposable shared clone at `target`.
+
+        ``git clone --shared`` keeps the object store in the source repository
+        (an ``objects/info/alternates`` pointer), so the clone is an ordinary
+        directory that plain removal deletes — never a ``git worktree``, whose
+        cleanup is unrecoverable under the sandbox (ortus-z7ib), and never a
+        ``git archive``, whose tree strips the vcs metadata a hatch-vcs build
+        derives its version from, so nothing in it could run. ``--no-checkout``
+        plus a detached checkout keeps the clone's HEAD off any branch name the
+        source repository owns.
+
+        Returns "" on success, else the reason. An existing `target` is
+        refused rather than overwritten.
+        """
+        if target.exists():
+            return f"clone target already exists: {target}"
+        # Resolve in the source repository before cloning: the clone only sees
+        # `ref` as `origin/<ref>`, and a bare `checkout --detach <ref>` there
+        # trips git's create-a-local-branch guessing instead of detaching.
+        resolved = self._run("rev-parse", "--verify", f"{ref}^{{commit}}")
+        if resolved.returncode != 0:
+            return (
+                _bounded_failure(resolved)
+                or f"cannot resolve {ref!r} to a commit"
+            )
+        oid = resolved.stdout.strip()
+        cloned = self._run(
+            "clone", "--shared", "--no-checkout", str(self.repo), str(target),
+            hooks=False,
+        )
+        if cloned.returncode != 0:
+            return _bounded_failure(cloned) or f"git clone exited {cloned.returncode}"
+        checked_out = self._run(
+            "-C", str(target), "checkout", "--detach", oid, hooks=False
+        )
+        if checked_out.returncode != 0:
+            return (
+                _bounded_failure(checked_out)
+                or f"git checkout exited {checked_out.returncode}"
+            )
+        return ""
+
     def delete_merged_branch(self, name: str) -> bool:
         """`git branch -d <name>` — refuses unmerged work by construction."""
         return self._run("branch", "-d", name).returncode == 0
