@@ -2636,13 +2636,16 @@ def _finalize_candidate(
             store.save(journal)
             write_log("finalization: no remote configured; nothing to push")
         else:
-            pushed = git.push(integration_branch)
+            pushed = _announced_push(git, integration_branch)
             if not pushed:
                 write_log(
                     "finalization: push rejected; pulling --rebase and retrying once"
                 )
+                output.progress(
+                    "grind", "push rejected; rebasing on origin and retrying"
+                )
                 if git.pull_rebase(integration_branch):
-                    pushed = git.push(integration_branch)
+                    pushed = _announced_push(git, integration_branch)
             if not pushed:
                 return journal, (
                     f"push of {integration_branch} to origin failed; the close and "
@@ -2771,6 +2774,42 @@ def _prepare_issue_branch(
     return issue_branch, blocker
 
 
+def _announced_push(git: GitClient, branch: str) -> bool:
+    """`git push origin <branch>`, announced on the console as it happens.
+
+    A push is the one act in a grind run that changes the world outside the
+    machine, so it must never hide inside a synchronization log line: the
+    console names the ref, the remote, and the commit range about to leave
+    *before* the attempt — a push that hangs then reads as an in-flight push
+    rather than silence — and confirms after. The range comes from refs
+    already on hand (origin/<branch> before the push, the local branch tip);
+    no network read is ever spent making an announcement prettier. When the
+    remote-tracking ref is unresolvable (a branch's first push) the
+    announcement says "all history" rather than inventing a range, and a push
+    moving nothing says "already up to date" rather than a zero-commit range.
+
+    Failure adds no console line here: each call site's existing failure
+    narrative owns that. Every site that pushes routes through this helper so
+    future push sites inherit the visibility instead of re-forgetting it.
+    """
+    old = git.remote_tip(branch)
+    new = git.branch_tip(branch) or git.head_oid()
+    if not old:
+        span = "all history"
+    else:
+        count = git.local_ahead_of_remote(branch)
+        if old == new or count == 0:
+            span = "already up to date"
+        else:
+            noun = "commit" if count == 1 else "commits"
+            span = f"{old[:7]}..{new[:7]}, {count} {noun}"
+    output.progress("grind", f"pushing {branch} → origin ({span})")
+    pushed = git.push(branch)
+    if pushed:
+        output.progress("grind", f"pushed {branch} → origin")
+    return pushed
+
+
 def _enforce_branch_discipline(
     git: GitClient,
     integration_branch: str,
@@ -2826,7 +2865,7 @@ def _enforce_branch_discipline(
                 "(no remote configured; nothing to push)"
             )
             return
-        pushed = git.push(integration_branch)
+        pushed = _announced_push(git, integration_branch)
         write_log(
             f"branch-guard [{phase}]: {decision.reason} "
             f"({'pushed' if pushed else 'PUSH FAILED'})"

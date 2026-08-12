@@ -544,6 +544,94 @@ def test_failure_at_push_retains_a_recoverable_journal(
     assert CANDIDATE in _committed_paths(repo)
 
 
+def test_finalization_push_announces_ref_remote_and_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (ortus-m1sj): the sync push names ref, remote, and commit range on
+    the console before the attempt, then confirms — a push is the one act that
+    changes the world outside the machine, so it must be unmistakable."""
+    repo, _issue_id = _seed(tmp_path, "fin-announce", remote=True)
+    old = _git(repo, "rev-parse", "origin/main").stdout.strip()
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    new = _git(repo, "rev-parse", "main").stdout.strip()
+    console = " ".join((result.stdout + result.stderr).split())
+    assert f"pushing main → origin ({old[:7]}..{new[:7]}, 1 commit)" in console
+    assert "pushed main → origin" in console
+    # AC-5: the console joined; the log's own line did not change.
+    assert "finalization: main synchronized with origin" in _log_text(repo)
+
+
+def test_push_retry_announces_rebase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2 (ortus-m1sj): a rejected first push narrates the rebase-and-retry
+    on the console, and the retried push announces itself again."""
+    repo, _issue_id = _seed(tmp_path, "fin-retry", remote=True)
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+    attempts: list[str] = []
+    real_push = GitClient.push
+
+    def _flaky_push(self: GitClient, branch: str) -> bool:
+        attempts.append(f"push:{branch}")
+        if len(attempts) == 1:
+            return False
+        return real_push(self, branch)
+
+    def _fake_pull(self: GitClient, branch: str) -> bool:
+        attempts.append(f"pull:{branch}")
+        return True
+
+    monkeypatch.setattr(GitClient, "push", _flaky_push)
+    monkeypatch.setattr(GitClient, "pull_rebase", _fake_pull)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert attempts == ["push:main", "pull:main", "push:main"]
+    console = " ".join((result.stdout + result.stderr).split())
+    assert "push rejected; rebasing on origin and retrying" in console
+    assert console.count("pushing main → origin (") == 2
+    assert "pushed main → origin" in console
+    # AC-5: the pre-existing log narrative is byte-for-byte unchanged.
+    assert (
+        "finalization: push rejected; pulling --rebase and retrying once"
+        in _log_text(repo)
+    )
+
+
+def test_first_push_says_all_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4 (ortus-m1sj): with no origin/<branch> tracking ref to anchor a
+    range, the announcement says "all history" instead of inventing one."""
+    repo, _issue_id = _seed(tmp_path, "fin-first")
+    bare = tmp_path / "fin-first-origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(bare)],
+        check=True,
+        capture_output=True,
+    )
+    _git(repo, "remote", "add", "origin", str(bare))
+    _install(monkeypatch, tmp_path, PassingRunner(repo))
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    console = " ".join((result.stdout + result.stderr).split())
+    assert "pushing main → origin (all history)" in console
+    assert "pushed main → origin" in console
+
+
 def test_failure_when_unrelated_edits_coexist_names_them_and_commits_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -397,6 +397,17 @@ def test_failed_housekeeping_push_halts_before_work() -> None:
         def has_remote(self) -> bool:
             return True
 
+        # The announcing push helper (ortus-m1sj) reads the range from local
+        # refs before attempting the push.
+        def remote_tip(self, branch: str) -> str:
+            return "a" * 40
+
+        def branch_tip(self, branch: str) -> str:
+            return "b" * 40
+
+        def local_ahead_of_remote(self, branch: str) -> int:
+            return 1
+
         def push(self, branch: str) -> bool:
             assert branch == "main"
             return False

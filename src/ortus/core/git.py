@@ -284,6 +284,20 @@ class GitClient:
         """
         return self._count(f"origin/{branch}..{branch}")
 
+    def remote_tip(self, branch: str) -> str:
+        """origin/<branch>'s last-known tip object id, or "" when unresolvable.
+
+        Read from the local remote-tracking ref, never the network, so a push
+        announcement can name the range about to leave (old remote tip .. local
+        tip) without a round trip. "" covers a branch's first push (no tracking
+        ref yet) and repos with no remote; callers say "all history" rather
+        than inventing a range.
+        """
+        proc = self._run(
+            "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+
     def merge_base(self, ref_a: str, ref_b: str) -> str:
         """The merge-base commit of the two refs, or "" when none resolves.
 

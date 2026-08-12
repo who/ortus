@@ -17,8 +17,10 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import claude as claude_mod
+from ortus.core import output as output_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
+from ortus.core.git import GitClient
 from ortus.core.readiness import _REQUIRED_SECTIONS
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
@@ -1662,6 +1664,57 @@ def test_grind_blockers_print_verbatim_on_console(
     console = _squashed_console(result)
     assert "bounded correction attempts exhausted (0/0)" in console
     assert "candidate left uncommitted" not in console
+
+
+def test_guard_backstop_push_announces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 (ortus-m1sj): the branch-guard's backstop push announces ref,
+    remote, and commit range in the same register as finalization's push."""
+    import io
+
+    from rich.console import Console
+
+    repo = tmp_path / "guard-push"
+    repo.mkdir()
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    _git("init", "-b", "main")
+    _git("config", "user.email", "ortus-tests@example.invalid")
+    _git("config", "user.name", "Ortus Tests")
+    (repo / "base.py").write_text("BASE = True\n")
+    _git("add", "-A")
+    _git("commit", "-m", "baseline")
+    bare = tmp_path / "guard-push-origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(bare)],
+        check=True,
+        capture_output=True,
+    )
+    _git("remote", "add", "origin", str(bare))
+    _git("push", "-u", "origin", "main")
+    # The scenario the backstop exists for: a closed issue's commit sits on
+    # local main while origin/main is still at the baseline.
+    (repo / "closed.py").write_text("CLOSED = True\n")
+    _git("add", "-A")
+    _git("commit", "-m", "closed work")
+    git = GitClient(repo)
+    old, new = git.remote_tip("main"), git.branch_tip("main")
+
+    err_buf = io.StringIO()
+    monkeypatch.setattr(
+        output_mod, "_err", Console(file=err_buf, force_terminal=False)
+    )
+    lines: list[str] = []
+    grind_mod._enforce_branch_discipline(git, "main", lines.append, phase="post-close")
+
+    console = " ".join(err_buf.getvalue().split())
+    assert f"pushing main → origin ({old[:7]}..{new[:7]}, 1 commit)" in console
+    assert "pushed main → origin" in console
+    assert git.local_ahead_of_remote("main") == 0
+    assert any("(pushed)" in line for line in lines), lines
 
 
 def _verdictless_grind(
