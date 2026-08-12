@@ -28,6 +28,7 @@ VERBS = [
     "spec",
     "dashboard",
     "curate",
+    "retro",
 ]
 
 
@@ -78,6 +79,7 @@ def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
         "spec",
         "dashboard",
         "curate",
+        "retro",
     ]
 
 

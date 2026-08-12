@@ -2105,3 +2105,21 @@ def test_malformed_proposal_is_ignored(tmp_path: Path) -> None:
     grind_mod._record_lesson_proposals(
         BdClient(tmp_path / "nowhere"), issue_id, write_log=log.append
     )
+
+
+def test_retro_does_not_run_in_an_iteration() -> None:
+    """AC-5 (ortus-v8bj): the retrospective is an operator-invoked verb. The
+    grind loop never references it, so no iteration can run one; and the verb
+    never takes the grind repo lock or imports the grind command, so a running
+    retrospective can never block an iteration either."""
+    from ortus.commands import retro as retro_cmd
+    from ortus.core import retro as retro_core
+
+    grind_source = Path(grind_mod.__file__).read_text(encoding="utf-8")
+    assert "retro" not in grind_source.lower()
+
+    for module in (retro_cmd, retro_core):
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        assert "grind_flock" not in source
+        assert "ortus.commands.grind" not in source
+        assert "ortus.commands import grind" not in source
