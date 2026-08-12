@@ -1846,6 +1846,14 @@ _CODEGRAPH_BLOCK_HEADER = "**CodeGraph v1**"
 #: queue") selectable.
 _NON_DESCRIPTIVE_COMMENT_RE = re.compile(r"\bPLAN-GAP\b|\bBLOCKED\b")
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
+#: Header of the optional lesson-proposal block a worker may append to its
+#: completion comment. Version-pinned like the CodeGraph block: a future
+#: schema is skipped rather than parsed against the wrong shape.
+_LESSON_PROPOSAL_HEADER = "**Lesson proposal v1**"
+#: A proposal key must be a bounded kebab-case slug: it becomes a bd memory
+#: key on acceptance and appears verbatim in every contract that injects it.
+_PROPOSAL_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_PROPOSAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _commit_packet(bd: BdClient, issue_id: str) -> dict[str, Any]:
@@ -2023,6 +2031,93 @@ def _completion_comments(bd: BdClient, issue_id: str) -> list[str]:
     return [
         text for text in _issue_comments(bd, issue_id) if _describes_the_change(text)
     ]
+
+
+def _lesson_proposals(comment: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Every `**Lesson proposal v1**` block in `comment`, plus malformation notes.
+
+    Returns ``(proposals, malformed)`` where each proposal is ``(key, body)``
+    with the proposal's date folded into the body — the memory store is flat,
+    so the date the contract requires must travel inside the text. A block
+    missing a field, carrying an invalid key or date, or cut short by a stray
+    `**` delimiter inside its own text yields a note instead of a proposal;
+    nothing in this comment can make parsing raise.
+    """
+
+    proposals: list[tuple[str, str]] = []
+    malformed: list[str] = []
+    fields: dict[str, str] | None = None
+
+    def _flush() -> None:
+        nonlocal fields
+        if fields is None:
+            return
+        key = fields.get("key", "")
+        lesson = " ".join(fields.get("lesson", "").split())
+        date = fields.get("date", "")
+        if not _PROPOSAL_KEY_RE.match(key):
+            malformed.append(f"key {key!r} is not a bounded kebab-case slug")
+        elif not lesson:
+            malformed.append(f"proposal {key!r} carries no lesson text")
+        elif not _PROPOSAL_DATE_RE.match(date):
+            malformed.append(f"proposal {key!r} has no YYYY-MM-DD date")
+        else:
+            proposals.append((key, f"{lesson} ({date})"))
+        fields = None
+
+    for line in comment.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_LESSON_PROPOSAL_HEADER):
+            _flush()
+            fields = {}
+            continue
+        if fields is None:
+            continue
+        if stripped.startswith("**"):
+            _flush()
+            continue
+        name, separator, value = stripped.partition(":")
+        if separator and name.strip().lower() in ("key", "lesson", "date"):
+            fields[name.strip().lower()] = value.strip()
+    _flush()
+    return proposals, malformed
+
+
+def _record_lesson_proposals(
+    bd: BdClient, issue_id: str, *, write_log: Callable[[str], None]
+) -> None:
+    """Record the issue's well-formed lesson proposals as pending curation.
+
+    A comment with no proposal block is skipped without a log line — proposing
+    nothing is the normal case and must cost nothing. A malformed block is
+    worth a log line and nothing more, and a tracker failure is logged and
+    abandoned: no proposal is ever worth failing the run that carried it.
+    """
+
+    try:
+        for comment in _issue_comments(bd, issue_id):
+            if _LESSON_PROPOSAL_HEADER not in comment:
+                continue
+            proposals, malformed = _lesson_proposals(comment)
+            for note in malformed:
+                write_log(
+                    f"lesson proposal: ignored a malformed block on {issue_id} "
+                    f"— {note}"
+                )
+            for key, body in proposals:
+                if bd.propose_lesson(key, body):
+                    write_log(
+                        f"lesson proposal: recorded {key!r} from {issue_id}; "
+                        "pending until curated"
+                    )
+                else:
+                    write_log(
+                        f"lesson proposal: {key!r} from {issue_id} is already "
+                        "covered by an accepted lesson"
+                    )
+    except Exception as exc:  # noqa: BLE001 - a lost proposal never fails the run
+        first = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        write_log(f"lesson proposal: recording failed for {issue_id} ({first})")
 
 
 def _change_description(
@@ -4497,6 +4592,14 @@ def grind(
                         timed_out=implementation_timed_out,
                     )
 
+                # The worker may have proposed lessons in its completion
+                # comment. Record them before any verdict is reached: a run
+                # that ends blocked or rejected may still have learned
+                # something worth curating. Legacy --condition mode claims no
+                # issue here, so there is no comment stream to scan.
+                if harness_select and implementation_worker_ran:
+                    _record_lesson_proposals(bd, issue_id, write_log=write_log)
+
                 if resolved_backend == "claude":
                     rejection = _claude_goal_rejection(log, start_offset=phase_offset)
                     if rejection is not None:
@@ -4904,6 +5007,10 @@ def grind(
                             returncode=rc,
                             timed_out=correction_timed_out,
                         )
+                        # A correction round is a worker return too: it may
+                        # have proposed a lesson the failed verdict taught it.
+                        # Re-recording earlier proposals is idempotent by key.
+                        _record_lesson_proposals(bd, issue_id, write_log=write_log)
                         if correction_timed_out:
                             halt = (
                                 f"correction worker timed out after {worker_timeout}s"

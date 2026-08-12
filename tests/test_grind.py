@@ -1965,3 +1965,143 @@ def test_failed_lesson_read_degrades_on_bd_error(tmp_path: Path) -> None:
     assert section == ""
     assert len(lines) == 1
     assert "\n" not in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# lesson proposals — a worker may propose a lesson, held pending until curated
+# ---------------------------------------------------------------------------
+
+_PROPOSAL_COMMENT = (
+    "**Changes**:\n"
+    "- src/thing.py - hardened the sweep\n"
+    "\n"
+    "**Verification**: targeted tests pass\n"
+    "\n"
+    "**Lesson proposal v1**:\n"
+    "key: sandbox-sweep\n"
+    "lesson: the verification sandbox is read-only; copy a tree before sweeping\n"
+    "date: 2026-08-12\n"
+)
+
+_PROPOSAL_BODY = (
+    "the verification sandbox is read-only; copy a tree before sweeping "
+    "(2026-08-12)"
+)
+
+
+def test_proposal_block_is_parsed() -> None:
+    """AC-1: a completion comment's `**Lesson proposal v1**` block parses into
+    a (key, dated body) pair, and text carrying the block delimiters cannot
+    corrupt the surrounding comment's parsing."""
+    proposals, malformed = grind_mod._lesson_proposals(_PROPOSAL_COMMENT)
+    assert malformed == []
+    assert proposals == [("sandbox-sweep", _PROPOSAL_BODY)]
+    # The same comment still yields its **Changes** bullets untouched.
+    assert grind_mod._changes_bullets(_PROPOSAL_COMMENT) == [
+        "src/thing.py - hardened the sweep"
+    ]
+
+    # A block followed by another bolded header ends cleanly at the delimiter.
+    hostile = (
+        "**Lesson proposal v1**:\n"
+        "key: delimiters\n"
+        "lesson: a lesson may name **Changes** without breaking anything\n"
+        "date: 2026-08-12\n"
+        "**Verification**: written after the block\n"
+    )
+    proposals, malformed = grind_mod._lesson_proposals(hostile)
+    assert malformed == []
+    assert proposals == [
+        ("delimiters", "a lesson may name **Changes** without breaking anything (2026-08-12)")
+    ]
+
+
+def test_proposal_is_recorded_pending(tmp_path: Path) -> None:
+    """AC-2 + AC-3: a parsed proposal lands in the tracker under the pending
+    prefix, where lesson selection never reads it."""
+    from ortus.core.bd import BdClient
+
+    repo = copy_bd_workspace(tmp_path / "repo", "bare").path
+    issue_id = _create_ready_issue(repo, "Learn a hazard")
+    subprocess.run(
+        ["bd", "comments", "add", issue_id, _PROPOSAL_COMMENT],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    log: list[str] = []
+    grind_mod._record_lesson_proposals(
+        BdClient(repo), issue_id, write_log=log.append
+    )
+
+    client = BdClient(repo)
+    assert client.pending_proposals() == {"sandbox-sweep": _PROPOSAL_BODY}
+    assert client.lessons(limit=5, max_chars=400) == ()
+    assert any("pending until curated" in line for line in log)
+    # Recording again (a correction round rescans the comments) is idempotent.
+    grind_mod._record_lesson_proposals(
+        BdClient(repo), issue_id, write_log=log.append
+    )
+    assert client.pending_proposals() == {"sandbox-sweep": _PROPOSAL_BODY}
+
+
+def test_no_proposal_is_unchanged(tmp_path: Path) -> None:
+    """AC-6: a worker that proposes nothing writes nothing and logs nothing."""
+    from ortus.core.bd import BdClient
+
+    repo = copy_bd_workspace(tmp_path / "repo", "bare").path
+    issue_id = _create_ready_issue(repo, "Ordinary completion")
+    subprocess.run(
+        [
+            "bd",
+            "comments",
+            "add",
+            issue_id,
+            "**Changes**:\n- src/thing.py - did the work\n\n**Verification**: ok",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    log: list[str] = []
+    grind_mod._record_lesson_proposals(
+        BdClient(repo), issue_id, write_log=log.append
+    )
+    assert log == []
+    assert BdClient(repo).memories() == {}
+
+
+def test_malformed_proposal_is_ignored(tmp_path: Path) -> None:
+    """AC-7: a malformed block earns a log line, records nothing, and never
+    raises — including when the workspace itself cannot be read."""
+    from ortus.core.bd import BdClient
+
+    repo = copy_bd_workspace(tmp_path / "repo", "bare").path
+    issue_id = _create_ready_issue(repo, "Learned it badly")
+    subprocess.run(
+        [
+            "bd",
+            "comments",
+            "add",
+            issue_id,
+            # Undated, and the key is not a kebab-case slug.
+            "**Lesson proposal v1**:\nkey: Not A Slug\nlesson: something\n",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    log: list[str] = []
+    grind_mod._record_lesson_proposals(
+        BdClient(repo), issue_id, write_log=log.append
+    )
+    assert any("ignored a malformed block" in line for line in log)
+    assert BdClient(repo).memories() == {}
+
+    # No bd workspace at all: the recorder degrades to a no-op, never a raise.
+    grind_mod._record_lesson_proposals(
+        BdClient(tmp_path / "nowhere"), issue_id, write_log=log.append
+    )

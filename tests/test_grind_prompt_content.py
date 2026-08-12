@@ -744,3 +744,45 @@ def test_oversized_lessons_are_dropped_from_the_claude_condition() -> None:
     prompt = _composed_worker_prompt("claude", huge)
     assert "Prior lessons" not in prompt
     assert prompt == _composed_worker_prompt("claude", "")
+
+
+# ---------------------------------------------------------------------------
+# (10) lesson proposals — a worker may propose, but pending never reaches a
+# worker and the contract states the qualifying rules (ortus-axns)
+# ---------------------------------------------------------------------------
+
+
+def test_pending_proposals_are_not_injected() -> None:
+    """AC-3: a memory stored under the proposal prefix never composes into a
+    worker's contract; only accepted (unprefixed) lessons do."""
+    from ortus.core.bd import LESSON_PROPOSAL_PREFIX
+
+    store = {
+        LESSON_PROPOSAL_PREFIX + "sandbox-sweep": (
+            "copy the tree before sweeping it (2026-08-12)"
+        ),
+        "accepted-lesson": (
+            "the scheduler holds the code it started with (2026-08-12)"
+        ),
+    }
+    section = _lessons_text(store)
+    assert "accepted-lesson" in section
+    assert "sandbox-sweep" not in section
+    # A store holding only pending proposals composes today's empty section.
+    assert _lessons_text(
+        {LESSON_PROPOSAL_PREFIX + "only-pending": "not yet curated (2026-08-12)"}
+    ) == ""
+
+
+def test_proposal_contract_states_the_rules() -> None:
+    """AC-8: the contract defines the proposal block and states that a lesson
+    must be falsifiable and dated, that a project-general lesson belongs in
+    the prompt instead, and that proposals stay pending until curated."""
+    body = _content()
+    assert "**Lesson proposal v1**" in body
+    assert "falsifiable and dated" in body
+    assert "date: <today, YYYY-MM-DD>" in body
+    assert "belongs in this prompt, not in one repository's lessons" in body
+    assert "pending until a human curates it" in body
+    assert "Proposing nothing is the normal case" in body
+    assert "Never restate what the code already says" in body
