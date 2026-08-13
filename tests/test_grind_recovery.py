@@ -489,6 +489,73 @@ def test_resume_before_select_uses_the_single_claim_when_the_journal_is_gone(
     assert (repo / INHERITED).read_text() == "work from the prior engineer\n"
 
 
+def test_resume_refuses_excluded_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A journal resume of a human-flagged issue never reaches a worker:
+    every snapshot gate would exclude the claim, so a worker's finished
+    candidate could only be silently dropped. The skip is loud, the claim and
+    work stay parked, and the queue continues past it (ortus-lf02)."""
+    repo, issue_id = _seed(tmp_path, "rec-excl")
+    (repo / INHERITED).write_text("work from the prior engineer\n")
+    _stage_journal(
+        repo, issue_id, phase="incomplete-candidate", paths=frozenset({INHERITED})
+    )
+    subprocess.run(
+        ["bd", "label", "add", issue_id, "human"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    backend = ScriptedRunner()
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo)
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert f"not resuming {issue_id}" in combined
+    assert "human" in combined
+    assert "relabel" in combined
+    assert backend.prompts == [], "no worker may be spawned for a hidden claim"
+    # The claim and the inherited work are untouched for the operator.
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert (repo / INHERITED).read_text() == "work from the prior engineer\n"
+
+
+def test_verification_skip_names_its_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim that vanishes from the label-filtered snapshot mid-iteration is
+    named as the cause of the skipped verification, not folded into a bare
+    'no bd-state change' (ortus-lf02)."""
+    repo, issue_id = _seed(tmp_path, "rec-skip")
+
+    def implement(worker_repo: Path, log_path: Path) -> int:
+        # The worker finishes real work but flags its own issue for a human —
+        # from this moment every snapshot gate is blind to the claim.
+        (worker_repo / CANDIDATE).write_text("DONE = True\n")
+        host = log_path.parent.parent
+        subprocess.run(
+            ["bd", "label", "add", issue_id, "human"],
+            cwd=host,
+            check=True,
+            capture_output=True,
+        )
+        return 0
+
+    backend = ScriptedRunner(implement=implement)
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo)
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log_text = _log(repo)
+    assert f"verification skipped for {issue_id}" in log_text
+    assert "hidden from snapshots by the excluded label(s) human" in log_text
+    assert "verification skipped" in result.stdout + result.stderr
+
+
 # ---------------------------------------------------------------------------
 # AC-3 — the fresh worker is told to assess, keep, repair, and continue
 # ---------------------------------------------------------------------------
@@ -1366,9 +1433,10 @@ def test_second_claim_does_not_log_resuming_at_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-2: only the inherited candidate's own iteration resumes. The line is
-    the operator's evidence for which iteration skipped its worker, so a second
-    one means the flag outlived the transaction it described."""
-    repo, _first_id, _second_id = _inherited_candidate_then_a_second_issue(
+    the operator's evidence for which iteration skipped its worker. A
+    human-flagged claim never enters an iteration at all (ortus-lf02): the
+    loud startup skip is its evidence, and no iteration logs a resume."""
+    repo, first_id, _second_id = _inherited_candidate_then_a_second_issue(
         tmp_path, "rec22"
     )
     _install(
@@ -1381,8 +1449,8 @@ def test_second_claim_does_not_log_resuming_at_verification(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     log = _log(repo)
-    assert f"iter 1: {RESUMING_LINE}" in log
-    assert f"iter 2: {RESUMING_LINE}" not in log
+    assert f"not resuming {first_id}" in log
+    assert RESUMING_LINE not in log
 
 
 def test_resumed_issue_still_skips_implementation(
@@ -1865,3 +1933,173 @@ def test_parked_branch_rebases_forward_on_resume(
     )
     assert shown.stdout == "PARKED = True\n"
     assert (repo / "advance.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# Spec defects escalate instead of spending corrections (ortus-lwr9)
+# ---------------------------------------------------------------------------
+
+
+UNPARSEABLE_ACCEPTANCE = """## Observable criteria
+- AC-1: The configured scenario reaches its asserted state.
+
+## Criterion checks
+- AC-1: Run `uv run pytest tests/test_grind.py -q` (or `make test` when `pytest` is absent).
+
+## Targeted tests
+Run `uv run pytest tests/test_grind.py -q`.
+"""
+
+
+@pytest.mark.slow
+def test_spec_defect_parks_without_correction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim whose claim-time criterion checks cannot be parsed is a packet
+    defect, not a candidate defect: no correction worker is dispatched, and
+    the claim escalates to the operator instead of halting into a resume that
+    would fail identically (ortus-lwr9)."""
+    repo, issue_id = _seed(tmp_path, "specdef")
+    branch = f"ortus/{issue_id}"
+    subprocess.run(
+        ["bd", "update", issue_id, "--acceptance", UNPARSEABLE_ACCEPTANCE],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    _claim(repo, issue_id)
+    for args in (
+        ["checkout", "-b", branch],
+        ["commit", "--allow-empty", "-m", "park point"],
+        ["checkout", "main"],
+    ):
+        subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    base = subprocess.run(
+        ["git", "rev-parse", "main"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    parked_tip = subprocess.run(
+        ["git", "rev-parse", branch], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    store = JournalStore(repo)
+    packet_digest, packet_ref = store.save_packet(issue_id, _issue(repo, issue_id))
+    journal = (
+        CandidateJournal.start(
+            repo=repo,
+            issue_id=issue_id,
+            base_head=base,
+            baseline_paths=(),
+            packet_hash=packet_digest,
+            packet_ref=packet_ref,
+        )
+        .with_branch(branch, parked_tip)
+        .with_candidate(
+            frozenset(),
+            phase="implementation-rejected",
+            candidate_hash="0" * 64,
+        )
+    )
+    store.save(journal)
+
+    def implement(worker_repo: Path, log_path: Path) -> int:
+        (worker_repo / CANDIDATE).write_text("DONE = True\n")
+        return 0
+
+    backend = ScriptedRunner(implement=implement)
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo)
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log_text = _log(repo)
+    assert "the work spec's criterion checks cannot be parsed" in log_text
+    assert "expected exactly one backticked command" in log_text
+    assert "correction attempt" not in log_text, "spec defects buy no corrections"
+    phases = [name for name, _text in backend.prompts]
+    assert phases.count(Phase.IMPLEMENT.value) == 1
+    assert len(phases) == 1, f"only the one implementation worker may run: {phases}"
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress", "the claim is kept for the operator"
+    assert "human" in (shown.get("labels") or []), "spec defects escalate"
+    assert any(
+        "Ortus correction escalation" in body
+        for body in _comment_bodies(repo, issue_id)
+    )
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "--verify", branch], cwd=repo, capture_output=True
+        ).returncode
+        == 0
+    ), "the candidate branch is preserved for the re-claim"
+
+
+# ---------------------------------------------------------------------------
+# A superseded journal's workspace is retired, never leaked (ortus-0wyq)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_handoff_retires_the_owned_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When an iteration claims a different issue than the journal owns, the
+    owned journal's workspace comes home first — branch fetched into the
+    primary repository, dirty work rescued, clone removed — so the new
+    transaction never buries the only copy of finished work (ortus-0wyq)."""
+    repo, _fixture_id = _seed(tmp_path, "leak")
+    _create_issue(repo, "second issue after the handoff")
+    calls: list[str] = []
+
+    def implement(worker_repo: Path, log_path: Path) -> int:
+        # The workspace directory is named for the issue the worker owns.
+        calls.append(worker_repo.name)
+        if len(calls) == 1:
+            # The first worker leaves dirty work in its clone and flags its
+            # own issue for a human — the contract's blocker route. The hidden
+            # claim drops out of every snapshot, the loop moves on to the next
+            # claim, and the journal it owned is superseded mid-run.
+            (worker_repo / CANDIDATE).write_text("ONLY_COPY = True\n")
+            host = log_path.parent.parent
+            subprocess.run(
+                ["bd", "label", "add", worker_repo.name, "human"],
+                cwd=host,
+                check=True,
+                capture_output=True,
+            )
+        else:
+            (worker_repo / "second.py").write_text("SECOND = True\n")
+        return 0
+
+    backend = ScriptedRunner(implement=implement)
+    _install(monkeypatch, tmp_path, backend)
+
+    result = _grind(repo, "--iterations", "3")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    assert len(calls) == 2, f"both issues get a worker: {calls}"
+    first_id, second_id = calls
+    log_text = _log(repo)
+    assert (
+        f"journal owned {first_id} but this iteration claimed {second_id}"
+        in log_text
+    )
+    assert not (
+        repo / "logs" / "grind-workspaces" / first_id
+    ).exists(), "the superseded workspace must be retired, not leaked"
+    rescued = subprocess.run(
+        ["git", "show", f"ortus/{first_id}:{CANDIDATE}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert rescued.stdout == "ONLY_COPY = True\n", (
+        "the clone's dirty work is rescued onto the branch in the primary"
+    )
+    assert _issue(repo, second_id)["status"] == "closed"
+    first = _issue(repo, first_id)
+    assert first["status"] == "in_progress", "the flagged claim is kept"
+    assert "human" in (first.get("labels") or [])

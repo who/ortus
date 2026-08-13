@@ -88,6 +88,7 @@ from ortus.core.compose import (
 from ortus.core.checks import (
     VERDICT_PASS as MACHINE_PASS,
     CheckRunResult,
+    parse_criterion_checks,
     render_tracker_comment,
     run_checks,
 )
@@ -1478,7 +1479,7 @@ def _machine_verify_candidate(
         summary.sync_duration_ms = sync_ms
         return summary
 
-    def _reject(reason: str) -> _VerificationResult:
+    def _reject(reason: str, *, spec_defect: bool = False) -> _VerificationResult:
         nonlocal journal
         if bd.show(issue_id).get("status") != "in_progress":
             bd.update_status(issue_id, "in_progress")
@@ -1508,14 +1509,18 @@ def _machine_verify_candidate(
         )
         write_log(f"iter {iteration}: machine verification rejected: {reason}")
         return _VerificationResult(
-            journal=journal, summary=_summarize(), failure=reason
+            journal=journal,
+            summary=_summarize(),
+            failure=reason,
+            spec_defect=spec_defect,
         )
 
     claim_criteria = _claim_time_criteria(store.repo, journal)
     if claim_criteria is None:
         return _reject(
             "the claim-time work-spec artifact is unreadable; the pipeline "
-            "judges only criteria whose claim-time identity it can prove"
+            "judges only criteria whose claim-time identity it can prove",
+            spec_defect=True,
         )
     expected_criteria = dict.fromkeys(re.findall(r"\bAC-\d+\b", claim_criteria))
     current_packet = bd.show(issue_id)
@@ -1526,13 +1531,30 @@ def _machine_verify_candidate(
     ):
         return _reject(
             "the acceptance criteria changed after claim; verification judges "
-            "the claim-time criteria — re-run grind to re-claim under the "
-            "edited work spec"
+            "the claim-time criteria — relabel the issue for a fresh claim "
+            "under the edited work spec",
+            spec_defect=True,
         )
     if issue_packet_hash(current_packet) != journal.issue_packet_hash:
         return _reject(
             "authoritative work spec changed during verification — "
-            + _packet_drift(store.repo, journal, current_packet)
+            + _packet_drift(store.repo, journal, current_packet),
+            spec_defect=True,
+        )
+    # An unparseable criterion check indicts the packet, not the candidate: a
+    # correction worker could only satisfy it by editing the claimed spec,
+    # which the acceptance-hash guard above forbids. Reject before spending a
+    # single check run, and mark it a spec defect so the retry controller
+    # escalates to the operator instead of resuming into the same wall.
+    _, packet_failures = parse_criterion_checks(claim_criteria)
+    if packet_failures:
+        return _reject(
+            "the work spec's criterion checks cannot be parsed: "
+            + "; ".join(failure.message for failure in packet_failures)
+            + ". No candidate correction can repair the packet — repair the "
+            "work spec, then relabel the issue for a fresh claim under the "
+            "repaired criteria",
+            spec_defect=True,
         )
     if not git.branch_exists(journal.issue_branch):
         return _reject(
@@ -1861,6 +1883,12 @@ class _VerificationResult:
     verdict: Verdict | None = None
     failure: str | None = None
     timed_out: bool = False
+    #: True when the failure indicts frozen claim-time state — unparseable
+    #: criterion checks, a packet edited after claim, an unreadable claim
+    #: artifact. No candidate correction and no resume can change that state,
+    #: so the retry controller must escalate to the operator instead of
+    #: halting for a resume that would fail identically (ortus-lwr9).
+    spec_defect: bool = False
 
     @property
     def passed(self) -> bool:
@@ -2315,7 +2343,13 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         "branches, and do not add a verification comment — verification re-runs "
         "against your corrected candidate and Ortus alone merges and finalizes it. "
         "If a finding needs a product or architecture decision the work spec does not "
-        "resolve, do not improvise: report it as a PLAN-GAP and stop."
+        "resolve, do not improvise: report it as a PLAN-GAP and stop. The work spec "
+        "itself is frozen for the life of the claim: NEVER edit the claimed issue's "
+        "packet (no bd update of its acceptance, design, description, title, or "
+        "notes) — verification judges the claim-time criteria by hash, so a packet "
+        "edit fails the round no matter how right it is. A finding that indicts the "
+        "spec rather than the candidate is report-and-stop: describe the defect in a "
+        f"durable comment, run `bd human {issue_id}`, and exit."
     )
     # Claude's /goal condition is hard-capped, so drop the least-severe findings
     # (verifiers order them most-severe-first) rather than truncating mid-word
@@ -5008,6 +5042,39 @@ def grind(
                     f"closed={initial_snapshot.closed}"
                 )
 
+            if resume_issue_id is not None:
+                # A journal resume names its issue directly, bypassing the
+                # label filter every snapshot gate applies. Feeding an excluded
+                # issue to a worker arms a trap: the worker runs, verification
+                # cannot see the claim, and the finished candidate is silently
+                # dropped (ortus-lf02). Skip the resume loudly instead — no
+                # worker ever runs for a hidden claim; its journal, branch, and
+                # claim stay parked, and the queue continues past it. The
+                # transaction-handoff path retires its workspace when another
+                # issue is claimed.
+                try:
+                    resumed_issue = bd.show(resume_issue_id)
+                except Exception:
+                    resumed_issue = {}
+                excluded = sorted(
+                    {str(label) for label in (resumed_issue.get("labels") or ())}
+                    & set(EXCLUDED_LABELS)
+                )
+                if excluded:
+                    skip_note = (
+                        f"not resuming {resume_issue_id}: it carries the "
+                        f"excluded label(s) {', '.join(excluded)}, so no worker "
+                        "may run for it — every snapshot gate would ignore its "
+                        "claim and a finished candidate would be silently "
+                        "dropped. Its claim, journal, and work stay parked; "
+                        "read the issue's newest comment, decide, and relabel "
+                        "it for the queue. The queue continues past it."
+                    )
+                    write_log(f"startup: {skip_note}")
+                    output.warn(skip_note)
+                    resume_issue_id = None
+                    resume_candidate_ready = False
+
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
                 output.progress("grind", "queue already drained; nothing to do.")
@@ -5180,9 +5247,20 @@ def grind(
                             "yourself. It stays open and unclaimed."
                         )
 
-                    target_issue = select_ready_issue(
-                        ready_packets, on_unready=report_unready
-                    )
+                    if resume_issue_id is not None:
+                        # A resume continues an existing claim, whose packet
+                        # was frozen at claim time — the machine pipeline
+                        # judges that claim-time spec and escalates its
+                        # defects. The readiness guard governs FRESH claims
+                        # only: routing a resumed claim through it would send
+                        # a repair pass against a frozen packet, and the
+                        # resulting edit could only trip the acceptance-hash
+                        # guard (ortus-qs6l).
+                        target_issue = ready_packets[0] if ready_packets else None
+                    else:
+                        target_issue = select_ready_issue(
+                            ready_packets, on_unready=report_unready
+                        )
 
                     # Nothing claimable, but the queue is NOT drained and the
                     # only thing between the loop and real work is work specs that
@@ -5362,6 +5440,22 @@ def grind(
                                 f"{active_journal.issue_id} but this iteration claimed "
                                 f"{issue_id}; starting a new transaction"
                             )
+                            if active_journal.workspace_path:
+                                # The abandoned journal's clone may hold the
+                                # only copy of its branch (rebases and amends
+                                # happen in the clone; the primary ref lags).
+                                # Retire it — rescue, fetch home, remove —
+                                # before the new transaction buries the record
+                                # that owned it (ortus-0wyq).
+                                transaction_store.save(
+                                    _retire_workspace(
+                                        git,
+                                        active_journal,
+                                        repo=target,
+                                        write_log=write_log,
+                                        rescue_uncommitted=True,
+                                    )
+                                )
                         # The resume belongs to the inherited candidate, not to
                         # the run: a transaction starting here has no captured
                         # implementation by definition, so this issue gets a
@@ -6045,6 +6139,12 @@ def grind(
                             if active_journal.corrections > 0:
                                 halt_phase = CORRECTION_REJECTED
                                 escalate = True
+                            if verification.spec_defect:
+                                # A defective packet fails identically on every
+                                # resume; only the operator can repair it, so
+                                # this is never left as a silently resumable
+                                # halt (ortus-lwr9).
+                                escalate = True
                             break
                         verdict = verification.verdict
                         assert verdict is not None
@@ -6430,6 +6530,37 @@ def grind(
                     # despite the phase contract, still leave durable evidence.
                     verification_summary = implementation_summary
                     verification_summary.phase = CodeGraphPhase.VERIFICATION.value
+                    if harness_select:
+                        # The claim vanished from the label-filtered snapshot.
+                        # Name the cause before the delta logic reads this
+                        # iteration as an idle no-op — a silently skipped
+                        # verification is how finished candidates get dropped
+                        # (ortus-lf02, ortus-xjdf).
+                        try:
+                            vanished = bd.show(issue_id)
+                        except Exception:
+                            vanished = {}
+                        vanished_status = str(vanished.get("status") or "unknown")
+                        vanished_labels = sorted(
+                            {str(label) for label in (vanished.get("labels") or ())}
+                            & set(EXCLUDED_LABELS)
+                        )
+                        if vanished_status == "in_progress" and vanished_labels:
+                            cause = (
+                                "its claim is hidden from snapshots by the "
+                                f"excluded label(s) {', '.join(vanished_labels)}"
+                            )
+                        elif vanished_status != "in_progress":
+                            cause = f"its status moved to {vanished_status}"
+                        else:
+                            cause = "it left the label-filtered snapshot"
+                        skip_note = (
+                            f"verification skipped for {issue_id}: {cause}; "
+                            "any candidate this iteration produced was NOT "
+                            "verified"
+                        )
+                        write_log(f"iter {iters_run}: WARN {skip_note}")
+                        output.warn(skip_note)
 
                 write_log(
                     f"CodeGraph phase summary: {len(verification_summary.events)} queries, "

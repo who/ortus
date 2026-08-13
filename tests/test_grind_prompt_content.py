@@ -609,6 +609,34 @@ def test_message_rules_cannot_drift() -> None:
             )
 
 
+def test_packet_edit_prohibition_states_the_mechanism() -> None:
+    """Every worker-facing contract forbids editing the claimed packet and
+    names the route for a defective spec (ortus-lwr9).
+
+    Verification judges the claim-time criteria by hash, so a packet edit
+    fails the round no matter how right it is; a worker that discovers a spec
+    defect must report and stop, never repair the spec in-flight.
+    """
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    for name, body in (
+        ("work-issue condition", read_work_issue_condition()),
+        ("correction footer", _correction_contract()),
+    ):
+        assert "NEVER edit the claimed issue's packet" in body, (
+            f"{name} does not forbid editing the claimed packet"
+        )
+        assert "frozen for the life of" in body, (
+            f"{name} does not state that the spec is frozen for the claim"
+        )
+        assert "report-and-stop" in body, (
+            f"{name} does not route spec defects to report-and-stop"
+        )
+        assert "bd human" in body, (
+            f"{name} does not name the escalation command"
+        )
+
+
 def test_worktree_prohibition_states_the_reason() -> None:
     """AC-4: each contract states the mechanism, so the rule stays checkable
     and is not later mistaken for arbitrary by an editor looking for

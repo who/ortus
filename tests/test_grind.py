@@ -2481,6 +2481,7 @@ def test_acceptance_hash_rechecked_before_judgment(
     )
     assert outcome.failure is not None
     assert "acceptance criteria changed after claim" in outcome.failure
+    assert outcome.spec_defect, "frozen claim-time state can never pass a resume"
     assert outcome.journal.phase == "verification-rejected"
     assert any("acceptance criteria changed after claim" in body for body in comments)
     assert statuses == ["in_progress"], "the claim is restored before the report"

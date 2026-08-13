@@ -102,6 +102,31 @@ def test_placeholder_and_unmapped_checks_are_rejected() -> None:
     assert "criterion_mapped_checks" in codes
 
 
+def test_unparseable_check_fails_readiness() -> None:
+    """A criterion check the machine parser refuses fails readiness with the
+    parser's own message, so an unrunnable spec is repaired before claim
+    instead of failing every claim as a work-spec defect (ortus-qs6l)."""
+    issue = ready_issue()
+    issue["acceptance_criteria"] = issue["acceptance_criteria"].replace(
+        "- AC-2: Run `uv run pytest tests/test_demo.py::test_run -q`.",
+        "- AC-2: Run `uv run pytest tests/test_demo.py::test_run -q` "
+        "(or `make test` when pytest is absent).",
+    )
+    report = validate_issue(issue)
+    assert not report.ready
+    failures = {f.code: f.message for f in report.failures}
+    assert "criterion_mapped_checks" in failures
+    assert "expected exactly one backticked command" in failures[
+        "criterion_mapped_checks"
+    ]
+
+
+def test_parseable_checks_pass_readiness() -> None:
+    """One backticked command per criterion still passes untouched (ortus-qs6l)."""
+    report = validate_issue(ready_issue())
+    assert report.ready, [f.message for f in report.failures]
+
+
 def test_full_miss_collapses_to_no_packet() -> None:
     """AC-1: an empty packet has one problem, not fifteen."""
     report = validate_issue({"id": "legacy-1", "issue_type": "task"})

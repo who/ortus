@@ -397,6 +397,22 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
                 "must map every AC-N exactly once by identifier and include exact commands or checks",
             )
         )
+    elif values.get("criterion_mapped_checks") and not _is_placeholder(
+        values["criterion_mapped_checks"]
+    ):
+        # The machine pipeline executes each check with the claim-time parser,
+        # so its rules ARE readiness: a check the parser refuses (for example a
+        # criterion carrying more than one backticked command) would pass here
+        # only to fail every claim as a work-spec defect. checks.py imports
+        # this module for section parsing, so the parser is imported at call
+        # time rather than at module level.
+        from ortus.core.checks import parse_criterion_checks
+
+        _, packet_failures = parse_criterion_checks(issue.get("acceptance_criteria"))
+        for packet_failure in packet_failures:
+            failures.append(
+                _shape_failure("criterion_mapped_checks", packet_failure.message)
+            )
 
     tests = values.get("targeted_tests", "")
     if tests and not _is_placeholder(tests) and not _TEST_COMMAND.search(tests):
@@ -442,7 +458,11 @@ def _shape_rules() -> tuple[str, ...]:
         f"`## {_section('criterion_mapped_checks').heading}` — repeats every "
         "criterion identifier exactly once, each with an exact command or "
         "deterministic check in backticks "
-        f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}).",
+        f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}). "
+        "Each criterion's line carries EXACTLY ONE backticked span — the "
+        "machine runner executes that literal string, so a second backticked "
+        "span on the same criterion (an alternative command, a quoted flag, a "
+        "symbol name) makes the check unparseable and fails readiness.",
         f"`## {_section('targeted_tests').heading}` — at least one exact test "
         "command in backticks "
         f"({_example(_TEST_COMMAND, '`uv run pytest tests/test_demo.py -q`')}).",
