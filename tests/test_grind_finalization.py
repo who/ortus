@@ -2145,3 +2145,282 @@ def test_export_failure_blocks_finalization(
     main_subjects = _git(repo, "log", "--format=%s", "main").stdout.splitlines()
     assert not [s for s in main_subjects if s.startswith(f"{issue_id}: ")]
     assert JournalStore(repo).load() is not None, "the transaction is resumable"
+
+
+# ---------------------------------------------------------------------------
+# Merge gate (ortus-6a0a.1)
+# ---------------------------------------------------------------------------
+
+
+def _prepare_gated_journal(
+    repo: Path, issue_id: str
+) -> tuple[CandidateJournal, str, GitClient]:
+    """A verified-pass journal on `ortus/<id>`, ready for the commit step."""
+
+    journal = _stage_pending_journal(
+        repo,
+        issue_id,
+        landed=("report", "close", "compose"),
+        close_issue=True,
+        add_report_comment=True,
+    )
+    git = GitClient(repo=repo)
+    branch = f"ortus/{issue_id}"
+    assert git.create_branch(branch, git.head_oid())
+    journal = journal.with_branch(branch, git.head_oid())
+    JournalStore(repo).save(journal)
+    return journal, branch, git
+
+
+def _run_finalize(
+    repo: Path,
+    issue_id: str,
+    journal: CandidateJournal,
+    git: GitClient,
+    *,
+    merge_gate: bool,
+    logs: list[str],
+    merge_gate_timeout: float = 30.0,
+    sleep: object = None,
+    clock: object = None,
+) -> tuple[CandidateJournal, str | None]:
+    kwargs: dict = {
+        "repo": repo,
+        "issue_id": issue_id,
+        "integration_branch": "main",
+        "baseline": frozenset(),
+        "write_log": logs.append,
+        "merge_gate": merge_gate,
+        "merge_gate_timeout": merge_gate_timeout,
+    }
+    if sleep is not None:
+        kwargs["sleep"] = sleep
+    if clock is not None:
+        kwargs["clock"] = clock
+    return grind_mod._finalize_candidate(
+        BdClient(repo=repo),
+        git,
+        JournalStore(repo),
+        journal,
+        **kwargs,
+    )
+
+
+def test_gated_finalization_pushes_the_issue_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: with gating on, the issue branch is pushed before the fast-forward."""
+
+    repo, issue_id = _seed(tmp_path, "gate1", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    order: list[str] = []
+    real_push = GitClient.push
+    real_ff = GitClient.fast_forward
+
+    def rec_push(self: GitClient, name: str) -> bool:
+        order.append(f"push:{name}")
+        return real_push(self, name)
+
+    def rec_ff(self: GitClient, name: str, to_ref: str) -> bool:
+        order.append(f"ff:{name}")
+        return real_ff(self, name, to_ref)
+
+    monkeypatch.setattr(GitClient, "push", rec_push)
+    monkeypatch.setattr(GitClient, "fast_forward", rec_ff)
+    monkeypatch.setattr(GitClient, "branch_checks", lambda self, name: "success")
+    logs: list[str] = []
+
+    updated, blocker = _run_finalize(
+        repo, issue_id, journal, git, merge_gate=True, logs=logs
+    )
+
+    assert blocker is None, blocker
+    assert f"push:{branch}" in order
+    assert order.index(f"push:{branch}") < order.index("ff:main")
+    assert updated.finalized("commit")
+
+
+def test_green_checks_allow_the_fast_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a successful check result lets the fast-forward proceed."""
+
+    repo, issue_id = _seed(tmp_path, "gate2", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    monkeypatch.setattr(GitClient, "branch_checks", lambda self, name: "success")
+
+    updated, blocker = _run_finalize(
+        repo, issue_id, journal, git, merge_gate=True, logs=[]
+    )
+
+    assert blocker is None, blocker
+    assert git.branch_tip("main") == git.branch_tip(branch)
+    assert git.current_branch() == "main"
+    assert updated.finalized("commit")
+    assert updated.finalized("sync")
+
+
+def test_red_checks_block_and_branch_stays_pushed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a failed check blocks finalization and leaves the branch pushed."""
+
+    repo, issue_id = _seed(tmp_path, "gate3", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    before_main = git.branch_tip("main")
+    monkeypatch.setattr(GitClient, "branch_checks", lambda self, name: "failure")
+
+    updated, blocker = _run_finalize(
+        repo, issue_id, journal, git, merge_gate=True, logs=[]
+    )
+
+    assert blocker is not None
+    assert branch in blocker
+    assert "failed" in blocker
+    assert git.branch_tip("main") == before_main
+    assert git.remote_tip(branch) == git.branch_tip(branch)
+    assert not updated.finalized("commit")
+
+
+def test_pending_at_the_bound_is_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: still-pending at the bound is a timeout, distinct from a failure."""
+
+    repo, issue_id = _seed(tmp_path, "gate4", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    monkeypatch.setattr(GitClient, "branch_checks", lambda self, name: "pending")
+    ticks = iter([0.0, 0.0, 10.0])
+
+    updated, blocker = _run_finalize(
+        repo,
+        issue_id,
+        journal,
+        git,
+        merge_gate=True,
+        logs=[],
+        merge_gate_timeout=5.0,
+        sleep=lambda _s: None,
+        clock=lambda: next(ticks),
+    )
+
+    assert blocker is not None
+    assert branch in blocker
+    assert "timed out" in blocker
+    assert "pending" in blocker
+    assert "failed" not in blocker
+    assert not updated.finalized("commit")
+
+
+def test_gating_off_is_identical_to_ungated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: with gating disabled, finalization never consults checks."""
+
+    repo, issue_id = _seed(tmp_path, "gate5", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    pushed: list[str] = []
+    real_push = GitClient.push
+
+    def rec_push(self: GitClient, name: str) -> bool:
+        pushed.append(name)
+        return real_push(self, name)
+
+    def boom(self: GitClient, name: str) -> str:
+        raise AssertionError("branch_checks must not run when gating is off")
+
+    monkeypatch.setattr(GitClient, "push", rec_push)
+    monkeypatch.setattr(GitClient, "branch_checks", boom)
+    logs: list[str] = []
+
+    updated, blocker = _run_finalize(
+        repo, issue_id, journal, git, merge_gate=False, logs=logs
+    )
+
+    assert blocker is None, blocker
+    assert branch not in pushed
+    assert "main" in pushed
+    assert not any("merge gate" in line for line in logs)
+    assert updated.finalized("commit")
+    assert updated.finalized("sync")
+
+
+def test_no_remote_degrades_with_a_log_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: no remote + gating on degrades to today's local landing."""
+
+    repo, issue_id = _seed(tmp_path, "gate6", remote=False)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    monkeypatch.setattr(
+        GitClient,
+        "branch_checks",
+        lambda self, name: (_ for _ in ()).throw(
+            AssertionError("no remote means no check read")
+        ),
+    )
+    logs: list[str] = []
+
+    updated, blocker = _run_finalize(
+        repo, issue_id, journal, git, merge_gate=True, logs=logs
+    )
+
+    assert blocker is None, blocker
+    assert any("no remote" in line for line in logs)
+    assert git.branch_tip("main") == git.branch_tip(branch)
+    assert updated.finalized("commit")
+    assert updated.finalization.get("sync") == "no-remote"
+
+
+def test_resume_reenters_the_wait_without_repushing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: crash between push and verdict resumes into the wait, no second push."""
+
+    repo, issue_id = _seed(tmp_path, "gate7", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    tip = git.branch_tip(branch)
+    record = dict(journal.finalization)
+    record[grind_mod._GATE_PUSHED_KEY] = tip
+    journal = replace(journal, finalization=record)
+    JournalStore(repo).save(journal)
+
+    pushed: list[str] = []
+    monkeypatch.setattr(
+        GitClient, "push", lambda self, name: pushed.append(name) or True
+    )
+    monkeypatch.setattr(GitClient, "branch_checks", lambda self, name: "success")
+    logs: list[str] = []
+
+    updated, blocker = grind_mod._apply_merge_gate(
+        git,
+        JournalStore(repo),
+        journal,
+        issue_branch=branch,
+        merge_gate=True,
+        merge_gate_timeout=30.0,
+        write_log=logs.append,
+    )
+
+    assert blocker is None, blocker
+    assert pushed == []
+    assert any("re-entering the check wait" in line for line in logs)
+    assert updated.finalization.get(grind_mod._GATE_PUSHED_KEY) == tip
+
+
+def test_blocker_names_branch_and_conclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: the blocker names the branch and the observed conclusion."""
+
+    repo, issue_id = _seed(tmp_path, "gate8", remote=True)
+    journal, branch, git = _prepare_gated_journal(repo, issue_id)
+    monkeypatch.setattr(GitClient, "branch_checks", lambda self, name: "failure")
+
+    _updated, blocker = _run_finalize(
+        repo, issue_id, journal, git, merge_gate=True, logs=[]
+    )
+
+    assert blocker is not None
+    assert branch in blocker
+    assert "failed" in blocker

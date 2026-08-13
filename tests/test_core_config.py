@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from ortus.core.config import DEFAULT_CODEGRAPH_MODE, DEFAULTS, load_config
+from ortus.core.config import (
+    DEFAULT_CODEGRAPH_MODE,
+    DEFAULT_MERGE_GATE_TIMEOUT,
+    DEFAULTS,
+    load_config,
+)
 from ortus.core.profiles import Phase, ProfileError
 
 
@@ -62,6 +67,21 @@ def test_codegraph_default_is_required(tmp_path: Path) -> None:
     cfg = load_config(repo=tmp_path, home=tmp_path / "home")
     assert DEFAULT_CODEGRAPH_MODE == "required"
     assert cfg.get("codegraph") == "required"
+
+
+def test_merge_gate_defaults_off(tmp_path: Path) -> None:
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert cfg.get("merge_gate") is False
+    assert cfg.get("merge_gate_timeout") == DEFAULT_MERGE_GATE_TIMEOUT
+
+
+def test_merge_gate_project_pin_wins(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_toml(repo / ".ortusrc", "merge_gate = true\nmerge_gate_timeout = 90\n")
+    cfg = load_config(repo=repo, home=tmp_path / "home")
+    assert cfg.get("merge_gate") is True
+    assert cfg.get("merge_gate_timeout") == 90
 
 
 def test_codegraph_explicit_pin_still_wins(tmp_path: Path) -> None:

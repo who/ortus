@@ -493,3 +493,82 @@ def test_exports_survive_switch_byte_identically(tmp_path: Path) -> None:
     assert reason == ""
     assert git.current_branch() == "main"
     assert exports.read_bytes() == newest
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("git@github.com:who/ortus.git", "who/ortus"),
+        ("https://github.com/who/ortus.git", "who/ortus"),
+        ("https://github.com/who/ortus", "who/ortus"),
+        ("ssh://git@github.com/who/ortus.git", "who/ortus"),
+        ("https://example.com/who/ortus.git", ""),
+        ("", ""),
+    ],
+)
+def test_github_repo_from_remote(url: str, expected: str) -> None:
+    from ortus.core.git import github_repo_from_remote
+
+    assert github_repo_from_remote(url) == expected
+
+
+def test_summarize_check_runs_empty_is_pending() -> None:
+    from ortus.core.git import summarize_check_runs
+
+    assert summarize_check_runs({}) == "pending"
+    assert summarize_check_runs({"check_runs": []}) == "pending"
+    assert summarize_check_runs("nope") == "pending"
+
+
+def test_summarize_check_runs_in_progress_is_pending() -> None:
+    from ortus.core.git import summarize_check_runs
+
+    assert (
+        summarize_check_runs(
+            {
+                "check_runs": [
+                    {"status": "completed", "conclusion": "success"},
+                    {"status": "in_progress", "conclusion": None},
+                ]
+            }
+        )
+        == "pending"
+    )
+
+
+def test_summarize_check_runs_failure_wins() -> None:
+    from ortus.core.git import summarize_check_runs
+
+    assert (
+        summarize_check_runs(
+            {
+                "check_runs": [
+                    {"status": "completed", "conclusion": "success"},
+                    {"status": "completed", "conclusion": "failure"},
+                ]
+            }
+        )
+        == "failure"
+    )
+
+
+def test_summarize_check_runs_all_green_is_success() -> None:
+    from ortus.core.git import summarize_check_runs
+
+    assert (
+        summarize_check_runs(
+            {
+                "check_runs": [
+                    {"status": "completed", "conclusion": "success"},
+                    {"status": "completed", "conclusion": "skipped"},
+                ]
+            }
+        )
+        == "success"
+    )
+
+
+def test_branch_checks_without_github_origin_is_pending(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    git = GitClient(repo)
+    assert git.branch_checks("main") == "pending"

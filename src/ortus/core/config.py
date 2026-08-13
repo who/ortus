@@ -37,6 +37,9 @@ else:  # pragma: no cover - py3.10 fallback
 # stays the escape hatch for a repository CodeGraph cannot index.
 DEFAULT_CODEGRAPH_MODE = "required"
 
+# Seconds. Used when `.ortusrc` omits `merge_gate_timeout`.
+DEFAULT_MERGE_GATE_TIMEOUT = 1800
+
 DEFAULTS: dict[str, Any] = {
     "owner": None,
     "prefix": None,
@@ -49,6 +52,14 @@ DEFAULTS: dict[str, Any] = {
     # a green machine run. Off by default per the escape-rate reversal
     # threshold in prd/PRD-lean-pipeline.md — one config line turns it back on.
     "reviewer": False,
+    # Wait for the issue branch's forge checks before fast-forwarding the
+    # integration branch. Off by default: the wait is minutes per landing and
+    # the operator opts in. A timeout is a blocker, never a pass.
+    "merge_gate": False,
+    # Seconds to wait for those checks. DEFAULT_MERGE_GATE_TIMEOUT covers a
+    # typical hermetic matrix; the workflow itself has no shorter job
+    # timeout to inherit.
+    "merge_gate_timeout": DEFAULT_MERGE_GATE_TIMEOUT,
 }
 
 

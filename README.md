@@ -155,6 +155,8 @@ project_type = "python" # python | typescript | go | rust | polyglot
 backend = "claude"      # claude | codex
 codegraph = "required"  # off | auto | required (default: required)
 codegraph_refresh_blocking = false
+merge_gate = false      # wait for issue-branch checks before fast-forward
+merge_gate_timeout = 1800  # seconds; timeout blocks, never lands
 
 [profiles.claude.plan]
 model = "opus"

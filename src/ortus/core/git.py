@@ -22,11 +22,59 @@ all (bd-only fixtures), and branch discipline must simply no-op there.
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 from ortus.core.grind_loop import BranchState, DEFAULT_INTEGRATION_BRANCH
+
+BranchCheckState = Literal["success", "failure", "pending"]
+
+_GITHUB_SCP = re.compile(r"^git@github\.com:([^/]+/[^/]+?)(?:\.git)?$")
+_GITHUB_URL = re.compile(
+    r"^(?:https?://|ssh://git@)github\.com/([^/]+/[^/]+?)(?:\.git)?/?$"
+)
+
+
+def github_repo_from_remote(url: str) -> str:
+    """`owner/repo` from an origin URL, or "" when it is not GitHub."""
+
+    stripped = url.strip()
+    matched = _GITHUB_SCP.match(stripped) or _GITHUB_URL.match(stripped)
+    return matched.group(1) if matched else ""
+
+
+def summarize_check_runs(payload: Any) -> BranchCheckState:
+    """Roll a GitHub check-runs document down to success, failure, or pending.
+
+    No runs yet, or any run still queued/in progress, is pending — a just-
+    pushed branch has not failed. A completed failure, cancellation, or
+    timed-out run is failure. Only an all-completed, no-failure set is
+    success. Unknown shapes are pending so a parse miss cannot authorize
+    a merge.
+    """
+
+    if not isinstance(payload, dict):
+        return "pending"
+    runs = payload.get("check_runs")
+    if not isinstance(runs, list) or not runs:
+        return "pending"
+    saw_completed = False
+    for run in runs:
+        if not isinstance(run, dict):
+            return "pending"
+        status = str(run.get("status") or "")
+        if status != "completed":
+            return "pending"
+        saw_completed = True
+        conclusion = str(run.get("conclusion") or "")
+        if conclusion in {"failure", "cancelled", "timed_out", "startup_failure"}:
+            return "failure"
+    return "success" if saw_completed else "pending"
 
 _RUNTIME_PATHS = (
     "logs",
@@ -590,6 +638,49 @@ class GitClient:
         exists to make visible.
         """
         return self._run("push", "origin", branch).returncode == 0
+
+    def origin_github_repo(self) -> str:
+        """`owner/repo` from `origin`, or "" when origin is missing or not GitHub."""
+
+        proc = self._run("remote", "get-url", "origin")
+        if proc.returncode != 0:
+            return ""
+        return github_repo_from_remote(proc.stdout.strip())
+
+    def branch_checks(self, branch: str) -> BranchCheckState:
+        """Forge check conclusion for `branch`: success, failure, or pending.
+
+        Reads GitHub check-runs for the branch tip via `gh`. Missing `gh`, a
+        non-GitHub origin, or an unreadable payload is pending — never
+        success — so a merge cannot proceed on an unknown result.
+        """
+
+        sha = self.branch_tip(branch)
+        if not sha:
+            return "pending"
+        repo = self.origin_github_repo()
+        if not repo:
+            return "pending"
+        if shutil.which("gh") is None:
+            return "pending"
+        try:
+            proc = subprocess.run(
+                ["gh", "api", f"repos/{repo}/commits/{sha}/check-runs"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "pending"
+        if proc.returncode != 0:
+            return "pending"
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return "pending"
+        return summarize_check_runs(payload)
 
     def pull_rebase(self, branch: str) -> bool:
         """`git pull --rebase origin <branch>`. Returns True on success.

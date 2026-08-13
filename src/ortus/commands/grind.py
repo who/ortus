@@ -92,7 +92,7 @@ from ortus.core.checks import (
     render_tracker_comment,
     run_checks,
 )
-from ortus.core.config import load_config
+from ortus.core.config import DEFAULT_MERGE_GATE_TIMEOUT, load_config
 from ortus.core.lifecycle import (
     CANDIDATE_CAPTURED,
     CORRECTION_REJECTED,
@@ -3145,6 +3145,10 @@ def _land_from_workspace(
     issue_id: str,
     integration_branch: str,
     write_log: Callable[[str], None],
+    merge_gate: bool = False,
+    merge_gate_timeout: float = DEFAULT_MERGE_GATE_TIMEOUT,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[CandidateJournal, str | None]:
     """Land a workspace-isolated candidate without moving the primary checkout.
 
@@ -3248,6 +3252,19 @@ def _land_from_workspace(
         return journal, (
             f"could not fetch {branch} from the worker workspace: {fetch_reason}"
         )
+    journal, gate_blocker = _apply_merge_gate(
+        git,
+        store,
+        journal,
+        issue_branch=branch,
+        merge_gate=merge_gate,
+        merge_gate_timeout=merge_gate_timeout,
+        write_log=write_log,
+        sleep=sleep,
+        clock=clock,
+    )
+    if gate_blocker is not None:
+        return journal, gate_blocker
     advance_reason = git.advance_preserving_exports(
         branch, _TRACKER_EXPORT_PATHS
     )
@@ -3283,6 +3300,10 @@ def _finalize_candidate(
     write_log: Callable[[str], None],
     compose: ComposeCallable | None = None,
     workspace_git: GitClient | None = None,
+    merge_gate: bool = False,
+    merge_gate_timeout: float = DEFAULT_MERGE_GATE_TIMEOUT,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[CandidateJournal, str | None]:
     """Ortus-owned report → close → compose → commit → sync, journaled by step.
 
@@ -3418,6 +3439,10 @@ def _finalize_candidate(
                 issue_id=issue_id,
                 integration_branch=integration_branch,
                 write_log=write_log,
+                merge_gate=merge_gate,
+                merge_gate_timeout=merge_gate_timeout,
+                sleep=sleep,
+                clock=clock,
             )
             if workspace_blocker is not None:
                 return journal, workspace_blocker
@@ -3576,6 +3601,19 @@ def _finalize_candidate(
                 branch_head = git.head_oid()
                 journal = journal.with_branch(journal.issue_branch, branch_head)
                 store.save(journal)
+                journal, gate_blocker = _apply_merge_gate(
+                    git,
+                    store,
+                    journal,
+                    issue_branch=journal.issue_branch,
+                    merge_gate=merge_gate,
+                    merge_gate_timeout=merge_gate_timeout,
+                    write_log=write_log,
+                    sleep=sleep,
+                    clock=clock,
+                )
+                if gate_blocker is not None:
+                    return journal, gate_blocker
                 if not git.fast_forward(integration_branch, journal.issue_branch):
                     return journal, (
                         f"fast-forward of {integration_branch} to "
@@ -4002,6 +4040,107 @@ def _retire_workspace(
         )
     )
     return replace(journal, workspace_path="")
+
+
+#: Extra `journal.finalization` key (not a FINALIZATION_STEP): the issue-branch
+#: SHA already pushed for merge-gate checks. Resume re-enters the wait without
+#: pushing again. Kept out of the step vocabulary so gating-off journals stay
+#: byte-identical to today's.
+_GATE_PUSHED_KEY = "issue_branch_pushed"
+_GATE_POLL_SECONDS = 15.0
+
+
+def _resolve_merge_gate(config: Any) -> tuple[bool, float]:
+    """`.ortusrc` merge-gate flag and timeout; invalid timeout falls back."""
+
+    enabled = bool(config.get("merge_gate", False))
+    raw = config.get("merge_gate_timeout", DEFAULT_MERGE_GATE_TIMEOUT)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = float(DEFAULT_MERGE_GATE_TIMEOUT)
+    if timeout < 0:
+        timeout = float(DEFAULT_MERGE_GATE_TIMEOUT)
+    return enabled, timeout
+
+
+def _apply_merge_gate(
+    git: GitClient,
+    store: JournalStore,
+    journal: CandidateJournal,
+    *,
+    issue_branch: str,
+    merge_gate: bool,
+    merge_gate_timeout: float,
+    write_log: Callable[[str], None],
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    poll_interval: float = _GATE_POLL_SECONDS,
+) -> tuple[CandidateJournal, str | None]:
+    """Push the issue branch and wait for its checks when the gate is on.
+
+    Returns ``(journal, None)`` when the caller may fast-forward, or a
+    blocker naming the branch and the observed conclusion. Gating off is a
+    silent no-op so every existing journal entry and log line is unchanged.
+    """
+
+    if not merge_gate:
+        return journal, None
+    if not issue_branch:
+        return journal, None
+    if not git.is_git_repo() or not git.has_remote():
+        write_log("finalization: merge gate skipped (no remote)")
+        return journal, None
+
+    tip = git.branch_tip(issue_branch) or journal.branch_head
+    already = journal.finalization.get(_GATE_PUSHED_KEY)
+    if already != tip:
+        if not _announced_push(git, issue_branch):
+            return journal, (
+                f"push of {issue_branch} to origin failed; the commit is "
+                f"preserved on {issue_branch}"
+            )
+        record = dict(journal.finalization)
+        record[_GATE_PUSHED_KEY] = tip
+        journal = replace(journal, finalization=record)
+        store.save(journal)
+        write_log(
+            f"finalization: pushed {issue_branch} at {tip[:12]} for merge-gate checks"
+        )
+    else:
+        write_log(
+            f"finalization: {issue_branch} already on origin at "
+            f"{str(already)[:12]}; re-entering the check wait"
+        )
+
+    deadline = clock() + merge_gate_timeout
+    write_log(
+        f"finalization: waiting up to {int(merge_gate_timeout)}s for checks "
+        f"on {issue_branch}"
+    )
+    output.progress(
+        "grind",
+        f"waiting for checks on {issue_branch} "
+        f"(up to {int(merge_gate_timeout)}s)",
+    )
+    while True:
+        conclusion = git.branch_checks(issue_branch)
+        if conclusion == "success":
+            write_log(f"finalization: checks on {issue_branch} passed")
+            return journal, None
+        if conclusion == "failure":
+            return journal, (
+                f"checks on {issue_branch} failed — the commit is preserved "
+                f"on {issue_branch}"
+            )
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return journal, (
+                f"checks on {issue_branch} timed out after "
+                f"{int(merge_gate_timeout)}s still pending — the commit is "
+                f"preserved on {issue_branch}"
+            )
+        sleep(min(poll_interval, remaining))
 
 
 def _announced_push(git: GitClient, branch: str) -> bool:
@@ -4724,6 +4863,7 @@ def grind(
         # Verification is the machine pipeline; the agent reviewer is a
         # default-off configured step, one `.ortusrc` line from returning.
         reviewer_enabled = bool(config.get("reviewer", False))
+        merge_gate, merge_gate_timeout = _resolve_merge_gate(config)
         implement_profile = config.resolve_profile(
             resolved_backend,
             Phase.IMPLEMENT,
@@ -4828,6 +4968,14 @@ def grind(
             )
         )
         output.info(f"codegraph:      {codegraph_mode.value}")
+        output.info(
+            "merge-gate:     "
+            + (
+                f"on, timeout {int(merge_gate_timeout)}s"
+                if merge_gate
+                else "off"
+            )
+        )
         output.info(
             f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}"
         )
@@ -4958,6 +5106,8 @@ def grind(
                     ),
                     write_log=write_log,
                     compose=compose_message,
+                    merge_gate=merge_gate,
+                    merge_gate_timeout=merge_gate_timeout,
                 )
                 if blocker is not None:
                     write_log(f"finalization resume: HALT — {blocker}")
@@ -6499,6 +6649,8 @@ def grind(
                             and candidate_git is not git
                             else None
                         ),
+                        merge_gate=merge_gate,
+                        merge_gate_timeout=merge_gate_timeout,
                     )
                     if active_journal.workspace_path:
                         # Landed or blocked, the clone is disposable: the

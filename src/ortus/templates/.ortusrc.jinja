@@ -25,3 +25,8 @@ codegraph = "{{ codegraph }}"
 # [profiles.{{ backend }}.verify]
 # model = "provider-model-name"
 # reasoning_effort = "high"
+
+# Push the issue branch and wait for its forge checks before fast-forwarding
+# the integration branch. Off by default — a timeout is a blocker, never a pass.
+# merge_gate = false
+# merge_gate_timeout = 1800
