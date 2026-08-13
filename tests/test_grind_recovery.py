@@ -1936,6 +1936,109 @@ def test_parked_branch_rebases_forward_on_resume(
 
 
 @pytest.mark.slow
+def test_legacy_resume_stale_fork(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (ortus-o52d): a legacy shared-tree resume whose fork point
+    trails main refuses before a worker runs, instead of burning a full
+    implement and then failing the integration-moved guard."""
+    repo, issue_id = _seed(tmp_path, "legfwd")
+    branch = f"ortus/{issue_id}"
+    _claim(repo, issue_id)
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "checkout", "-b", branch],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / CANDIDATE).write_text("PARKED = True\n")
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "add", CANDIDATE],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "commit", "-m", "parked work"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    parked_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "checkout", "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    stray = repo / "stray-shared.txt"
+    stray.write_text("uncommitted shared-tree residue\n")
+    store = JournalStore(repo)
+    digest, diff_ref = store.save_diff(
+        candidate_diff(repo, frozenset({CANDIDATE}), base=base)
+    )
+    packet_digest, packet_ref = store.save_packet(issue_id, _issue(repo, issue_id))
+    journal = (
+        CandidateJournal.start(
+            repo=repo,
+            issue_id=issue_id,
+            base_head=base,
+            baseline_paths=(),
+            packet_hash=packet_digest,
+            packet_ref=packet_ref,
+        )
+        .with_branch(branch, parked_tip)
+        .with_candidate(
+            {CANDIDATE, "stray-shared.txt"},
+            phase="verification-rejected",
+            candidate_hash=digest,
+            diff_ref=diff_ref,
+        )
+    )
+    store.save(journal)
+    (repo / "advance.txt").write_text("integration moved\n")
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "add", "advance.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            "integration advances",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    stray.write_text("uncommitted shared-tree residue\n")
+
+    def _boom(_repo: Path, _log: Path) -> int:
+        raise AssertionError("worker must not run on a guaranteed rejection")
+
+    _install(monkeypatch, tmp_path, ScriptedRunner(implement=_boom, verify=_boom))
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 1, result.stdout + result.stderr
+    combined = result.stdout + result.stderr + _log(repo)
+    assert "legacy shared-tree candidate detected" in _log(repo)
+    assert "moved past" in combined
+    assert "integration-moved guard" in combined
+    assert "is no longer its head" not in _log(repo)
+    assert _issue(repo, issue_id)["status"] == "open"
+
+
+@pytest.mark.slow
 def test_tracker_lock_never_routes_a_branch_resume_down_the_legacy_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

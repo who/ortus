@@ -3753,6 +3753,47 @@ def _prepare_issue_branch(
                 return issue_branch, (
                     f"could not check out {issue_branch} to resume: {reason}"
                 ), False
+        integration_tip = git.branch_tip(integration_branch)
+        if (
+            journal is not None
+            and journal.base_head
+            and integration_tip
+            and journal.base_head != integration_tip
+        ):
+            # The workspace path already rebases a parked branch forward
+            # (ortus-bz3c). The legacy shared-tree path did not, so a stale
+            # fork point burned a full worker and then failed the
+            # integration-moved guard on every retry (ortus-o52d).
+            dirty = (
+                (git.dirty_paths() or frozenset())
+                - _TRACKER_EXPORT_PATHS
+                - _TRACKER_TOOL_STATE
+            )
+            if dirty:
+                return issue_branch, (
+                    f"{integration_branch} moved past {issue_branch}'s fork "
+                    f"point ({journal.base_head[:12]} → "
+                    f"{integration_tip[:12]}) and the worktree is dirty, so "
+                    "the branch cannot rebase forward; a worker would fail "
+                    "the integration-moved guard. Dirty paths: "
+                    + ", ".join(sorted(dirty))
+                    + ". Resolve the branch manually, then re-run grind"
+                ), False
+            rebase_reason = git.rebase_onto(integration_tip, issue_branch)
+            if rebase_reason:
+                return issue_branch, (
+                    f"{integration_branch} moved past {issue_branch}'s fork "
+                    f"point and the rebase forward hit a conflict: "
+                    f"{rebase_reason} — resolve the branch manually, then "
+                    "re-run grind"
+                ), False
+            write_log(
+                f"iter prep: rebased parked {issue_branch} onto "
+                f"{integration_branch} at {integration_tip[:12]}"
+            )
+            # A rebase is a re-cut: the caller refreshes base_head from the
+            # integration tip, not this checkout (we are on the issue branch).
+            return issue_branch, "", False
         write_log(
             f"iter prep: resumed existing {issue_branch} at "
             f"{git.branch_tip(issue_branch)[:12]}"
@@ -5765,9 +5806,15 @@ def grind(
                             # A branch (re)established at the integration head
                             # has a new fork point; a journal carrying an older
                             # one would trip the integration-moved guard on a
-                            # branch that never diverged (ortus-ti4i).
+                            # branch that never diverged (ortus-ti4i). Read the
+                            # integration tip, not HEAD: a legacy resume may
+                            # be sitting on the issue branch after a rebase.
                             active_journal = replace(
-                                active_journal, base_head=git.head_oid()
+                                active_journal,
+                                base_head=(
+                                    git.branch_tip(integration_branch)
+                                    or git.head_oid()
+                                ),
                             )
                         active_journal = replace(
                             active_journal.with_branch(
