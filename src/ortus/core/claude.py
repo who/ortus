@@ -391,7 +391,7 @@ def _repo_agent_dir_tmpfs(repo: Path) -> list[str]:
 # placeholders, and the bd export. None of it is code under test, and all of it
 # gets written during an ordinary read-only review.
 REPO_TOOL_STATE: frozenset[str] = frozenset(
-    {".git", ".gitconfig", ".claude", ".codex", ".beads", ".ortus"}
+    {".git", ".gitconfig", ".claude", ".codex", ".beads", ".codegraph", ".ortus"}
 )
 
 

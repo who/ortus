@@ -1436,6 +1436,7 @@ def _machine_verify_candidate(
     sync_ms: int,
     iteration: int,
     integration_branch: str,
+    worker_timeout: int = 0,
 ) -> _VerificationResult:
     """Judge the candidate with the deterministic pipeline: no agent, no tokens.
 
@@ -1612,6 +1613,12 @@ def _machine_verify_candidate(
         claim_criteria,
         str(ref),
         base_ref=(journal.base_head or integration_branch),
+        # A criterion that runs the full gate needs gate-length time; the
+        # per-command bound follows the worker budget rather than the
+        # runner's 10-minute default (two live criteria timed out there).
+        timeout_seconds=float(
+            max(1800, worker_timeout if worker_timeout > 0 else 0)
+        ),
     )
     disagreements = _claim_disagreements(_latest_claims(bd, issue_id), run)
     verdict = _machine_verdict(journal, run, disagreements)
@@ -1684,6 +1691,7 @@ def _verification_pass(
         sync_ms=kwargs["sync_ms"],
         iteration=iteration,
         integration_branch=integration_branch,
+        worker_timeout=int(kwargs.get("worker_timeout") or 0),
     )
     if not reviewer_enabled:
         return machine_result
@@ -3735,8 +3743,21 @@ def _materialize_workspace(
 
     workspace = repo / _WORKSPACES_DIR / issue_id
     if workspace.exists():
-        # Anything here is a leftover the startup sweep already rescued (or a
-        # crashed sweep will); a fresh claim starts from the primary's refs.
+        if (
+            journal is not None
+            and journal.workspace_path
+            and (repo / journal.workspace_path) == workspace
+        ):
+            # The startup sweep could not retire this workspace (it said why
+            # in the log), so it may still hold the only copy of the work. A
+            # claim never destroys that.
+            return issue_branch, None, None, (
+                f"the worker workspace at {journal.workspace_path} still "
+                "holds unswept state; resolve the sweep failure recorded in "
+                "the log, then re-run grind"
+            ), False
+        # Anything else is a leftover no journal owns; a fresh claim starts
+        # from the primary's refs.
         shutil.rmtree(workspace, ignore_errors=True)
     workspace.parent.mkdir(parents=True, exist_ok=True)
     reason = git.clone_shared(git.head_oid(), workspace)
@@ -3767,6 +3788,14 @@ def _materialize_workspace(
     index = repo / ".codegraph"
     if index.is_dir() and not (workspace / ".codegraph").exists():
         try:
+            # The primary's gitignore pattern (`.codegraph/`) matches only a
+            # directory, not this symlink, so the clone excludes it at the
+            # git level — a candidate must never absorb the index link
+            # (observed live on ortus-k46v.1's first clone-mode run).
+            exclude = workspace / ".git" / "info" / "exclude"
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a", encoding="utf-8") as fh:
+                fh.write("/.codegraph\n")
             (workspace / ".codegraph").symlink_to(index.resolve())
         except OSError as exc:
             write_log(f"iter prep: could not link the CodeGraph index ({exc})")
