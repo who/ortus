@@ -1161,6 +1161,37 @@ def test_issue_comments_break_same_second_ties_by_id() -> None:
     assert bodies == ["first", "second"]
 
 
+def test_issue_comments_keep_an_unkeyed_entry_among_its_neighbours() -> None:
+    """An entry with no ordering fields stays where the tracker returned it."""
+
+    class _UnkeyedBd:
+        """A tracker that stamped one of three comments with nothing."""
+
+        def comments(self, issue_id: str) -> list[dict[str, str]]:
+            return [
+                {
+                    "id": "019fed0a-4314-781f-8c0b-000000000001",
+                    "created_at": "2026-08-10T18:58:21Z",
+                    "text": "first",
+                },
+                {"text": "unkeyed"},
+                {
+                    "id": "019fed0a-4a2c-7a94-9d1e-000000000002",
+                    "created_at": "2026-08-10T18:58:22Z",
+                    "text": "third",
+                },
+            ]
+
+    # Sorting an absent key as the empty string would rank this entry ahead of
+    # every stamped comment, which reads as the oldest and would hand the
+    # newest-block callers the wrong end of the list.
+    assert grind_mod._issue_comments(_UnkeyedBd(), "repo-1") == [
+        "first",
+        "unkeyed",
+        "third",
+    ]
+
+
 def test_issue_comments_survive_an_unreadable_tracker() -> None:
     """A tracker that cannot be read costs the prose, never the commit."""
 

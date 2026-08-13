@@ -2571,24 +2571,32 @@ def _issue_comments(bd: BdClient, issue_id: str) -> list[str]:
     tracker — version nibble `7`, as in `019fed0a-4314-781f-...`), whose
     leading 48 bits are a millisecond timestamp, so lexicographic id order is
     posting order within a second. `created_at` stays the primary key, which
-    keeps a bd that ever widens its timestamps working unchanged; the sort is
-    stable, so entries carrying neither field keep the order bd returned them
-    in rather than being reshuffled to the front.
+    keeps a bd that ever widens its timestamps working unchanged.
+
+    An entry that carries neither field has no key of its own, and sorting it
+    on empty strings would hoist it ahead of every stamped comment — the one
+    reordering a total order must not perform, because the entry's only
+    evidence of when it was posted is the company it arrived in. Each missing
+    field therefore inherits the last value seen, and the position bd returned
+    the entry in breaks the resulting tie, so an unkeyed entry stays beside
+    its neighbours instead of moving to the front.
     """
 
     try:
         entries = bd.comments(issue_id)
     except Exception:  # noqa: BLE001 - a missing description never blocks a commit
         return []
-    ordered = sorted(
-        (entry for entry in entries if isinstance(entry, dict)),
-        key=lambda entry: (
-            str(entry.get("created_at") or ""),
-            str(entry.get("id") or ""),
-        ),
-    )
+    keyed: list[tuple[str, str, int, dict[str, Any]]] = []
+    stamp = ident = ""
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        stamp = str(entry.get("created_at") or "") or stamp
+        ident = str(entry.get("id") or "") or ident
+        keyed.append((stamp, ident, position, entry))
+    keyed.sort(key=lambda row: (row[0], row[1], row[2]))
     bodies: list[str] = []
-    for entry in ordered:
+    for *_key, entry in keyed:
         for key in ("body", "text", "comment", "content"):
             value = entry.get(key)
             if value:
