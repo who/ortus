@@ -1145,8 +1145,13 @@ def test_issue_comments_break_same_second_ties_by_id() -> None:
                     "created_at": "2026-08-10T18:58:21Z",
                     "text": "first",
                 },
-                # A malformed element must not reach the sort key.
+                # A malformed element must not reach the sort key, and an
+                # entry with no body at all is dropped after it is ordered.
                 "not a comment",
+                {
+                    "id": "019fed0a-4a2c-7a94-9d1e-000000000003",
+                    "created_at": "2026-08-10T18:58:21Z",
+                },
             ]
 
     bodies = grind_mod._issue_comments(_SameSecondBd(), "repo-1")
@@ -1154,6 +1159,16 @@ def test_issue_comments_break_same_second_ties_by_id() -> None:
     # Absolute order, not merely "not what bd returned": `_latest_claims`
     # reads this list reversed, so an accidental flip would invert it.
     assert bodies == ["first", "second"]
+
+
+def test_issue_comments_survive_an_unreadable_tracker() -> None:
+    """A tracker that cannot be read costs the prose, never the commit."""
+
+    class _BrokenBd:
+        def comments(self, issue_id: str) -> list[dict[str, str]]:
+            raise BdError(["bd", "comments", issue_id], 1, "tracker unavailable")
+
+    assert grind_mod._issue_comments(_BrokenBd(), "repo-1") == []
 
 
 def test_commit_degrades_without_packet(
