@@ -182,6 +182,15 @@ _TRACKER_EXPORT_PATHS = frozenset(
     }
 )
 
+#: Tracker runtime artifacts that may appear untracked at the repo root
+#: (bd >= 1.2 writes `.beads.gate.lock` beside `.beads/`). Never candidate
+#: content and never evidence of shared-tree work: one absorbed into a
+#: journal's candidate_paths misrouted a branch-scoped resume down the
+#: legacy path, whose stale fork point then failed the integration-moved
+#: guard on every retry. Ignored via .gitignore too; this set defends repos
+#: whose .gitignore predates the entry.
+_TRACKER_TOOL_STATE = frozenset({".beads.gate.lock"})
+
 
 def _is_tool_state(path: str) -> bool:
     """Whether a dirty path is tool state rather than candidate content.
@@ -755,7 +764,7 @@ def _rebuild_journal_from_claim(
     if dirty is None or len(claimed) != 1:
         return None
     issue_hint = next(iter(claimed))
-    paths = dirty - _TRACKER_EXPORT_PATHS
+    paths = dirty - _TRACKER_EXPORT_PATHS - _TRACKER_TOOL_STATE
     try:
         digest, diff_ref = store.save_diff(candidate_diff(repo, paths))
     except RuntimeError as exc:
@@ -856,7 +865,7 @@ def _prepare_handoff(
             if dirty is None:
                 write_log("transaction handoff: git status failed; assuming clean tree")
                 dirty = frozenset()
-            inherited = dirty - _TRACKER_EXPORT_PATHS
+            inherited = dirty - _TRACKER_EXPORT_PATHS - _TRACKER_TOOL_STATE
         if not inherited:
             return _HandoffState(notes=notes)
         state = _HandoffState(handoff_paths=inherited, active=True, notes=notes)
@@ -5527,7 +5536,9 @@ def grind(
                         # primary worktree; a fresh clone would never see it.
                         # Those transactions recover by the pre-workspace
                         # rules, in the primary tree.
-                        primary_dirty = git.dirty_paths() or frozenset()
+                        primary_dirty = (
+                            git.dirty_paths() or frozenset()
+                        ) - _TRACKER_TOOL_STATE
                         legacy_resume = bool(
                             active_journal is not None
                             and active_journal.issue_id == issue_id
@@ -5605,7 +5616,8 @@ def grind(
                     active_journal = active_journal.with_candidate(
                         dirty_after_claim
                         - _candidate_baseline(active_journal, codex_baseline)
-                        - _TRACKER_EXPORT_PATHS,
+                        - _TRACKER_EXPORT_PATHS
+                        - _TRACKER_TOOL_STATE,
                         phase=active_journal.phase
                         if resume_candidate_ready
                         else IMPLEMENTATION,

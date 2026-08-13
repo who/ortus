@@ -295,7 +295,10 @@ def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
     (repo / ".ortusrc").write_text('backend = "codex"\n')
-    (repo / ".codex").mkdir()
+    # bd >=1.1 `init` scaffolds agent config (.agents/, .claude/, .codex/,
+    # .cursor/) into the workspace, so the template may already carry this
+    # directory; older bds leave it to the fixture.
+    (repo / ".codex").mkdir(exist_ok=True)
     (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
     (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
     subprocess.run(

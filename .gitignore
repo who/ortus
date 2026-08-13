@@ -33,3 +33,4 @@ package.json
 .beads/*.duckdb
 .beads/*.bak
 .beads/*.pre-embedded-*
+.beads.gate.lock

@@ -1935,6 +1935,110 @@ def test_parked_branch_rebases_forward_on_resume(
     assert (repo / "advance.txt").exists()
 
 
+@pytest.mark.slow
+def test_tracker_lock_never_routes_a_branch_resume_down_the_legacy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An untracked bd runtime lock (`.beads.gate.lock`) recorded in a
+    journal's candidate_paths must not read as shared-tree work: the resume
+    stays on the workspace path, rebases the parked branch forward, and never
+    trips the integration-moved guard on the stale fork point."""
+    repo, issue_id = _seed(tmp_path, "lockres")
+    branch = f"ortus/{issue_id}"
+    _claim(repo, issue_id)
+    for args in (["checkout", "-b", branch],):
+        subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    (repo / CANDIDATE).write_text("PARKED = True\n")
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "add", CANDIDATE],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "commit", "-m", "parked work"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    parked_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "checkout", "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    store = JournalStore(repo)
+    digest, diff_ref = store.save_diff(
+        candidate_diff(repo, frozenset({CANDIDATE}), base=base)
+    )
+    packet_digest, packet_ref = store.save_packet(issue_id, _issue(repo, issue_id))
+    journal = (
+        CandidateJournal.start(
+            repo=repo,
+            issue_id=issue_id,
+            base_head=base,
+            baseline_paths=(),
+            packet_hash=packet_digest,
+            packet_ref=packet_ref,
+        )
+        .with_branch(branch, parked_tip)
+        .with_candidate(
+            {CANDIDATE, ".beads.gate.lock"},
+            phase="verification-rejected",
+            candidate_hash=digest,
+            diff_ref=diff_ref,
+        )
+    )
+    store.save(journal)
+    post_completion_comment(repo, issue_id, {"AC-1": "pass"})
+    # The tracker's runtime lock sits untracked in the primary — the bait that
+    # once flipped this resume onto the legacy shared-tree path.
+    (repo / ".beads.gate.lock").write_text("")
+    # The integration branch moves past the fork point while the branch parks.
+    (repo / "advance.txt").write_text("integration moved\n")
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "add", "advance.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "commit", "-m", "advance"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    _install(monkeypatch, tmp_path, ScriptedRunner())
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert "legacy shared-tree candidate detected" not in log
+    assert f"rebased parked {branch}" in log
+    assert "is no longer its head" not in log
+    assert _issue(repo, issue_id)["status"] == "closed"
+    committed = subprocess.run(
+        ["git", "show", "main", "--stat", "--format="],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert ".beads.gate.lock" not in committed, "the lock is never committed"
+
+
 # ---------------------------------------------------------------------------
 # Spec defects escalate instead of spending corrections (ortus-lwr9)
 # ---------------------------------------------------------------------------
