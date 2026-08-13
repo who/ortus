@@ -1125,6 +1125,37 @@ def test_commit_body_takes_the_refreshed_changes_block(
     assert "added the SHIPPED flag" not in body
 
 
+def test_issue_comments_break_same_second_ties_by_id() -> None:
+    """AC-2: same-second comments come back in posting order, oldest first."""
+
+    class _SameSecondBd:
+        """A tracker whose one-second timestamps cannot order two comments."""
+
+        def comments(self, issue_id: str) -> list[object]:
+            assert issue_id == "repo-1"
+            return [
+                # Posted second, returned first: only the id says so.
+                {
+                    "id": "019fed0a-4a2c-7a94-9d1e-000000000002",
+                    "created_at": "2026-08-10T18:58:21Z",
+                    "text": "second",
+                },
+                {
+                    "id": "019fed0a-4314-781f-8c0b-000000000001",
+                    "created_at": "2026-08-10T18:58:21Z",
+                    "text": "first",
+                },
+                # A malformed element must not reach the sort key.
+                "not a comment",
+            ]
+
+    bodies = grind_mod._issue_comments(_SameSecondBd(), "repo-1")
+
+    # Absolute order, not merely "not what bd returned": `_latest_claims`
+    # reads this list reversed, so an accidental flip would invert it.
+    assert bodies == ["first", "second"]
+
+
 def test_commit_degrades_without_packet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

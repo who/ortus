@@ -2561,16 +2561,34 @@ def _printable(text: Any) -> str:
 
 
 def _issue_comments(bd: BdClient, issue_id: str) -> list[str]:
-    """Comment bodies in tracker order, or [] when they cannot be read."""
+    """Comment bodies oldest first, or [] when they cannot be read.
+
+    Posting order is the contract every caller reads through — the newest
+    `**Changes**` block describes what ships, and the newest claims block is
+    the one that counts — but bd emits `created_at` at one-second resolution,
+    so two comments posted inside the same second come back in either order.
+    The comment id breaks that tie: bd issues UUIDv7 ids (probed on this
+    tracker — version nibble `7`, as in `019fed0a-4314-781f-...`), whose
+    leading 48 bits are a millisecond timestamp, so lexicographic id order is
+    posting order within a second. `created_at` stays the primary key, which
+    keeps a bd that ever widens its timestamps working unchanged; the sort is
+    stable, so entries carrying neither field keep the order bd returned them
+    in rather than being reshuffled to the front.
+    """
 
     try:
         entries = bd.comments(issue_id)
     except Exception:  # noqa: BLE001 - a missing description never blocks a commit
         return []
+    ordered = sorted(
+        (entry for entry in entries if isinstance(entry, dict)),
+        key=lambda entry: (
+            str(entry.get("created_at") or ""),
+            str(entry.get("id") or ""),
+        ),
+    )
     bodies: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
+    for entry in ordered:
         for key in ("body", "text", "comment", "content"):
             value = entry.get(key)
             if value:
