@@ -441,9 +441,10 @@ def _capture_codex_candidate(
     # dirty set still contributes untracked files, which no committed range
     # can name.
     base = journal.base_head if journal.issue_branch else ""
+    tip = git.branch_tip(journal.issue_branch) if base else ""
     range_changed: frozenset[str] = frozenset()
-    if base and git.head_oid() != base:
-        changed = git.changed_paths(base)
+    if base and tip and tip != base:
+        changed = git.changed_paths(base, tip)
         if changed is None:
             output.error("grind: could not read the candidate's committed range")
             raise typer.Exit(code=1)
@@ -486,9 +487,14 @@ def _candidate_view(
         if journal.issue_branch and git.branch_exists(journal.issue_branch)
         else ""
     )
+    # The branch, never the checkout, is the committed range's tip: the
+    # primary repository deliberately stays on the integration branch, so an
+    # implicit HEAD would read the harness's own landings as the candidate
+    # (ortus-bz3c, observed on the first clone-mode resume).
+    tip = git.branch_tip(journal.issue_branch) if base else ""
     extra: frozenset[str] = frozenset()
-    if base and git.head_oid() != base:
-        changed = git.changed_paths(base)
+    if base and tip and tip != base:
+        changed = git.changed_paths(base, tip)
         if changed is None:
             return None
         extra = changed
@@ -953,6 +959,7 @@ def _prepare_handoff(
     # the recorded base. The worktree-only view read a committed candidate
     # as empty here and "refreshed" the journal to nothing (ortus-4fxr).
     diff_base = ""
+    diff_tip = ""
     if git.is_git_repo():
         view = _candidate_view(git, journal, baseline)
         if view is None:
@@ -960,13 +967,19 @@ def _prepare_handoff(
             candidate = _candidate_paths(dirty, baseline)
         else:
             candidate, diff_base = view
+            if diff_base and git.current_branch() != journal.issue_branch:
+                # The primary is parked on the integration branch; the
+                # candidate's tree is its branch ref, not this checkout
+                # (ortus-bz3c). A legacy resume sitting on the branch keeps
+                # the worktree reading for its dirty tail.
+                diff_tip = git.branch_tip(journal.issue_branch)
     else:
         candidate = _candidate_paths(dirty, baseline)
     if prior_phase in _SEALED_PHASES and candidate != frozenset(journal.candidate_paths):
         moved.append("the candidate path set changed since the prior worker")
     try:
         diff = (
-            candidate_diff(repo, candidate, base=diff_base)
+            candidate_diff(repo, candidate, base=diff_base, tip=diff_tip)
             if git.is_git_repo()
             else b""
         )
@@ -3799,6 +3812,32 @@ def _materialize_workspace(
             (workspace / ".codegraph").symlink_to(index.resolve())
         except OSError as exc:
             write_log(f"iter prep: could not link the CodeGraph index ({exc})")
+    if resuming_own and journal is not None and (
+        journal.base_head and journal.base_head != git.head_oid()
+    ):
+        # The integration branch advanced while this branch was parked. A
+        # guard that rejects the stale fork point on every retry is a dead
+        # end (ortus-ti4i's sibling), so the workspace carries the branch
+        # forward: rebase onto the clone-time integration head, conflicts
+        # reported as a claim blocker with the branch left untouched.
+        rebase_reason = workspace_git.rebase_onto(git.head_oid(), issue_branch)
+        if rebase_reason:
+            shutil.rmtree(workspace, ignore_errors=True)
+            return issue_branch, None, None, (
+                f"{integration_branch} moved past {issue_branch}'s fork "
+                f"point and the rebase forward hit a conflict: "
+                f"{rebase_reason} — resolve the branch manually, then "
+                "re-run grind"
+            ), False
+        write_log(
+            f"iter prep: rebased parked {issue_branch} onto "
+            f"{integration_branch} at {git.head_oid()[:12]} "
+            f"(primary stays on {integration_branch})"
+        )
+        # A rebase is a re-cut: the fork point is new, so the caller
+        # refreshes base_head and the capture recomputes the candidate
+        # identity, exactly as for a fresh branch (ortus-ti4i).
+        return issue_branch, workspace, workspace_git, "", False
     if resuming_own:
         write_log(
             f"iter prep: worker workspace resumed {issue_branch} at "

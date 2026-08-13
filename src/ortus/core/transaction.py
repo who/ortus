@@ -143,7 +143,9 @@ def fingerprint_paths(repo: Path, paths: Iterable[str]) -> dict[str, str]:
     return {path: _path_fingerprint(repo, path) for path in sorted(set(paths))}
 
 
-def candidate_diff(repo: Path, paths: Iterable[str], *, base: str = "") -> bytes:
+def candidate_diff(
+    repo: Path, paths: Iterable[str], *, base: str = "", tip: str = ""
+) -> bytes:
     """Return a deterministic, binary-safe diff bundle for candidate paths.
 
     Normal ``git diff HEAD`` covers staged, unstaged, deleted, and binary tracked
@@ -156,6 +158,12 @@ def candidate_diff(repo: Path, paths: Iterable[str], *, base: str = "") -> bytes
     A branch-scoped candidate passes its recorded base head instead, so
     commits the worker made on its issue branch are part of the bundle rather
     than invisible to it.
+
+    `tip` pins the other end to a ref instead of the worktree — the reading a
+    primary repository parked on the integration branch needs, where the
+    checkout is deliberately not the candidate's tree (ortus-bz3c). With a
+    tip, the bundle is committed content only and no untracked appendix
+    applies.
     """
 
     selected = tuple(sorted(set(paths)))
@@ -185,14 +193,17 @@ def candidate_diff(repo: Path, paths: Iterable[str], *, base: str = "") -> bytes
             if head.returncode == 0
             else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         )
+    endpoints = [base, tip] if tip else [base]
     tracked = subprocess.run(
-        ["git", "diff", "--binary", "--no-ext-diff", base, "--", *selected],
+        ["git", "diff", "--binary", "--no-ext-diff", *endpoints, "--", *selected],
         cwd=repo,
         capture_output=True,
         check=False,
     )
     if tracked.returncode != 0:
         raise RuntimeError(tracked.stderr.decode("utf-8", errors="replace").strip())
+    if tip:
+        return tracked.stdout
     untracked = subprocess.run(
         ["git", "ls-files", "-z", "--others", "--exclude-standard", "--", *selected],
         cwd=repo,

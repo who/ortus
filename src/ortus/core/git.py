@@ -615,17 +615,45 @@ class GitClient:
         proc = self._run("rev-parse", "--verify", "--quiet", f"refs/heads/{name}")
         return proc.stdout.strip() if proc.returncode == 0 else ""
 
-    def changed_paths(self, base: str) -> frozenset[str] | None:
-        """Every path that differs between `base` and the working tree.
+    def changed_paths(
+        self, base: str, tip: str = ""
+    ) -> frozenset[str] | None:
+        """Every path that differs between `base` and `tip` (default: worktree).
 
         Committed-and-then-modified files appear once; the caller unions this
         with :meth:`dirty_paths` to cover untracked files, which no
-        base-relative diff can name. None on error, mirroring `dirty_paths`.
+        base-relative diff can name. A branch-scoped candidate names its tip
+        explicitly — the primary checkout never leaves the integration
+        branch, so an implicit HEAD would diff the wrong tree. None on error,
+        mirroring `dirty_paths`.
         """
-        proc = self._run("diff", "--name-only", "-z", base, "--")
+        args = ["diff", "--name-only", "-z", base]
+        if tip:
+            args.append(tip)
+        proc = self._run(*args, "--")
         if proc.returncode != 0:
             return None
         return frozenset(path for path in proc.stdout.split("\0") if path)
+
+    def rebase_onto(self, upstream: str, branch: str) -> str:
+        """`git rebase <upstream> <branch>`: carry a parked branch forward.
+
+        The merge-forward a resumed transaction needs when the integration
+        branch advanced past its fork point. Hook-free like all branch
+        plumbing; a conflicted rebase is aborted so the branch is left
+        exactly where it was, and the reason comes back for the operator.
+        Returns "" on success.
+        """
+        proc = self._run("rebase", upstream, branch, hooks=False)
+        if proc.returncode == 0:
+            return ""
+        conflicted = self._run("diff", "--name-only", "--diff-filter=U")
+        names = ", ".join(
+            line for line in conflicted.stdout.splitlines() if line.strip()
+        )
+        self._run("rebase", "--abort", hooks=False)
+        reason = _bounded_failure(proc) or f"git rebase exited {proc.returncode}"
+        return f"{reason} (conflicted: {names})" if names else reason
 
     def head_message(self) -> str:
         """The full commit message of HEAD, or "" when unreadable."""

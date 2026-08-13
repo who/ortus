@@ -1727,3 +1727,141 @@ def test_crashed_clone_is_swept_at_startup(
         text=True,
     )
     assert shown.stdout == "HALF_DONE = True\n"
+
+
+# ---------------------------------------------------------------------------
+# The primary-side candidate lens and the parked-branch merge-forward
+# (ortus-bz3c)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_never_absorbs_integration_commits(tmp_path: Path) -> None:
+    """AC-1 (ortus-bz3c): with the primary parked on the integration branch,
+    a handoff refresh of a branch-scoped journal reads the branch — never
+    main's own later commits."""
+    repo, issue_id, base, tip, digest = _branch_scoped_rejected_workspace(tmp_path)
+    from ortus.core.bd import BdClient
+
+    # Return to main and land unrelated integration work past the fork point.
+    _git(repo, "checkout", "main")
+    (repo / "landed-by-main.txt").write_text("integration work\n")
+    _git(repo, "add", "landed-by-main.txt")
+    _git(repo, "commit", "-m", "unrelated integration landing")
+
+    grind_mod._prepare_handoff(
+        BdClient(repo=repo),
+        GitClient(repo),
+        JournalStore(repo),
+        repo=repo,
+        backend="claude",
+        integration_branch="main",
+        write_log=lambda _line: None,
+    )
+    resumed = JournalStore(repo).load()
+    assert resumed is not None
+    assert "landed-by-main.txt" not in resumed.candidate_paths
+    assert set(resumed.candidate_paths) == {CANDIDATE}
+    assert resumed.candidate_hash == digest
+
+
+@pytest.mark.slow
+def test_parked_branch_rebases_forward_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parked branch whose fork point trails the integration head is
+    rebased forward at claim and lands, instead of looping on the
+    integration-moved rejection."""
+    repo, issue_id = _seed(tmp_path, "fwd1")
+    branch = f"ortus/{issue_id}"
+    _claim(repo, issue_id)
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "checkout", "-b", branch],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / CANDIDATE).write_text("PARKED = True\n")
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "add", CANDIDATE],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "commit", "-m", "parked work"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    parked_tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "checkout", "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    store = JournalStore(repo)
+    digest, diff_ref = store.save_diff(
+        candidate_diff(repo, frozenset({CANDIDATE}), base=base)
+    )
+    packet_digest, packet_ref = store.save_packet(issue_id, _issue(repo, issue_id))
+    journal = (
+        CandidateJournal.start(
+            repo=repo,
+            issue_id=issue_id,
+            base_head=base,
+            baseline_paths=(),
+            packet_hash=packet_digest,
+            packet_ref=packet_ref,
+        )
+        .with_branch(branch, parked_tip)
+        .with_candidate(
+            {CANDIDATE},
+            phase="verification-rejected",
+            candidate_hash=digest,
+            diff_ref=diff_ref,
+        )
+    )
+    store.save(journal)
+    post_completion_comment(repo, issue_id, {"AC-1": "pass"})
+    # The integration branch moves past the fork point while the branch parks.
+    (repo / "advance.txt").write_text("integration moved\n")
+    subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "add", "advance.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            "integration advances",
+        ],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    _install(monkeypatch, tmp_path, ScriptedRunner())
+
+    result = _grind(repo, "--tasks", "1")
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _log(repo)
+    assert f"rebased parked {branch}" in log
+    assert "is no longer its head" not in log
+    assert _issue(repo, issue_id)["status"] == "closed"
+    shown = subprocess.run(
+        ["git", "show", f"main:{CANDIDATE}"], cwd=repo, capture_output=True, text=True
+    )
+    assert shown.stdout == "PARKED = True\n"
+    assert (repo / "advance.txt").exists()
