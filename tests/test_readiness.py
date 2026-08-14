@@ -85,9 +85,9 @@ def test_incomplete_leaf_reports_every_required_surface() -> None:
         "ordered_steps",
         "dependencies",
         "edge_cases",
-        "criterion_mapped_checks",
-        "targeted_tests",
     } <= codes
+    assert "criterion_mapped_checks" not in codes
+    assert "targeted_tests" not in codes
     assert not report.ready
 
 
@@ -164,7 +164,7 @@ Run `uv run pytest tests/test_demo.py -q`.
 def test_full_miss_collapses_to_no_packet() -> None:
     """AC-1: an empty packet has one problem, not fifteen."""
     report = validate_issue({"id": "legacy-1", "issue_type": "task"})
-    total = len(_REQUIRED_SECTIONS)
+    total = sum(1 for section in _REQUIRED_SECTIONS if section.required)
     assert report.packet_missing
     assert report.summary() == (
         f"no readiness work spec ({total} of {total} sections missing)"
@@ -298,6 +298,61 @@ def test_kind_tags_are_accepted_not_required() -> None:
     )
     report = validate_issue(tagged)
     assert report.ready and report.failures == ()
+
+
+def test_one_heading_packet_is_ready() -> None:
+    """AC-1: commands on Observable lines, no Criterion-checks heading."""
+    issue = ready_issue()
+    issue["acceptance_criteria"] = """## Observable criteria
+- AC-1 (proves-new): Preview performs no writes. `uv run pytest tests/test_demo.py::test_preview -q`
+- AC-2 (guards-existing): Normal execution is unchanged. `uv run pytest tests/test_demo.py::test_run -q`
+"""
+    report = validate_issue(issue)
+    assert report.ready, [f.message for f in report.failures]
+
+
+def test_optional_targeted_omitted_is_ready() -> None:
+    """AC-2: omitting Targeted tests does not fail readiness."""
+    issue = ready_issue()
+    issue["acceptance_criteria"] = """## Observable criteria
+- AC-1: Preview performs no writes.
+- AC-2: Normal execution is unchanged.
+
+## Criterion checks
+- AC-1: Run `uv run pytest tests/test_demo.py::test_preview -q`.
+- AC-2: Run `uv run pytest tests/test_demo.py::test_run -q`.
+"""
+    report = validate_issue(issue)
+    assert report.ready, [f.message for f in report.failures]
+
+
+def test_none_targeted_is_ready() -> None:
+    """AC-2: `None — <why>` is a valid Targeted tests body."""
+    issue = ready_issue()
+    issue["acceptance_criteria"] = """## Observable criteria
+- AC-1: Preview performs no writes.
+- AC-2: Normal execution is unchanged.
+
+## Criterion checks
+- AC-1: Run `uv run pytest tests/test_demo.py::test_preview -q`.
+- AC-2: Run `uv run pytest tests/test_demo.py::test_run -q`.
+
+## Targeted tests
+None — criterion commands name the targeted surface
+"""
+    report = validate_issue(issue)
+    assert report.ready, [f.message for f in report.failures]
+
+
+def test_observable_line_without_command_fails_when_checks_omitted() -> None:
+    issue = ready_issue()
+    issue["acceptance_criteria"] = """## Observable criteria
+- AC-1: Preview performs no writes.
+- AC-2: Normal execution is unchanged.
+"""
+    report = validate_issue(issue)
+    assert not report.ready
+    assert "observable_criteria" in {f.code for f in report.failures}
 
 
 def test_contradiction_guidance_must_be_actionable() -> None:

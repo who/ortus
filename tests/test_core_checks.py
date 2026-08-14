@@ -246,6 +246,35 @@ def test_unparseable_criterion_is_a_packet_failure(tmp_path: Path) -> None:
     assert failures and "more than once" in failures[0].message
 
 
+def test_observable_line_command_parses_without_checks_heading() -> None:
+    """One-heading packet: commands on Observable lines are the checks."""
+    parsed, failures = parse_criterion_checks(
+        "## Observable criteria\n\n"
+        "- AC-1 (proves-new): Preview performs no writes. "
+        "`uv run pytest tests/test_demo.py::test_preview -q`\n"
+        "- AC-2: Normal execution is unchanged. "
+        "`uv run pytest tests/test_demo.py::test_run -q`\n"
+    )
+    assert failures == ()
+    assert [c.criterion_id for c in parsed] == ["AC-1", "AC-2"]
+    assert parsed[0].command == "uv run pytest tests/test_demo.py::test_preview -q"
+    assert parsed[0].kind == "proves-new"
+    assert parsed[1].command == "uv run pytest tests/test_demo.py::test_run -q"
+    assert parsed[1].kind is None
+
+
+def test_parse_criterion_checks_prefers_checks_heading() -> None:
+    """When Criterion checks is present, Observable commands are ignored."""
+    parsed, failures = parse_criterion_checks(
+        "## Observable criteria\n\n"
+        "- AC-1: something. `uv run pytest tests/wrong.py -q`\n\n"
+        "## Criterion checks\n\n"
+        "- AC-1: `true`\n"
+    )
+    assert failures == ()
+    assert [c.command for c in parsed] == ["true"]
+
+
 def test_bare_and_mixed_span_commands_parse() -> None:
     """Backticks are optional; a command-looking span wins among pins."""
     parsed, failures = parse_criterion_checks(

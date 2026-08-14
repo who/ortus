@@ -182,17 +182,20 @@ def parse_criterion_checks(
 ) -> tuple[tuple[CriterionCheck, ...], tuple[PacketFailure, ...]]:
     """Extract per-criterion commands from an acceptance_criteria field.
 
-    Reads the same ``## Criterion checks`` section readiness v1 validates,
-    with the same identifier and command extractor. Lines without an ``AC-N``
-    are section prose and skipped; a line with an identifier must carry
-    one runnable command (backticks optional), and each identifier may
-    appear only once.
+    Reads ``## Criterion checks`` when that heading has content, otherwise
+    the commands on ``## Observable criteria`` lines. The identifier and
+    command extractor are the same ones readiness v1 validates. Lines
+    without an ``AC-N`` are section prose and skipped; a line with an
+    identifier must carry one runnable command (backticks optional), and
+    each identifier may appear only once.
     Each check also carries the optional kind tag from its Observable-criteria
     line — the tag is data on the criterion, so a work spec claimed before kinds
     existed parses correctly, just untagged.
     """
     kinds = _criterion_kinds(acceptance_criteria)
     body = readiness.section_text(acceptance_criteria, _CHECKS_HEADING)
+    if not readiness._has_section_content(body):
+        body = readiness.section_text(acceptance_criteria, _OBSERVABLE_HEADING)
     parsed: list[CriterionCheck] = []
     failures: list[PacketFailure] = []
     seen: set[str] = set()

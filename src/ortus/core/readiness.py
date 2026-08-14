@@ -63,7 +63,7 @@ class ReadinessReport:
         codes = {failure.code for failure in self.failures}
         return (
             not self.exempt
-            and codes == {section.code for section in _REQUIRED_SECTIONS}
+            and codes == {section.code for section in _required_sections()}
             and all(
                 failure.message == _MISSING_SECTION_MESSAGE
                 for failure in self.failures
@@ -82,7 +82,10 @@ class ReadinessReport:
             return "ready"
         total = len(_REQUIRED_SECTIONS)
         if self.packet_missing:
-            return f"no readiness work spec ({total} of {total} sections missing)"
+            required = len(_required_sections())
+            return (
+                f"no readiness work spec ({required} of {required} sections missing)"
+            )
         sections = [
             f"{failure.field}/{failure.section}" for failure in self.failures
         ]
@@ -96,12 +99,13 @@ class ReadinessReport:
 
 @dataclass(frozen=True)
 class RequiredSection:
-    """One required heading plus the guidance that teaches how to fill it."""
+    """One schema heading plus the guidance that teaches how to fill it."""
 
     field: str
     heading: str
     code: str
     guidance: str
+    required: bool = True
 
     def __post_init__(self) -> None:
         # A section added without guidance would render an empty bullet in the
@@ -198,24 +202,33 @@ _REQUIRED_SECTIONS: tuple[RequiredSection, ...] = (
         "acceptance_criteria",
         "Observable criteria",
         "observable_criteria",
-        "one observable result per stable identifier.",
+        "one observable result per stable identifier; each line may carry "
+        "one command (backticks optional).",
     ),
     RequiredSection(
         "acceptance_criteria",
         "Criterion checks",
         "criterion_mapped_checks",
-        "exactly one matching entry for every criterion identifier, with one "
-        "runnable command (backticks optional).",
+        "optional alias: exactly one matching entry for every criterion "
+        "identifier, with one runnable command (backticks optional). Omit "
+        "when each Observable line already carries its command.",
+        required=False,
     ),
     RequiredSection(
         "acceptance_criteria",
         "Targeted tests",
         "targeted_tests",
-        "exact bounded test commands (backticks optional). Follow the "
-        "repository's testing policy; do not make a full local matrix the "
-        "worker default.",
+        "optional. Omit, write `None — <why>`, or give exact bounded test "
+        "commands (backticks optional). Follow the repository's testing "
+        "policy; do not make a full local matrix the worker default.",
+        required=False,
     ),
 )
+
+
+def _required_sections() -> tuple[RequiredSection, ...]:
+    return tuple(section for section in _REQUIRED_SECTIONS if section.required)
+
 
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _PLACEHOLDER = re.compile(
@@ -328,7 +341,7 @@ def _check_line_body(line: str, criterion_id: str) -> str:
 
 
 def extract_check_command(line: str, criterion_id: str) -> tuple[str | None, str | None]:
-    """Return ``(command, error)`` for one Criterion-checks line.
+    """Return ``(command, error)`` for one Criterion-checks or Observable line.
 
     Prefers the unique command-looking backtick span. If none, uses the rest
     of the line after the AC-N label when that remainder is a command.
@@ -407,6 +420,24 @@ def _is_placeholder(value: str) -> bool:
     )
 
 
+_EXPLAINED_ABSENCE = re.compile(r"^None\s*[—–-]+\s+\S")
+
+
+def _is_explained_absence(value: str) -> bool:
+    """True for the contract's `None — <why that is safe>` form."""
+
+    lines = [
+        re.sub(r"^\s*(?:[-*+] |\d+[.)]\s+)", "", line).strip().strip("`*_ ")
+        for line in value.splitlines()
+    ]
+    meaningful = [line for line in lines if line]
+    return bool(meaningful) and all(_EXPLAINED_ABSENCE.match(line) for line in meaningful)
+
+
+def _has_section_content(value: str) -> bool:
+    return bool(value) and not _is_placeholder(value) and not _is_explained_absence(value)
+
+
 def _failure(code: str, field: str, section: str, message: str) -> ReadinessFailure:
     return ReadinessFailure(code, field, section, message)
 
@@ -444,7 +475,7 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
     for section in _REQUIRED_SECTIONS:
         value = parsed[section.field].get(section.key, "")
         values[section.code] = value
-        if _is_placeholder(value):
+        if section.required and _is_placeholder(value):
             failures.append(
                 _failure(
                     section.code,
@@ -498,7 +529,8 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
                 "each criterion must have an AC-N identifier",
             )
         )
-    if values.get("criterion_mapped_checks") and (
+    has_mapped_checks = _has_section_content(values.get("criterion_mapped_checks", ""))
+    if has_mapped_checks and (
         not criteria
         or set(check_counts) != criteria
         or any(count != 1 for count in criterion_counts.values())
@@ -510,25 +542,41 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
                 "must map every AC-N exactly once by identifier and include exact commands or checks",
             )
         )
-    elif values.get("criterion_mapped_checks") and not _is_placeholder(
-        values["criterion_mapped_checks"]
-    ):
+    elif criteria:
         # The machine pipeline executes each check with the claim-time parser,
         # so its rules ARE readiness: a check the parser refuses (for example a
         # criterion carrying more than one backticked command) would pass here
         # only to fail every claim as a work-spec defect. checks.py imports
         # this module for section parsing, so the parser is imported at call
-        # time rather than at module level.
+        # time rather than at module level. When Criterion checks is omitted,
+        # the same parser reads commands from the Observable lines.
         from ortus.core.checks import parse_criterion_checks
 
-        _, packet_failures = parse_criterion_checks(issue.get("acceptance_criteria"))
-        for packet_failure in packet_failures:
+        parsed_checks, packet_failures = parse_criterion_checks(
+            issue.get("acceptance_criteria")
+        )
+        fail_code = (
+            "criterion_mapped_checks" if has_mapped_checks else "observable_criteria"
+        )
+        if packet_failures:
+            for packet_failure in packet_failures:
+                failures.append(_shape_failure(fail_code, packet_failure.message))
+        elif {check.criterion_id for check in parsed_checks} != criteria:
             failures.append(
-                _shape_failure("criterion_mapped_checks", packet_failure.message)
+                _shape_failure(
+                    fail_code,
+                    "each criterion must carry one runnable command when "
+                    "Criterion checks is omitted"
+                    if not has_mapped_checks
+                    else "must map every AC-N exactly once by identifier and include exact commands or checks",
+                )
             )
 
     tests = values.get("targeted_tests", "")
-    if tests and not _is_placeholder(tests) and not targeted_test_command(tests):
+    if (
+        _has_section_content(tests)
+        and not targeted_test_command(tests)
+    ):
         failures.append(
             _shape_failure(
                 "targeted_tests",
@@ -567,16 +615,18 @@ def _shape_rules() -> tuple[str, ...]:
         f"line ({_example(_ORDERED_STEP, '1. Parse the flag.')}).",
         f"`## {_section('observable_criteria').heading}` — every criterion "
         f"carries a unique identifier ({_example(_CRITERION_ID, '`AC-1`')}, "
-        "`AC-2`, ...).",
-        f"`## {_section('criterion_mapped_checks').heading}` — repeats every "
-        "criterion identifier exactly once, each with one runnable command "
-        "(backticks optional) "
+        "`AC-2`, ...). When Criterion checks is omitted, each line also "
+        "carries one runnable command (backticks optional).",
+        f"`## {_section('criterion_mapped_checks').heading}` — optional. When "
+        "present, repeats every criterion identifier exactly once, each with "
+        "one runnable command (backticks optional) "
         f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}). "
         "A command-looking span wins among several; extra spans that are not "
         "commands (version pins, paths) are ignored. Two command-looking "
         "spans on one criterion are ambiguous and fail readiness.",
-        f"`## {_section('targeted_tests').heading}` — at least one test "
-        "invocation (backticks optional) "
+        f"`## {_section('targeted_tests').heading}` — optional. Omit it, write "
+        "`None — <why>`, or include at least one test invocation (backticks "
+        "optional) "
         f"({_example(_TEST_INVOCATION, 'uv run pytest tests/test_demo.py -q')}).",
     )
 
@@ -609,7 +659,8 @@ def spec_markdown() -> str:
         (
             "",
             "Epics are containers and are exempt from these sections; every "
-            "non-epic issue must satisfy all of them. Notes may carry "
+            "non-epic issue must satisfy the required headings. Criterion "
+            "checks and Targeted tests are optional aliases. Notes may carry "
             "supplementary evidence only, never required readiness content.",
         )
     )

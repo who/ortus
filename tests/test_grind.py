@@ -639,7 +639,7 @@ def test_grind_readiness_warning_dedupes_per_run(
         log_text.count("readiness skip (left open for planning/human repair)") == 2
     ), "the log must record every occurrence"
     squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
-    total = len(_REQUIRED_SECTIONS)
+    total = sum(1 for section in _REQUIRED_SECTIONS if section.required)
     skip_line = re.sub(
         r"\s+",
         "",
@@ -688,8 +688,8 @@ def test_grind_repair_prompt_keeps_full_enumeration(
         f"{issue_id}: description/objective: missing, empty, or placeholder section"
         in prompt
     )
-    assert prompt.count("missing, empty, or placeholder section") == len(
-        _REQUIRED_SECTIONS
+    assert prompt.count("missing, empty, or placeholder section") == sum(
+        1 for section in _REQUIRED_SECTIONS if section.required
     )
 
 
@@ -718,7 +718,7 @@ def test_grind_queue_blocked_exit_uses_summary(
 
     assert result.exit_code == 0, result.stdout + result.stderr
     squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
-    total = len(_REQUIRED_SECTIONS)
+    total = sum(1 for section in _REQUIRED_SECTIONS if section.required)
     assert (
         re.sub(
             r"\s+",

@@ -56,15 +56,8 @@ Empty plans still exit zero; render failures remain nonzero; dry-run must not cr
 ## Plan-gap guidance
 If the renderer and executor disagree about operation ordering, record `PLAN-GAP` with both symbols and route to planning; do not choose an ordering.' \
   --acceptance='## Observable criteria
-- AC-1: `--dry-run` reports the ordered operations and performs no writes.
-- AC-2: Invocations without `--dry-run` retain existing behavior.
-
-## Criterion checks
-- AC-1: Run `uv run pytest tests/test_run.py::test_dry_run -q`.
-- AC-2: Run `uv run pytest tests/test_run.py::test_normal_run -q`.
-
-## Targeted tests
-Run `uv run pytest tests/test_run.py -q`.' \
+- AC-1 (proves-new): `--dry-run` reports the ordered operations and performs no writes. `uv run pytest tests/test_run.py::test_dry_run -q`
+- AC-2 (guards-existing): Invocations without `--dry-run` retain existing behavior. `uv run pytest tests/test_run.py::test_normal_run -q`.' \
   --notes='CodeGraph confirmed `cli.app -> run -> Executor.apply`; no out-of-scope callers.')
 ```
 
