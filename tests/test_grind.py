@@ -52,12 +52,17 @@ def _fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _fixture_repo(tmp_path: Path) -> Path:
-    """Repo with .beads/ + .claude/settings.json with hooks enabled."""
+    """Beads + hooks-enabled settings, and a git work tree.
+
+    f2he.4 made a git repo a grind start precondition (work stays on
+    main). Sandbox/hook tests still need to reach those later checks.
+    """
     repo = tmp_path / "fixture"
     (repo / ".beads").mkdir(parents=True)
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir(exist_ok=True)
     settings.write_text(json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}))
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
     return repo
 
 
@@ -1462,115 +1467,6 @@ def _post_claims(repo: Path, criteria: tuple[str, ...] = ("AC-1", "AC-2")) -> No
         )
 
 
-class _PassingWorker:
-    """Implementation writes one candidate file; the verifier passes it."""
-
-    extra_env: dict[str, str] = {}
-
-    def __init__(self, repo: Path) -> None:
-        self.repo = repo
-
-    def run(
-        self,
-        prompt: str,
-        *,
-        repo: Path,
-        log_path: Path,
-        readonly: bool = False,
-        **kwargs: object,
-    ) -> int:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.touch(exist_ok=True)
-        if readonly:
-            _emit_verdict(self.repo, log_path, criteria=("AC-1", "AC-2"))
-        else:
-            (self.repo / "candidate.py").write_text("VALUE = 1\n")
-        return 0
-
-
-def _run_claim_with_failing_checkout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    *,
-    preexisting_branch: bool,
-) -> tuple[Path, str, object]:
-    repo = _bd_repo(tmp_path, name)
-    issue_id = _create_ready_issue(repo, "claim that cannot check out")
-    _baseline_commit(repo)
-    if preexisting_branch:
-        subprocess.run(
-            ["git", "branch", f"ortus/{issue_id}", "main"], cwd=repo, check=True
-        )
-    _fake_sandbox(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: _PassingWorker(repo))
-    monkeypatch.setattr(
-        "ortus.core.git.GitClient.checkout_reporting",
-        lambda self, branch: (
-            "simulated: local changes clash" if branch.startswith("ortus/") else ""
-        ),
-    )
-    result = runner.invoke(app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"])
-    return repo, issue_id, result
-
-
-@pytest.mark.slow
-def test_failed_claim_deletes_its_own_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-3: a claim that created its branch and then failed removes it and
-    reverts the claim."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo, issue_id, result = _run_claim_with_failing_checkout(
-        tmp_path, monkeypatch, "mfyu3", preexisting_branch=False
-    )
-    assert result.exit_code == 1
-    gone = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/ortus/{issue_id}"],
-        cwd=repo,
-        capture_output=True,
-    )
-    assert gone.returncode != 0, "the claim-created branch must be removed"
-    assert _issue(repo, issue_id)["status"] == "open"
-
-
-@pytest.mark.slow
-def test_failed_claim_keeps_a_reused_branch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-4: a pre-existing branch is never deleted by a failed claim."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo, issue_id, result = _run_claim_with_failing_checkout(
-        tmp_path, monkeypatch, "mfyu4", preexisting_branch=True
-    )
-    assert result.exit_code == 1
-    kept = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/ortus/{issue_id}"],
-        cwd=repo,
-        capture_output=True,
-    )
-    assert kept.returncode == 0, "a reused branch survives the failed claim"
-    assert _issue(repo, issue_id)["status"] == "open"
-
-
-@pytest.mark.slow
-def test_checkout_blocker_carries_git_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-5: the halt names what git said, not just that a checkout failed."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo, _issue_id, result = _run_claim_with_failing_checkout(
-        tmp_path, monkeypatch, "mfyu5", preexisting_branch=False
-    )
-    assert result.exit_code == 1
-    combined = " ".join((result.stdout + result.stderr).split()) + _grind_log(repo)
-    assert "simulated: local changes clash" in combined
-
-
 def _stranded_claim_repo(tmp_path: Path) -> tuple[Path, object, bytes]:
     """A git repo manufactured into the observed strand: the tree on a prior
     issue's branch whose committed exports diverge from main, newer export
@@ -2889,3 +2785,72 @@ def test_leftover_claim_spawn_has_no_resume(
     assert recorded.calls
     assert "resume" not in recorded.calls[0]
     assert _issue(repo, issue_id)["status"] == "in_progress"
+
+
+def test_intake_export_is_not_candidate() -> None:
+    """f2he.3 AC-2: tracker export paths never become candidate paths."""
+    dirty = frozenset(
+        {
+            "src/ortus/commands/grind.py",
+            ".beads/issues.jsonl",
+            ".beads/interactions.jsonl",
+            ".beads/embeddeddolt/x",
+        }
+    )
+    paths = grind_mod._candidate_paths(dirty, frozenset())
+    assert paths == frozenset({"src/ortus/commands/grind.py"})
+
+
+@pytest.mark.slow
+def test_grind_does_not_cut_issue_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f2he.4 AC-1: a one-task grind does not create ortus/<id>."""
+    repo = _bd_repo(tmp_path, "no-issue-branch")
+    issue_id = _create_ready_issue(repo, "on main")
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    branches = subprocess.run(
+        ["git", "branch", "--list", f"ortus/{issue_id}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert branches.strip() == ""
+
+
+@pytest.mark.slow
+def test_grind_does_not_create_workspace_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f2he.4 AC-2: a one-task grind does not create logs/grind-workspaces/<id>."""
+    repo = _bd_repo(tmp_path, "no-workspace")
+    issue_id = _create_ready_issue(repo, "no clone")
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert not (repo / "logs" / "grind-workspaces" / issue_id).exists()
+
+
+def test_grind_requires_git_repo(tmp_path: Path) -> None:
+    """f2he.4 AC-3: grind refuses to start when the tree is not a git repo."""
+    repo = tmp_path / "not-git"
+    (repo / ".beads").mkdir(parents=True)
+    result = runner.invoke(app, ["grind", str(repo)])
+    assert result.exit_code == 1
+    combined = result.stdout + result.stderr
+    assert "not a git repository" in combined.lower() or "git" in combined.lower()

@@ -384,8 +384,6 @@ def render_report(
     ]
     if base_head:
         lines.append(f"Base commit: `{base_head}`")
-    if issue_packet_hash:
-        lines.append(f"Work spec: `{issue_packet_hash}`")
     if attempt is not None:
         lines.append(f"Verifier attempt: {attempt}")
     for phase, profile in sorted((profiles or {}).items()):
@@ -444,8 +442,6 @@ def render_rejection_report(
     ]
     if base_head:
         lines.append(f"Base commit: `{base_head}`")
-    if issue_packet_hash:
-        lines.append(f"Work spec: `{issue_packet_hash}`")
     if attempt is not None:
         lines.append(f"Verifier attempt: {attempt}")
     for phase, profile in sorted((profiles or {}).items()):

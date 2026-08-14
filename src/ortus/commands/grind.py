@@ -208,13 +208,19 @@ def _is_tool_state(path: str) -> bool:
     return path.split("/", 1)[0] in REPO_TOOL_STATE
 
 
+def _is_tracker_path(path: str) -> bool:
+    """Tracker exports and lock files are never candidate content."""
+
+    return path.split("/", 1)[0] == ".beads" or path in _TRACKER_TOOL_STATE
+
+
 def _candidate_paths(dirty: frozenset[str], baseline: frozenset[str]) -> frozenset[str]:
     """The dirty paths a verdict is legitimately about."""
 
     return frozenset(
         path
-        for path in dirty - baseline - _TRACKER_EXPORT_PATHS
-        if not _is_tool_state(path)
+        for path in dirty - baseline
+        if not _is_tool_state(path) and not _is_tracker_path(path)
     )
 _EVIDENCE_SECRET = re.compile(
     r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)([^\r\n]+)"
@@ -650,26 +656,10 @@ def _reclassify_edited_declarations(
     the index or the work spec can name — leaves the declaration standing.
     """
 
-    if not honored:
-        return [], []
-    current = fingerprint_paths(repo, honored)
-    edited = sorted(
-        path
-        for path in honored
-        if journal.handoff_fingerprints.get(path) not in (None, current.get(path))
-    )
-    if not edited:
-        return [], []
-    locations = _concrete_locations(repo, journal)
-    readopted: list[str] = []
-    gaps: list[str] = []
-    for path in edited:
-        decision = path_ownership(repo, path, locations)
-        if decision.ownership is Ownership.OWN:
-            readopted.append(path)
-        elif decision.ownership is Ownership.MIXED:
-            gaps.append(describe(path, decision))
-    return readopted, gaps
+    # f2he.3: ownership is not decided by path fingerprints. A declaration
+    # stands; .beads/ exclusion handles intake.
+    del repo, journal, honored
+    return [], []
 
 
 def _concrete_locations(repo: Path, journal: CandidateJournal) -> str:
@@ -763,7 +753,11 @@ def _rebuild_journal_from_claim(
     if dirty is None or len(claimed) != 1:
         return None
     issue_hint = next(iter(claimed))
-    paths = dirty - _TRACKER_EXPORT_PATHS - _TRACKER_TOOL_STATE
+    paths = frozenset(
+        path
+        for path in dirty
+        if not _is_tool_state(path) and not _is_tracker_path(path)
+    )
     try:
         digest, diff_ref = store.save_diff(candidate_diff(repo, paths))
     except RuntimeError as exc:
@@ -864,7 +858,11 @@ def _prepare_handoff(
             if dirty is None:
                 write_log("transaction handoff: git status failed; assuming clean tree")
                 dirty = frozenset()
-            inherited = dirty - _TRACKER_EXPORT_PATHS - _TRACKER_TOOL_STATE
+            inherited = frozenset(
+                path
+                for path in dirty
+                if not _is_tool_state(path) and not _is_tracker_path(path)
+            )
         if not inherited:
             return _HandoffState(notes=notes)
         state = _HandoffState(handoff_paths=inherited, active=True, notes=notes)
@@ -941,20 +939,7 @@ def _prepare_handoff(
     # A disowned path that changed since it was disowned has been taken back:
     # someone edited it deliberately, so it belongs to the candidate again
     # rather than being excluded from review forever.
-    current_fingerprints = fingerprint_paths(repo, journal.unrelated_paths)
-    readopted = sorted(
-        path
-        for path, digest in journal.handoff_fingerprints.items()
-        if path in journal.unrelated_paths and current_fingerprints.get(path) != digest
-    )
-    if readopted:
-        journal = replace(
-            journal,
-            unrelated_paths=tuple(
-                path for path in journal.unrelated_paths if path not in readopted
-            ),
-        )
-        moved.append("previously unrelated work was edited: " + ", ".join(readopted))
+    # f2he.3: do not re-adopt unrelated paths from fingerprint drift.
     # What the prior worker on this issue actually owned, read before the live
     # candidate is recomputed below. Only this recorded set is attributable: the
     # recomputed one sweeps in whatever else went dirty since — a stranded file
@@ -1161,9 +1146,7 @@ def _verifier_prompt(journal: CandidateJournal, probe_text: str) -> str:
         "evidence and emit; do not restart the review.\n\n"
         f"Issue: {journal.issue_id}\n"
         f"Work spec: {journal.issue_packet_ref}\n"
-        f"Work spec SHA-256: {journal.issue_packet_hash}\n"
         f"Candidate diff: {journal.candidate_diff_ref}\n"
-        f"Candidate SHA-256: {journal.candidate_hash}\n"
         f"Captured evidence: {json.dumps(journal.evidence, ensure_ascii=False)}\n\n"
         "The candidate is everything between the recorded base commit and the "
         "working tree — commits the worker made on its issue branch as well as "
@@ -1426,13 +1409,10 @@ def _machine_report(
         "## Ortus machine verification record",
         "",
         f"Issue: {issue_id}",
-        f"Candidate: `{journal.candidate_hash}`",
         f"Decision: **{verdict.decision.upper()}**",
     ]
     if journal.base_head:
         lines.append(f"Base commit: `{journal.base_head}`")
-    if journal.issue_packet_hash:
-        lines.append(f"Work spec: `{journal.issue_packet_hash}`")
     lines.append(f"Verifier attempt: {journal.attempt}")
     lines.extend(["", render_tracker_comment(run).rstrip(), "", "### Claims"])
     if disagreements:
@@ -2328,7 +2308,7 @@ def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict)
         "issue; do not run bd ready, do not select other work, and use only the id "
         f"{issue_id}. Read `bd show {issue_id} --json` for the authoritative work spec, "
         "then correct ONLY the failures below.\n\n"
-        f"Current candidate SHA-256: {journal.candidate_hash}\n\n"
+        f"Issue: {journal.issue_id}\n\n"
         f"Failed acceptance criteria:\n{criteria}\n\n"
     )
     footer = (
@@ -2908,9 +2888,7 @@ def _finalization_report(issue_id: str, journal: CandidateJournal) -> str:
     return (
         f"{_FINALIZATION_MARKER}\n\n"
         f"Issue: {issue_id}\n"
-        f"Candidate: `{journal.candidate_hash}`\n"
         f"Base commit: `{journal.base_head}`\n"
-        f"Work spec: `{journal.issue_packet_hash}`\n"
         f"Verifier attempts: {len(journal.verifier_refs)}\n"
         f"Correction attempts: {journal.corrections}\n"
         f"Plan-gap routed: {'yes' if journal.plan_gap_routed else 'no'}\n"
@@ -5013,6 +4991,10 @@ def grind(
             output.info(_legacy_prompt(condition, resolved_backend))
         return
 
+    if not _make_git(target).is_git_repo():
+        output.error("grind: working tree is not a git repository")
+        raise typer.Exit(code=1)
+
     # Phase 0 — sandbox precondition (Tier 1 native vs Tier 2 docker).
     try:
         if docker:
@@ -5055,6 +5037,9 @@ def grind(
 
             bd = _make_bd(target)
             git = _make_git(target)
+            if not git.is_git_repo():
+                output.error("grind: working tree is not a git repository")
+                raise typer.Exit(code=1)
             transaction_store = JournalStore(target)
             # Re-assert branch discipline before anything else: a stray branch
             # left by a prior crashed grind (or a manual checkout) is caught
@@ -5083,9 +5068,6 @@ def grind(
                 integration_branch,
                 write_log,
                 phase="startup",
-                allowed_branch=(
-                    startup_journal.issue_branch if startup_journal else ""
-                ),
             )
             # AC-6: a run killed between any two finalization phase transitions left a
             # journal that still owes work. Replay it BEFORE selecting anything,
@@ -5357,9 +5339,6 @@ def grind(
                     integration_branch,
                     write_log,
                     phase="pre-iter",
-                    allowed_branch=(
-                        active_journal.issue_branch if active_journal else ""
-                    ),
                 )
 
                 # Queue reads can auto-export generated Beads state between
@@ -5733,91 +5712,33 @@ def grind(
                     # finalization fetches the branch home. The primary
                     # checkout never leaves the integration branch, so
                     # operator intake can no longer collide with a candidate.
-                    if git.is_git_repo() and git.has_commits():
-                        # A journal from the shared-tree era can carry
-                        # uncommitted candidate or handoff state in the
-                        # primary worktree; a fresh clone would never see it.
-                        # Those transactions recover by the pre-workspace
-                        # rules, in the primary tree.
-                        primary_dirty = (
-                            git.dirty_paths() or frozenset()
-                        ) - _TRACKER_TOOL_STATE
-                        legacy_resume = bool(
-                            active_journal is not None
-                            and active_journal.issue_id == issue_id
-                            and not active_journal.workspace_path
-                            and primary_dirty
-                            & (
-                                frozenset(active_journal.candidate_paths)
-                                | frozenset(active_journal.handoff_paths)
-                            )
-                        )
-                        if legacy_resume:
+                    # f2he.4: work on the primary checkout (main). Do not cut
+                    # ortus/<id> or clone logs/grind-workspaces/<id>.
+                    if git.has_commits():
+                        current = git.current_branch()
+                        if current != integration_branch:
                             write_log(
-                                "iter prep: legacy shared-tree candidate "
-                                "detected; resuming in the primary worktree"
+                                f"iter prep: HALT — working tree is on "
+                                f"{current or 'a detached HEAD'}, not "
+                                f"{integration_branch}"
                             )
-                            issue_branch, branch_blocker, branch_resumed = (
-                                _prepare_issue_branch(
-                                    git,
-                                    issue_id=issue_id,
-                                    integration_branch=integration_branch,
-                                    journal=active_journal,
-                                    write_log=write_log,
-                                )
+                            output.error(
+                                f"grind: working tree is on "
+                                f"{current or 'a detached HEAD'}, not "
+                                f"{integration_branch}",
+                                hint="commit or stash your work, check out "
+                                f"{integration_branch}, then re-run grind",
                             )
-                            worker_repo = target
-                            candidate_git = git
-                        else:
-                            (
-                                issue_branch,
-                                worker_repo,
-                                candidate_git,
-                                branch_blocker,
-                                branch_resumed,
-                            ) = _materialize_workspace(
-                                git,
-                                repo=target,
-                                issue_id=issue_id,
-                                integration_branch=integration_branch,
-                                journal=active_journal,
-                                write_log=write_log,
-                            )
-                        if branch_blocker or worker_repo is None:
-                            bd.update_status(issue_id, "open")
-                            write_log(f"iter prep: HALT — {branch_blocker}")
-                            output.error(f"grind: {branch_blocker}")
                             raise typer.Exit(code=1)
-                        if not branch_resumed:
-                            # A branch (re)established at the integration head
-                            # has a new fork point; a journal carrying an older
-                            # one would trip the integration-moved guard on a
-                            # branch that never diverged (ortus-ti4i). Read the
-                            # integration tip, not HEAD: a legacy resume may
-                            # be sitting on the issue branch after a rebase.
-                            active_journal = replace(
-                                active_journal,
-                                base_head=(
-                                    git.branch_tip(integration_branch)
-                                    or git.head_oid()
-                                ),
-                            )
+                    worker_repo = target
+                    candidate_git = git
+                    if active_journal is not None:
                         active_journal = replace(
-                            active_journal.with_branch(
-                                issue_branch,
-                                candidate_git.branch_tip(issue_branch)
-                                or git.head_oid(),
-                            ),
-                            workspace_path=(
-                                ""
-                                if worker_repo == target
-                                else str(worker_repo.relative_to(target))
-                            ),
+                            active_journal,
+                            issue_branch="",
+                            workspace_path="",
                         )
                         transaction_store.save(active_journal)
-                    else:
-                        worker_repo = target
-                        candidate_git = git
                     dirty_after_claim = candidate_git.dirty_paths()
                     if dirty_after_claim is None:
                         output.error("grind: could not record candidate ownership")
@@ -6014,8 +5935,9 @@ def grind(
                         f"iter {iters_run}: left {judged_id} in_progress "
                         "for the next window"
                     )
-                    if idle_sleep > 0:
-                        time.sleep(idle_sleep)
+                    # One context window per leftover claim. The next grind
+                    # invocation is the next window.
+                    break
                 else:
                     write_log(
                         f"iter {iters_run}: WARN no bd-state change "
@@ -6023,6 +5945,8 @@ def grind(
                     )
                     if idle_sleep > 0:
                         time.sleep(idle_sleep)
+                    else:
+                        break
                 if iterations > 0 and iters_run >= iterations:
                     write_log(
                         f"--iterations cap reached: {iters_run}/{iterations}; "
