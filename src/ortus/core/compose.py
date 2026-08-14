@@ -649,7 +649,7 @@ def compose_commit_message(
 
     if not diff.strip():
         raise ComposeFailed("the candidate diff is empty or unreadable")
-    runner = runner_factory() if backend == "claude" else runner_factory("codex")
+    runner = runner_factory() if backend == "claude" else runner_factory(backend)
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)

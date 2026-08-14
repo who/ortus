@@ -2419,7 +2419,7 @@ def _run_plan_gap_pass(
     gap_log = log.with_name(f"{log.stem}-plan-gap{log.suffix}")
     # Mirror the factory call shape the readiness-repair pass uses so the
     # zero-argument Claude seam existing test overrides rely on keeps working.
-    runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    runner = _make_runner() if backend == "claude" else _make_runner(backend)
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(probe.capability)
@@ -4887,7 +4887,7 @@ def grind(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend (claude|codex); overrides ORTUS_BACKEND and .ortusrc.",
+        help="claude, codex, or grok; overrides ORTUS_BACKEND and .ortusrc.",
     ),
     codegraph: Optional[CodeGraphMode] = typer.Option(
         None,
@@ -5310,12 +5310,12 @@ def grind(
             cache.ensure_cache_dirs(target)
             cache_env = cache.env_overrides(target)
             # Preserve the zero-argument seam used by existing Claude test and
-            # plugin overrides. Codex is the only branch that needs an explicit
-            # selector here.
+            # plugin overrides. Any non-Claude backend (codex, grok) is passed
+            # through so make_runner can return the matching sibling type.
             runner = (
                 _make_runner()
                 if resolved_backend == "claude"
-                else _make_runner("codex")
+                else _make_runner(resolved_backend)
             )
             configure_codegraph = getattr(runner, "configure_codegraph", None)
             if callable(configure_codegraph):

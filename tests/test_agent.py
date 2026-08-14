@@ -99,6 +99,28 @@ def test_grok_resume_maps_to_flag() -> None:
     assert argv[argv.index("--resume") + 1] == "sess-1"
 
 
+def test_make_runner_grok_is_grok_runner() -> None:
+    runner = make_runner("grok")
+    assert type(runner) is GrokRunner
+    assert not isinstance(runner, CodexRunner)
+
+
+def test_grok_runner_selection_has_no_codex_else() -> None:
+    root = Path(__file__).resolve().parents[1] / "src" / "ortus"
+    hits: list[str] = []
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for needle in (
+            'else _make_runner("codex")',
+            "else _make_runner('codex')",
+            'else runner_factory("codex")',
+            "else runner_factory('codex')",
+        ):
+            if needle in text:
+                hits.append(f"{path.relative_to(root.parent.parent)}: {needle}")
+    assert hits == []
+
+
 def test_grok_codegraph_is_store_only() -> None:
     from ortus.core.codegraph import CodeGraphCapability
 

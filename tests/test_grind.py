@@ -526,6 +526,21 @@ def test_grind_dry_run_prints_resolved_flags_and_exits(
     assert "/goal" in result.stdout
 
 
+def test_grind_help_lists_grok() -> None:
+    result = runner.invoke(app, ["grind", "--help"])
+    assert result.exit_code == 0
+    assert "grok" in result.stdout
+
+
+def test_grok_dry_run_resolves_backend_and_goal_wrap(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path)
+    result = runner.invoke(app, ["grind", str(repo), "--backend", "grok", "--dry-run"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "backend:        grok" in result.stdout
+    prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
+    assert prompt.lstrip().startswith("/goal ")
+
+
 def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     repo = _fixture_repo(tmp_path)
     (repo / ".ortusrc").write_text('backend = "codex"\n')
@@ -1195,6 +1210,38 @@ def test_grind_exits_one_on_disabled_hooks_before_claude(
     assert "disableAllHooks" in (result.stdout + result.stderr) or "hooks" in (
         result.stdout + result.stderr
     )
+
+
+def test_claude_hook_precheck_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude grind still refuses a repo that disabled hooks (AC-2)."""
+    test_grind_exits_one_on_disabled_hooks_before_claude(tmp_path, monkeypatch)
+
+
+def test_grok_grind_skips_claude_hook_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _fixture_repo(tmp_path)
+    (repo / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {"disableAllHooks": True, "sandbox": {"excludedCommands": ["bd", "bd *"]}}
+        )
+    )
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    seen: list[object] = []
+
+    def _capture(backend: str = "claude") -> ClaudeRunner:
+        seen.append(backend)
+        raise AssertionError(f"stop after runner pick: {backend}")
+
+    monkeypatch.setattr(grind_mod, "_make_runner", _capture)
+    result = runner.invoke(app, ["grind", str(repo), "--backend", "grok"])
+    combined = result.stdout + result.stderr
+    assert "disableAllHooks" not in combined
+    if seen:
+        assert seen == ["grok"]
 
 
 @pytest.mark.slow

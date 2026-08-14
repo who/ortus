@@ -43,7 +43,7 @@ def retro(
     backend_option: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend (claude|codex); overrides ORTUS_BACKEND and .ortusrc.",
+        help="claude, codex, or grok; overrides ORTUS_BACKEND and .ortusrc.",
     ),
     timeout: float = typer.Option(
         900.0, "--timeout", help="Hard cap (secs) on the single model pass."

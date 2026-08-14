@@ -123,7 +123,7 @@ def repair_readiness(
 
     if not reports:
         return 0
-    runner = runner_factory() if backend == "claude" else runner_factory("codex")
+    runner = runner_factory() if backend == "claude" else runner_factory(backend)
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)

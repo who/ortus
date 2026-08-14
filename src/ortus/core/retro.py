@@ -457,7 +457,7 @@ def run_retrospective(
             message="no model configured; the retrospective proposes nothing",
         )
 
-    runner = runner_factory() if backend == "claude" else runner_factory("codex")
+    runner = runner_factory() if backend == "claude" else runner_factory(backend)
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         # The pass reasons over supplied records only; it gets no graph.

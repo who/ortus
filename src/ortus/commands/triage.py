@@ -228,7 +228,7 @@ def triage(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend (claude|codex); defaults from .ortusrc.",
+        help="claude, codex, or grok; defaults from .ortusrc.",
     ),
 ) -> None:
     """Triage bd `human`-flagged issues: an agent gathers context, you decide."""
@@ -257,7 +257,7 @@ def triage(
         f"{resolved_backend} log → {log_path.relative_to(target)}"
     )
     runner = (
-        _make_runner() if resolved_backend == "claude" else _make_runner("codex")
+        _make_runner() if resolved_backend == "claude" else _make_runner(resolved_backend)
     )
     rc = runner.run(prompt, repo=target, log_path=log_path)
     if rc != 0:

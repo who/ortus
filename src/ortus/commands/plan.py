@@ -81,7 +81,7 @@ def _decompose_prd(
     # PRD path; substitute it before handing to claude. Last, so a PRD path
     # containing a dollar sign is never itself read as a placeholder.
     expanded = prompt.replace("$prd_path", str(prd.resolve())) + contract
-    runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    runner = _make_runner() if backend == "claude" else _make_runner(backend)
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)
@@ -101,7 +101,7 @@ def _expand_idea(
     # Use the grind prompt's interview entry-point indirectly; for now we
     # just hand claude a freeform "interview the user about their idea"
     # instruction. Phase 3 idzn.1 fleshes out the full interview prompt.
-    runner = _make_runner() if backend == "claude" else _make_runner("codex")
+    runner = _make_runner() if backend == "claude" else _make_runner(backend)
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)
@@ -144,7 +144,7 @@ def plan(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend (claude|codex); defaults from .ortusrc.",
+        help="claude, codex, or grok; defaults from .ortusrc.",
     ),
     model: Optional[str] = typer.Option(
         None, "--model", help="Override the planning profile model for this run."

@@ -49,7 +49,7 @@ def interview(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend (claude|codex); defaults from .ortusrc.",
+        help="claude, codex, or grok; defaults from .ortusrc.",
     ),
 ) -> None:
     """Run an interactive interview to draft a PRD for an open feature."""
@@ -85,7 +85,9 @@ def interview(
     log_path = target / "logs" / "interview.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    runner = _make_runner() if resolved_backend == "claude" else _make_runner("codex")
+    runner = (
+        _make_runner() if resolved_backend == "claude" else _make_runner(resolved_backend)
+    )
     output.info(
         f"interview starting for {chosen} via {resolved_backend}; "
         f"log → {log_path.relative_to(target)}"
