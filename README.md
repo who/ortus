@@ -74,10 +74,10 @@ ortus grind . --tasks 5
 
 | Verb | Purpose |
 |---|---|
-| `ortus init <repo>` | Bootstrap a fresh repo; `--backend claude|codex` selects its default agent |
+| `ortus init <repo>` | Bootstrap a fresh repo; `--backend claude|codex|grok` selects its default agent |
 | `ortus check <repo>` | Verify bd, selected agent, sandbox, and backend config; strictly read-only |
 | `ortus plan <repo> [<PRD>]` | Decompose a PRD into bd issues, or interview-then-PRD-then-decompose if no PRD path |
-| `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude or Codex subprocess |
+| `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude, Codex, or Grok subprocess |
 | `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
 | `ortus tail <repo>` | Follow `logs/{grind,goal,ralph}-*.log` with stream-json filtering |
 | `ortus triage <repo>` | Walk the human-flagged bd queue interactively |
@@ -100,7 +100,7 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 |---|---|---|
 | **uv** | install + run ortus | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
 | **bd** (beads) v1.0.0+ | issue tracking (backed by embedded Dolt) | `brew install beads` or [GH release](https://github.com/gastownhall/beads/releases) |
-| **claude** or **codex** | agent running inside `ortus grind`; Claude is the default | [Claude Code](https://github.com/anthropics/claude-code) / [Codex CLI](https://github.com/openai/codex) |
+| **claude**, **codex**, or **grok** | agent running inside `ortus grind`; Claude is the default | [Claude Code](https://github.com/anthropics/claude-code) / [Codex CLI](https://github.com/openai/codex) / Grok Build |
 | **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
 | **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
 
@@ -108,14 +108,16 @@ Required: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. `ortus ini
 
 ## Agent backends
 
-Claude remains the default. Select Codex at project creation with `ortus init . --backend codex`, per run with `--backend codex`, or through `ORTUS_BACKEND=codex`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default.
+Claude remains the default. Select Codex or Grok at project creation with `ortus init . --backend codex` or `--backend grok`, per run with `--backend`, or through `ORTUS_BACKEND`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default.
 
-Claude workers run a narrow `claude -p '/goal …'` session. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`. In both cases the outer `ortus grind` scheduler trusts only observable bd state and starts a fresh process for the next issue.
+Claude workers run a narrow `claude -p '/goal …'` session. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`. In every case the outer `ortus grind` scheduler trusts only observable bd state and starts a fresh process for the next issue.
 
-Neither backend's worker may close an issue, commit, or push. Workers leave
+Grok workers launch headless as `grok -p` (not a TUI session). The landed Q1 finding is EXPANDS, so Ortus wraps the task in `/goal` the same way as Claude.
+
+No backend's worker may close an issue, commit, or push. Workers leave
 uncommitted candidate edits; `ortus grind` itself owns the lifecycle.
 
-Either backend can start from a dirty checkout. Existing changes are treated as
+Any backend can start from a dirty checkout. Existing changes are treated as
 an engineering handoff: the fresh worker receives the selected issue and the
 current Git state, assesses which work is useful, and continues instead of
 requiring a clean restart. If a worker exits nonzero, is killed, or fails
@@ -152,7 +154,7 @@ Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 ```toml
 prefix = "myproj"       # bd issue-id prefix
 project_type = "python" # python | typescript | go | rust | polyglot
-backend = "claude"      # claude | codex
+backend = "claude"      # claude | codex | grok
 codegraph = "required"  # off | auto | required (default: required)
 codegraph_refresh_blocking = false
 merge_gate = false      # wait for issue-branch checks before fast-forward
@@ -407,7 +409,7 @@ hatch for a repository CodeGraph cannot index.
 gitignores `.codegraph/` (the index is local, machine-specific, and often
 large). Because it is gitignored, a fresh clone has no index: run
 `codegraph init` once, which `ortus check` names as the remediation. Register
-the CodeGraph MCP server for the selected Claude or Codex backend. Planning
+the CodeGraph MCP server for the selected Claude, Codex, or Grok backend. Planning
 validates work specs,
 implementation confirms references and runs impact analysis, the parent refreshes
 the index after candidate edits, and a fresh verifier independently checks changed

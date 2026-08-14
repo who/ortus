@@ -56,7 +56,7 @@ def main(
 
 # FR-002 verb set (+unlock, added for stuck-flock recovery). Order here
 # drives --help listing order.
-app.command(name="init", help="Bootstrap a fresh repo for Claude or Codex.")(init)
+app.command(name="init", help="Bootstrap a fresh repo for Claude, Codex, or Grok.")(init)
 app.command(name="plan", help="Decompose a PRD (or freeform idea) into bd issues.")(plan)
 app.command(name="grind", help="Drive the bd queue via backend-neutral subprocess-per-task workers.")(grind)
 app.command(name="interview", help="Interactive PRD-building interview.")(interview)
