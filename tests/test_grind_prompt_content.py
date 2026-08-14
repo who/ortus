@@ -135,14 +135,29 @@ def _composed_implement_prompt(backend: str = "claude") -> str:
 
 
 def test_worker_prompt_is_goal_loop() -> None:
-    """AC-1: composed implement prompt is the goal-prompt loop + AGENTS.md close."""
+    """AC-1: composed implement prompt is a pointer, not the inlined loop."""
     body = _composed_implement_prompt()
-    assert "Orient" in body
+    assert "goal-prompt.md" in body
     assert "in_progress" in body
     assert "bd ready" in body
-    assert "bd update" in body and "in_progress" in body
     assert "AGENTS.md" in body
     assert "Session-close" in body or "session-close" in body.lower()
+    # The standup body lives on disk; inlining it widens Grok host skeptics.
+    assert "**Orient.**" not in body
+    assert "bd events tail" not in body
+
+
+def test_worker_prompt_done_bar_is_close_and_sync() -> None:
+    """Host /goal skeptics confirm closed + origin sync, not a re-audit."""
+    for backend in ("claude", "grok"):
+        body = _composed_implement_prompt(backend)
+        assert body.startswith("/goal ")
+        lowered = body.lower()
+        assert "achieved when" in lowered
+        assert "closed" in lowered and "in sync with origin" in lowered
+        assert "do not run pytest" in lowered
+        assert "do not re-read the implementation" in lowered
+        assert "worker instructions, not extra achievement criteria" in lowered
 
 
 def test_worker_prompt_one_issue_per_window() -> None:

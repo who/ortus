@@ -13,4 +13,4 @@ Read `AGENTS.md` first. One context window, one issue, then exit. Do not pick a 
 
 4. **Session-close** that id per `AGENTS.md`: completion comment, commit, `bd close`, `git pull --rebase --autostash`, `bd dolt push`, `git push`. Do not wait for an outer process to commit or close.
 
-5. **Exit.** No sentinel. Do not start another issue.
+5. **Exit.** No sentinel. Do not start another issue. After session-close the goal is achieved: the issue is closed and HEAD is in sync with origin. The criterion-check commands from step 3 are the whole verification — do not run pytest or the repo test suite again. Answer with the id, close reason, HEAD sha, and those commands. Then stop. Do not re-read the implementation.

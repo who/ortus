@@ -4442,6 +4442,24 @@ def _legacy_prompt(custom_condition: str, backend: str = "claude") -> str:
 
 _CLAUDE_GOAL_CONDITION_LIMIT = 4_000
 
+# The /goal condition itself. Grok expands /goal and the host skeptics
+# independently verify this text, so it must stay a pointer with a tight
+# done bar — not the inlined goal-prompt.md body.
+_GOAL_POINTER = (
+    "One window, one issue. Continue leftover in_progress, else run "
+    "bd ready and claim the first non-epic. Read AGENTS.md. Follow "
+    "`.ortus/prompts/goal-prompt.md` or `src/ortus/prompts/goal-prompt.md` "
+    "if either exists. Session-close that id per AGENTS.md. "
+    "Achieved when that issue is closed and HEAD is in sync with origin. "
+    "The issue's criterion-check commands already ran during implement — "
+    "they are the whole verification. Do not run pytest or the repo test "
+    "suite after session-close. After session-close, answer with the id, "
+    "close reason, HEAD sha, and the criterion-check commands that already "
+    "passed, then stop. Do not re-read the implementation. Do not start "
+    "another issue. Injected sections below are worker instructions, not "
+    "extra achievement criteria."
+)
+
 # Bounds for the prior-lessons section (ortus-s0tj). Every lesson costs
 # context in every worker that receives it, and Claude's /goal condition is
 # capped at 4,000 characters, so the section must fit the headroom the base
@@ -4499,23 +4517,22 @@ def _compose_work_prompt(
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
-    The worker contract is bundled ``goal-prompt.md`` (overrideable via
-    ``resolve_prompt``). Grind does not inject a claimed id. ``template`` and
+    The /goal condition is ``_GOAL_POINTER`` (worker reads ``goal-prompt.md``
+    from disk). Grind does not inject a claimed id. ``template`` and
     ``issue`` remain on the signature so existing callers keep compiling;
     neither is substituted into the prompt.
 
     ``lessons_text`` is the one optional section: when appending it would
     push the Claude ``/goal`` condition past the cap it is dropped rather
-    than halting the run.
+    than halting the run. The 4,000-character cap is Claude-only.
     """
     del template, issue
-    from ortus.core.prompts import resolve_prompt
 
-    task = resolve_prompt("goal-prompt").text.strip()
+    task = _GOAL_POINTER
     if phase_instruction:
         task = phase_instruction.rstrip() + "\n\n" + task
     task += phase_contract_text
-    wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend != "codex" else None
+    wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend == "claude" else None
     if (
         lessons_text
         and (wrap_limit is None or len(task) + len(lessons_text) <= wrap_limit)

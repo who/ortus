@@ -784,7 +784,8 @@ def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
     assert "bd ready" in prompt
     assert "AGENTS.md" in prompt
-    assert "/goal" not in prompt
+    # Pointer names goal-prompt.md; Codex must not wrap with the slash command.
+    assert not prompt.lstrip().startswith("/goal")
 
 
 def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
@@ -1293,10 +1294,28 @@ def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
     assert len(claude_prompt.removeprefix("/goal ")) <= 4_000
     assert issue["description"] not in claude_prompt
 
+    grok_prompt = grind_mod._compose_work_prompt(template, issue, "grok")
+    assert grok_prompt.startswith("/goal ")
+    assert "Achieved when" in grok_prompt
+    assert issue["description"] not in grok_prompt
+
     codex_prompt = grind_mod._compose_work_prompt(template, issue, "codex")
     assert not codex_prompt.startswith("/goal")
     assert "bd ready" in codex_prompt
     assert issue["description"] not in codex_prompt
+
+
+def test_goal_condition_limit_is_claude_only() -> None:
+    """Grok host /goal is not Claude's 4,000-character slash-command cap."""
+    issue = {"id": "demo-wide", "title": "wide instruction"}
+    wide = "x" * 5_000
+    grok_prompt = grind_mod._compose_work_prompt(
+        "", issue, "grok", phase_instruction=wide
+    )
+    assert grok_prompt.startswith("/goal ")
+    assert len(grok_prompt.removeprefix("/goal ")) > 4_000
+    with pytest.raises(grind_mod.BackendError, match="4,000-character"):
+        grind_mod._compose_work_prompt("", issue, "claude", phase_instruction=wide)
 
 
 def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
