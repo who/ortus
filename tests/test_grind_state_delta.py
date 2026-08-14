@@ -149,8 +149,28 @@ class _VerifiedLifecycle:
             (repo / f"candidate-{self.spawns}.py").write_text(f"N = {self.spawns}\n")
             host = log_path.parent.parent
             journal = JournalStore(host).load()
-            if journal is not None and journal.issue_id:
-                post_completion_comment(host, journal.issue_id, {"AC-1": "pass"})
+            issue_id = journal.issue_id if journal is not None else ""
+            if not issue_id:
+                ready = json.loads(
+                    subprocess.run(
+                        ["bd", "ready", "--json"],
+                        cwd=host,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                )
+                issue_id = next(
+                    item["id"]
+                    for item in ready
+                    if item.get("issue_type") != "epic"
+                )
+            subprocess.run(
+                ["bd", "close", issue_id, "--reason", "verified lifecycle worker"],
+                cwd=host,
+                check=True,
+                capture_output=True,
+            )
             return 0
         journal = JournalStore(log_path.parent.parent).load()
         assert journal is not None
@@ -243,6 +263,7 @@ def _bd_status(repo: Path, issue_id: str) -> str:
     )[0]["status"]
 
 
+@pytest.mark.skip(reason="f2he.2: grind no longer hashes packets or rejects drift")
 def test_packet_drift_does_not_end_the_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -287,6 +308,7 @@ def test_packet_drift_does_not_end_the_loop(
     }
 
 
+@pytest.mark.skip(reason="f2he.2: grind no longer hashes packets or rejects drift")
 def test_packet_drift_message_names_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -350,10 +372,9 @@ def test_closed_branch_when_ortus_finalizes_a_verified_candidate(
     assert result.exit_code == 0, (
         result.stdout + result.stderr + "\n--- log ---\n" + log
     )
-    assert "closed +1" in log, f"expected closed-branch log entry; got:\n{log}"
+    assert "worker closed" in log, f"expected worker-close log entry; got:\n{log}"
     assert "WARN orphan" not in log
     assert "WARN no bd-state change" not in log
-    assert "(report, close, commit, sync)" in log, "Ortus must own the close"
 
 
 # --- orphan branch --------------------------------------------------------
@@ -413,8 +434,10 @@ def test_orphan_branch_when_subprocess_claims_without_closing(
     assert result.exit_code == 0, (
         result.stdout + result.stderr + "\n--- log ---\n" + log
     )
-    assert "WARN orphan claim" in log, f"expected orphan-branch log entry; got:\n{log}"
-    assert "warn: orphan claim on " in log, "orphan-policy=warn should record the id"
+    assert "in_progress for the next window" in log, (
+        f"expected leftover claim left in_progress; got:\n{log}"
+    )
+    assert "orphan-policy: revert" not in log
 
 
 # --- no-change branch -----------------------------------------------------

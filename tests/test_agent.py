@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -140,3 +141,9 @@ def test_grok_codegraph_is_store_only() -> None:
     assert "-c" not in argv
     assert "mcp_servers" not in " ".join(argv)
     assert runner.codegraph is not None
+
+
+def test_runner_run_accepts_resume_kwarg() -> None:
+    """f2he.5 AC-3: runners still accept resume=; grind just must not pass it."""
+    for cls in (ClaudeRunner, GrokRunner, CodexRunner):
+        assert "resume" in inspect.signature(cls.run).parameters

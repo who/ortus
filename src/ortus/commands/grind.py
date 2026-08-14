@@ -5209,11 +5209,19 @@ def grind(
             )
             if orphan_ids:
                 write_log(
-                    f"startup orphan sweep: {len(orphan_ids)} "
-                    f"orphan(s) from prior grind: {sorted(orphan_ids)}"
+                    f"startup leftover claim(s): {len(orphan_ids)} "
+                    f"in_progress issue(s) left for the next window: "
+                    f"{sorted(orphan_ids)}"
                 )
+                # f2he.2: a live unfinished claim is not an orphan. Revert
+                # must not fire. Escalate still hands the issue to a human
+                # when the operator asked for that policy.
                 action = apply_orphan_policy(
-                    orphan_policy,
+                    (
+                        OrphanPolicy.WARN
+                        if orphan_policy is OrphanPolicy.REVERT
+                        else orphan_policy
+                    ),
                     orphan_ids,
                     revert_fn=lambda i: bd.update_status(i, "open"),
                     escalate_fn=lambda i: bd.add_label(i, "human"),
@@ -5612,21 +5620,17 @@ def grind(
                             output.error(follow_up)
                         break
                     issue_id = target_issue["id"]
-                    # f2he.1 keeps the harness claim so the existing post-exit
-                    # judge still has an in_progress id. The worker contract
-                    # continues leftover in_progress first. f2he.2 drops this
-                    # claim. Re-assert in_progress even on resume: the startup
-                    # orphan sweep may have reverted the leftover to open.
-                    try:
-                        bd.update_status(issue_id, "in_progress")
-                    except Exception as exc:
+                    # f2he.2: grind does not claim a fresh ready issue. The
+                    # worker claims via goal-prompt. A leftover in_progress
+                    # is already claimed; spawn a new process for it.
+                    if resume_issue_id is not None:
                         write_log(
-                            f"iter prep: claim of {issue_id} failed ({exc}); "
-                            "idle-sleeping"
+                            f"iter prep: continuing leftover claim {issue_id}"
                         )
-                        if idle_sleep > 0:
-                            time.sleep(idle_sleep)
-                        continue
+                    else:
+                        write_log(
+                            f"iter prep: worker will claim {issue_id} via goal-prompt"
+                        )
                     target_issue = bd.show(issue_id)
                     phase_profiles = {
                         "implementation": implement_profile.display_name,
@@ -5849,7 +5853,6 @@ def grind(
                             else codegraph_probe
                         )
                     except CodeGraphUnavailable as exc:
-                        bd.update_status(issue_id, "open")
                         output.error(str(exc))
                         raise typer.Exit(code=1)
                     if callable(configure_codegraph):
@@ -5869,8 +5872,6 @@ def grind(
                             lessons_text=_lessons_contract(bd, write_log),
                         )
                     except BackendError as exc:
-                        if resume_issue_id is None:
-                            bd.update_status(issue_id, "open")
                         write_log(f"iter prep: HALT — {exc}")
                         output.error(str(exc))
                         raise typer.Exit(code=1)
@@ -5942,14 +5943,93 @@ def grind(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
                     )
-                # The session that produced the candidate is where a correction
-                # returns; captured here because only this segment of the log
-                # is known to be the implementation worker's.
-                worker_session_id = (
-                    _transcript_session_id(log, start_offset=phase_offset)
-                    if resolved_backend == "claude" and implementation_worker_ran
-                    else ""
-                )
+                if resolved_backend == "claude":
+                    rejection = _claude_goal_rejection(log, start_offset=phase_offset)
+                    if rejection is not None:
+                        write_log(
+                            f"iter {iters_run}: HALT — Claude rejected /goal before "
+                            f"running a worker turn: {rejection}"
+                        )
+                        output.error(
+                            "grind: Claude rejected the /goal condition before worker work",
+                            hint=rejection,
+                        )
+                        raise typer.Exit(code=1)
+
+                # f2he.2: the iteration result is observable bd status only.
+                # Do not re-run tests, do not require Claims v1, do not
+                # spawn a verifier or a correction, do not revert a live
+                # in_progress claim.
+                closed_delta = 1
+                if harness_select:
+                    try:
+                        judged = bd.show(issue_id)
+                    except Exception:
+                        judged = {}
+                    judged_status = str(judged.get("status") or "open")
+                    judged_id = issue_id
+                else:
+                    after_state = _snapshot(bd)
+                    iter_delta = compute_delta(before, after_state)
+                    closed_delta = max(iter_delta.closed_delta, 0)
+                    if iter_delta.closed_one_or_more:
+                        judged_status = "closed"
+                        judged_id = "issue"
+                    elif after_state.in_progress_ids:
+                        judged_status = "in_progress"
+                        judged_id = sorted(after_state.in_progress_ids)[0]
+                    else:
+                        judged_status = "open"
+                        judged_id = "issue"
+                if (
+                    active_journal is not None
+                    and active_journal.workspace_path
+                ):
+                    active_journal = _retire_workspace(
+                        git,
+                        active_journal,
+                        repo=target,
+                        write_log=write_log,
+                        rescue_uncommitted=True,
+                    )
+                    transaction_store.save(active_journal)
+                if judged_status == "closed":
+                    tasks_completed += closed_delta
+                    write_log(
+                        f"iter {iters_run}: worker closed {judged_id} "
+                        f"(tasks_completed={tasks_completed})"
+                    )
+                    output.progress(
+                        "grind",
+                        f"closed {judged_id} — {tasks_completed} done this run",
+                    )
+                    if tasks > 0 and tasks_completed >= tasks:
+                        write_log(
+                            f"--tasks cap reached: {tasks_completed}/{tasks}; "
+                            "exiting outer loop"
+                        )
+                        break
+                elif judged_status == "in_progress":
+                    write_log(
+                        f"iter {iters_run}: left {judged_id} in_progress "
+                        "for the next window"
+                    )
+                    if idle_sleep > 0:
+                        time.sleep(idle_sleep)
+                else:
+                    write_log(
+                        f"iter {iters_run}: WARN no bd-state change "
+                        f"({judged_id} is {judged_status})"
+                    )
+                    if idle_sleep > 0:
+                        time.sleep(idle_sleep)
+                if iterations > 0 and iters_run >= iterations:
+                    write_log(
+                        f"--iterations cap reached: {iters_run}/{iterations}; "
+                        "exiting outer loop"
+                    )
+                    break
+                continue
 
                 # A recovery worker may have judged some inherited work unrelated
                 # to this issue. Honor that before any ownership snapshot, so a
@@ -6450,22 +6530,9 @@ def grind(
                         # resubmit it. No resumable session — another backend, a
                         # backend restart — degrades to a fresh context carrying
                         # the pipeline record: logged, never silent.
-                        resume_kwargs: dict[str, str] = (
-                            {"resume": worker_session_id}
-                            if worker_session_id
-                            else {}
-                        )
-                        if resume_kwargs:
-                            write_log(
-                                f"iter {iters_run}: correction resumes worker "
-                                f"session {worker_session_id}"
-                            )
-                        elif resolved_backend == "claude":
-                            write_log(
-                                f"iter {iters_run}: no worker session to resume; "
-                                "correction runs in a fresh context (degraded)"
-                            )
                         try:
+                            # f2he.5: never pass --resume. A correction, if
+                            # this path is reached, is a fresh process.
                             rc = runner.run(
                                 correction_prompt,
                                 repo=worker_repo,
@@ -6475,37 +6542,7 @@ def grind(
                                 timeout=(
                                     worker_timeout if worker_timeout > 0 else None
                                 ),
-                                **resume_kwargs,
                             )
-                            if (
-                                resume_kwargs
-                                and rc != 0
-                                and not _transcript_session_id(
-                                    log, start_offset=correction_offset
-                                )
-                            ):
-                                # The resume itself failed before any worker
-                                # turn ran (the CLI could not find the session).
-                                write_log(
-                                    f"iter {iters_run}: could not resume worker "
-                                    f"session {worker_session_id}; retrying the "
-                                    "correction in a fresh context (degraded)"
-                                )
-                                correction_offset = (
-                                    log.stat().st_size if log.exists() else 0
-                                )
-                                rc = runner.run(
-                                    correction_prompt,
-                                    repo=worker_repo,
-                                    log_path=log,
-                                    fast=fast,
-                                    profile=implement_profile,
-                                    timeout=(
-                                        worker_timeout
-                                        if worker_timeout > 0
-                                        else None
-                                    ),
-                                )
                         except subprocess.TimeoutExpired:
                             correction_timed_out = True
                             rc = 143

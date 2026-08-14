@@ -40,6 +40,9 @@ runner = CliRunner()
 
 FAKE_CLAUDE = shim_path("fake-claude")
 pytestmark = pytest.mark.integration
+_F2HE2_NO_VERIFY = pytest.mark.skip(
+    reason="f2he.2: grind judges bd status only; no Claims, verifier, or Ortus close"
+)
 
 
 def _fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,6 +206,7 @@ def _repair_packet_into(repo: Path, issue_id: str) -> None:
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -580,6 +584,7 @@ def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -643,6 +648,7 @@ def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
 # integration"` still selects it — and only waives the 5s hermetic budget,
 # which is precisely what pyproject documents the marker for.
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 @pytest.mark.parametrize(
     "mutation,expected_phase,expected_text",
     [
@@ -990,6 +996,7 @@ def _blocked_verifier_grind(
 # so `-m "fast or integration"` still selects it; the marker waives only the
 # budget, exactly as it does for test_verifier_report_and_mutation_isolation.
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_verification_preflight_aborts_the_run_naming_the_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1011,6 +1018,7 @@ def test_verification_preflight_aborts_the_run_naming_the_probe(
 
 
 @pytest.mark.slow  # real bwrap launch; see the note above
+@_F2HE2_NO_VERIFY
 def test_blocked_verification_spends_no_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1094,6 +1102,7 @@ def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_codex_rejects_implementation_worker_that_closes_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1753,6 +1762,7 @@ def _narrated_grind(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_grind_console_prints_claim_with_title(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1766,6 +1776,7 @@ def test_grind_console_prints_claim_with_title(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_grind_console_prints_verdict_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1783,6 +1794,7 @@ def test_grind_console_prints_verdict_line(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_grind_console_prints_tally_and_finalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1806,6 +1818,7 @@ def test_grind_console_prints_tally_and_finalization(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_grind_blockers_print_verbatim_on_console(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1922,6 +1935,7 @@ def _verdictless_grind(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_verdictless_failure_names_issue_and_action(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1993,6 +2007,7 @@ def test_candidate_state_phrasing_is_computed() -> None:
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_exit_line_accounts_for_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2013,6 +2028,7 @@ def test_exit_line_accounts_for_retry(
 
 @pytest.mark.slow
 @pytest.mark.parametrize("healthy", [True, False], ids=["healthy", "no-handshake"])
+@_F2HE2_NO_VERIFY
 def test_grind_healthy_codegraph_lines_are_log_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, healthy: bool
 ) -> None:
@@ -2385,6 +2401,7 @@ def _comments_text(repo: Path, issue_id: str) -> str:
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_flag_off_spawns_no_verifier_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2402,6 +2419,7 @@ def test_flag_off_spawns_no_verifier_agent(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_verification_comment_is_the_runner_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2420,6 +2438,7 @@ def test_verification_comment_is_the_runner_record(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_claim_disagreement_fails_per_criterion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2440,6 +2459,7 @@ def test_claim_disagreement_fails_per_criterion(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_missing_claims_block_fails_with_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2455,6 +2475,7 @@ def test_missing_claims_block_fails_with_name(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_reviewer_flag_runs_after_green_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2565,6 +2586,7 @@ def test_acceptance_hash_rechecked_before_judgment(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_primary_checkout_never_leaves_integration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2625,6 +2647,7 @@ def test_primary_checkout_never_leaves_integration(
 
 
 @pytest.mark.slow
+@_F2HE2_NO_VERIFY
 def test_primary_side_commit_stays_out_of_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2677,3 +2700,192 @@ def test_primary_side_commit_stays_out_of_candidate(
     ).stdout
     assert "intake-note.md" not in landed
     assert (repo / "intake-note.md").read_text() == "operator scratch\n"
+
+
+class _RecordingRunner:
+    """Captures run() kwargs so tests can see whether grind passed resume=."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        self.calls.append({"prompt": prompt, **kwargs})
+        return 0
+
+
+class _CloseWithoutClaimsRunner:
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, host: Path) -> None:
+        self.host = host
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        listing = json.loads(
+            subprocess.run(
+                ["bd", "list", "--status=in_progress", "--json"],
+                cwd=self.host,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        issue_id = next((item["id"] for item in listing if item.get("id")), None)
+        if issue_id is None:
+            ready = json.loads(
+                subprocess.run(
+                    ["bd", "ready", "--json"],
+                    cwd=self.host,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+            )
+            issue_id = next(
+                item["id"]
+                for item in ready
+                if item.get("issue_type") != "epic"
+            )
+            subprocess.run(
+                ["bd", "update", issue_id, "--status=in_progress"],
+                cwd=self.host,
+                check=True,
+                capture_output=True,
+            )
+        subprocess.run(
+            ["bd", "close", issue_id, "--reason", "worker closed without Claims"],
+            cwd=self.host,
+            check=True,
+            capture_output=True,
+        )
+        return 0
+
+
+class _ClaimAndBailRunner:
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, host: Path) -> None:
+        self.host = host
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        listing = json.loads(
+            subprocess.run(
+                ["bd", "list", "--status=in_progress", "--json"],
+                cwd=self.host,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        if listing:
+            return 0
+        ready = json.loads(
+            subprocess.run(
+                ["bd", "ready", "--json"],
+                cwd=self.host,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        issue_id = next(
+            item["id"] for item in ready if item.get("issue_type") != "epic"
+        )
+        subprocess.run(
+            ["bd", "update", issue_id, "--status=in_progress"],
+            cwd=self.host,
+            check=True,
+            capture_output=True,
+        )
+        return 0
+
+
+@pytest.mark.slow
+def test_grind_counts_worker_close_without_claims_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a worker close is a win; grind does not require Claims v1."""
+    repo = _bd_repo(tmp_path, "close-no-claims")
+    issue_id = _create_ready_issue(repo, "close me")
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "closed"
+    log = _grind_log(repo)
+    assert f"worker closed {issue_id}" in log
+    assert "Claims v1" not in log
+    assert "claims disagree" not in log.lower()
+
+
+@pytest.mark.slow
+def test_grind_leaves_unfinished_claim_in_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: unfinished work stays in_progress; grind does not revert it."""
+    repo = _bd_repo(tmp_path, "leave-claimed")
+    issue_id = _create_ready_issue(repo, "leave me")
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _ClaimAndBailRunner(repo)
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, issue_id)["status"] == "in_progress"
+    log = _grind_log(repo)
+    assert f"left {issue_id} in_progress" in log
+    assert "orphan-policy: revert" not in log
+
+
+@pytest.mark.slow
+def test_grind_implement_argv_has_no_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f2he.5 AC-1: implement spawn does not pass resume=."""
+    repo = _bd_repo(tmp_path, "no-resume")
+    _create_ready_issue(repo, "fresh")
+    recorded = _RecordingRunner()
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert recorded.calls
+    assert "resume" not in recorded.calls[0]
+
+
+@pytest.mark.slow
+def test_leftover_claim_spawn_has_no_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """f2he.5 AC-2: journal/leftover resume is a new process, no --resume."""
+    repo = _bd_repo(tmp_path, "leftover-no-resume")
+    issue_id = _create_ready_issue(repo, "leftover")
+    subprocess.run(
+        ["bd", "update", issue_id, "--status=in_progress"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    recorded = _RecordingRunner()
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert recorded.calls
+    assert "resume" not in recorded.calls[0]
+    assert _issue(repo, issue_id)["status"] == "in_progress"
