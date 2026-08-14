@@ -96,8 +96,8 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="candidate",
         definition=(
-            "The uncommitted edit set one worker produced for one issue, which "
-            "a fresh verifier judges before anything is committed."
+            "The edit set one worker produced for one issue, which it "
+            "session-closes after its acceptance checks pass."
         ),
         home="`CandidateJournal.candidate_paths` in `src/ortus/core/transaction.py`",
         team_role=(
@@ -145,18 +145,17 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="finalization",
         definition=(
-            "The commit-and-close sequence grind runs itself after a passing "
-            "verdict, one journaled phase transition at a time; no worker closes "
-            "an issue."
+            "The worker's own commit-and-close at the end of an issue — owned "
+            "paths, bd close, and push — after which grind reaps and moves on."
         ),
-        home="`finalized_phase()` in `src/ortus/core/lifecycle.py`",
+        home="`_done_bar_met()` in `src/ortus/commands/grind.py`",
         team_role=(
-            "The release manager merging, closing the ticket and updating the "
-            "board — never the developer who wrote the code."
+            "The developer closing their own ticket after the checks they ran, "
+            "not a release manager doing it for them."
         ),
         analogy=(
-            "The registrar signing the certificate. The couple do not marry "
-            "themselves, however much of the wedding they did."
+            "The couple signing their own register. The registrar is not in "
+            "the room."
         ),
     ),
     Term(
@@ -180,7 +179,7 @@ TERMS: tuple[Term, ...] = (
         term="happy path",
         definition=(
             "The route through a state machine taken when nothing goes wrong, "
-            "which is the only part the README diagrams draw."
+            "which is the only part the README diagram draws."
         ),
         home="`StateMachine.happy_path` in `src/ortus/core/lifecycle.py`",
         team_role=(
@@ -195,8 +194,9 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="harness",
         definition=(
-            "The grind scheduler process that selects and claims the issue and "
-            "launches each worker against it; the worker never chooses its own work."
+            "The grind scheduler process that launches one fresh worker per "
+            "issue and reaps it once the issue is closed and HEAD is in sync "
+            "with origin."
         ),
         home="`src/ortus/core/grind_loop.py`",
         team_role=(
@@ -307,8 +307,9 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="seal",
         definition=(
-            "Recording the candidate's diff hash, so every later phase can prove "
-            "the edit set it is judging is the one the worker produced."
+            "Recording the candidate's diff hash so a later observer can prove "
+            "which edit set the worker closed, rather than whatever the tree "
+            "holds now."
         ),
         home="`CandidateJournal.candidate_hash` in `src/ortus/core/transaction.py`",
         team_role=(
@@ -355,8 +356,9 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="verdict",
         definition=(
-            "The structured pass-or-fail judgement a fresh read-only verifier "
-            "emits about a candidate, with one entry per acceptance criterion."
+            "The pass-or-fail result of the issue's acceptance checks, which "
+            "the worker runs itself before session-close, with one entry per "
+            "acceptance criterion."
         ),
         home="`parse_verdict()` in `src/ortus/core/verdict.py`",
         team_role=(
@@ -388,7 +390,8 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="worker",
         definition=(
-            "One agent subprocess running one phase for one issue, started fresh "
+            "One agent subprocess that implements one issue end to end — "
+            "including its acceptance checks and session-close — started fresh "
             "with no memory of any worker before it."
         ),
         home="`compose_worker_prompt()` in `src/ortus/core/agent.py`",

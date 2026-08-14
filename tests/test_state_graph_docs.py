@@ -12,7 +12,6 @@ from ortus.core.lifecycle import (
     COUPLINGS,
     END_MARKER,
     ISSUE_MACHINE,
-    LOG_LABELS,
     LifecycleError,
     mermaid_candidate_graph,
     mermaid_issue_graph,
@@ -27,20 +26,17 @@ def _readme_text() -> str:
     return README.read_text(encoding="utf-8")
 
 
-def test_readme_contains_both_graphs() -> None:
+def test_readme_contains_the_issue_graph_only() -> None:
     block = readme_block(_readme_text())
 
-    assert block.count("```mermaid") == 2
+    assert block.count("```mermaid") == 1
     assert mermaid_issue_graph() in block
-    assert mermaid_candidate_graph() in block
+    assert mermaid_candidate_graph() not in block
     assert ISSUE_MACHINE.title in block
-    assert CANDIDATE_MACHINE.title in block
-
-    # The coupling prose is part of the section, not an afterthought.
+    assert CANDIDATE_MACHINE.title not in block
+    assert "Where the two machines meet" not in block
     for coupling in COUPLINGS:
-        assert coupling.description in block
-    for label in LOG_LABELS:
-        assert label in block
+        assert coupling.description not in block
 
 
 def _assert_block_matches(text: str) -> None:
@@ -77,16 +73,24 @@ def test_every_transition_is_documented_even_when_the_diagram_omits_it() -> None
     """
 
     block = readme_block(_readme_text())
-    for machine in (ISSUE_MACHINE, CANDIDATE_MACHINE):
-        for transition in machine.transitions:
-            row = (
-                f"| `{transition.source}` | {transition.trigger} | "
-                f"`{transition.target}` |"
-            )
-            assert row in block, (
-                f"{machine.name}: {transition.source} -> {transition.target} "
-                "is declared but absent from the README transition table"
-            )
+    for transition in ISSUE_MACHINE.transitions:
+        row = (
+            f"| `{transition.source}` | {transition.trigger} | "
+            f"`{transition.target}` |"
+        )
+        assert row in block, (
+            f"{ISSUE_MACHINE.name}: {transition.source} -> {transition.target} "
+            "is declared but absent from the README transition table"
+        )
+    for transition in CANDIDATE_MACHINE.transitions:
+        row = (
+            f"| `{transition.source}` | {transition.trigger} | "
+            f"`{transition.target}` |"
+        )
+        assert row not in block, (
+            f"{CANDIDATE_MACHINE.name}: {transition.source} -> "
+            f"{transition.target} must not appear in the README block"
+        )
 
 
 def test_readme_block_matches_renderer() -> None:
@@ -135,8 +139,8 @@ def test_broken_markers_fail_clearly(text: str, message: str) -> None:
 
 def test_hand_edit_inside_the_markers_is_detected() -> None:
     tampered = _readme_text().replace(
-        "#### Where the two machines meet",
-        "#### Where the two machines meet (hand-edited)",
+        f"#### {ISSUE_MACHINE.title}",
+        f"#### {ISSUE_MACHINE.title} (hand-edited)",
         1,
     )
     assert tampered != _readme_text()

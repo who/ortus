@@ -303,7 +303,7 @@ ISSUE_MACHINE = StateMachine(
     terminal=frozenset({ISSUE_CLOSED}),
     happy_path=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
     transitions=(
-        Transition(ISSUE_OPEN, ISSUE_IN_PROGRESS, "grind claims the selected issue"),
+        Transition(ISSUE_OPEN, ISSUE_IN_PROGRESS, "the worker claims the selected issue"),
         Transition(
             ISSUE_IN_PROGRESS,
             ISSUE_IN_PROGRESS,
@@ -317,7 +317,7 @@ ISSUE_MACHINE = StateMachine(
         Transition(
             ISSUE_IN_PROGRESS,
             ISSUE_CLOSED,
-            "finalization closes the verified issue",
+            "the worker session-closes the issue",
         ),
     ),
 )
@@ -748,7 +748,14 @@ def _machine_section(machine: StateMachine, graph: str) -> list[str]:
 
 
 def render_readme_block() -> str:
-    """The exact text README carries between the state-graph markers."""
+    """The exact text README carries between the state-graph markers.
+
+    Operator-facing README shows only the bd issue-status machine. The
+    candidate journal machine and the coupling table stay declared in this
+    module (and still have tests) but are not drawn here: the advertised
+    close path is the worker session-closing the issue, not harness
+    finalization.
+    """
 
     lines = [
         "<!-- Generated from src/ortus/core/lifecycle.py. Do not edit by hand: "
@@ -756,28 +763,7 @@ def render_readme_block() -> str:
         "",
     ]
     lines += _machine_section(ISSUE_MACHINE, mermaid_issue_graph())
-    lines += _machine_section(CANDIDATE_MACHINE, mermaid_candidate_graph())
-    lines += [
-        "#### Where the two machines meet",
-        "",
-        "| Candidate phase | Issue status | What it means |",
-        "| --- | --- | --- |",
-    ]
-    for coupling in COUPLINGS:
-        lines.append(
-            f"| `{coupling.candidate_phase}` | {coupling.issue_transition} | "
-            f"{coupling.description} |"
-        )
-    lines += [
-        "",
-        "`"
-        + "`, `".join(LOG_LABELS)
-        + "` are *not* journal phases. They are the `phase=` argument of "
-        "grind's branch-discipline logging, and they never reach a journal; "
-        "neither does `idle`, which a run snapshot reports when no journal "
-        "exists at all.",
-    ]
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def readme_block(text: str) -> str:
