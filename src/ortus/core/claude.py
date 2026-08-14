@@ -107,6 +107,7 @@ class ClaudeRunner:
         resume: str | None = None,
         reap_when: Callable[[], bool] | None = None,
         reap_poll: float = 2.0,
+        on_poll: Callable[[], None] | None = None,
     ) -> int:
         """Spawn claude, tee output to log_path (NOT stdout), return exit code.
 
@@ -127,6 +128,7 @@ class ClaudeRunner:
             readonly=readonly,
             reap_when=reap_when,
             reap_poll=reap_poll,
+            on_poll=on_poll,
         )
 
     def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
@@ -200,6 +202,7 @@ def _spawn_logged(
     readonly: bool = False,
     reap_when: Callable[[], bool] | None = None,
     reap_poll: float = 2.0,
+    on_poll: Callable[[], None] | None = None,
 ) -> int:
     """Spawn one agent CLI, tee stdout/stderr to log_path, reap the group.
 
@@ -208,7 +211,8 @@ def _spawn_logged(
 
     ``reap_when`` is polled every ``reap_poll`` seconds. When it returns
     true the child group is SIGTERM'd and this returns the child's exit
-    code — it does not raise ``TimeoutExpired``.
+    code — it does not raise ``TimeoutExpired``. ``on_poll`` peeks the
+    growing log while the child is still running.
     """
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,6 +251,7 @@ def _spawn_logged(
                 timeout=timeout,
                 reap_when=reap_when,
                 reap_poll=reap_poll,
+                on_poll=on_poll,
             )
         except KeyboardInterrupt:
             _kill_group(proc)
@@ -265,11 +270,21 @@ def _wait_logged(
     timeout: float | None,
     reap_when: Callable[[], bool] | None,
     reap_poll: float,
+    on_poll: Callable[[], None] | None = None,
 ) -> int:
     """Wait for ``proc``, optionally reaping when ``reap_when`` becomes true."""
 
     deadline = None if timeout is None else time.monotonic() + timeout
-    poll = reap_poll if reap_when is not None else None
+    poll = reap_poll if (reap_when is not None or on_poll is not None) else None
+
+    def _peek() -> None:
+        if on_poll is None:
+            return
+        try:
+            on_poll()
+        except Exception:
+            return
+
     while True:
         remaining = None if deadline is None else deadline - time.monotonic()
         if remaining is not None and remaining <= 0:
@@ -279,8 +294,11 @@ def _wait_logged(
         if poll is not None:
             slice_timeout = poll if remaining is None else min(poll, remaining)
         try:
-            return proc.wait(timeout=slice_timeout)
+            rc = proc.wait(timeout=slice_timeout)
+            _peek()
+            return rc
         except subprocess.TimeoutExpired:
+            _peek()
             if reap_when is not None:
                 try:
                     due = reap_when()

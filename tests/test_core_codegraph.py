@@ -7,10 +7,12 @@ import pytest
 
 from ortus.core.codegraph import (
     MAX_LABEL,
+    MCP_ORIENT_QUERY,
     CodeGraphAdapter,
     CodeGraphMode,
     CodeGraphPhase,
     CodeGraphProbe,
+    CodeGraphRpcError,
     CodeGraphUnavailable,
     append_normalized,
     parse_transcript,
@@ -40,6 +42,9 @@ def test_codex_probe_produces_the_child_registration(
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
     monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
+    )
     probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="codex")
     assert probe.available
     assert probe.capability is not None
@@ -52,6 +57,9 @@ def test_grok_probe_is_cli_and_index_not_injected_capability(
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
     monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
+    )
     probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="grok")
     assert probe.available
     assert probe.capability is None
@@ -191,3 +199,144 @@ def test_unavailable_and_negative_required_handshake(tmp_path: Path) -> None:
     )
     with pytest.raises(CodeGraphUnavailable, match="capability"):
         require_handshake(required)
+
+
+_FAKE_MCP = """#!/usr/bin/env python3
+import json
+import sys
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {"protocolVersion": "2024-11-05"},
+                }
+            )
+            + "\\n"
+        )
+        sys.stdout.flush()
+    elif method == "tools/call":
+        name = (message.get("params") or {}).get("name")
+        if name != "codegraph_explore":
+            reply = {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "error": {"message": f"unknown tool {name}"},
+            }
+        else:
+            reply = {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {"content": [{"type": "text", "text": "ok"}]},
+            }
+        sys.stdout.write(json.dumps(reply) + "\\n")
+        sys.stdout.flush()
+        break
+"""
+
+
+_FAKE_MCP_ERROR = """#!/usr/bin/env python3
+import json
+import sys
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message.get("method") == "initialize":
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {"protocolVersion": "2024-11-05"},
+                }
+            )
+            + "\\n"
+        )
+        sys.stdout.flush()
+    elif message.get("method") == "tools/call":
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"message": "server unavailable"},
+                }
+            )
+            + "\\n"
+        )
+        sys.stdout.flush()
+        break
+"""
+
+
+def _write_exec(path: Path, source: str) -> Path:
+    path.write_text(source)
+    path.chmod(0o755)
+    return path
+
+
+def test_mcp_tools_call_returns_explore_result(tmp_path: Path) -> None:
+    server = _write_exec(tmp_path / "fake-mcp", _FAKE_MCP)
+    result = CodeGraphAdapter().mcp_tools_call(
+        tmp_path, MCP_ORIENT_QUERY, command=str(server), args=()
+    )
+    assert result["content"][0]["text"] == "ok"
+
+
+def test_mcp_tools_call_raises_on_rpc_error(tmp_path: Path) -> None:
+    server = _write_exec(tmp_path / "fake-mcp-error", _FAKE_MCP_ERROR)
+    with pytest.raises(CodeGraphRpcError, match="tools/call failed"):
+        CodeGraphAdapter().mcp_tools_call(
+            tmp_path, MCP_ORIENT_QUERY, command=str(server), args=()
+        )
+
+
+def test_required_probe_performs_mcp_tools_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    calls: list[str] = []
+
+    def _fake_mcp(self: CodeGraphAdapter, repo: Path, query: str, **kwargs: object) -> dict:
+        calls.append(query)
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(CodeGraphAdapter, "mcp_tools_call", _fake_mcp)
+    probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.REQUIRED)
+    assert probe.available
+    assert calls == [MCP_ORIENT_QUERY]
+
+
+def test_required_probe_mcp_tools_call_fails_when_rpc_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+
+    def _boom(self: CodeGraphAdapter, *args: object, **kwargs: object) -> dict:
+        raise CodeGraphRpcError("server unavailable")
+
+    monkeypatch.setattr(CodeGraphAdapter, "mcp_tools_call", _boom)
+    with pytest.raises(CodeGraphUnavailable, match="MCP tools/call failed"):
+        CodeGraphAdapter().probe(tmp_path, CodeGraphMode.REQUIRED)
+
+
+def test_auto_probe_mcp_failure_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+
+    def _boom(self: CodeGraphAdapter, *args: object, **kwargs: object) -> dict:
+        raise CodeGraphRpcError("server unavailable")
+
+    monkeypatch.setattr(CodeGraphAdapter, "mcp_tools_call", _boom)
+    probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO)
+    assert not probe.available
+    assert "MCP tools/call failed" in (probe.reason or "")

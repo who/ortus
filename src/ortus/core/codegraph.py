@@ -1,13 +1,15 @@
 """Typed CodeGraph policy, probing, transcript normalization, and reporting.
 
 CodeGraph is optional in ``auto`` mode, explicit in ``off`` mode, and a hard
-prerequisite in ``required`` mode.  The parent process can observe the local
-index and CLI; MCP registration is reconciled from each agent phase's JSONL.
+prerequisite in ``required`` mode.  The parent process proves host capability
+with one stdio MCP ``tools/call`` and observes each agent phase's JSONL for a
+live ``tool_result``.
 """
 
 from __future__ import annotations
 
 import json
+import select
 import shutil
 import subprocess
 import time
@@ -15,6 +17,9 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
+
+MCP_ORIENT_QUERY = "orient to this repository"
+MCP_RPC_TIMEOUT = 20.0
 
 
 SCHEMA_VERSION = 1
@@ -37,6 +42,10 @@ class CodeGraphPhase(str, Enum):
 
 class CodeGraphUnavailable(RuntimeError):
     """Required-mode prerequisites or capability handshake were absent."""
+
+
+class CodeGraphRpcError(RuntimeError):
+    """stdio JSON-RPC to the CodeGraph MCP server failed."""
 
 
 @dataclass(frozen=True)
@@ -163,13 +172,114 @@ class CodeGraphAdapter:
         probe = CodeGraphProbe(
             mode, index, cli, available, "; ".join(missing) or None, capability
         )
-        if mode is CodeGraphMode.REQUIRED and not available:
-            raise CodeGraphUnavailable(
-                f"CodeGraph required but unavailable: {probe.reason}. "
-                "Run `codegraph init`/`codegraph sync`, install the CLI, and configure "
-                "the agent's CodeGraph MCP server."
+        if not available:
+            if mode is CodeGraphMode.REQUIRED:
+                raise CodeGraphUnavailable(
+                    f"CodeGraph required but unavailable: {probe.reason}. "
+                    "Run `codegraph init`/`codegraph sync`, install the CLI, and configure "
+                    "the agent's CodeGraph MCP server."
+                )
+            return probe
+        try:
+            self.mcp_tools_call(
+                repo,
+                MCP_ORIENT_QUERY,
+                command=cli_path or "codegraph",
             )
+        except CodeGraphRpcError as exc:
+            reason = f"MCP tools/call failed: {exc}"
+            if mode is CodeGraphMode.REQUIRED:
+                raise CodeGraphUnavailable(
+                    f"CodeGraph required but {reason}. "
+                    "Run `codegraph init`/`codegraph sync`, install the CLI, and configure "
+                    "the agent's CodeGraph MCP server."
+                ) from exc
+            return CodeGraphProbe(mode, index, cli, False, reason, None)
         return probe
+
+    def mcp_tools_call(
+        self,
+        repo: Path,
+        query: str,
+        *,
+        command: str = "codegraph",
+        args: tuple[str, ...] = ("serve", "--mcp"),
+        timeout: float = MCP_RPC_TIMEOUT,
+    ) -> dict[str, Any]:
+        """One bounded ``codegraph_explore`` over CodeGraph's stdio MCP.
+
+        Drives the existing JSON-RPC 2.0 newline-delimited dialect. A third-party
+        MCP client is not required and is not used.
+        """
+
+        argv = [command, *args]
+        if "serve" in args:
+            if "--path" not in argv and "-p" not in argv:
+                argv.extend(["--path", str(repo)])
+            if "--no-watch" not in argv:
+                argv.append("--no-watch")
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(repo) if repo.is_dir() else None,
+                bufsize=0,
+            )
+        except OSError as exc:
+            raise CodeGraphRpcError(f"could not launch CodeGraph MCP: {exc}") from exc
+        try:
+            _rpc_send(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "ortus", "version": "0"},
+                    },
+                },
+            )
+            init = _rpc_recv(proc, expected_id=1, timeout=timeout)
+            if init.get("error"):
+                raise CodeGraphRpcError(f"initialize failed: {init['error']}")
+            _rpc_send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+            _rpc_send(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "codegraph_explore",
+                        "arguments": {
+                            "query": query[:MAX_LABEL],
+                            "maxFiles": 1,
+                        },
+                    },
+                },
+            )
+            reply = _rpc_recv(proc, expected_id=2, timeout=timeout)
+            if reply.get("error"):
+                raise CodeGraphRpcError(f"tools/call failed: {reply['error']}")
+            result = reply.get("result")
+            if not isinstance(result, dict):
+                raise CodeGraphRpcError("tools/call returned no result object")
+            return result
+        finally:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.wait(timeout=1)
 
     def refresh(self, repo: Path, probe: CodeGraphProbe) -> tuple[str, int | None]:
         if not probe.available or probe.mode is CodeGraphMode.OFF:
@@ -411,3 +521,41 @@ def _grok_tool_name_and_input(obj: dict[str, Any]) -> tuple[str, object]:
             name = nested
             arguments = arguments.get("tool_input", arguments)
     return name, arguments
+
+
+def _rpc_send(proc: subprocess.Popen[bytes], payload: dict[str, Any]) -> None:
+    if proc.stdin is None:
+        raise CodeGraphRpcError("CodeGraph MCP stdin is closed")
+    proc.stdin.write((json.dumps(payload) + "\n").encode())
+    proc.stdin.flush()
+
+
+def _rpc_recv(
+    proc: subprocess.Popen[bytes], *, expected_id: int, timeout: float
+) -> dict[str, Any]:
+    if proc.stdout is None:
+        raise CodeGraphRpcError("CodeGraph MCP stdout is closed")
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodeGraphRpcError("CodeGraph MCP RPC timed out")
+        readable, _, _ = select.select([proc.stdout], [], [], remaining)
+        if not readable:
+            raise CodeGraphRpcError("CodeGraph MCP RPC timed out")
+        line = proc.stdout.readline()
+        if not line:
+            err = b""
+            if proc.stderr is not None:
+                err = proc.stderr.read() or b""
+            raise CodeGraphRpcError(
+                f"CodeGraph MCP closed stdout: {err[:200]!r}"
+            )
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(message, dict):
+            continue
+        if message.get("id") == expected_id:
+            return message

@@ -2404,6 +2404,7 @@ def test_grind_healthy_codegraph_lines_are_log_only(
         assert "CodeGraph fallback" not in console
     else:
         # Trouble still prints: the missing handshake earns its console line.
+        # f2he.2 skips verification, so only the implementation fallback fires.
         assert (
             "implementation CodeGraph fallback: agent MCP capability handshake "
             "not observed" in console
@@ -3113,15 +3114,10 @@ def test_grind_counts_worker_close_without_claims_block(
 
 @pytest.mark.slow
 @pytest.mark.codegraph_default
-def test_silent_fresh_worker_under_required_skips_post_worker_handshake(
+def test_silent_fresh_worker_under_required_fails_handshake(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-1: a silent worker under required does not halt on missing MCP.
-
-    The post-worker require_handshake gate is gone. Grind judges bd status:
-    a worker that closes its issue is a win even when the transcript has no
-    CodeGraph tool event.
-    """
+    """A silent required worker fails the live handshake even if it closed."""
     from ortus.core.codegraph import CodeGraphProbe
 
     repo = _bd_repo(tmp_path, "silent-required")
@@ -3144,12 +3140,9 @@ def test_silent_fresh_worker_under_required_skips_post_worker_handshake(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
     combined = result.stdout + result.stderr
-    assert result.exit_code == 0, combined
+    assert result.exit_code == 1, combined
+    assert "no CodeGraph MCP" in combined
     assert _issue(repo, issue_id)["status"] == "closed"
-    assert "no CodeGraph MCP" not in combined
-    assert "CodeGraph required but the implementation agent" not in combined
-    log = _grind_log(repo)
-    assert f"worker closed {issue_id}" in log
 
 
 @pytest.mark.slow

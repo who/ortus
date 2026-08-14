@@ -268,64 +268,6 @@ def _make_codegraph() -> CodeGraphAdapter:
     return CodeGraphAdapter()
 
 
-def _codex_codegraph_handshake(
-    runner: ClaudeRunner,
-    *,
-    repo: Path,
-    log_path: Path,
-    phase: CodeGraphPhase,
-    probe: CodeGraphProbe,
-    profile: AgentProfile,
-    timeout: float | None,
-) -> CodeGraphProbe:
-    """Prove child registration in a read-only process before phase work."""
-    if not getattr(probe, "available", False):
-        return probe
-    handshake = getattr(runner, "run_codegraph_handshake", None)
-    offset = log_path.stat().st_size if log_path.exists() else 0
-    # Healthy handshake plumbing narrates to the log, not the console
-    # (ortus-kawu); only a failure below earns a console line.
-    log_line = _log_writer(log_path)
-    reason: str | None = None
-    if not callable(handshake):
-        reason = "Codex runner does not support the CodeGraph child handshake"
-    else:
-        log_line(f"{phase.value} CodeGraph child handshake probe")
-        try:
-            rc = handshake(
-                phase=phase.value,
-                repo=repo,
-                log_path=log_path,
-                profile=profile,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            rc = 143
-            reason = "Codex CodeGraph child handshake timed out"
-        except OSError as exc:
-            rc = 1
-            reason = f"Codex CodeGraph child handshake could not launch: {exc}"
-        summary = parse_transcript(
-            log_path, phase=phase, probe=probe, start_offset=offset
-        )
-        append_normalized(log_path, summary)
-        if rc != 0 and reason is None:
-            reason = f"Codex CodeGraph child handshake exited {rc}"
-        elif not summary.capability_observed:
-            reason = "; ".join(summary.fallbacks[:3])
-        else:
-            log_line(f"{phase.value} CodeGraph child handshake succeeded")
-            _append_handshake(log_path, phase, success=True)
-            return probe
-
-    assert reason is not None
-    _append_handshake(log_path, phase, success=False, reason=reason)
-    if probe.mode is CodeGraphMode.REQUIRED:
-        raise CodeGraphUnavailable(f"CodeGraph required but {reason}")
-    output.progress("grind", f"{phase.value} CodeGraph fallback: {reason}")
-    return replace(probe, available=False, reason=reason, capability=None)
-
-
 def _append_handshake(
     log_path: Path,
     phase: CodeGraphPhase,
@@ -1958,24 +1900,7 @@ def _verify_candidate(
     sealed = seal_paths(repo, journal.candidate_paths) if git.is_git_repo() else {}
     if configure_codegraph is not None:
         configure_codegraph(probe.capability)
-    try:
-        verification_probe = (
-            _codex_codegraph_handshake(
-                runner,
-                repo=repo,
-                log_path=log,
-                phase=CodeGraphPhase.VERIFICATION,
-                probe=probe,
-                profile=profile,
-                timeout=(worker_timeout if worker_timeout > 0 else None),
-            )
-            if backend == "codex"
-            else probe
-        )
-    except CodeGraphUnavailable as exc:
-        bd.update_status(issue_id, "open")
-        output.error(str(exc))
-        raise typer.Exit(code=1)
+    verification_probe = probe
     if configure_codegraph is not None:
         configure_codegraph(verification_probe.capability)
     verifier_prompt = _verifier_prompt(
@@ -5848,25 +5773,7 @@ def grind(
                     configure_codegraph = getattr(runner, "configure_codegraph", None)
                     if callable(configure_codegraph):
                         configure_codegraph(codegraph_probe.capability)
-                    try:
-                        implementation_probe = (
-                            _codex_codegraph_handshake(
-                                runner,
-                                repo=target,
-                                log_path=log,
-                                phase=CodeGraphPhase.IMPLEMENTATION,
-                                probe=codegraph_probe,
-                                profile=implement_profile,
-                                timeout=(
-                                    worker_timeout if worker_timeout > 0 else None
-                                ),
-                            )
-                            if resolved_backend == "codex"
-                            else codegraph_probe
-                        )
-                    except CodeGraphUnavailable as exc:
-                        output.error(str(exc))
-                        raise typer.Exit(code=1)
+                    implementation_probe = codegraph_probe
                     if callable(configure_codegraph):
                         configure_codegraph(implementation_probe.capability)
                     implementation_instruction = _IMPLEMENTATION_INSTRUCTION
@@ -5920,6 +5827,32 @@ def grind(
                 implementation_worker_ran = True
                 phase_offset = log.stat().st_size if log.exists() else 0
                 impl_started = time.monotonic()
+                impl_handshake_logged = False
+                implementation_summary = parse_transcript(
+                    log,
+                    phase=CodeGraphPhase.IMPLEMENTATION,
+                    probe=implementation_probe,
+                    start_offset=phase_offset,
+                )
+
+                def _poll_impl_handshake() -> None:
+                    nonlocal impl_handshake_logged, implementation_summary
+                    implementation_summary = parse_transcript(
+                        log,
+                        phase=CodeGraphPhase.IMPLEMENTATION,
+                        probe=implementation_probe,
+                        start_offset=phase_offset,
+                    )
+                    if (
+                        implementation_summary.capability_observed
+                        and not impl_handshake_logged
+                    ):
+                        impl_handshake_logged = True
+                        write_log("implementation CodeGraph handshake succeeded")
+                        _append_handshake(
+                            log, CodeGraphPhase.IMPLEMENTATION, success=True
+                        )
+
                 try:
                     if implementation_probe.available:
                         write_log("implementation CodeGraph handshake requested")
@@ -5970,6 +5903,7 @@ def grind(
                             profile=implement_profile,
                             timeout=(worker_timeout if worker_timeout > 0 else None),
                             reap_when=reap_when,
+                            on_poll=_poll_impl_handshake,
                         )
                 except subprocess.TimeoutExpired:
                     implementation_timed_out = True
@@ -5991,13 +5925,35 @@ def grind(
                         )
                         raise typer.Exit(code=1)
 
+                # Live implementation handshake is judged here, before f2he.2
+                # reads bd status. Worker process exit is not a CodeGraph signal.
+                if implementation_worker_ran:
+                    _poll_impl_handshake()
+                    append_normalized(log, implementation_summary)
+                    if (
+                        not implementation_summary.capability_observed
+                        and codegraph_mode is not CodeGraphMode.OFF
+                    ):
+                        output.progress(
+                            "grind",
+                            "implementation CodeGraph fallback: "
+                            + "; ".join(implementation_summary.fallbacks[:3]),
+                        )
+                    write_log(
+                        "CodeGraph implementation summary: "
+                        f"queries={len(implementation_summary.events)} "
+                        f"fallbacks={implementation_summary.fallbacks or 'none'}"
+                    )
+                    try:
+                        require_handshake(implementation_summary)
+                    except CodeGraphUnavailable as exc:
+                        output.error(str(exc))
+                        raise typer.Exit(code=1)
+
                 # f2he.2: the iteration result is observable bd status only.
                 # Do not re-run tests, do not require Claims v1, do not
                 # spawn a verifier or a correction, do not revert a live
-                # in_progress claim. Implementation CodeGraph handshake is
-                # the worker-owned prompt (and the Codex pre-edit child
-                # handshake). The post-worker require_handshake gate is
-                # retired: it lived after this continue and never ran.
+                # in_progress claim.
                 closed_delta = 1
                 if harness_select:
                     try:

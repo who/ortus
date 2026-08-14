@@ -59,34 +59,6 @@ class CodexRunner(ClaudeRunner):
         """Apply the capability produced by the outer probe to future launches."""
         self.codegraph = capability
 
-    def run_codegraph_handshake(
-        self,
-        *,
-        phase: str,
-        repo: Path,
-        log_path: Path,
-        profile: AgentProfile | None = None,
-        timeout: float | None = None,
-    ) -> int:
-        """Run a query-only child in a read-only sandbox before phase work."""
-        prior_sandbox = self.sandbox_mode
-        self.sandbox_mode = "read-only"
-        try:
-            prompt = (
-                "CodeGraph capability handshake only. Do not call shell tools and do not "
-                "edit files. Call codegraph_explore exactly once with the bounded query "
-                f"'Orient to this repository for the {phase} phase', then stop."
-            )
-            return super().run(
-                prompt,
-                repo=repo,
-                log_path=log_path,
-                profile=profile,
-                timeout=timeout,
-            )
-        finally:
-            self.sandbox_mode = prior_sandbox
-
     @property
     def codex_binary(self) -> str:
         return self.claude_binary
@@ -221,6 +193,7 @@ class GrokRunner:
         resume: str | None = None,
         reap_when: Callable[[], bool] | None = None,
         reap_poll: float = 2.0,
+        on_poll: Callable[[], None] | None = None,
     ) -> int:
         """Spawn grok, tee output to log_path (NOT stdout), return exit code."""
         argv = self.build_argv(
@@ -237,6 +210,7 @@ class GrokRunner:
             readonly=readonly,
             reap_when=reap_when,
             reap_poll=reap_poll,
+            on_poll=on_poll,
         )
 
     def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:

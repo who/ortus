@@ -147,3 +147,9 @@ def test_runner_run_accepts_resume_kwarg() -> None:
     """f2he.5 AC-3: runners still accept resume=; grind just must not pass it."""
     for cls in (ClaudeRunner, GrokRunner, CodexRunner):
         assert "resume" in inspect.signature(cls.run).parameters
+
+
+def test_codex_has_no_separate_handshake_agent() -> None:
+    """AC-4: Codex no longer launches a child just to scrape a handshake log."""
+    assert not hasattr(CodexRunner, "run_codegraph_handshake")
+    assert "on_poll" in inspect.signature(CodexRunner.run).parameters
