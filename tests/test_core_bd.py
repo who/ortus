@@ -82,6 +82,36 @@ def test_close_marks_issue_closed(bd_workspace: Path) -> None:
     assert detail["status"] == "closed"
 
 
+def test_children_includes_closed_kids(bd_workspace: Path) -> None:
+    """Rollover needs closed children; bd show no longer embeds them."""
+    client = BdClient(bd_workspace)
+    epic = client.create(title="container", issue_type="epic", priority=2)
+    proc = subprocess.run(
+        [
+            "bd",
+            "create",
+            "--silent",
+            "--title",
+            "kid",
+            "--type",
+            "task",
+            "--parent",
+            epic,
+        ],
+        cwd=bd_workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    kid = proc.stdout.strip()
+    assert client.children(epic)
+    assert {row["id"] for row in client.children(epic)} == {kid}
+    client.close(kid)
+    kids = client.children(epic)
+    assert len(kids) == 1
+    assert kids[0]["status"] == "closed"
+
+
 def test_list_all_includes_open_and_closed_without_status_filter(
     bd_workspace: Path,
 ) -> None:

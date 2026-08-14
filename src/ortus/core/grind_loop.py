@@ -197,7 +197,9 @@ def epic_children(issue: dict) -> list[dict]:
     ]
 
 
-def epic_is_exhausted(issue: dict) -> bool:
+def epic_is_exhausted(
+    issue: dict, children: list[dict] | None = None
+) -> bool:
     """True when an epic has children and every one of them is closed.
 
     Such an epic is complete, but it stays `open` (workers never claim
@@ -206,12 +208,15 @@ def epic_is_exhausted(issue: dict) -> bool:
     alone, the loop exits "queue blocked" at every milestone boundary even
     though real work is one dependency-hop away. A childless epic is NOT
     exhausted: it may simply not have been decomposed yet.
+
+    ``children`` is the `bd children` list. When omitted, fall back to
+    ``dependents`` on the issue dict (older bd show payloads / unit tests).
     """
     if str(issue.get("issue_type") or issue.get("type") or "").strip() != "epic":
         return False
-    children = epic_children(issue)
-    return bool(children) and all(
-        str(c.get("status") or "").strip() == "closed" for c in children
+    kids = children if children is not None else epic_children(issue)
+    return bool(kids) and all(
+        str(c.get("status") or "").strip() == "closed" for c in kids
     )
 
 

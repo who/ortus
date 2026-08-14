@@ -194,6 +194,15 @@ class BdClient:
         _, data = self._run("human", "list", "--json", parse_json=True)
         return data or []
 
+    def children(self, parent_id: str) -> list[dict[str, Any]]:
+        """`bd children <id> --json`: all children, including closed.
+
+        `bd show` no longer embeds parent-child dependents, so rollover and
+        anything else that needs the subtree must ask this command.
+        """
+        _, data = self._run("children", parent_id, "--json", parse_json=True)
+        return data or []
+
     def comments(self, issue_id: str) -> list[dict[str, Any]]:
         """`bd comments <id> --json`: ordered comment list for one issue."""
         _, data = self._run("comments", issue_id, "--json", parse_json=True)

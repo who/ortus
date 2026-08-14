@@ -381,6 +381,26 @@ def test_epic_is_exhausted_open_child_or_childless_or_non_epic() -> None:
     )
 
 
+def test_epic_is_exhausted_uses_explicit_children_not_empty_show() -> None:
+    """bd show no longer embeds dependents; rollover passes bd children."""
+    epic = {"id": "e-1", "issue_type": "epic"}
+    assert not epic_is_exhausted(epic)
+    assert epic_is_exhausted(
+        epic,
+        children=[
+            {"id": "e-1.1", "status": "closed"},
+            {"id": "e-1.2", "status": "closed"},
+        ],
+    )
+    assert not epic_is_exhausted(
+        epic,
+        children=[
+            {"id": "e-1.1", "status": "closed"},
+            {"id": "e-1.2", "status": "open"},
+        ],
+    )
+
+
 def test_format_issue_details_includes_core_fields() -> None:
     issue = {
         "id": "p-9",

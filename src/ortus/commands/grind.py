@@ -4347,7 +4347,14 @@ def _rollover_exhausted_epics(
             except Exception as exc:
                 write_log(f"epic rollover: bd show {epic_id} failed ({exc})")
                 continue
-            if not epic_is_exhausted(full):
+            try:
+                kids = bd.children(epic_id)
+            except Exception as exc:
+                write_log(
+                    f"epic rollover: bd children {epic_id} failed ({exc})"
+                )
+                continue
+            if not epic_is_exhausted(full, children=kids):
                 continue
             try:
                 bd.close(
