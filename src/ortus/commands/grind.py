@@ -4581,6 +4581,43 @@ def _unready_skip_line(title: str, report: ReadinessReport) -> str:
     return f'skipped "{label}" ({report.issue_id}) — {report.summary()}'
 
 
+def _flag_unready_for_human(
+    bd: BdClient,
+    reports: list[ReadinessReport],
+    write_log: Callable[[str], None],
+) -> None:
+    """Label each unready leaf human and comment the readiness diagnostic.
+
+    Used only when the ready queue holds nothing implementable. A failed
+    label add still warns and continues so every remaining id is attempted;
+    grind never falls back to a repair worker from this path.
+    """
+
+    for report in reports:
+        diagnostic = report.diagnostic()
+        try:
+            bd.add_label(report.issue_id, "human")
+        except Exception as exc:
+            write_log(
+                f"readiness: could not label {report.issue_id} human ({exc})"
+            )
+            output.warn(
+                f"could not label {report.issue_id} human ({exc}); "
+                "leaving it open and stopping"
+            )
+        try:
+            bd.add_comment(
+                report.issue_id,
+                "readiness schema v1 failed; grind will not repair this "
+                f"packet.\n\n{diagnostic}",
+            )
+        except Exception as exc:
+            write_log(
+                f"readiness: could not comment on {report.issue_id} ({exc})"
+            )
+        write_log(f"readiness: flagged {report.issue_id} human")
+
+
 def _fmt_duration(seconds: float) -> str:
     """Elapsed time the way a colleague would say it: `47s` under a minute,
     whole minutes after that. Console milestones only; the log keeps exact
@@ -4796,12 +4833,12 @@ def grind(
         ),
     ),
     repair_unready: bool = typer.Option(
-        True,
+        False,
         "--repair-unready/--no-repair-unready",
         help=(
             "When the ready queue holds only tasks that fail readiness schema "
-            "v1, repair them in place with one planning-profile pass and keep "
-            "going. --no-repair-unready restores the skip-and-stop behavior."
+            "v1, default grind flags each one human and stops. "
+            "--repair-unready opts into one planning-profile repair pass."
         ),
     ),
     repair_budget: int = typer.Option(
@@ -4961,7 +4998,7 @@ def grind(
             + (
                 f"{plan_profile.display_name}, budget {repair_budget} pass(es)"
                 if repair_unready and repair_budget > 0
-                else "off (unready tasks are skipped)"
+                else "off (unready tasks are flagged human)"
             )
         )
         output.info(f"codegraph:      {codegraph_mode.value}")
@@ -5430,12 +5467,10 @@ def grind(
                         if key in warned_unready:
                             return
                         warned_unready.add(key)
-                        fix = "draft one" if report.packet_missing else "repair it"
                         output.warn(
-                            f"{_unready_skip_line(title, report)}; grind will "
-                            f"{fix} automatically when the queue has nothing "
-                            "ready, or run ortus plan / edit the work spec "
-                            "yourself. It stays open and unclaimed."
+                            f"{_unready_skip_line(title, report)}. It stays "
+                            "open and unclaimed. Run ortus plan or edit the "
+                            "work spec."
                         )
 
                     if resume_issue_id is not None:
@@ -5455,12 +5490,13 @@ def grind(
 
                     # Nothing claimable, but the queue is NOT drained and the
                     # only thing between the loop and real work is work specs that
-                    # fail readiness schema v1. Repair those in place and
-                    # revalidate rather than dead-ending on an authoring defect
-                    # (ortus-xhrj.7). A queue that also holds a ready task never
-                    # reaches here, so it spends no repair budget; epics never
-                    # reach here either, because select_ready_issue skips them
-                    # without reporting them unready.
+                    # fail readiness schema v1. Default grind flags those leaves
+                    # human and takes the no-ready-issue exit. An explicit
+                    # --repair-unready still repairs in place. A queue that also
+                    # holds a ready task never reaches here; epics never reach
+                    # here either, because select_ready_issue skips them without
+                    # reporting them unready. A leftover in_progress resume
+                    # never populates ``unready``.
                     repair_blocked: str | None = None
                     if target_issue is None and unready:
                         pending = tuple(
@@ -5469,9 +5505,7 @@ def grind(
                             if report.issue_id not in repair_attempted
                         )
                         if not repair_unready:
-                            repair_blocked = (
-                                "readiness repair disabled by --no-repair-unready"
-                            )
+                            _flag_unready_for_human(bd, unready, write_log)
                         elif repairs_run >= repair_budget:
                             repair_blocked = (
                                 "readiness repair budget exhausted "

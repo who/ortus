@@ -157,6 +157,24 @@ def _grind_log(repo: Path) -> str:
     )
 
 
+def _comments_blob(repo: Path, issue_id: str) -> str:
+    return subprocess.run(
+        ["bd", "comments", issue_id, "--json"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def _packet_fields(issue: dict) -> tuple[str, str, str]:
+    return (
+        str(issue.get("description") or ""),
+        str(issue.get("design") or ""),
+        str(issue.get("acceptance_criteria") or issue.get("acceptance") or ""),
+    )
+
+
 def _emit_verdict(
     repo: Path, log_path: Path, *, criteria: tuple[str, ...], decision: str = "pass"
 ) -> None:
@@ -269,7 +287,16 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
     )
 
     result = runner.invoke(
-        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+        app,
+        [
+            "grind",
+            str(repo),
+            "--repair-unready",
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+        ],
     )
 
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -300,46 +327,219 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
 
 
 @pytest.mark.slow
-def test_grind_repair_opt_out_restores_skip_and_stop(
+def test_grind_unready_does_not_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-2: --no-repair-unready spawns nothing and leaves the leaf open."""
+    """AC-1: default grind never spawns a planning/repair worker for unready-only."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "optout")
+    repo = _bd_repo(tmp_path, "norepair")
     issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    before = _packet_fields(_issue(repo, issue_id))
 
     class NeverRuns:
         extra_env: dict[str, str] = {}
 
         def run(self, prompt: str, **kwargs: object) -> int:
-            raise AssertionError("--no-repair-unready must not spawn any subprocess")
+            raise AssertionError("default grind must not spawn any subprocess")
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
 
     result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--no-repair-unready",
-            "--tasks",
-            "1",
-            "--idle-sleep",
-            "0",
-        ],
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
 
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert _issue(repo, issue_id)["status"] == "open"
+    after = _issue(repo, issue_id)
+    assert after["status"] == "open"
+    assert _packet_fields(after) == before, "grind must not rewrite the work spec"
     combined = result.stdout + result.stderr
-    assert "readiness repair disabled by --no-repair-unready" in combined
+    assert "automatically" not in combined
+    assert "READINESS REPAIR PASS" not in combined
     log_text = _grind_log(repo)
-    # The pre-existing skip line keeps its format so log tailing is unaffected.
-    assert "readiness skip (left open for planning/human repair)" in log_text
+    assert "readiness repair pass" not in log_text
     assert "no ready issue to claim (queue blocked or human-only)" in log_text
+
+
+@pytest.mark.slow
+def test_grind_unready_flags_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: each unready leaf is labeled human, stays open, and is commented."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "flaghuman")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+
+    class NeverRuns:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, **kwargs: object) -> int:
+            raise AssertionError("default grind must not spawn any subprocess")
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "open"
+    assert "human" in (shown.get("labels") or [])
+    comments = _comments_blob(repo, issue_id)
+    assert issue_id in comments
+    assert "missing, empty, or placeholder section" in comments
+    assert "grind will not repair this packet" in comments
+
+
+@pytest.mark.slow
+def test_grind_unready_flags_all_then_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two unready leaves are both flagged human, then grind stops."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "flagall")
+    first = _create_unready_issue(repo, "first hand authored leaf", priority="1")
+    second = _create_unready_issue(repo, "second hand authored leaf", priority="1")
+
+    class NeverRuns:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, **kwargs: object) -> int:
+            raise AssertionError("default grind must not spawn any subprocess")
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
+
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for issue_id in (first, second):
+        shown = _issue(repo, issue_id)
+        assert shown["status"] == "open"
+        assert "human" in (shown.get("labels") or [])
+        comments = _comments_blob(repo, issue_id)
+        assert "missing, empty, or placeholder section" in comments
+    assert "no ready issue to claim (queue blocked or human-only)" in _grind_log(repo)
+
+
+@pytest.mark.slow
+def test_grind_unready_label_failure_warns_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed human label still warns and stops; repair is not spawned."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "labelfail")
+    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+
+    class NeverRuns:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, **kwargs: object) -> int:
+            raise AssertionError("label failure must not spawn a repair worker")
+
+    def boom(self: object, target_id: str, label: str) -> None:
+        raise grind_mod.BdError(
+            ["bd", "label", "add", target_id, label], 1, "denied"
+        )
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
+    monkeypatch.setattr(grind_mod.BdClient, "add_label", boom)
+
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "open"
+    assert "human" not in (shown.get("labels") or [])
+    combined = result.stdout + result.stderr
+    assert "could not label" in combined
+    assert "automatically" not in combined
+    assert "readiness repair pass" not in _grind_log(repo)
+
+
+@pytest.mark.slow
+def test_grind_ready_leaf_does_not_flag_unready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ready leaf is claimed; sibling unready leaves are not flagged this iteration."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "readyplus")
+    unready_id = _create_unready_issue(repo, "unready sibling", priority="1")
+    ready_id = _create_ready_issue(repo, "ready leaf", priority="2")
+    recorded = _RecordingRunner()
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert recorded.calls, "the ready leaf must be handed to a worker"
+    unready = _issue(repo, unready_id)
+    assert unready["status"] == "open"
+    assert "human" not in (unready.get("labels") or [])
+    assert _issue(repo, ready_id)["id"] == ready_id
+
+
+@pytest.mark.slow
+def test_grind_leftover_in_progress_is_not_unready_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leftover in_progress claim is continued, not repaired or human-flagged."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "leftover-unready")
+    leftover_id = _create_unready_issue(repo, "leftover unready", priority="1")
+    subprocess.run(
+        ["bd", "update", leftover_id, "--status=in_progress"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / "leftover-notes.txt").write_text("inherited work\n", encoding="utf-8")
+    recorded = _RecordingRunner()
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    shown = _issue(repo, leftover_id)
+    assert shown["status"] == "in_progress"
+    assert "human" not in (shown.get("labels") or [])
+    assert recorded.calls, "leftover in_progress must continue, not take the unready exit"
+    profile = recorded.calls[0].get("profile")
+    assert getattr(profile, "phase", None) is not Phase.PLAN
+    assert "readiness repair pass" not in _grind_log(repo)
 
 
 @pytest.mark.slow
@@ -373,7 +573,16 @@ def test_grind_repair_budget_exhausted_prints_diagnostics_and_follow_up(
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoPassClaude())
 
     result = runner.invoke(
-        app, ["grind", str(repo), "--repair-budget", "0", "--idle-sleep", "0"]
+        app,
+        [
+            "grind",
+            str(repo),
+            "--repair-unready",
+            "--repair-budget",
+            "0",
+            "--idle-sleep",
+            "0",
+        ],
     )
 
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -420,7 +629,9 @@ def test_grind_readiness_warning_dedupes_per_run(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoFixClaude())
 
-    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+    result = runner.invoke(
+        app, ["grind", str(repo), "--repair-unready", "--idle-sleep", "0"]
+    )
 
     assert result.exit_code == 0, result.stdout + result.stderr
     log_text = _grind_log(repo)
@@ -465,7 +676,9 @@ def test_grind_repair_prompt_keeps_full_enumeration(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoFixClaude())
 
-    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
+    result = runner.invoke(
+        app, ["grind", str(repo), "--repair-unready", "--idle-sleep", "0"]
+    )
 
     assert result.exit_code == 0, result.stdout + result.stderr
     assert len(prompts) == 1, "exactly one repair pass runs for one unready leaf"
@@ -501,9 +714,7 @@ def test_grind_queue_blocked_exit_uses_summary(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: NeverRuns())
 
-    result = runner.invoke(
-        app, ["grind", str(repo), "--no-repair-unready", "--idle-sleep", "0"]
-    )
+    result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
 
     assert result.exit_code == 0, result.stdout + result.stderr
     squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
