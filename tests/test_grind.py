@@ -279,7 +279,7 @@ def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
     log_text = _grind_log(repo)
     assert "readiness repair pass 1/2" in log_text
     assert f"readiness repair: {issue_id} now passes readiness" in log_text
-    assert f"harness selected+claimed {issue_id}" in log_text
+    assert f"goal-prompt ready for {issue_id}" in log_text
     comments = subprocess.run(
         ["bd", "comments", issue_id, "--json"],
         cwd=repo,
@@ -562,7 +562,8 @@ def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "backend:        codex" in result.stdout
     prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
-    assert "Work bd issue" in prompt
+    assert "bd ready" in prompt
+    assert "AGENTS.md" in prompt
     assert "/goal" not in prompt
 
 
@@ -1062,15 +1063,16 @@ def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
     template = grind_mod.read_work_issue_condition()
 
     claude_prompt = grind_mod._compose_work_prompt(template, issue, "claude")
-    assert claude_prompt.startswith("/goal Work bd issue demo-large")
-    assert "bd show demo-large --json" in claude_prompt
+    assert claude_prompt.startswith("/goal ")
+    assert "bd ready" in claude_prompt
+    assert "AGENTS.md" in claude_prompt
     assert len(claude_prompt.removeprefix("/goal ")) <= 4_000
     assert issue["description"] not in claude_prompt
 
     codex_prompt = grind_mod._compose_work_prompt(template, issue, "codex")
     assert not codex_prompt.startswith("/goal")
-    assert issue["description"].strip() in codex_prompt
-    assert issue["acceptance_criteria"].strip() in codex_prompt
+    assert "bd ready" in codex_prompt
+    assert issue["description"] not in codex_prompt
 
 
 def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
@@ -1125,18 +1127,26 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
         ) -> int:
             prompts.append(prompt)
             assert not prompt.startswith("/goal")
-            assert "Do NOT invoke `ortus grind`" in prompt
-            match = re.search(r"Work bd issue ([^\.\s]+)\.", prompt)
-            assert match
+            assert "bd ready" in prompt
+            claimed_rows = json.loads(
+                subprocess.run(
+                    ["bd", "list", "--status=in_progress", "--json"],
+                    cwd=primary,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+            )
+            claimed = next(item["id"] for item in claimed_rows if item.get("id"))
             subprocess.run(
-                ["bd", "close", match.group(1), "--reason", "fake codex completed it"],
+                ["bd", "close", claimed, "--reason", "fake codex completed it"],
                 cwd=primary,
                 check=True,
                 capture_output=True,
             )
             marker = repo / "codex-worker-output.txt"
             prior = marker.read_text() if marker.exists() else ""
-            marker.write_text(prior + match.group(1) + "\n")
+            marker.write_text(prior + claimed + "\n")
             return 0
 
     _fake_sandbox(monkeypatch)
@@ -1323,10 +1333,8 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
     logs = list((repo / "logs").glob("grind-*.log"))
     assert logs
     log_text = "\n".join(p.read_text(encoding="utf-8") for p in logs)
-    # The harness logged the in-harness select+claim of the EXACT id...
-    assert f"harness selected+claimed {issue_id}" in log_text
-    # ...and the worker's prompt (echoed by fake-claude's argv) carried that id.
-    assert f"Work bd issue {issue_id}" in log_text
+    assert f"goal-prompt ready for {issue_id}" in log_text
+    assert "bd ready" in log_text
 
 
 @pytest.mark.slow
@@ -1388,14 +1396,13 @@ def test_claude_goal_rejection_restores_claim_and_halts_without_retry(
 
 
 def test_grind_dry_run_default_shows_harness_select(tmp_path: Path) -> None:
-    """Default (no --condition) dry-run advertises harness-side selection and
-    the work-issue template with its placeholders intact."""
+    """Default (no --condition) dry-run shows the goal-prompt worker loop."""
     repo = _fixture_repo(tmp_path)
     result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
     assert result.exit_code == 0
     assert "select:" in result.stdout
-    assert "harness" in result.stdout
-    assert "<ISSUE_ID>" in result.stdout
+    assert "goal-prompt" in result.stdout
+    assert "bd ready" in result.stdout
 
 
 def test_grind_fr003_no_beads(tmp_path: Path) -> None:

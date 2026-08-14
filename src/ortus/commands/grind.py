@@ -162,7 +162,6 @@ from ortus.core.grind_loop import (
     classify_branch_state,
     compute_delta,
     epic_is_exhausted,
-    inject_issue,
     queue_drained,
     read_work_issue_condition,
     select_ready_issue,
@@ -2285,15 +2284,8 @@ _MESSAGE_RULES = (
 #: Module-level so the prompt-content tests can hold its message guidance to
 #: the same rule set the finalization gate enforces.
 _IMPLEMENTATION_INSTRUCTION = (
-    "IMPLEMENTATION PHASE ONLY. These phase rules override any conflicting "
-    "instruction elsewhere in this prompt. Make the change, run targeted "
-    "checks, and commit the completed work on the issue branch grind handed "
-    "you, with your own commit message. " + _MESSAGE_RULES + " Do not close "
-    "the issue, do not run git push, do not switch branches or touch the "
-    "integration branch, do not select other work, and do not add the final "
-    "verification comment; the machine verification pipeline re-runs every "
-    "criterion check against your committed range next, and Ortus owns "
-    "merging and finalization."
+    "Follow the one-issue goal-prompt loop. Session-close that id per "
+    "AGENTS.md. " + _MESSAGE_RULES + " Do not pick a second issue."
 )
 
 
@@ -4527,50 +4519,36 @@ def _compose_work_prompt(
     phase_contract_text: str = "",
     lessons_text: str = "",
 ) -> str:
-    """Build one backend-appropriate prompt for a harness-claimed issue.
+    """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
-    Codex receives the complete work spec because its plain ``exec`` prompt
-    has no slash-command condition limit. Claude's ``/goal`` condition is
-    capped at 4,000 characters, so it receives the exact claimed id and loads
-    the authoritative, deliberately thorough work spec from bd itself.
+    The worker contract is bundled ``goal-prompt.md`` (overrideable via
+    ``resolve_prompt``). Grind does not inject a claimed id. ``template`` and
+    ``issue`` remain on the signature so existing callers keep compiling;
+    neither is substituted into the prompt.
 
-    ``lessons_text`` is the one optional section: no runtime behavior depends
-    on a lesson being present, so when appending it would push the Claude
-    condition past the cap it is dropped rather than halting the run.
+    ``lessons_text`` is the one optional section: when appending it would
+    push the Claude ``/goal`` condition past the cap it is dropped rather
+    than halting the run.
     """
-    issue_id = str(issue.get("id") or "")
-    if not issue_id:
-        raise ValueError("cannot compose a worker prompt for an issue with no id")
+    del template, issue
+    from ortus.core.prompts import resolve_prompt
 
-    if backend == "codex":
-        task = inject_issue(template, issue)
-        if phase_instruction:
-            task = phase_instruction.rstrip() + "\n\n" + task
-        task += phase_contract_text + lessons_text
-        return compose_worker_prompt("codex", task)
-
-    task = (
-        f"Work bd issue {issue_id}. The grind harness already selected and claimed "
-        "this exact issue. Do not run bd ready, select another issue, or operate on "
-        f"any other id. First run `bd show {issue_id} --json`; its description, "
-        "design, acceptance criteria, and notes are the authoritative implementation "
-        "work spec. Follow that work spec and the repository instructions. Run the required "
-        "checks, use only the exact claimed id in bd commands, and do not invoke another "
-        "queue orchestrator. If a human decision is required, flag this exact issue and "
-        "stop. Otherwise complete only this issue, leave the result as uncommitted "
-        "candidate edits, then end the session."
-    )
+    task = resolve_prompt("goal-prompt").text.strip()
     if phase_instruction:
-        task += "\n\n" + phase_instruction.rstrip()
+        task = phase_instruction.rstrip() + "\n\n" + task
     task += phase_contract_text
-    if lessons_text and len(task) + len(lessons_text) <= _CLAUDE_GOAL_CONDITION_LIMIT:
+    wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend != "codex" else None
+    if (
+        lessons_text
+        and (wrap_limit is None or len(task) + len(lessons_text) <= wrap_limit)
+    ):
         task += lessons_text
-    if len(task) > _CLAUDE_GOAL_CONDITION_LIMIT:
+    if wrap_limit is not None and len(task) > wrap_limit:
         raise BackendError(
             "internal Claude /goal condition exceeds the 4,000-character limit "
             f"({len(task)} characters)"
         )
-    return compose_worker_prompt("claude", task)
+    return compose_worker_prompt(backend, task)  # type: ignore[arg-type]
 
 
 def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
@@ -5018,7 +4996,7 @@ def grind(
             )
         )
         output.info(
-            f"select:         {'harness (per-iteration claim)' if harness_select else 'worker (legacy --condition)'}"
+            f"select:         {'worker (goal-prompt claim)' if harness_select else 'worker (legacy --condition)'}"
         )
         output.info("--- per-iteration prompt ---")
         if harness_select:
@@ -5028,8 +5006,8 @@ def grind(
                     {"id": "<ISSUE_ID>", "title": "<ISSUE_DETAILS>"},
                     resolved_backend,
                 )
-                + "\n(the harness fills <ISSUE_ID>/<ISSUE_DETAILS> per iteration "
-                "from the next ready issue it claims.)"
+                + "\n(the worker orients, continues leftover in_progress or "
+                "runs bd ready, and claims; grind only decides whether to spawn.)"
             )
         else:
             output.info(_legacy_prompt(condition, resolved_backend))
@@ -5634,17 +5612,21 @@ def grind(
                             output.error(follow_up)
                         break
                     issue_id = target_issue["id"]
+                    # f2he.1 keeps the harness claim so the existing post-exit
+                    # judge still has an in_progress id. The worker contract
+                    # continues leftover in_progress first. f2he.2 drops this
+                    # claim. Re-assert in_progress even on resume: the startup
+                    # orphan sweep may have reverted the leftover to open.
                     try:
                         bd.update_status(issue_id, "in_progress")
                     except Exception as exc:
                         write_log(
-                            f"iter prep: claim of {issue_id} failed ({exc}); idle-sleeping"
+                            f"iter prep: claim of {issue_id} failed ({exc}); "
+                            "idle-sleeping"
                         )
                         if idle_sleep > 0:
                             time.sleep(idle_sleep)
                         continue
-                    # Freeze the post-claim authoritative work spec. Verification
-                    # is bound to this exact JSON identity, including status.
                     target_issue = bd.show(issue_id)
                     phase_profiles = {
                         "implementation": implement_profile.display_name,
@@ -5887,16 +5869,14 @@ def grind(
                             lessons_text=_lessons_contract(bd, write_log),
                         )
                     except BackendError as exc:
-                        # Revert the claim before halting: a worker was never
-                        # spawned, so leaving the issue in_progress would
-                        # strand it.
-                        bd.update_status(issue_id, "open")
+                        if resume_issue_id is None:
+                            bd.update_status(issue_id, "open")
                         write_log(f"iter prep: HALT — {exc}")
                         output.error(str(exc))
                         raise typer.Exit(code=1)
                     write_log(
-                        f"iter {iters_run + 1}: harness selected+claimed {issue_id}; "
-                        f"injected into {resolved_backend} worker prompt"
+                        f"iter {iters_run + 1}: goal-prompt ready for {issue_id} "
+                        f"({resolved_backend})"
                     )
                     # output.progress escapes markup itself, so a bracketed
                     # title survives the console without pre-escaping.

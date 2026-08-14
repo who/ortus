@@ -44,7 +44,8 @@ def test_codex_exec_gets_plain_prompt_not_slash_goal() -> None:
     prompt = compose_worker_prompt("codex", task)
     argv = CodexRunner().build_argv(prompt)
     assert prompt.startswith(task)
-    assert "outer Ortus process will commit and push" in prompt
+    assert "PLAN-GAP" in prompt
+    assert "outer Ortus process will commit and push" not in prompt
     assert argv[:2] == ["codex", "exec"]
     assert argv[2] == prompt
     assert "/goal" not in " ".join(argv)

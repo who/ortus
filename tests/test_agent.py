@@ -91,7 +91,8 @@ def test_wrap_grok_prompt_verbatim_never_contains_goal() -> None:
     prompt = wrap_grok_prompt("T", q1="VERBATIM")
     assert "/goal" not in prompt
     assert prompt.startswith("T")
-    assert "outer Ortus process will commit and push" in prompt
+    assert "PLAN-GAP" in prompt
+    assert "outer Ortus process will commit and push" not in prompt
 
 
 def test_grok_profile_routes_model_and_effort() -> None:

@@ -13,15 +13,8 @@ The first existing file wins; the others are ignored.
 > legacy shell compatibility; its historical CodeGraph prose is not the active
 > availability probe or enforcement mechanism.
 >
-> **Not a worker contract under `ortus grind`.** No step below is handed to a
-> grind worker. Steps 8 and 9 (close, commit, push) describe the retired
-> agent-owned lifecycle only. Under `ortus grind` the worker commits its
-> completed work on the issue branch grind handed it (`ortus/<issue-id>`),
-> with its own commit message; a fresh read-only verifier judges the committed
-> range plus any uncommitted edits, and Ortus alone reports, closes,
-> fast-forwards the integration branch, and pushes — see
-> `ortus/prompts/conditions/work-issue.txt` for the contract workers actually
-> receive.
+> **Not a worker contract under `ortus grind`.** The worker contract is
+> `src/ortus/prompts/goal-prompt.md`. This file is a legacy reference.
 
 Read @AGENTS.md for session rules and landing-the-plane protocol.
 

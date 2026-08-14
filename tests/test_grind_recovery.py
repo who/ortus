@@ -463,10 +463,11 @@ def test_resume_before_select_prefers_the_in_progress_issue(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     implementation = backend.prompt_for(Phase.IMPLEMENT)
-    assert issue_id in implementation
+    assert "bd ready" in implementation
     assert tempting not in implementation
     assert _issue(repo, tempting)["status"] == "open"
     assert f"transaction resume: issue={issue_id}" in _log(repo)
+    assert f"goal-prompt ready for {issue_id}" in _log(repo)
 
 
 def test_resume_before_select_uses_the_single_claim_when_the_journal_is_gone(
@@ -485,8 +486,9 @@ def test_resume_before_select_uses_the_single_claim_when_the_journal_is_gone(
     assert result.exit_code == 0, result.stdout + result.stderr
 
     implementation = backend.prompt_for(Phase.IMPLEMENT)
-    assert issue_id in implementation and tempting not in implementation
+    assert "bd ready" in implementation and tempting not in implementation
     assert f"resuming the single claimed issue {issue_id}" in _log(repo)
+    assert f"goal-prompt ready for {issue_id}" in _log(repo)
     assert (repo / INHERITED).read_text() == "work from the prior engineer\n"
 
 
@@ -635,7 +637,8 @@ def test_moved_state_schema_head_and_hash_drift_stay_context(
     assert "candidate changed; refreshed to" in log
     # Reported, then resumed anyway: the same issue, with the real worktree —
     # and carried all the way to a verified landing.
-    assert issue_id in backend.prompt_for(Phase.IMPLEMENT)
+    assert "bd ready" in backend.prompt_for(Phase.IMPLEMENT)
+    assert f"goal-prompt ready for {issue_id}" in _log(repo)
     assert (repo / INHERITED).read_text() == "work the journal never recorded\n"
     assert _issue(repo, issue_id)["status"] == "closed"
 
@@ -1277,7 +1280,7 @@ def test_failure_phase_closed_issue_is_never_reopened_by_a_stale_journal(
     assert _issue(repo, closed_id)["status"] == "closed", "no reopen"
     assert "is already closed; not resuming it" in _log(repo)
     implementation = backend.prompt_for(Phase.IMPLEMENT)
-    assert f"Work bd issue {fresh_id}." in implementation
+    assert "bd ready" in implementation
     assert f"Work bd issue {closed_id}." not in implementation
     assert "RECOVERY HANDOFF" in implementation, "the stray edits are still context"
     assert f"{closed_id} is already closed" in implementation, "why, as context"
@@ -1425,7 +1428,7 @@ def test_second_claim_runs_an_implementation_worker(
 
     implementations = _implementations(backend)
     assert len(implementations) == 1, "exactly the second claim gets a worker"
-    assert f"Work bd issue {second_id}." in implementations[0]
+    assert "bd ready" in implementations[0]
     assert _issue(repo, second_id)["status"] == "closed"
     assert CANDIDATE in _committed_paths(repo)
 
@@ -1502,8 +1505,8 @@ def test_no_handoff_runs_every_worker(
 
     implementations = _implementations(backend)
     assert len(implementations) == 2
-    assert f"Work bd issue {first_id}." in implementations[0]
-    assert f"Work bd issue {second_id}." in implementations[1]
+    assert "bd ready" in implementations[0]
+    assert "bd ready" in implementations[1]
     assert RESUMING_LINE not in _log(repo)
 
 

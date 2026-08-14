@@ -123,6 +123,49 @@ def test_grind_prompt_keeps_blocked_as_transcript_marker() -> None:
     assert "<promise>BLOCKED</promise>" in body
 
 
+def _composed_implement_prompt(backend: str = "claude") -> str:
+    from ortus.commands.grind import _IMPLEMENTATION_INSTRUCTION, _compose_work_prompt
+
+    return _compose_work_prompt(
+        "",
+        {"id": "repo-1", "title": "an issue"},
+        backend,
+        phase_instruction=_IMPLEMENTATION_INSTRUCTION,
+    )
+
+
+def test_worker_prompt_is_goal_loop() -> None:
+    """AC-1: composed implement prompt is the goal-prompt loop + AGENTS.md close."""
+    body = _composed_implement_prompt()
+    assert "Orient" in body
+    assert "in_progress" in body
+    assert "bd ready" in body
+    assert "bd update" in body and "in_progress" in body
+    assert "AGENTS.md" in body
+    assert "Session-close" in body or "session-close" in body.lower()
+
+
+def test_worker_prompt_one_issue_per_window() -> None:
+    """AC-2: one issue per invocation; a second issue is forbidden."""
+    body = _composed_implement_prompt()
+    lowered = body.lower()
+    assert "one issue" in lowered
+    assert "do not pick a second issue" in lowered
+    assert "do not start another issue" in lowered
+
+
+def test_worker_prompt_drops_harness_inject_and_compact() -> None:
+    """AC-3: no harness-claim ban, no Ortus-will-close sentence, no /compact step."""
+    body = _composed_implement_prompt()
+    assert "already selected and claimed" not in body.lower()
+    assert "harness already selected" not in body.lower()
+    assert "outer Ortus process will commit" not in body
+    assert "Ortus will commit" not in body
+    assert "Ortus owns merging" not in body
+    assert "**Compact" not in body
+    assert "/compact" not in body
+
+
 # ---------------------------------------------------------------------------
 # (3) verifier contract — the criterion-id rule must be stated, not implied
 # ---------------------------------------------------------------------------

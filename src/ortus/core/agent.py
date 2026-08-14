@@ -263,9 +263,9 @@ def wrap_grok_prompt(task: str, *, q1: str = GROK_GOAL_MODE) -> str:
     if q1 == "VERBATIM":
         return (
             task
-            + "\n\nGrok lifecycle note: do not run `git commit` or `git push`; "
-            "do not close the assigned issue. The outer Ortus process will "
-            "commit and push the completed work."
+            + "\n\nGrok lifecycle note: session-close per AGENTS.md. If this "
+            "surface cannot `git commit` or `bd close` non-interactively, "
+            "that is PLAN-GAP — do not invent a substitute."
         )
     raise BackendError(
         f"PLAN-GAP: grok-backend-q1 must be EXPANDS or VERBATIM, got {q1!r}"
@@ -303,8 +303,8 @@ def compose_worker_prompt(backend: Backend, task: str) -> str:
     if backend == "grok":
         return wrap_grok_prompt(task)
     return (
-        task + "\n\nCodex sandbox note: `.git` metadata is intentionally read-only in "
-        "the workspace-write sandbox. Replace procedure step (3) with: do not "
-        "run `git commit` or `git push`; after you close the one assigned issue, "
-        "the outer Ortus process will commit and push the completed work."
+        task
+        + "\n\nCodex sandbox note: `.git` metadata is read-only in the "
+        "workspace-write sandbox. Session-close per AGENTS.md. If `git commit` "
+        "cannot run, that is PLAN-GAP — do not invent a substitute."
     )
