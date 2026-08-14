@@ -91,6 +91,50 @@ def test_claude_normalization_hit_miss_error_truncation_and_redaction(tmp_path: 
     assert all(json.loads(line)["type"] == "ortus.codegraph" for line in normalized.splitlines())
 
 
+def test_grok_use_tool_mcp_counts_as_handshake(tmp_path: Path) -> None:
+    transcript = tmp_path / "grok.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "tool_call",
+                "toolCallId": "call-1",
+                "toolName": "use_tool",
+                "status": "pending",
+                "rawInput": {
+                    "tool_name": "codegraph__codegraph_explore",
+                    "tool_input": {"query": "orient to this repository"},
+                },
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "tool_call_update", "toolCallId": "call-1"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "completed",
+                "rawOutput": {
+                    "type": "MCP",
+                    "tool_name": "codegraph_explore",
+                    "server_name": "codegraph",
+                    "output": {"text": "symbols found"},
+                },
+            }
+        )
+        + "\n"
+    )
+    summary = parse_transcript(
+        transcript,
+        phase=CodeGraphPhase.IMPLEMENTATION,
+        probe=_available(CodeGraphMode.REQUIRED),
+    )
+    assert summary.capability_observed
+    assert summary.events[0].success
+    assert summary.events[0].query == "orient to this repository"
+    require_handshake(summary)
+
+
 def test_codex_normalization_success_and_empty_result() -> None:
     summary = parse_transcript(
         FIXTURES / "codegraph-codex-events.jsonl",

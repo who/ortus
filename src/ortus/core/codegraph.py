@@ -219,7 +219,7 @@ def parse_transcript(
     probe: CodeGraphProbe,
     start_offset: int = 0,
 ) -> CodeGraphSummary:
-    """Normalize Claude/Codex JSONL CodeGraph calls without retaining payloads."""
+    """Normalize Claude/Codex/Grok JSONL CodeGraph calls without retaining payloads."""
     summary = CodeGraphSummary(phase.value, probe)
     if probe.mode is CodeGraphMode.OFF:
         summary.fallbacks.append("disabled by policy")
@@ -342,7 +342,7 @@ def _hit(result: object) -> bool:
 
 
 def _tool_records(obj: object) -> Iterable[tuple[str, str, object, object, object]]:
-    """Yield id/name/arguments/result/error across Claude and Codex schemas."""
+    """Yield id/name/arguments/result/error across Claude, Codex, and Grok schemas."""
     if not isinstance(obj, dict):
         return
     kind = obj.get("type")
@@ -370,3 +370,34 @@ def _tool_records(obj: object) -> Iterable[tuple[str, str, object, object, objec
                 item.get("result") if completed else None,
                 item.get("error") if completed else None,
             )
+    elif kind == "tool_call":
+        name, arguments = _grok_tool_name_and_input(obj)
+        yield str(obj.get("toolCallId", "")), name, arguments, None, None
+    elif kind == "tool_call_update":
+        name, _ = _grok_tool_name_and_input(obj)
+        raw_out = obj.get("rawOutput")
+        if isinstance(raw_out, dict):
+            tname = raw_out.get("tool_name")
+            server = raw_out.get("server_name")
+            if tname:
+                name = f"{server}.{tname}" if server else str(tname)
+        status = obj.get("status")
+        yield (
+            str(obj.get("toolCallId", "")),
+            name,
+            None,
+            raw_out if status == "completed" else None,
+            raw_out if status in ("failed", "error") else None,
+        )
+
+
+def _grok_tool_name_and_input(obj: dict[str, Any]) -> tuple[str, object]:
+    """Grok headless `tool_call` name, unwrapping the `use_tool` MCP meta-tool."""
+    name = str(obj.get("toolName") or obj.get("title") or "")
+    arguments = obj.get("rawInput")
+    if isinstance(arguments, dict):
+        nested = arguments.get("tool_name")
+        if isinstance(nested, str) and nested:
+            name = nested
+            arguments = arguments.get("tool_input", arguments)
+    return name, arguments
