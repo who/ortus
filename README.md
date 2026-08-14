@@ -140,7 +140,7 @@ the loop re-claims the same issue and resumes the same worktree — while
 
 ## Why ortus
 
-- **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No more `copier update` chasing N repos.
+- **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No per-repo vendor copies to chase.
 - **`bd ready` IS the queue.** No README task lists, no TodoWrite scratchpads. The queue is data.
 - **The scheduler is the loop.** Backend output is advisory; observable bd state decides whether an iteration succeeded, orphaned a claim, or made no change.
 - **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; Codex workers retain `workspace-write`, while Claude uses its generated sandbox policy.

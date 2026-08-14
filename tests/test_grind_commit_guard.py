@@ -22,13 +22,6 @@ from ortus.core.grind_logic import grind_flock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GUARD = REPO_ROOT / "scripts" / "grind_commit_guard.py"
-TEMPLATE_GUARD = REPO_ROOT / "template" / "scripts" / "grind_commit_guard.py"
-TEMPLATE_SETTINGS = (
-    REPO_ROOT
-    / "template"
-    / "{% if agent_cli == 'claude' %}.claude{% endif %}"
-    / "settings.json.jinja"
-)
 LIVE_SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 
 CLAIMED_ID = "ortus-test.9"
@@ -249,16 +242,7 @@ def test_guard_degrades_open_on_own_failure(held: Path) -> None:
         assert result.returncode == 0, f"payload {payload!r} must not block"
 
 
-# --- AC-6: ortus init template wires the hook ----------------------------------
-
-
-def test_template_wires_the_hook() -> None:
-    settings = TEMPLATE_SETTINGS.read_text(encoding="utf-8")
-    assert '"PreToolUse"' in settings
-    assert '"matcher": "Bash"' in settings
-    assert "grind_commit_guard.py" in settings
-    # Template consumers must receive the very same guard this repo runs.
-    assert TEMPLATE_GUARD.read_bytes() == GUARD.read_bytes()
+# --- AC-6: the canonical repo wires the hook ----------------------------------
 
 
 def test_live_repo_wires_the_hook() -> None:

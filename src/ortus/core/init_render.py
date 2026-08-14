@@ -35,8 +35,7 @@ BACKEND_TEMPLATES: dict[str, str] = {
 }
 
 
-# Per-project-type choices for the three stack flags. Mirrors the historical
-# copier.yaml blocks for package_manager / framework / linter.
+# Per-project-type choices for the three stack flags.
 PACKAGE_MANAGER_CHOICES: dict[str, tuple[str, ...]] = {
     "python": ("uv", "pip", "none"),
     "typescript": ("bun", "npm", "pnpm", "yarn", "none"),

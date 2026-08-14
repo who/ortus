@@ -48,13 +48,6 @@ dev = [
     # inflates individual durations, which would break the CI duration budget.
     "pytest-xdist>=3.5.0",
     "build>=1.2.0",
-    # The M5 backend-acceptance test generates a project per backend, so CI
-    # needs the template engine itself, not just the rendering library.
-    "copier>=9.0.0",
-    # copier.yaml loads its context/validator extensions through this loader;
-    # without it the template refuses to render (and the extension unit tests
-    # error at import).
-    "copier-template-extensions>=0.3.0",
 ]
 
 [project.scripts]
@@ -67,6 +60,11 @@ Issues = "https://github.com/who/ortus/issues"
 
 [tool.hatch.version]
 source = "vcs"
+
+# The sunset tag v0.x-final-bash is not a PEP 440 version. Keep hatch-vcs
+# on the v0.1.* line so editable installs and wheels still get a real version.
+[tool.hatch.version.raw-options]
+git_describe_command = "git describe --dirty --tags --long --match 'v[0-9]*.[0-9]*' --exclude 'v0.x-final-bash'"
 
 [tool.hatch.build.targets.sdist]
 include = [
