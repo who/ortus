@@ -2291,12 +2291,17 @@ def test_header_watchdog_clamped_at_zero_when_a_worker_is_overdue() -> None:
     assert dash.watchdog_headroom(later, cap=3600) == 1200.0
 
     # Past the cap: clamped at zero and rendered as overdue, which is the fact
-    # an operator acts on. A negative countdown would read as a bug.
+    # an operator acts on. A negative countdown would read as a bug. Inspect
+    # watchdog_line alone — header_line appends it to the corrections clause,
+    # and "corrections 0/0 - retries disabled" contains a hyphen that is not
+    # a minus sign on the countdown.
     overdue = _header_snapshot(observed_at=_HEADER_NOW + _dt.timedelta(minutes=45))
     assert dash.watchdog_headroom(overdue, cap=3600) == 0.0
-    rendered = dash.header_line(overdue, worker_cap=3600)
-    assert "overdue by 15m 00s" in rendered
-    assert "-" not in rendered.splitlines()[-1]
+    watchdog = dash.watchdog_line(overdue, cap=3600)
+    assert "overdue by 15m 00s" in watchdog
+    assert "past 1h 00m" in watchdog
+    assert not watchdog.lstrip().startswith("-")
+    assert " -" not in watchdog.split("overdue by", 1)[-1]
 
     # A cap of zero disables the watchdog: no limit, not an expired one.
     assert dash.WATCHDOG_OFF in dash.header_line(live, worker_cap=0)

@@ -11,8 +11,9 @@ Three acceptance conditions, one per section below:
 3. A malformed/unparseable event fails loudly with a diagnostic instead of
    being silently skipped.
 
-The bash decoder in ortus/tail.sh is driven through its ``--decode`` mode
-against the same golden, so the two implementations cannot drift apart.
+If ``ortus/tail.sh`` is still present, its ``--decode`` mode is checked
+against the same golden. The bash-era ``template/ortus/tail.sh`` mirror
+is gone; the Python decoder is canonical.
 """
 
 from __future__ import annotations
@@ -142,14 +143,6 @@ def test_bash_decoder_matches_the_same_golden() -> None:
     proc = _render_sh(HAPPY_FIXTURE)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == HAPPY_GOLDEN.read_text(encoding="utf-8"), proc.stdout
-
-
-@requires_jq
-def test_template_tail_sh_decoder_matches_the_same_golden() -> None:
-    """NFR-003: the template mirror decodes identically, not just ortus/."""
-    proc = _render_sh(HAPPY_FIXTURE, tail_sh=REPO_ROOT / "template" / "ortus" / "tail.sh")
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout == HAPPY_GOLDEN.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
