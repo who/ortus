@@ -200,6 +200,9 @@ def test_require_handshake_runs_before_judged_status() -> None:
     assert handshake != -1
     assert judged != -1
     assert handshake < judged
+    continue_at = source.find("\n                continue\n", judged)
+    assert continue_at != -1
+    assert "_verification_pass(" not in source[continue_at:]
 
 
 def test_silent_transcript_still_fails_required_handshake(tmp_path: Path) -> None:
