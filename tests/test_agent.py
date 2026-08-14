@@ -40,6 +40,15 @@ def test_readonly_verifier_postures_are_technically_enforced(
     assert grok_argv[0] != "bwrap" and "bwrap" not in grok_argv
 
 
+def test_resolve_backend_grok_from_ortusrc(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".ortusrc").write_text('backend = "grok"\n')
+    assert resolve_backend(None, repo=repo, home=home) == "grok"
+
+
 def test_grok_is_a_legal_backend(tmp_path: Path) -> None:
     home = tmp_path / "home"
     assert resolve_backend("grok", repo=tmp_path, home=home) == "grok"

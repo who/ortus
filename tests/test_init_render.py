@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ortus.core.init_render import (
+    BACKEND_TEMPLATES,
     BUNDLED_TEMPLATES,
     PROJECT_TYPES,
     RenderContext,
@@ -30,7 +31,7 @@ def test_all_four_templates_ship_in_package() -> None:
     available = {p.name for p in pkg.iterdir() if p.is_file()}
     available |= {f"{p.name}/{c.name}" for p in pkg.iterdir() if p.is_dir() for c in p.iterdir()}
     # Every template name should map to a .jinja file in package data.
-    for name in BUNDLED_TEMPLATES:
+    for name in (*BUNDLED_TEMPLATES, *BACKEND_TEMPLATES.values()):
         jinja_name = f"{name}.jinja"
         assert (
             jinja_name in available or jinja_name.replace("/", "/") in available
@@ -39,6 +40,12 @@ def test_all_four_templates_ship_in_package() -> None:
 
 def test_list_bundled_matches_constant() -> None:
     assert list_bundled() == list(BUNDLED_TEMPLATES)
+
+
+def test_list_bundled_grok_swaps_in_project_config() -> None:
+    names = list_bundled("grok")
+    assert ".grok/config.toml" in names
+    assert ".claude/settings.json" not in names
 
 
 # Acceptance #2 — rendered settings.json is valid JSON + has excludedCommands.
@@ -158,6 +165,20 @@ def test_codex_render_uses_codex_config_and_no_claude_dir(tmp_path: Path) -> Non
     assert "plain" in (tmp_path / "AGENTS.md").read_text()
 
 
+def test_grok_render_uses_grok_config_and_no_claude_dir(tmp_path: Path) -> None:
+    ctx = RenderContext(prefix="acme", project_type="python", backend="grok")
+    written = render_all(tmp_path, ctx)
+    dest = tmp_path / ".grok" / "config.toml"
+    assert dest in written
+    assert dest.is_file()
+    assert not (tmp_path / ".claude").exists()
+    assert 'backend = "grok"' in (tmp_path / ".ortusrc").read_text()
+    data = tomllib.loads(dest.read_text())
+    assert "codegraph" in data["mcp_servers"]
+    assert "sandbox" not in data
+    assert "sandbox_mode" not in data
+
+
 # Acceptance #4 — {% raw %} round-trips bash snippets.
 def test_raw_blocks_in_agents_md_preserve_bash_braces() -> None:
     ctx = RenderContext(prefix="x", project_type="polyglot")
@@ -176,7 +197,7 @@ def test_raw_blocks_in_agents_md_preserve_bash_braces() -> None:
 AUTHORING_CONTRACT_HEADING = "### Issue authoring contract (readiness v1)"
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("backend", ["claude", "codex", "grok"])
 def test_agents_md_carries_authoring_contract_for_backend(backend: str) -> None:
     ctx = RenderContext(prefix="p", project_type="polyglot", backend=backend)
     text = render_template("AGENTS.md", ctx)
@@ -202,7 +223,7 @@ def test_agents_md_authoring_contract_sits_with_the_bd_guidance() -> None:
 
 
 @pytest.mark.parametrize("project_type", PROJECT_TYPES)
-@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("backend", ["claude", "codex", "grok"])
 def test_agents_md_renders_across_the_matrix(project_type: str, backend: str) -> None:
     """StrictUndefined still satisfied for every rendered combination."""
     ctx = RenderContext(prefix="p", project_type=project_type, backend=backend)

@@ -75,6 +75,32 @@ def test_init_codex_creates_only_codex_config(tmp_path: Path) -> None:
     assert 'backend = "codex"' in (target / ".ortusrc").read_text()
 
 
+def test_init_grok_creates_only_grok_config(tmp_path: Path) -> None:
+    """Official project `.grok/config.toml` is what Grok Build reads.
+
+    docs.x.ai/build/settings: only [mcp_servers], [plugins], and [permission]
+    apply in that file. This is not a decorative ignored path, and [sandbox]
+    must not be written expecting the binary to honor it.
+    """
+    target = tmp_path / "grok"
+    result = runner.invoke(app, ["init", str(target), "--backend", "grok"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    grok_config = target / ".grok" / "config.toml"
+    assert grok_config.is_file()
+    assert not (target / ".claude" / "settings.json").exists()
+    assert not (target / ".claude").exists()
+    assert 'backend = "grok"' in (target / ".ortusrc").read_text()
+    import sys
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib
+    data = tomllib.loads(grok_config.read_text())
+    assert "codegraph" in data.get("mcp_servers", {})
+    assert "sandbox" not in data
+    assert "sandbox_mode" not in data
+
+
 def test_settings_json_has_bd_excluded_and_hooks(tmp_path: Path) -> None:
     """Acceptance #2: settings has sandbox.excludedCommands and bd-prime hooks."""
     target = tmp_path / "fresh"

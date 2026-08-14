@@ -221,5 +221,6 @@ def test_help_advertises_new_flags() -> None:
     assert "--package-manager" in out
     assert "--framework" in out
     assert "--linter" in out
+    assert "claude|codex|grok" in out
     # the help text should defer per-language detail rather than enumerate it
     assert "depend on --project-type" in out

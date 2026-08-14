@@ -69,7 +69,7 @@ def _bd_remember(repo: Path) -> None:
 
 
 def _remove_bd_claude_scaffold(repo: Path) -> None:
-    """Remove Claude-only files that ``bd init`` creates in a new Codex repo."""
+    """Remove Claude-only files that ``bd init`` creates in a new non-Claude repo."""
     settings = repo / ".claude" / "settings.json"
     if settings.is_file():
         settings.unlink()
@@ -245,7 +245,7 @@ def init(
     backend: str = typer.Option(
         "claude",
         "--backend",
-        help="Agent backend to configure (claude|codex). Claude remains the default.",
+        help="Agent backend to configure (claude|codex|grok). Claude remains the default.",
     ),
     codegraph: Optional[str] = typer.Option(
         None,
@@ -313,7 +313,7 @@ def init(
             raise typer.Exit(code=1)
         output.success(f"bd workspace initialized (prefix={resolved_prefix})")
         _normalize_initial_branch(target)
-        if backend == "codex":
+        if backend in {"codex", "grok"}:
             # bd currently installs its Claude integration unconditionally.
             # These files were created moments ago by this init operation, so
             # remove them before rendering the selected backend's config.

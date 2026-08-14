@@ -111,6 +111,14 @@ def _fake_sandbox_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- acceptance tests ------------------------------------------------------
 
 
+def test_check_help_lists_grok_backend() -> None:
+    result = runner.invoke(
+        app, ["check", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
+    )
+    assert result.exit_code == 0
+    assert "claude|codex|grok" in result.stdout
+
+
 def test_check_all_green_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,6 +532,108 @@ def test_codegraph_codex_registration_is_the_injected_capability(
     assert result.exit_code == 0, result.stdout + result.stderr
     compact = "".join(result.stdout.split())
     assert "injectedperchildbyortus" in compact
+
+
+def _healthy_grok_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "grok-healthy"
+    (repo / ".beads").mkdir(parents=True)
+    (repo / ".codegraph").mkdir()
+    grok_cfg = repo / ".grok" / "config.toml"
+    grok_cfg.parent.mkdir()
+    grok_cfg.write_text(
+        "[mcp_servers.codegraph]\n"
+        'command = "codegraph"\n'
+        'args = ["serve", "--mcp"]\n'
+        "enabled = true\n"
+    )
+    (repo / ".ortusrc").write_text('backend = "grok"\n')
+    return repo
+
+
+def test_check_grok_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: `ortus check --backend grok` reports the grok binary and config."""
+    repo = _healthy_grok_repo(tmp_path)
+    seen: list[str] = []
+
+    def which(binary: str) -> str:
+        seen.append(binary)
+        return f"/usr/bin/{binary}"
+
+    monkeypatch.setattr(check_mod.shutil, "which", which)
+    monkeypatch.setattr(
+        check_mod.subprocess, "run", _fake_bd_run(readiness_memory=True)
+    )
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo), "--backend", "grok"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "grok" in seen
+    assert "claude" not in seen
+    assert ".grok/config.toml" in result.stdout
+    assert ".claude/settings.json" not in result.stdout
+    assert "hooks" not in result.stdout
+    compact = "".join(result.stdout.split())
+    assert "CLI=ok" in compact
+    assert "index=present" in compact
+    assert "codegraphserverregistered" in compact
+
+
+def test_check_grok_binary_missing_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing `grok` on PATH fails the same way missing `claude` does."""
+    repo = _healthy_grok_repo(tmp_path)
+
+    def which(binary: str) -> str | None:
+        if binary == "grok":
+            return None
+        return f"/usr/bin/{binary}"
+
+    monkeypatch.setattr(check_mod.shutil, "which", which)
+    monkeypatch.setattr(
+        check_mod.subprocess, "run", _fake_bd_run(readiness_memory=True)
+    )
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo), "--backend", "grok"])
+    assert result.exit_code == 1
+    compact = "".join(c for c in result.stdout if not c.isspace() and c != "│")
+    assert "grok" in compact
+    assert "notonPATH" in compact
+    assert "FAIL" in result.stdout
+
+
+def test_check_grok_binary_on_claude_tree_fails_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Claude-inited tree checked as grok fails the Grok settings probe."""
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo), "--backend", "grok"])
+    assert result.exit_code == 1
+    assert ".grok/config.toml" in result.stdout
+    assert "FAIL" in result.stdout
+    assert "missing" in result.stdout
+
+
+def test_check_grok_codegraph_ignores_claude_mcp_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grok MCP reporting is file-backed project config, not Claude scopes."""
+    repo = _healthy_grok_repo(tmp_path)
+    (repo / ".grok" / "config.toml").write_text("# no mcp_servers on purpose\n")
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"codegraph": {"command": "codegraph"}}})
+    )
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = check_mod.check_codegraph(repo, "grok")
+    assert result.ok, result.message
+    assert "CLI=ok" in result.message
+    assert "index=present" in result.message
+    assert check_mod.CODEGRAPH_MCP_HINT in result.message
+    assert "codegraph server registered" not in result.message
 
 
 def test_check_codex_uses_codex_binary_and_config(

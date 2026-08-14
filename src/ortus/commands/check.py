@@ -69,6 +69,10 @@ def check_codex() -> CheckResult:
     return _binary_check("codex")
 
 
+def check_grok() -> CheckResult:
+    return _binary_check("grok")
+
+
 def check_jq() -> CheckResult:
     return _binary_check("jq")
 
@@ -180,6 +184,23 @@ def check_codex_settings(repo: Path) -> CheckResult:
     return CheckResult(".codex/config.toml", True, str(settings))
 
 
+def check_grok_settings(repo: Path) -> CheckResult:
+    """Project `.grok/config.toml` exists and parses.
+
+    Official project config contributes only ``[mcp_servers]``, ``[plugins]``,
+    and ``[permission]``. Missing ``sandbox_mode`` is not a failure.
+    """
+    settings = repo / ".grok" / "config.toml"
+    if not settings.is_file():
+        return CheckResult(".grok/config.toml", False, f"missing at {settings}")
+    try:
+        with settings.open("rb") as fh:
+            tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return CheckResult(".grok/config.toml", False, f"unparseable: {exc}")
+    return CheckResult(".grok/config.toml", True, str(settings))
+
+
 def check_hooks(repo: Path) -> CheckResult:
     try:
         check_hooks_enabled(repo)
@@ -202,6 +223,27 @@ CODEGRAPH_INSTALL_HINT = (
 )
 CODEGRAPH_INDEX_HINT = "run `codegraph init` in this repo"
 CODEGRAPH_MCP_HINT = "register the MCP server with `codegraph install`"
+
+
+def _grok_mcp_registered(repo: Path) -> bool:
+    """Report whether project ``.grok/config.toml`` registers ``codegraph``.
+
+    Official project config is the only file-backed Grok scope Ortus emits
+    and validates. Claude's ``.mcp.json`` / ``~/.claude.json`` are not Grok
+    registration, even though the binary may merge those compat sources.
+    """
+    path = repo / ".grok" / "config.toml"
+    if not path.is_file():
+        return False
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    servers = data.get("mcp_servers") or {}
+    return isinstance(servers, dict) and "codegraph" in servers
 
 
 def _claude_mcp_registered(repo: Path) -> bool:
@@ -269,6 +311,13 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
     if backend == "codex":
         registered = cli.ok and index
         registration = "injected per child by ortus" if registered else "needs CLI + index"
+    elif backend == "grok":
+        registered = _grok_mcp_registered(repo)
+        registration = (
+            "codegraph server registered"
+            if registered
+            else f"not registered in a readable scope — {CODEGRAPH_MCP_HINT}"
+        )
     else:
         registered = _claude_mcp_registered(repo)
         registration = (
@@ -335,9 +384,23 @@ def check_prompt_overrides(repo: Path) -> CheckResult:
 
 def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     results: list[CheckResult] = []
+    if backend == "claude":
+        backend_binary = check_claude
+        settings_check: Callable[[Path], CheckResult] = check_claude_settings
+        settings_label = ".claude/settings.json"
+    elif backend == "codex":
+        backend_binary = check_codex
+        settings_check = check_codex_settings
+        settings_label = ".codex/config.toml"
+    elif backend == "grok":
+        backend_binary = check_grok
+        settings_check = check_grok_settings
+        settings_label = ".grok/config.toml"
+    else:
+        raise ValueError(f"unsupported check backend {backend!r}")
     checks: list[Callable[..., CheckResult]] = [
         check_bd,
-        check_claude if backend == "claude" else check_codex,
+        backend_binary,
         check_jq,
         check_sandbox,
     ]
@@ -347,10 +410,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     repo_checks: list[tuple[Callable[[Path], CheckResult], str]] = [
         (check_beads_dir, ".beads/"),
         (check_readiness_memory, "bd readiness memory"),
-        (
-            check_claude_settings if backend == "claude" else check_codex_settings,
-            ".claude/settings.json" if backend == "claude" else ".codex/config.toml",
-        ),
+        (settings_check, settings_label),
     ]
     if backend == "claude":
         repo_checks.append((check_hooks, "hooks"))
@@ -377,7 +437,7 @@ def check(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend to verify (claude|codex); defaults from .ortusrc.",
+        help="Agent backend to verify (claude|codex|grok); defaults from .ortusrc.",
     ),
 ) -> None:
     """Verify bd/claude/sandbox prereqs and hook-disable state."""

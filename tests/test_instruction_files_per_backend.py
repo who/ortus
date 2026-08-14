@@ -145,7 +145,7 @@ def test_agents_md_renders_under_strict_undefined(rendered):
 # applied to the bundled template that `ortus init` actually renders today. The
 # readiness v1 authoring contract is load-bearing: without it a Codex session,
 # which never reads CLAUDE.md, authors issues that `ortus grind` skips.
-@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("backend", ["claude", "codex", "grok"])
 def test_bundled_agents_md_carries_the_authoring_contract(backend):
     from ortus.core.init_render import RenderContext, render_template
 

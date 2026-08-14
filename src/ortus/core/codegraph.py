@@ -136,15 +136,25 @@ class CodeGraphAdapter:
         index = (repo / ".codegraph").is_dir()
         cli_path = shutil.which("codegraph")
         cli = cli_path is not None
-        capability = (
-            CodeGraphCapability(cli_path)
-            if backend == "codex" and index and cli_path is not None
-            else None
-        )
-        # Claude owns its MCP registration. Codex receives the exact registration
-        # represented by ``capability`` on every fresh process, avoiding reliance
-        # on project trust or mutable user configuration.
-        available = index and cli and (backend != "codex" or capability is not None)
+        if backend == "codex":
+            # Codex receives the exact registration represented by
+            # ``capability`` on every fresh process, avoiding reliance on
+            # project trust or mutable user configuration.
+            capability = (
+                CodeGraphCapability(cli_path)
+                if index and cli_path is not None
+                else None
+            )
+            available = index and cli and capability is not None
+        elif backend == "grok":
+            # File-backed project registration in `.grok/config.toml`.
+            # GrokRunner is store-only and must not grow `-c` overrides.
+            capability = None
+            available = index and cli
+        else:
+            # Claude owns its MCP registration in `.mcp.json` / `~/.claude.json`.
+            capability = None
+            available = index and cli
         missing = []
         if not index:
             missing.append("project index .codegraph/ is missing")

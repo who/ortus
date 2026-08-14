@@ -47,6 +47,17 @@ def test_codex_probe_produces_the_child_registration(
     assert probe.capability.args == ("serve", "--mcp")
 
 
+def test_grok_probe_is_cli_and_index_not_injected_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="grok")
+    assert probe.available
+    assert probe.capability is None
+    assert probe.cli_present and probe.index_present
+
+
 def test_codex_probe_reports_missing_server_with_initialized_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

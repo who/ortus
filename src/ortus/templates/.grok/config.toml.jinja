@@ -1,0 +1,9 @@
+# Official project `.grok/config.toml` (https://docs.x.ai/build/settings):
+# only [mcp_servers], [plugins], and [permission] apply in this file.
+# [sandbox] is ignored here — verifier read-only stays the runner's
+# `grok --sandbox read-only`, not a project sandbox_mode.
+
+[mcp_servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]
+enabled = true

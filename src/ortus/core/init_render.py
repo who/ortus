@@ -31,6 +31,7 @@ BUNDLED_TEMPLATES: tuple[str, ...] = (
 BACKEND_TEMPLATES: dict[str, str] = {
     "claude": ".claude/settings.json",
     "codex": ".codex/config.toml",
+    "grok": ".grok/config.toml",
 }
 
 
