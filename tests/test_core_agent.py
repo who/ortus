@@ -10,9 +10,11 @@ from ortus.core.agent import (
     AgentProfile,
     BackendError,
     CodexRunner,
+    GrokRunner,
     compose_worker_prompt,
     make_runner,
     resolve_backend,
+    wrap_grok_prompt,
     Phase,
 )
 from ortus.core.claude import ClaudeRunner
@@ -105,3 +107,21 @@ def test_codex_readonly_does_not_wrap_runtime_filesystem(tmp_path: Path) -> None
 
     assert runner._readonly_argv(argv, tmp_path) == argv
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
+def test_make_runner_grok_is_not_a_claude_subclass() -> None:
+    runner = make_runner("grok")
+    assert isinstance(runner, GrokRunner)
+    assert not isinstance(runner, ClaudeRunner)
+    assert not isinstance(runner, CodexRunner)
+
+
+def test_wrap_grok_prompt_unknown_q1_is_plan_gap() -> None:
+    with pytest.raises(BackendError, match="PLAN-GAP"):
+        wrap_grok_prompt("T", q1="MAYBE")
+
+
+def test_compose_worker_prompt_grok_follows_q1_expands() -> None:
+    assert compose_worker_prompt("grok", "close one") == "/goal close one"
+    assert wrap_grok_prompt("close one") == "/goal close one"
+    assert "/goal" not in wrap_grok_prompt("close one", q1="VERBATIM")

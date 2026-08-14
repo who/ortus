@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from ortus.core.agent import CodexRunner
+from ortus.core.agent import CodexRunner, GrokRunner
 from ortus.core.claude import ClaudeRunner
 from tests._platform import skip_on_windows_bash_shim
 
@@ -51,6 +51,16 @@ def test_readonly_argv_is_explicit_without_changing_implementation_defaults() ->
     assert codex_implement[codex_implement.index("--sandbox") + 1] == "workspace-write"
     assert "--disallowedTools" in claude.build_argv("verify", readonly=True)
     assert "--disallowedTools" not in claude.build_argv("implement")
+
+    grok = GrokRunner()
+    grok_verify = grok.build_argv("verify", readonly=True)
+    grok_implement = grok.build_argv("implement")
+    assert grok_verify[grok_verify.index("--sandbox") + 1] == "read-only"
+    assert grok_implement[grok_implement.index("--sandbox") + 1] == "workspace"
+    assert grok_implement[0] == "grok"
+    assert grok_implement[grok_implement.index("--output-format") + 1] == "streaming-json"
+    assert "--always-approve" in grok_implement
+    assert "--yolo" not in grok_implement
 
 
 def _adapter_argv(case: dict) -> list[str]:

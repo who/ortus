@@ -3,22 +3,33 @@
 Claude remains Ortus's default.  The Codex backend deliberately uses a plain
 ``codex exec`` prompt: slash commands are an interactive Codex surface and a
 literal ``/goal`` passed to ``codex exec`` does not activate Goal mode.
+
+Grok Build expands ``/goal`` on ``grok -p`` (memory ``grok-backend-q1`` =
+EXPANDS), so that backend uses the same wrap as Claude.  GrokRunner is a
+sibling of ClaudeRunner, not a subclass: Grok's sandbox and approval flags
+are not Claude's.
 """
 
 from __future__ import annotations
 
 import os
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
-from ortus.core.claude import ClaudeRunner
+from ortus.core.claude import ClaudeRunner, _spawn_logged
 from ortus.core.config import load_config
 from ortus.core.codegraph import CodeGraphCapability
 from ortus.core.profiles import AgentProfile, Phase as Phase
 
-Backend = Literal["claude", "codex"]
-BACKENDS: tuple[Backend, ...] = ("claude", "codex")
+Backend = Literal["claude", "codex", "grok"]
+BACKENDS: tuple[Backend, ...] = ("claude", "codex", "grok")
+
+# Isolated probe 2026-08-13: grok -p '/goal …' is consumed by the host goal
+# driver. wrap_grok_prompt still accepts q1= so a VERBATIM re-probe can flip
+# the wrap without inventing a third termination shape.
+GROK_GOAL_MODE = "EXPANDS"
 
 
 class BackendError(ValueError):
@@ -148,6 +159,119 @@ class CodexRunner(ClaudeRunner):
         return None
 
 
+@dataclass
+class GrokRunner:
+    """Run one non-interactive Grok Build task and log its streaming-json stream.
+
+    Sibling of ClaudeRunner, not a subclass: Grok's ``--sandbox`` /
+    ``--always-approve`` surface is not Claude's permission-mode set, and
+    stuffing the grok binary into ``claude_binary`` would hide that.
+    """
+
+    grok_binary: str = "grok"
+    extra_env: dict[str, str] = field(default_factory=dict)
+    codegraph: CodeGraphCapability | None = None
+    sandbox_mode: str = "workspace"
+
+    def configure_codegraph(self, capability: CodeGraphCapability | None) -> None:
+        """Store the outer probe result. MCP registration is a later leaf."""
+        self.codegraph = capability
+
+    def build_argv(
+        self,
+        prompt: str,
+        *,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+        readonly: bool = False,
+        resume: str | None = None,
+    ) -> list[str]:
+        # `fast` is intentionally ignored. Grok has no Claude-equivalent --fast
+        # tier flag. `codegraph` is stored for later MCP wiring; this leaf does
+        # not emit grok -c / grok mcp overrides.
+        argv = [
+            self.grok_binary,
+            "-p",
+            prompt,
+            "--output-format",
+            "streaming-json",
+            "--sandbox",
+            "read-only" if readonly else self.sandbox_mode,
+            "--always-approve",
+        ]
+        if resume:
+            argv.extend(["--resume", resume])
+        if profile is not None and profile.model is not None:
+            argv.extend(["-m", profile.model])
+        if profile is not None and profile.reasoning_effort is not None:
+            argv.extend(["--effort", profile.reasoning_effort])
+        return argv
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+        timeout: float | None = None,
+        readonly: bool = False,
+        resume: str | None = None,
+    ) -> int:
+        """Spawn grok, tee output to log_path (NOT stdout), return exit code."""
+        argv = self.build_argv(
+            prompt, fast=fast, profile=profile, readonly=readonly, resume=resume
+        )
+        if readonly:
+            argv = self._readonly_argv(argv, repo)
+        return _spawn_logged(
+            argv,
+            repo=repo,
+            log_path=log_path,
+            extra_env=self.extra_env,
+            timeout=timeout,
+            readonly=readonly,
+        )
+
+    def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
+        """Trust Grok's native sandbox; do not wrap the process in bwrap.
+
+        ``--sandbox read-only`` already protects the repository and leaves
+        ``~/.grok/`` writable for session state. An outer read-only root would
+        prevent the verifier from starting, same failure Codex already
+        documented.
+        """
+
+        return argv
+
+    def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
+        """No Ortus-owned read-only wrapper to probe."""
+
+        return None
+
+
+def wrap_grok_prompt(task: str, *, q1: str = GROK_GOAL_MODE) -> str:
+    """Wrap a logical worker task for ``grok -p`` given the Q1 finding.
+
+    EXPANDS (the recorded finding) uses the same ``/goal`` wrap as Claude.
+    VERBATIM must never be handed a literal ``/goal`` string: the host would
+    forward it to the model instead of driving Goal mode.
+    """
+    if q1 == "EXPANDS":
+        return f"/goal {task}"
+    if q1 == "VERBATIM":
+        return (
+            task
+            + "\n\nGrok lifecycle note: do not run `git commit` or `git push`; "
+            "do not close the assigned issue. The outer Ortus process will "
+            "commit and push the completed work."
+        )
+    raise BackendError(
+        f"PLAN-GAP: grok-backend-q1 must be EXPANDS or VERBATIM, got {q1!r}"
+    )
+
+
 def resolve_backend(
     requested: str | None = None,
     *,
@@ -164,9 +288,11 @@ def resolve_backend(
     return cast(Backend, name)
 
 
-def make_runner(backend: Backend) -> ClaudeRunner:
+def make_runner(backend: Backend) -> ClaudeRunner | GrokRunner:
     if backend == "codex":
         return CodexRunner()
+    if backend == "grok":
+        return GrokRunner()
     return ClaudeRunner()
 
 
@@ -174,6 +300,8 @@ def compose_worker_prompt(backend: Backend, task: str) -> str:
     """Wrap a logical worker task for the selected execution surface."""
     if backend == "claude":
         return f"/goal {task}"
+    if backend == "grok":
+        return wrap_grok_prompt(task)
     return (
         task + "\n\nCodex sandbox note: `.git` metadata is intentionally read-only in "
         "the workspace-write sandbox. Replace procedure step (3) with: do not "

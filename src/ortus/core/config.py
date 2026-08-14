@@ -125,7 +125,7 @@ def _validate_profiles(values: dict[str, Any]) -> None:
     for backend, phases in profiles.items():
         if backend not in SUPPORTED_EFFORTS:
             raise ProfileError(
-                f"invalid profile backend {backend!r}; expected claude or codex"
+                f"invalid profile backend {backend!r}; expected claude, codex, or grok"
             )
         if not isinstance(phases, dict):
             raise ProfileError(f"invalid profiles.{backend}: expected a TOML table")

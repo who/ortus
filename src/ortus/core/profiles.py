@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-BackendName = Literal["claude", "codex"]
+BackendName = Literal["claude", "codex", "grok"]
 
 
 class Phase(str, Enum):
@@ -21,6 +21,7 @@ class Phase(str, Enum):
 SUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     "claude": frozenset({"low", "medium", "high", "max"}),
     "codex": frozenset({"low", "medium", "high", "xhigh"}),
+    "grok": frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"}),
 }
 
 
@@ -55,7 +56,7 @@ def validate_profile_values(
     """Validate untyped configuration and return an immutable profile."""
     if backend not in SUPPORTED_EFFORTS:
         raise ProfileError(
-            f"invalid profile backend {backend!r}; expected claude or codex"
+            f"invalid profile backend {backend!r}; expected claude, codex, or grok"
         )
     if model is not None and (
         not isinstance(model, str)

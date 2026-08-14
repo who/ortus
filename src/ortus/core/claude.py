@@ -114,50 +114,14 @@ class ClaudeRunner:
         )
         if readonly:
             argv = self._readonly_argv(argv, repo)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        # ORTUS_WORKER marks every harness-spawned agent session so the grind
-        # commit guard hook (scripts/grind_commit_guard.py) exempts pipeline
-        # sessions; operator-supplied extra_env stays authoritative.
-        env = {**os.environ, "ORTUS_WORKER": "1", **self.extra_env}
-        if readonly:
-            env.update(
-                {
-                    "XDG_CACHE_HOME": "/tmp/ortus-verifier-cache",
-                    "UV_CACHE_DIR": "/tmp/ortus-verifier-cache/uv",
-                    "PYTHONDONTWRITEBYTECODE": "1",
-                }
-            )
-
-        # Open log_path in line-buffered append mode. Both stdout and stderr
-        # go straight to the file; the parent's terminal sees nothing.
-        with open(log_path, "ab", buffering=0) as log_fh:
-            popen_kwargs: dict = dict(
-                cwd=str(repo),
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=log_fh,
-            )
-            if not _IS_WINDOWS:
-                # POSIX: detach into a new session so SIGINT propagates to the
-                # process group, not just the parent. Windows has no setsid()
-                # equivalent; we fall back to per-PID termination in _kill_group.
-                popen_kwargs["start_new_session"] = True
-            proc = subprocess.Popen(argv, **popen_kwargs)
-            try:
-                return proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _kill_group(proc)
-                raise
-            except KeyboardInterrupt:
-                _kill_group(proc)
-                raise
-            finally:
-                # If the child somehow survived a normal-path exit (shouldn't,
-                # since wait() blocks), reap its process group to mirror
-                # goal.sh's cleanup_children trap.
-                if proc.poll() is None:
-                    _kill_group(proc)
+        return _spawn_logged(
+            argv,
+            repo=repo,
+            log_path=log_path,
+            extra_env=self.extra_env,
+            timeout=timeout,
+            readonly=readonly,
+        )
 
     def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
         """Apply the backend's OS-level read-only launch posture."""
@@ -218,6 +182,67 @@ class ClaudeRunner:
             "  The verification sandbox cannot execute commands, so no verdict "
             "it produced would be a judgement of the code."
         )
+
+
+def _spawn_logged(
+    argv: list[str],
+    *,
+    repo: Path,
+    log_path: Path,
+    extra_env: dict[str, str],
+    timeout: float | None = None,
+    readonly: bool = False,
+) -> int:
+    """Spawn one agent CLI, tee stdout/stderr to log_path, reap the group.
+
+    Shared by ClaudeRunner and GrokRunner so a sibling backend does not
+    subclass Claude just to inherit process-group cleanup.
+    """
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # ORTUS_WORKER marks every harness-spawned agent session so the grind
+    # commit guard hook (scripts/grind_commit_guard.py) exempts pipeline
+    # sessions; operator-supplied extra_env stays authoritative.
+    env = {**os.environ, "ORTUS_WORKER": "1", **extra_env}
+    if readonly:
+        env.update(
+            {
+                "XDG_CACHE_HOME": "/tmp/ortus-verifier-cache",
+                "UV_CACHE_DIR": "/tmp/ortus-verifier-cache/uv",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        )
+
+    # Open log_path in unbuffered append mode. Both stdout and stderr go
+    # straight to the file; the parent's terminal sees nothing.
+    with open(log_path, "ab", buffering=0) as log_fh:
+        popen_kwargs: dict = dict(
+            cwd=str(repo),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
+        )
+        if not _IS_WINDOWS:
+            # POSIX: detach into a new session so SIGINT propagates to the
+            # process group, not just the parent. Windows has no setsid()
+            # equivalent; we fall back to per-PID termination in _kill_group.
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(argv, **popen_kwargs)
+        try:
+            return proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            raise
+        except KeyboardInterrupt:
+            _kill_group(proc)
+            raise
+        finally:
+            # If the child somehow survived a normal-path exit (shouldn't,
+            # since wait() blocks), reap its process group to mirror
+            # goal.sh's cleanup_children trap.
+            if proc.poll() is None:
+                _kill_group(proc)
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -396,6 +421,7 @@ REPO_TOOL_STATE: frozenset[str] = frozenset(
         ".gitconfig",
         ".claude",
         ".codex",
+        ".grok",
         ".beads",
         ".beads.gate.lock",
         ".codegraph",
