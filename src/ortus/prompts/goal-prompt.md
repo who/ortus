@@ -1,6 +1,11 @@
 Read `AGENTS.md` first. One context window, one issue, then exit. Do not pick a second issue. Grind starts a fresh process for the next issue; do not compact.
 
-1. **Orient.** Run `bd list --status=closed --sort closed --limit 3 --json`. Then run `bd show --long` on those ids. Each `bd` command is its own Bash call with `bd` as the first token. Never wrap `bd` in a pipe, `xargs`, `&&`, `;`, or `bash -c`.
+1. **Orient.** Ninety-second standup only: what is in flight, what just happened, what the tree looks like. Do not open work specs here. Each `bd` command is its own Bash call with `bd` as the first token. Never wrap `bd` in a pipe, `xargs`, `&&`, `;`, or `bash -c`. Git commands are their own Bash calls.
+   - `bd list --status=in_progress --json --brief` — leftover claims.
+   - `bd events tail --limit 20 --json` — recent closes, comments, claims, creates. Comments are the interesting lines (`op=comment`); closes are next. The journal starts at enable and does not backfill older comments.
+   - `git log -5 --oneline` — what actually landed.
+   - `git status --porcelain` — inherited dirty paths.
+   Do not `bd show`, `bd show --long`, or `bd comments` in this step. After you pick an id in step 2, `bd show <id> --json` is the work spec and `bd comments <id> --json` is that ticket's thread.
 
 2. **Continue or select.** If any issue is `in_progress`, continue that id. If more than one is `in_progress`, flag human, comment PLAN-GAP, and stop. Else run `bd ready --json`. If empty, exit with no sentinel. Claim the first non-epic issue with `bd update <id> --status=in_progress`. Then `bd show <id> --json` — that packet is the work spec.
 
