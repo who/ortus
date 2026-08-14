@@ -34,10 +34,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        # setup-uv dropped moving major tags at v8; only full-version tags resolve.
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
@@ -74,7 +75,7 @@ jobs:
       # declared >=20 <25) and the runner's default node drifts, so it is
       # pinned here rather than inherited.
       - name: Set up Node (CodeGraph engine range)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -120,7 +121,7 @@ jobs:
 
       - name: Upload pytest timing evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-${{ matrix.os }}-py${{ matrix.python-version }}
           path: junit.xml
@@ -128,7 +129,7 @@ jobs:
 
       - name: Upload coverage artifact (PR only)
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
           path: coverage.xml
@@ -141,10 +142,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        # setup-uv dropped moving major tags at v8; only full-version tags resolve.
+        uses: astral-sh/setup-uv@v10.0.1
 
       - name: Install bd (beads)
         run: |
@@ -154,7 +156,7 @@ jobs:
           sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
 
       - name: Set up Node (CodeGraph engine range)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -194,7 +196,7 @@ jobs:
 
       - name: Upload release timing evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-junit
           path: release-junit.xml
