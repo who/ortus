@@ -485,3 +485,110 @@ def test_multiple_logs_cap_independently(tmp_path: Path) -> None:
     assert "SKIPPED 20 earlier lines: grind-b.log" in out
     assert out.count("SKIPPED") == 2
     assert "L00000" in out  # the short log is untouched
+
+
+# --- ortus-zt5n.7: Grok streaming-json decoder -----------------------------
+
+
+_GROK_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "grok-stream-events.jsonl"
+
+
+def _write_grok_log(logs: Path, name: str = "grind-grok.log") -> Path:
+    log = logs / name
+    log.write_text(_GROK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    return log
+
+
+def _follow_grok(
+    tmp_path: Path, *, raw: bool = False, show_tools: bool = False, show_system: bool = False
+) -> str:
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    _write_grok_log(logs)
+    buf = io.StringIO()
+    _follow(
+        logs,
+        raw=raw,
+        show_tools=show_tools,
+        show_system=show_system,
+        iterations=1,
+        out=buf,
+    )
+    return buf.getvalue()
+
+
+def test_grok_follow_coalesces_thought_text_and_summarizes_tools(tmp_path: Path) -> None:
+    """Default tail on a Grok grind log: coalesced think/text, one tool line."""
+    out = _follow_grok(tmp_path)
+    assert "  think  The user wants a plan." in out
+    assert "  think  I need to inspect the leftover state." in out
+    assert "  text   I'll inspect the leftover state." in out
+    assert out.count("  think  ") == 2
+    assert out.count("  text   ") == 1
+    assert out.count("  tool   ") == 3
+    assert "  tool   search_tool  codegraph explore repository orientation" in out
+    assert "  tool   read_file  src/ortus/commands/tail.py" in out
+    assert "  tool   run_terminal_command  bd prime" in out
+    assert "  done   tool" in out
+    assert "  fail   tool" in out
+    assert "[2026-08-14 14:08:40] iter 1: spawning grok (single-issue worker)" in out
+    assert '{"type":"thought"' not in out
+    assert '{"type":"tool_call"' not in out
+    assert "available_commands" not in out
+    assert "input_tokens" not in out
+    assert "  plan   " not in out
+
+
+def test_grok_raw_emits_original_json_lines(tmp_path: Path) -> None:
+    """--raw / raw=True keeps every fixture line, including dropped kinds."""
+    fixture = _GROK_FIXTURE.read_text(encoding="utf-8")
+    out = _follow_grok(tmp_path, raw=True)
+    for line in fixture.splitlines():
+        assert line in out
+    assert '{"type":"usage"' in out
+    assert '{"type":"available_commands"' in out
+
+
+def test_grok_default_omits_usage_and_available_commands(tmp_path: Path) -> None:
+    out = _follow_grok(tmp_path)
+    assert "available_commands" not in out
+    assert '"type":"usage"' not in out
+    assert "input_tokens" not in out
+    assert "cache_read_input_tokens" not in out
+
+
+def test_grok_tools_and_system_flags_do_not_hide_default_view(tmp_path: Path) -> None:
+    """AC-1: default (no --tools/--system) still shows Grok think/text/tool."""
+    out = _follow_grok(tmp_path, show_tools=False, show_system=False)
+    assert "  think  The user wants a plan." in out
+    assert "  text   I'll inspect the leftover state." in out
+    assert "  tool   search_tool  codegraph explore repository orientation" in out
+    assert "  done   tool" in out
+    verbose = _follow_grok(tmp_path, show_tools=True, show_system=True)
+    assert "  plan   [done] handshake" in verbose
+    assert "  tool   read_file  src/ortus/commands/tail.py" in verbose
+
+
+def test_grok_truncated_json_does_not_crash(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "grind-grok.log").write_text(
+        '{"type":"thought","data":"partial\n'
+        '{"type":"tool_call","toolName":"read_file","rawInput":{"target_file":"x.py"}\n',
+        encoding="utf-8",
+    )
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "partial" in out
+    assert "read_file" in out or "tool_call" in out
+
+
+def test_grok_format_line_standalone_flushes_one_crumb() -> None:
+    """_format_line without shared state still renders a Grok crumb."""
+    rendered = _format_line(
+        '{"type":"thought","data":"Hello from grok"}',
+        show_tools=False,
+        show_system=False,
+    )
+    assert rendered == "  think  Hello from grok"

@@ -28,6 +28,12 @@ Verbosity contract (parity with legacy ortus/tail.sh; ortus-eomm):
     --assistant / -a:
       - suppress USER text (mirrors bash tail.sh ASSISTANT_ONLY)
 
+    Grok streaming-json (type thought/text/tool_call/tool_call_update):
+      Always shown (any verbosity, including default): coalesced think/text
+      paragraphs, one tool line per tool_call, done/fail on tool_call_update.
+      usage and available_commands are dropped. --tools does not hide Grok
+      tools (they are the default view). --system also shows Grok plan entries.
+
     Non-JSON line colouring (mirrors bash format_line non-JSON branch):
       - "===..." lines                bold cyan (preceded by a blank line)
       - "Processing:" / "Found..."    cyan
@@ -47,7 +53,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Iterable, Optional
 
@@ -659,11 +665,38 @@ _BANNER_RE = re.compile(r"^===")
 _INFO_RE = re.compile(r"^(Processing:|Found)")
 _ERROR_RE = re.compile(r"(error|Error|ERROR)")
 _SUCCESS_RE = re.compile(r"(success|Success|completed)")
+_GRIND_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} ")
+
+# Grok headless crumbs use these top-level `type` values. Claude stream-json
+# never emits them at the object root (its `text` lives inside assistant
+# content parts), so this set is a safe detector on the shared format path.
+_GROK_EVENT_TYPES = frozenset(
+    {
+        "thought",
+        "text",
+        "tool_call",
+        "tool_call_update",
+        "usage",
+        "available_commands",
+        "plan",
+    }
+)
+_GROK_TOOL_DETAIL_KEYS = (
+    "command",
+    "target_file",
+    "file_path",
+    "query",
+    "url",
+    "tool_name",
+    "pattern",
+)
 
 
 def _render_plain(line: str, palette: _Palette) -> str:
     if not line:
         return line
+    if _GRIND_RE.match(line):
+        return _wrap(line, palette.bold, palette.yellow, reset=palette.reset)
     if _BANNER_RE.search(line):
         return "\n" + _wrap(line, palette.bold, palette.cyan, reset=palette.reset)
     if _INFO_RE.search(line):
@@ -675,6 +708,119 @@ def _render_plain(line: str, palette: _Palette) -> str:
     return _wrap(line, palette.dim, reset=palette.reset)
 
 
+@dataclass
+class _GrokCoalesce:
+    """Buffer consecutive Grok thought/text crumbs into one paragraph."""
+
+    kind: str | None = None
+    buf: str = ""
+
+    def flush(self, palette: _Palette) -> list[str]:
+        if not self.buf:
+            self.kind = None
+            return []
+        body = " ".join(self.buf.split())
+        kind = self.kind
+        self.buf = ""
+        self.kind = None
+        if not body:
+            return []
+        if kind == "thought":
+            return [_wrap(f"  think  {body}", palette.dim, reset=palette.reset)]
+        return [_wrap(f"  text   {body}", reset=palette.reset)]
+
+    def append(self, kind: str, chunk: str, palette: _Palette) -> list[str]:
+        out: list[str] = []
+        if self.kind is not None and self.kind != kind:
+            out.extend(self.flush(palette))
+        self.kind = kind
+        self.buf += chunk
+        if "\n" in chunk:
+            out.extend(self.flush(palette))
+        return out
+
+
+def _is_grok_event(obj: object) -> bool:
+    return isinstance(obj, dict) and obj.get("type") in _GROK_EVENT_TYPES
+
+
+def _summarize_grok_tool(obj: dict) -> str:
+    name = str(obj.get("toolName") or obj.get("title") or "tool")
+    raw = obj.get("rawInput")
+    if not isinstance(raw, dict):
+        return name
+    detail = ""
+    for key in _GROK_TOOL_DETAIL_KEYS:
+        value = raw.get(key)
+        if value:
+            detail = str(value).replace("\n", " ")[:160]
+            break
+    if not detail:
+        return name
+    return f"{name}  {detail}"
+
+
+def _render_grok_object(
+    obj: dict,
+    *,
+    grok: _GrokCoalesce,
+    show_system: bool,
+    palette: _Palette,
+) -> list[str]:
+    """Render one Grok streaming-json event; may flush a pending paragraph."""
+    kind = obj.get("type")
+    if kind in ("usage", "available_commands"):
+        return []
+    if kind in ("thought", "text"):
+        data = obj.get("data")
+        chunk = "" if data is None else str(data)
+        return grok.append(str(kind), chunk, palette)
+    if kind == "tool_call":
+        # Default Grok view always includes tools (unlike Claude --tools).
+        out = grok.flush(palette)
+        out.append(
+            _wrap(
+                f"  tool   {_summarize_grok_tool(obj)}",
+                palette.bold,
+                palette.cyan,
+                reset=palette.reset,
+            )
+        )
+        return out
+    if kind == "tool_call_update":
+        status = obj.get("status") or ""
+        if status == "completed":
+            out = grok.flush(palette)
+            out.append(_wrap("  done   tool", palette.green, reset=palette.reset))
+            return out
+        if status in ("failed", "error"):
+            out = grok.flush(palette)
+            out.append(_wrap("  fail   tool", palette.red, reset=palette.reset))
+            return out
+        return []
+    if kind == "plan":
+        out = grok.flush(palette)
+        if not show_system:
+            return out
+        entries = obj.get("entries") or []
+        if not isinstance(entries, list):
+            return out
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            status = entry.get("status", "?")
+            content = entry.get("content", "")
+            out.append(f"  plan   [{status}] {content}")
+        return out
+    return []
+
+
+def _join_rendered(pieces: list[str]) -> str | None:
+    if not pieces:
+        return None
+    return "\n".join(pieces)
+
+
 def _format_line(
     line: str,
     *,
@@ -682,31 +828,55 @@ def _format_line(
     show_system: bool,
     assistant_only: bool = False,
     palette: _Palette = _NO_COLOR_PALETTE,
+    grok: _GrokCoalesce | None = None,
 ) -> str | None:
     """Render one stream-json line; returns None when filtered out.
 
     May embed newlines when one JSON object yields multiple rendered lines
-    (e.g., an assistant message with both text and tool_use parts).
+    (e.g., an assistant message with both text and tool_use parts, or a Grok
+    tool_call that flushes a pending think/text paragraph).
+
+    Pass a shared `grok` buffer (one per `_LogStream`) to coalesce consecutive
+    thought/text crumbs. Without one, each Grok crumb flushes immediately.
     """
     line = line.rstrip("\n")
     if not line:
         return None
     if not line.startswith("{"):
-        return _render_plain(line, palette)
+        pieces: list[str] = []
+        if grok is not None:
+            pieces.extend(grok.flush(palette))
+        pieces.append(_render_plain(line, palette))
+        return _join_rendered(pieces)
     try:
         obj = json.loads(line)
     except (json.JSONDecodeError, ValueError):
-        return _render_plain(line, palette)
-    pieces = _render_object(
-        obj,
-        show_tools=show_tools,
-        show_system=show_system,
-        assistant_only=assistant_only,
-        palette=palette,
+        pieces = []
+        if grok is not None:
+            pieces.extend(grok.flush(palette))
+        pieces.append(_render_plain(line, palette))
+        return _join_rendered(pieces)
+    if _is_grok_event(obj):
+        owned = grok if grok is not None else _GrokCoalesce()
+        pieces = _render_grok_object(
+            obj, grok=owned, show_system=show_system, palette=palette
+        )
+        if grok is None:
+            pieces.extend(owned.flush(palette))
+        return _join_rendered(pieces)
+    pieces = []
+    if grok is not None:
+        pieces.extend(grok.flush(palette))
+    pieces.extend(
+        _render_object(
+            obj,
+            show_tools=show_tools,
+            show_system=show_system,
+            assistant_only=assistant_only,
+            palette=palette,
+        )
     )
-    if not pieces:
-        return None
-    return "\n".join(pieces)
+    return _join_rendered(pieces)
 
 
 @dataclass
@@ -716,6 +886,7 @@ class _LogStream:
     #: The stream's first read has happened, so the attach-time history cap
     #: no longer applies; everything after this point is live follow output.
     attached: bool = False
+    grok: _GrokCoalesce = field(default_factory=_GrokCoalesce)
 
 
 def _follow(
@@ -773,47 +944,54 @@ def _follow(
                 stream.pos = fh.tell()
             first_read = not stream.attached
             stream.attached = True
-            if not chunk:
-                continue
-            chunk_lines = chunk.splitlines()
-            # The cap trims input lines before rendering and only on the
-            # attach read; position accounting above stays byte-accurate, so
-            # follow reads are untouched.
-            if first_read and lines > 0 and len(chunk_lines) > lines:
-                skipped = len(chunk_lines) - lines
-                chunk_lines = chunk_lines[-lines:]
-                notice = _wrap(
-                    f"=== SKIPPED {skipped} earlier lines: {stream.path.name} "
-                    "(use --lines 0 for full history) ===",
-                    palette.bold,
-                    palette.magenta,
-                    reset=palette.reset,
-                )
-                out.write(f"{notice}\n")
-            for line in chunk_lines:
-                if raw:
-                    out.write(line + "\n")
-                    continue
-                if codex:
-                    rendered = _format_codex_line(
-                        line,
-                        show_tools=show_tools,
-                        show_system=show_system,
-                        palette=palette,
+            chunk_lines: list[str] = []
+            if chunk:
+                chunk_lines = chunk.splitlines()
+                # The cap trims input lines before rendering and only on the
+                # attach read; position accounting above stays byte-accurate, so
+                # follow reads are untouched.
+                if first_read and lines > 0 and len(chunk_lines) > lines:
+                    skipped = len(chunk_lines) - lines
+                    chunk_lines = chunk_lines[-lines:]
+                    notice = _wrap(
+                        f"=== SKIPPED {skipped} earlier lines: {stream.path.name} "
+                        "(use --lines 0 for full history) ===",
+                        palette.bold,
+                        palette.magenta,
+                        reset=palette.reset,
                     )
-                    if rendered is not None and CODEX_DECODE_ERROR_PREFIX in rendered:
-                        err.write(rendered + "\n")
-                        err.flush()
-                else:
-                    rendered = _format_line(
-                        line,
-                        show_tools=show_tools,
-                        show_system=show_system,
-                        assistant_only=assistant_only,
-                        palette=palette,
-                    )
-                if rendered is not None:
-                    out.write(rendered + "\n")
+                    out.write(f"{notice}\n")
+                for line in chunk_lines:
+                    if raw:
+                        out.write(line + "\n")
+                        continue
+                    if codex:
+                        rendered = _format_codex_line(
+                            line,
+                            show_tools=show_tools,
+                            show_system=show_system,
+                            palette=palette,
+                        )
+                        if rendered is not None and CODEX_DECODE_ERROR_PREFIX in rendered:
+                            err.write(rendered + "\n")
+                            err.flush()
+                    else:
+                        rendered = _format_line(
+                            line,
+                            show_tools=show_tools,
+                            show_system=show_system,
+                            assistant_only=assistant_only,
+                            palette=palette,
+                            grok=stream.grok,
+                        )
+                    if rendered is not None:
+                        out.write(rendered + "\n")
+            if not raw:
+                last_iter = iterations >= 0 and i + 1 >= iterations
+                if (chunk_lines and first_read) or last_iter:
+                    leftover = stream.grok.flush(palette)
+                    if leftover:
+                        out.write("\n".join(leftover) + "\n")
             out.flush()
         if iterations < 0 or i + 1 < iterations:
             time.sleep(POLL_SECONDS)
