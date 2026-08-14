@@ -863,10 +863,19 @@ def _prepare_handoff(
                 for path in dirty
                 if not _is_tool_state(path) and not _is_tracker_path(path)
             )
+        claimed = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
         if not inherited:
+            # A leftover claim is the next window's goal even when the tree is
+            # clean.
+            if len(claimed) == 1:
+                issue_id = next(iter(claimed))
+                write_log(
+                    "transaction handoff: resuming the single claimed issue "
+                    f"{issue_id}"
+                )
+                return _HandoffState(resume_issue_id=issue_id, notes=notes)
             return _HandoffState(notes=notes)
         state = _HandoffState(handoff_paths=inherited, active=True, notes=notes)
-        claimed = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
         if len(claimed) == 1:
             # The claim and the uncommitted work together are the handoff, so
             # prefer that issue over selecting anything new.

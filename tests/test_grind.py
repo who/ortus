@@ -1305,6 +1305,47 @@ def test_large_issue_uses_bounded_claude_goal_and_full_codex_packet() -> None:
     assert issue["description"] not in codex_prompt
 
 
+def test_claude_goal_stays_under_cap_with_recovery_handoff() -> None:
+    """A 1,500-character recovery handoff must stay inside Claude's /goal cap."""
+    from ortus.core.codegraph import (
+        CodeGraphMode,
+        CodeGraphPhase,
+        CodeGraphProbe,
+        phase_contract,
+    )
+
+    handoff = " RECOVERY HANDOFF: " + "x" * 1500
+    bare = grind_mod._compose_work_prompt(
+        "",
+        {"id": "x", "title": "t"},
+        "claude",
+        phase_instruction=handoff,
+    )
+    assert grind_mod._GOAL_POINTER in bare
+    assert "**Orient.**" not in bare
+    assert len(bare.removeprefix("/goal ")) <= 4_000
+
+    contract = phase_contract(
+        CodeGraphPhase.IMPLEMENTATION,
+        CodeGraphProbe(
+            mode=CodeGraphMode.REQUIRED,
+            index_present=True,
+            cli_present=True,
+            available=True,
+        ),
+    )
+    stacked = grind_mod._compose_work_prompt(
+        "",
+        {"id": "x", "title": "t"},
+        "claude",
+        phase_instruction=grind_mod._IMPLEMENTATION_INSTRUCTION + handoff,
+        phase_contract_text=contract,
+    )
+    assert grind_mod._GOAL_POINTER in stacked
+    assert "**Orient.**" not in stacked
+    assert len(stacked.removeprefix("/goal ")) <= 4_000
+
+
 def test_goal_condition_limit_is_claude_only() -> None:
     """Grok host /goal is not Claude's 4,000-character slash-command cap."""
     issue = {"id": "demo-wide", "title": "wide instruction"}
@@ -2979,6 +3020,7 @@ def test_grind_implement_argv_has_no_resume(
     """f2he.5 AC-1: implement spawn does not pass resume=."""
     repo = _bd_repo(tmp_path, "no-resume")
     _create_ready_issue(repo, "fresh")
+    _baseline_commit(repo)
     recorded = _RecordingRunner()
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -3004,6 +3046,7 @@ def test_leftover_claim_spawn_has_no_resume(
         check=True,
         capture_output=True,
     )
+    _baseline_commit(repo)
     recorded = _RecordingRunner()
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))

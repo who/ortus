@@ -188,6 +188,16 @@ def _empty_git_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_beads_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep test `bd` subprocesses off an inherited host tracker.
+
+    `ortus grind` sets BEADS_DIR on its workers. Criterion-check pytest
+    inherits that pin and would otherwise init or mutate the host database.
+    """
+    monkeypatch.delenv("BEADS_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def neutralized_git_identity(
     monkeypatch: pytest.MonkeyPatch, _empty_git_config: Path
 ) -> None:
@@ -437,8 +447,17 @@ def _templates_root() -> Path:
 
 
 def _bd(cwd: Path, *args: str) -> str:
+    env = os.environ.copy()
+    # Grind workers pin BEADS_DIR to the host tracker. Template init/create
+    # must use the workspace under cwd, not that inherited database.
+    env.pop("BEADS_DIR", None)
     return subprocess.run(
-        ["bd", *args], cwd=str(cwd), check=True, capture_output=True, text=True
+        ["bd", *args],
+        cwd=str(cwd),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
     ).stdout.strip()
 
 
@@ -468,6 +487,16 @@ def _build_bare(path: Path) -> tuple[str, ...]:
     settings.write_text(
         json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}}), encoding="utf-8"
     )
+    # Copies inherit this commit, so grind does not treat scaffold files as a
+    # recovery handoff (ortus-eji6).
+    gitignore = path / ".gitignore"
+    ignore = "logs/\n.cache/\n.beads/ortus.flock\n"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+    if ignore not in existing:
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        gitignore.write_text(existing + prefix + ignore, encoding="utf-8")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-m", "fixture baseline")
     return ()
 
 
