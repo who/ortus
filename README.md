@@ -221,14 +221,12 @@ worker edits, then a fresh read-only verifier reviews the exact candidate and
 returns a schema-validated verdict. Every verdict — pass or fail — is written
 to the issue as a criterion-by-criterion report before anything else happens.
 
-**Corrections.** A failed verdict starts a bounded retry loop. Each attempt
-spawns one fresh implementation worker that receives only the issue id, the
-current candidate SHA-256, the failed acceptance criteria, and the verifier's
-precise findings — not the transcript, and not the rendered report. Every
-correction gets its own fresh verifier. `--max-corrections` bounds the loop
-(default 2; `0` disables retries). When the attempts are spent, grind labels
-the issue `human`, records an escalation comment, and leaves the candidate
-uncommitted and the issue open.
+**Corrections.** Off by default. A failed verdict escalates: grind labels the
+issue `human`, records an escalation comment, and keeps the candidate on the
+issue branch. `--max-corrections N` re-enables a bounded retry loop (each
+attempt is one fresh implement worker plus one fresh verifier, given only the
+failed criteria and findings). Measured runs almost never changed the
+candidate; the default is therefore `0`.
 
 **Planning gaps.** A finding that names an unresolved product or architecture
 decision never reaches a correction worker — that would be improvisation. It
@@ -260,12 +258,11 @@ from the step it stopped at. Grind never abandons an outstanding finalization
 to pick up other work.
 
 **Cost.** The floor is two subprocesses per issue (implement + verify). Each
-correction adds two more, so `--max-corrections 2` bounds one issue at six;
-a planning gap adds one planning-profile pass. Verification runs on the `verify`
-profile, which is normally the slow, expensive one — lowering
-`--max-corrections` is the cheapest lever on a noisy queue, and
-`--verify-model` / `--verify-reasoning-effort` is the next. Omitting the
-profile tables entirely keeps every phase on its provider default.
+correction adds two more; the default `--max-corrections 0` keeps that floor.
+A planning gap adds one planning-profile pass. Verification runs on the
+`verify` profile. `--verify-model` / `--verify-reasoning-effort` is the next
+lever. Omitting the profile tables entirely keeps every phase on its provider
+default.
 
 ### State graphs
 

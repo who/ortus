@@ -4820,13 +4820,13 @@ def grind(
         ),
     ),
     max_corrections: int = typer.Option(
-        2,
+        0,
         "--max-corrections",
         help=(
-            "Bounded fresh correction attempts after a failed verification "
-            "(0 disables retries). Each attempt spawns one fresh implementation "
-            "worker with only the failed criteria and findings, then one fresh "
-            "verifier. Exhaustion flags the issue for a human and never commits."
+            "Fresh implement+verify retries after a failed verdict "
+            "(default 0: escalate immediately). Each attempt is a new worker "
+            "with only the failed criteria and findings. Exhaustion flags the "
+            "issue for a human and never merges."
         ),
     ),
     integration_branch: str = typer.Option(

@@ -524,12 +524,26 @@ def test_grind_dry_run_prints_resolved_flags_and_exits(
     assert "repo:" in result.stdout
     assert "tasks:" in result.stdout
     assert "/goal" in result.stdout
+    assert "escalates immediately" in result.stdout
 
 
 def test_grind_help_lists_grok() -> None:
     result = runner.invoke(app, ["grind", "--help"])
     assert result.exit_code == 0
     assert "grok" in result.stdout
+
+
+def test_grind_max_corrections_defaults_to_zero() -> None:
+    import inspect
+
+    declared = inspect.signature(grind_mod.grind).parameters[
+        "max_corrections"
+    ].default.default
+    assert declared == 0
+    result = runner.invoke(app, ["grind", "--help"])
+    assert result.exit_code == 0
+    flattened = " ".join(result.stdout.split())
+    assert "default 0" in flattened
 
 
 def test_grok_dry_run_resolves_backend_and_goal_wrap(tmp_path: Path) -> None:
@@ -1768,7 +1782,11 @@ def test_grind_console_prints_tally_and_finalization(
     """AC-3: correction attempts, the landing, and the running tally all
     reach the console."""
     _, issue_id, result, hashes = _narrated_grind(
-        tmp_path, monkeypatch, name="tally", decisions=("fail", "pass")
+        tmp_path,
+        monkeypatch,
+        name="tally",
+        decisions=("fail", "pass"),
+        max_corrections=2,
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     console = _squashed_console(result)

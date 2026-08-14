@@ -218,9 +218,10 @@ def _log(repo: Path) -> str:
 
 
 def _grind(repo: Path, *extra: str) -> object:
-    return runner.invoke(
-        app, ["grind", str(repo), "--idle-sleep", "0", *(extra or ("--iterations", "1"))]
-    )
+    extras = extra or ("--iterations", "1")
+    if "--max-corrections" not in extras:
+        extras = ("--max-corrections", "2", *extras)
+    return runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0", *extras])
 
 
 class ScriptedRunner:

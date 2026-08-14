@@ -315,7 +315,17 @@ def test_failed_report_forbids_close_commit_and_push_in_the_correction(
     _install(monkeypatch, tmp_path, scripted)
 
     runner.invoke(
-        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+        app,
+        [
+            "grind",
+            str(repo),
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--max-corrections",
+            "2",
+        ],
     )
 
     correction = next(
@@ -646,7 +656,17 @@ def test_failure_returns_to_the_same_session(
     )
 
     result = runner.invoke(
-        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+        app,
+        [
+            "grind",
+            str(repo),
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--max-corrections",
+            "2",
+        ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
