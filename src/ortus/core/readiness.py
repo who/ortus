@@ -204,15 +204,16 @@ _REQUIRED_SECTIONS: tuple[RequiredSection, ...] = (
         "acceptance_criteria",
         "Criterion checks",
         "criterion_mapped_checks",
-        "exactly one matching entry for every criterion identifier, with an "
-        "exact command or deterministic inspection in backticks.",
+        "exactly one matching entry for every criterion identifier, with one "
+        "runnable command (backticks optional).",
     ),
     RequiredSection(
         "acceptance_criteria",
         "Targeted tests",
         "targeted_tests",
-        "exact bounded test commands in backticks. Follow the repository's "
-        "testing policy; do not make a full local matrix the worker default.",
+        "exact bounded test commands (backticks optional). Follow the "
+        "repository's testing policy; do not make a full local matrix the "
+        "worker default.",
     ),
 )
 
@@ -236,9 +237,59 @@ _CRITERION_KIND = re.compile(
 )
 _ORDERED_STEP = re.compile(r"^\s*\d+[.)]\s+\S+", re.MULTILINE)
 _CODE_SPAN = re.compile(r"`[^`\n]+`")
-_TEST_COMMAND = re.compile(
-    r"`[^`\n]*(?:pytest|test[_./:-]|unittest)[^`\n]*`", re.IGNORECASE
+_TEST_INVOCATION = re.compile(
+    r"(?:pytest|unittest|python\s+-m\s+pytest)\b", re.IGNORECASE
 )
+_COMMAND_LEAD_IN = re.compile(
+    r"^(?:run|execute|check|verify|invoke)\b[:\s]*", re.IGNORECASE
+)
+_COMMAND_RUNNERS = frozenset(
+    {
+        "uv",
+        "python",
+        "python3",
+        "pytest",
+        "rg",
+        "git",
+        "bd",
+        "gh",
+        "make",
+        "cargo",
+        "go",
+        "npm",
+        "pnpm",
+        "yarn",
+        "node",
+        "ruff",
+        "mypy",
+        "tox",
+        "nox",
+        "true",
+        "false",
+        "echo",
+        "sleep",
+        "seq",
+        "sh",
+        "bash",
+        "env",
+        "ortus",
+        "test",
+        "touch",
+        "cat",
+        "ls",
+        "cmp",
+        "diff",
+        "wc",
+        "head",
+        "tail",
+        "mkdir",
+        "rm",
+        "cp",
+        "mv",
+    }
+)
+_MISSING_COMMAND = "no runnable command"
+_AMBIGUOUS_COMMAND = "ambiguous: more than one command-looking span"
 _LOCATION = re.compile(
     r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|[A-Za-z0-9_-]+\.(?:py|md|toml|ya?ml|json|sh|ts|tsx|js|jsx|rs|go)"
 )
@@ -250,6 +301,69 @@ _SYMBOL = re.compile(
 
 def _normalise_heading(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def _first_token(text: str) -> str:
+    stripped = text.strip()
+    return stripped.split(None, 1)[0] if stripped else ""
+
+
+def _normalize_command(text: str) -> str:
+    cleaned = _COMMAND_LEAD_IN.sub("", text.strip()).strip()
+    return cleaned.rstrip(".").strip()
+
+
+def looks_like_command(text: str) -> bool:
+    """True when `text` starts with a known runner after optional lead-in prose."""
+
+    token = _first_token(_normalize_command(text))
+    return token.rsplit("/", 1)[-1] in _COMMAND_RUNNERS
+
+
+def _check_line_body(line: str, criterion_id: str) -> str:
+    match = re.search(rf"\b{re.escape(criterion_id)}\b", line, re.IGNORECASE)
+    rest = line[match.end() :] if match else line
+    rest = re.sub(r"^\s*\([^)]*\)", "", rest)
+    return re.sub(r"^\s*[:.-]\s*", "", rest).strip()
+
+
+def extract_check_command(line: str, criterion_id: str) -> tuple[str | None, str | None]:
+    """Return ``(command, error)`` for one Criterion-checks line.
+
+    Prefers the unique command-looking backtick span. If none, uses the rest
+    of the line after the AC-N label when that remainder is a command.
+    Two command-looking spans are ambiguous. Prose-only lines have no command.
+    """
+
+    body = _check_line_body(line, criterion_id)
+    command_spans = [
+        span[1:-1].strip()
+        for span in _CODE_SPAN.findall(body)
+        if looks_like_command(span[1:-1])
+    ]
+    if len(command_spans) > 1:
+        return None, _AMBIGUOUS_COMMAND
+    if len(command_spans) == 1:
+        return _normalize_command(command_spans[0]), None
+    unwrapped = _CODE_SPAN.sub(lambda match: match.group(0)[1:-1], body)
+    if looks_like_command(unwrapped):
+        return _normalize_command(unwrapped), None
+    return None, _MISSING_COMMAND
+
+
+def targeted_test_command(section: str) -> str | None:
+    """The first test invocation in a Targeted tests section, backticks optional."""
+
+    for line in section.splitlines():
+        command, error = extract_check_command(f"- AC-0: {line}", "AC-0")
+        if error is None and command is not None and _TEST_INVOCATION.search(command):
+            return command
+    command, error = extract_check_command(
+        f"- AC-0: {section.replace(chr(10), ' ')}", "AC-0"
+    )
+    if error is None and command is not None and _TEST_INVOCATION.search(command):
+        return command
+    return None
 
 
 def _sections(value: Any) -> dict[str, str]:
@@ -389,7 +503,6 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
         or set(check_counts) != criteria
         or any(count != 1 for count in criterion_counts.values())
         or any(count != 1 for count in check_counts.values())
-        or not _CODE_SPAN.search(values["criterion_mapped_checks"])
     ):
         failures.append(
             _shape_failure(
@@ -415,11 +528,11 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
             )
 
     tests = values.get("targeted_tests", "")
-    if tests and not _is_placeholder(tests) and not _TEST_COMMAND.search(tests):
+    if tests and not _is_placeholder(tests) and not targeted_test_command(tests):
         failures.append(
             _shape_failure(
                 "targeted_tests",
-                "must include an exact targeted test command in backticks",
+                "must include a targeted test command (backticks optional)",
             )
         )
 
@@ -456,16 +569,15 @@ def _shape_rules() -> tuple[str, ...]:
         f"carries a unique identifier ({_example(_CRITERION_ID, '`AC-1`')}, "
         "`AC-2`, ...).",
         f"`## {_section('criterion_mapped_checks').heading}` — repeats every "
-        "criterion identifier exactly once, each with an exact command or "
-        "deterministic check in backticks "
+        "criterion identifier exactly once, each with one runnable command "
+        "(backticks optional) "
         f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}). "
-        "Each criterion's line carries EXACTLY ONE backticked span — the "
-        "machine runner executes that literal string, so a second backticked "
-        "span on the same criterion (an alternative command, a quoted flag, a "
-        "symbol name) makes the check unparseable and fails readiness.",
-        f"`## {_section('targeted_tests').heading}` — at least one exact test "
-        "command in backticks "
-        f"({_example(_TEST_COMMAND, '`uv run pytest tests/test_demo.py -q`')}).",
+        "A command-looking span wins among several; extra spans that are not "
+        "commands (version pins, paths) are ignored. Two command-looking "
+        "spans on one criterion are ambiguous and fail readiness.",
+        f"`## {_section('targeted_tests').heading}` — at least one test "
+        "invocation (backticks optional) "
+        f"({_example(_TEST_INVOCATION, 'uv run pytest tests/test_demo.py -q')}).",
     )
 
 

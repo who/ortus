@@ -216,8 +216,8 @@ def test_output_is_file_captured_and_bounded(
 
 
 def test_unparseable_criterion_is_a_packet_failure(tmp_path: Path) -> None:
-    """AC-6: a criterion without exactly one backticked command indicts the
-    packet; the runner never guesses, and the parseable rest still runs."""
+    """AC-6: a criterion without a runnable command indicts the packet; the
+    runner never guesses, and the parseable rest still runs."""
     repo = _repo(tmp_path)
 
     result = run_checks(
@@ -233,7 +233,9 @@ def test_unparseable_criterion_is_a_packet_failure(tmp_path: Path) -> None:
     )
 
     assert [f.criterion_id for f in result.packet_failures] == ["AC-1", "AC-3"]
-    assert all("backticked command" in f.message for f in result.packet_failures)
+    assert all(
+        "no runnable command" in f.message for f in result.packet_failures
+    )
     assert [r.criterion_id for r in result.results] == ["AC-2"]
     assert not result.ok
 
@@ -242,6 +244,21 @@ def test_unparseable_criterion_is_a_packet_failure(tmp_path: Path) -> None:
     )
     assert [c.criterion_id for c in duplicated] == ["AC-1"]
     assert failures and "more than once" in failures[0].message
+
+
+def test_bare_and_mixed_span_commands_parse() -> None:
+    """Backticks are optional; a command-looking span wins among pins."""
+    parsed, failures = parse_criterion_checks(
+        _packet(
+            "- AC-1: uv run pytest tests/test_demo.py -q\n"
+            "- AC-2: `rg -n uses: .github/workflows/test.yml` shows no `setup-uv@v3`",
+            observable="- AC-1: a.\n- AC-2: b.",
+        )
+    )
+    assert failures == ()
+    assert [c.criterion_id for c in parsed] == ["AC-1", "AC-2"]
+    assert parsed[0].command == "uv run pytest tests/test_demo.py -q"
+    assert parsed[1].command == "rg -n uses: .github/workflows/test.yml"
 
 
 def test_rendering_carries_commands_and_verdicts(tmp_path: Path) -> None:

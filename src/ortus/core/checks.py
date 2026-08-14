@@ -4,9 +4,10 @@ Executes a work spec's Criterion checks as subprocesses in a disposable shared
 clone of a git ref and records every command, exit code, and bounded output —
 the machine that replaces the verifier's mechanical half at zero model tokens.
 
-The command grammar is exactly what readiness v1 validates: the identifier and
-code-span regexes are imported from :mod:`ortus.core.readiness`, not restated,
-so any work spec that passes readiness is runnable here. The tree the commands
+The command grammar is exactly what readiness v1 validates: identifiers,
+code spans, and :func:`ortus.core.readiness.extract_check_command` are
+imported from :mod:`ortus.core.readiness`, not restated, so any work spec
+that passes readiness is runnable here. The tree the commands
 run in is a ``git clone --shared`` — never a worktree (cleanup is
 unrecoverable under the sandbox, ortus-z7ib) and never an archive (a hatch-vcs
 build derives its version from git metadata an archive strips, so nothing in
@@ -38,12 +39,13 @@ from pathlib import Path
 from ortus.core import readiness
 from ortus.core.git import GitClient
 
-# The readiness grammar, shared by reference: an AC identifier, a backticked
-# command, and a kind tag mean here exactly what the validator accepted at
-# claim.
+# The readiness grammar, shared by reference: an AC identifier, a command
+# extractor, and a kind tag mean here exactly what the validator accepted
+# at claim.
 _CRITERION_ID = readiness._CRITERION_ID
 _CODE_SPAN = readiness._CODE_SPAN
 _CRITERION_KIND = readiness._CRITERION_KIND
+extract_check_command = readiness.extract_check_command
 _CHECKS_HEADING = readiness._section("criterion_mapped_checks").heading
 _OBSERVABLE_HEADING = readiness._section("observable_criteria").heading
 
@@ -181,9 +183,10 @@ def parse_criterion_checks(
     """Extract per-criterion commands from an acceptance_criteria field.
 
     Reads the same ``## Criterion checks`` section readiness v1 validates,
-    with the same identifier and code-span grammar. Lines without an ``AC-N``
+    with the same identifier and command extractor. Lines without an ``AC-N``
     are section prose and skipped; a line with an identifier must carry
-    exactly one backticked command, and each identifier may appear only once.
+    one runnable command (backticks optional), and each identifier may
+    appear only once.
     Each check also carries the optional kind tag from its Observable-criteria
     line — the tag is data on the criterion, so a work spec claimed before kinds
     existed parses correctly, just untagged.
@@ -212,20 +215,13 @@ def parse_criterion_checks(
             )
             continue
         seen.add(criterion_id)
-        spans = _CODE_SPAN.findall(line)
-        if len(spans) != 1:
+        command, error = readiness.extract_check_command(line, criterion_id)
+        if error or not command:
             failures.append(
                 PacketFailure(
                     criterion_id,
-                    f"{criterion_id}: expected exactly one backticked command, "
-                    f"found {len(spans)}",
+                    f"{criterion_id}: {error or readiness._MISSING_COMMAND}",
                 )
-            )
-            continue
-        command = spans[0][1:-1].strip()
-        if not command:
-            failures.append(
-                PacketFailure(criterion_id, f"{criterion_id}: empty command")
             )
             continue
         parsed.append(

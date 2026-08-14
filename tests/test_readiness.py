@@ -116,14 +116,48 @@ def test_unparseable_check_fails_readiness() -> None:
     assert not report.ready
     failures = {f.code: f.message for f in report.failures}
     assert "criterion_mapped_checks" in failures
-    assert "expected exactly one backticked command" in failures[
-        "criterion_mapped_checks"
-    ]
+    assert "ambiguous" in failures["criterion_mapped_checks"]
 
 
 def test_parseable_checks_pass_readiness() -> None:
     """One backticked command per criterion still passes untouched (ortus-qs6l)."""
     report = validate_issue(ready_issue())
+    assert report.ready, [f.message for f in report.failures]
+
+
+def test_bare_check_and_targeted_commands_are_ready() -> None:
+    """A command without backticks is still a command (ortus-avyu)."""
+    issue = ready_issue()
+    issue["acceptance_criteria"] = """## Observable criteria
+- AC-1: Preview performs no writes.
+- AC-2: Normal execution is unchanged.
+
+## Criterion checks
+- AC-1: uv run pytest tests/test_demo.py::test_preview -q
+- AC-2: uv run pytest tests/test_demo.py::test_run -q
+
+## Targeted tests
+uv run pytest tests/test_demo.py -q
+"""
+    report = validate_issue(issue)
+    assert report.ready, [f.message for f in report.failures]
+
+
+def test_extra_non_command_spans_do_not_fail_readiness() -> None:
+    """Version pins in backticks are not a second command (ortus-avyu)."""
+    issue = ready_issue()
+    issue["acceptance_criteria"] = """## Observable criteria
+- AC-1: The old pin is gone.
+- AC-2: Normal execution is unchanged.
+
+## Criterion checks
+- AC-1: `rg -n uses: .github/workflows/test.yml` shows no `setup-uv@v3`
+- AC-2: Run `uv run pytest tests/test_demo.py::test_run -q`.
+
+## Targeted tests
+Run `uv run pytest tests/test_demo.py -q`.
+"""
+    report = validate_issue(issue)
     assert report.ready, [f.message for f in report.failures]
 
 
