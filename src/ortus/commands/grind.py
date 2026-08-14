@@ -4483,15 +4483,14 @@ def _compose_work_prompt(
 def _done_bar_met(
     bd: BdClient,
     git: GitClient,
-    watch_ids: frozenset[str],
+    baseline_closed: int,
     integration_branch: str,
 ) -> str | None:
-    """Id that is closed with HEAD in sync, or None.
+    """Label when closed-count grew since spawn and HEAD is in sync.
 
-    ``watch_ids`` is the predicted spawn id plus whatever was already
-    ``in_progress`` at spawn, so a leftover continue still trips the bar.
-    Missing origin tracking is not "in sync". Tracker or git errors are
-    None: a poll must not kill a live worker.
+    Predicted id does not matter: a worker that claimed a different ready
+    issue still trips the bar. Missing origin tracking is not in sync.
+    Tracker or git errors are None: a poll must not kill a live worker.
     """
 
     try:
@@ -4499,15 +4498,11 @@ def _done_bar_met(
             return None
         if git.local_ahead_of_remote(integration_branch) != 0:
             return None
+        closed = bd.count_by_status("closed")
     except Exception:
         return None
-    for issue_id in sorted(watch_ids):
-        try:
-            status = str(bd.show(issue_id).get("status") or "")
-        except Exception:
-            continue
-        if status == "closed":
-            return issue_id
+    if closed > baseline_closed:
+        return f"closed {baseline_closed}->{closed}"
     return None
 
 
@@ -5876,25 +5871,28 @@ def grind(
                         reap_when = None
                         if resolved_backend == "grok":
                             try:
-                                leftover_ids = bd.in_progress_ids()
+                                baseline_closed = bd.count_by_status("closed")
                             except Exception:
-                                leftover_ids = set()
-                            watch_ids = frozenset({issue_id}) | leftover_ids
+                                baseline_closed = None
+                            if baseline_closed is not None:
 
-                            def _reap_on_done_bar() -> bool:
-                                closed_id = _done_bar_met(
-                                    bd, git, watch_ids, integration_branch
-                                )
-                                if not closed_id:
-                                    return False
-                                write_log(
-                                    f"iter {iters_run}: done bar met for "
-                                    f"{closed_id} (closed and in sync); "
-                                    "reaping grok /goal review"
-                                )
-                                return True
+                                def _reap_on_done_bar() -> bool:
+                                    label = _done_bar_met(
+                                        bd,
+                                        git,
+                                        baseline_closed,
+                                        integration_branch,
+                                    )
+                                    if not label:
+                                        return False
+                                    write_log(
+                                        f"iter {iters_run}: done bar met "
+                                        f"({label}, in sync); "
+                                        "reaping grok /goal review"
+                                    )
+                                    return True
 
-                            reap_when = _reap_on_done_bar
+                                reap_when = _reap_on_done_bar
                         rc = runner.run(
                             iteration_prompt,
                             repo=worker_repo,

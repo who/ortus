@@ -1360,11 +1360,12 @@ def test_goal_condition_limit_is_claude_only() -> None:
 
 
 class _DoneBarBd:
-    def __init__(self, statuses: dict[str, str]) -> None:
-        self.statuses = statuses
+    def __init__(self, closed: int) -> None:
+        self.closed = closed
 
-    def show(self, issue_id: str) -> dict[str, str]:
-        return {"status": self.statuses[issue_id]}
+    def count_by_status(self, status: str, *, exclude_labels: tuple[str, ...] = ()) -> int:
+        del status, exclude_labels
+        return self.closed
 
 
 class _DoneBarGit:
@@ -1381,68 +1382,35 @@ class _DoneBarGit:
         return self.ahead
 
 
-def test_done_bar_met_requires_closed_and_in_sync() -> None:
-    """Reap only when a watched id is closed and origin is not behind local."""
+def test_done_bar_met_requires_new_close_and_in_sync() -> None:
+    """Reap when closed count grew and origin is not behind local."""
     assert (
-        grind_mod._done_bar_met(
-            _DoneBarBd({"ortus-1": "closed"}),
-            _DoneBarGit(ahead=0),
-            frozenset({"ortus-1"}),
-            "main",
-        )
-        == "ortus-1"
+        grind_mod._done_bar_met(_DoneBarBd(658), _DoneBarGit(ahead=0), 657, "main")
+        == "closed 657->658"
     )
     assert (
-        grind_mod._done_bar_met(
-            _DoneBarBd({"ortus-1": "in_progress"}),
-            _DoneBarGit(ahead=0),
-            frozenset({"ortus-1"}),
-            "main",
-        )
+        grind_mod._done_bar_met(_DoneBarBd(657), _DoneBarGit(ahead=0), 657, "main")
+        is None
+    )
+    assert (
+        grind_mod._done_bar_met(_DoneBarBd(658), _DoneBarGit(ahead=1), 657, "main")
         is None
     )
     assert (
         grind_mod._done_bar_met(
-            _DoneBarBd({"ortus-1": "closed"}),
-            _DoneBarGit(ahead=1),
-            frozenset({"ortus-1"}),
-            "main",
+            _DoneBarBd(658), _DoneBarGit(ahead=0, tip=""), 657, "main"
         )
         is None
-    )
-    assert (
-        grind_mod._done_bar_met(
-            _DoneBarBd({"ortus-1": "closed"}),
-            _DoneBarGit(ahead=0, tip=""),
-            frozenset({"ortus-1"}),
-            "main",
-        )
-        is None
-    )
-
-
-def test_done_bar_met_trips_on_leftover_not_predicted_id() -> None:
-    """A leftover continue still trips the bar when that leftover is closed."""
-    assert (
-        grind_mod._done_bar_met(
-            _DoneBarBd({"ortus-pred": "open", "ortus-left": "closed"}),
-            _DoneBarGit(ahead=0),
-            frozenset({"ortus-pred", "ortus-left"}),
-            "main",
-        )
-        == "ortus-left"
     )
 
 
 def test_done_bar_met_is_false_on_tracker_error() -> None:
     class _BoomBd:
-        def show(self, issue_id: str) -> dict[str, str]:
+        def count_by_status(self, status: str, **kwargs: object) -> int:
             raise RuntimeError("tracker down")
 
     assert (
-        grind_mod._done_bar_met(
-            _BoomBd(), _DoneBarGit(ahead=0), frozenset({"ortus-1"}), "main"
-        )
+        grind_mod._done_bar_met(_BoomBd(), _DoneBarGit(ahead=0), 657, "main")
         is None
     )
 
