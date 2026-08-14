@@ -20,6 +20,8 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from ortus.core.profiles import AgentProfile
@@ -103,6 +105,8 @@ class ClaudeRunner:
         timeout: float | None = None,
         readonly: bool = False,
         resume: str | None = None,
+        reap_when: Callable[[], bool] | None = None,
+        reap_poll: float = 2.0,
     ) -> int:
         """Spawn claude, tee output to log_path (NOT stdout), return exit code.
 
@@ -121,6 +125,8 @@ class ClaudeRunner:
             extra_env=self.extra_env,
             timeout=timeout,
             readonly=readonly,
+            reap_when=reap_when,
+            reap_poll=reap_poll,
         )
 
     def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
@@ -192,11 +198,17 @@ def _spawn_logged(
     extra_env: dict[str, str],
     timeout: float | None = None,
     readonly: bool = False,
+    reap_when: Callable[[], bool] | None = None,
+    reap_poll: float = 2.0,
 ) -> int:
     """Spawn one agent CLI, tee stdout/stderr to log_path, reap the group.
 
     Shared by ClaudeRunner and GrokRunner so a sibling backend does not
     subclass Claude just to inherit process-group cleanup.
+
+    ``reap_when`` is polled every ``reap_poll`` seconds. When it returns
+    true the child group is SIGTERM'd and this returns the child's exit
+    code — it does not raise ``TimeoutExpired``.
     """
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,10 +242,12 @@ def _spawn_logged(
             popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen(argv, **popen_kwargs)
         try:
-            return proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_group(proc)
-            raise
+            return _wait_logged(
+                proc,
+                timeout=timeout,
+                reap_when=reap_when,
+                reap_poll=reap_poll,
+            )
         except KeyboardInterrupt:
             _kill_group(proc)
             raise
@@ -243,6 +257,42 @@ def _spawn_logged(
             # goal.sh's cleanup_children trap.
             if proc.poll() is None:
                 _kill_group(proc)
+
+
+def _wait_logged(
+    proc: subprocess.Popen,
+    *,
+    timeout: float | None,
+    reap_when: Callable[[], bool] | None,
+    reap_poll: float,
+) -> int:
+    """Wait for ``proc``, optionally reaping when ``reap_when`` becomes true."""
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    poll = reap_poll if reap_when is not None else None
+    while True:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            _kill_group(proc)
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        slice_timeout = remaining
+        if poll is not None:
+            slice_timeout = poll if remaining is None else min(poll, remaining)
+        try:
+            return proc.wait(timeout=slice_timeout)
+        except subprocess.TimeoutExpired:
+            if reap_when is not None:
+                try:
+                    due = reap_when()
+                except Exception:
+                    due = False
+                if due:
+                    _kill_group(proc)
+                    try:
+                        return proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        rc = proc.returncode
+                        return 143 if rc is None else rc
 
 
 def _kill_group(proc: subprocess.Popen) -> None:

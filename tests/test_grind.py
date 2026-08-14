@@ -1359,6 +1359,87 @@ def test_goal_condition_limit_is_claude_only() -> None:
         grind_mod._compose_work_prompt("", issue, "claude", phase_instruction=wide)
 
 
+class _DoneBarBd:
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def show(self, issue_id: str) -> dict[str, str]:
+        del issue_id
+        return {"status": self.status}
+
+
+class _DoneBarGit:
+    def __init__(self, *, ahead: int, tip: str = "abc") -> None:
+        self.ahead = ahead
+        self.tip = tip
+
+    def remote_tip(self, branch: str) -> str:
+        del branch
+        return self.tip
+
+    def local_ahead_of_remote(self, branch: str) -> int:
+        del branch
+        return self.ahead
+
+
+def test_done_bar_met_requires_closed_and_in_sync() -> None:
+    """AC-1: reap only when closed and origin is not behind local."""
+    assert grind_mod._done_bar_met(
+        _DoneBarBd("closed"), _DoneBarGit(ahead=0), "ortus-1", "main"
+    )
+    assert not grind_mod._done_bar_met(
+        _DoneBarBd("in_progress"), _DoneBarGit(ahead=0), "ortus-1", "main"
+    )
+    assert not grind_mod._done_bar_met(
+        _DoneBarBd("closed"), _DoneBarGit(ahead=1), "ortus-1", "main"
+    )
+    assert not grind_mod._done_bar_met(
+        _DoneBarBd("closed"), _DoneBarGit(ahead=0, tip=""), "ortus-1", "main"
+    )
+
+
+def test_done_bar_met_is_false_on_tracker_error() -> None:
+    class _BoomBd:
+        def show(self, issue_id: str) -> dict[str, str]:
+            raise RuntimeError("tracker down")
+
+    assert not grind_mod._done_bar_met(
+        _BoomBd(), _DoneBarGit(ahead=0), "ortus-1", "main"
+    )
+
+
+@pytest.mark.slow
+def test_grok_implement_reaps_on_done_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a grok implement spawn gets a reap_when bound to the claimed id."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "grok-reap")
+    _create_ready_issue(repo, "reap after close")
+    recorded = _RecordingRunner()
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--backend",
+            "grok",
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert recorded.calls
+    reap_when = recorded.calls[0].get("reap_when")
+    assert callable(reap_when)
+
+
 def test_claude_goal_rejection_is_detected_only_in_requested_log_slice(
     tmp_path: Path,
 ) -> None:

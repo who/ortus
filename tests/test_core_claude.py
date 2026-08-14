@@ -18,6 +18,7 @@ from ortus.core.claude import (
     _kill_group,
     _readonly_wrapper,
     _repo_source_readonly,
+    _spawn_logged,
 )
 from ortus.core.profiles import AgentProfile, Phase
 from tests._platform import (
@@ -308,6 +309,39 @@ def test_timeout_kills_child(tmp_path: Path) -> None:
     log = tmp_path / "log.txt"
     with pytest.raises(subprocess.TimeoutExpired):
         runner.run("hello", repo=tmp_path, log_path=log, timeout=0.5)
+
+
+def test_spawn_logged_reap_when_returns_without_timeout(tmp_path: Path) -> None:
+    """A true reap_when SIGTERMs the child and does not raise TimeoutExpired."""
+    t0 = time.monotonic()
+    rc = _spawn_logged(
+        [str(FAKE_CLAUDE)],
+        repo=tmp_path,
+        log_path=tmp_path / "reap.log",
+        extra_env={"FAKE_CLAUDE_SLEEP": "30"},
+        timeout=10,
+        reap_when=lambda: True,
+        reap_poll=0.1,
+    )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 3.0, f"reap took {elapsed:.2f}s"
+    assert rc != 0
+
+
+def test_spawn_logged_timeout_still_raises_when_reap_stays_false(
+    tmp_path: Path,
+) -> None:
+    """Worker-timeout still raises when the done-bar predicate never fires."""
+    with pytest.raises(subprocess.TimeoutExpired):
+        _spawn_logged(
+            [str(FAKE_CLAUDE)],
+            repo=tmp_path,
+            log_path=tmp_path / "timeout.log",
+            extra_env={"FAKE_CLAUDE_SLEEP": "30"},
+            timeout=0.4,
+            reap_when=lambda: False,
+            reap_poll=0.1,
+        )
 
 
 _ENV_ECHO_SHIM = (

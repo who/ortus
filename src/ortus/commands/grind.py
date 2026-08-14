@@ -4555,6 +4555,32 @@ def _compose_work_prompt(
     return compose_worker_prompt(backend, task)  # type: ignore[arg-type]
 
 
+def _done_bar_met(
+    bd: BdClient,
+    git: GitClient,
+    issue_id: str,
+    integration_branch: str,
+) -> bool:
+    """True when the claimed issue is closed and HEAD is not ahead of origin.
+
+    Missing origin tracking is not "in sync" — do not reap on close alone.
+    Any tracker or git error is false: a poll must not kill a live worker.
+    """
+
+    try:
+        status = str(bd.show(issue_id).get("status") or "")
+    except Exception:
+        return False
+    if status != "closed":
+        return False
+    try:
+        if not git.remote_tip(integration_branch):
+            return False
+        return git.local_ahead_of_remote(integration_branch) == 0
+    except Exception:
+        return False
+
+
 def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
     """Return a zero-turn Claude goal-condition rejection from a log slice."""
     try:
@@ -5909,6 +5935,23 @@ def grind(
                             "resuming at verification"
                         )
                     else:
+                        reap_when = None
+                        if resolved_backend == "grok":
+                            watched = issue_id
+
+                            def _reap_on_done_bar() -> bool:
+                                if not _done_bar_met(
+                                    bd, git, watched, integration_branch
+                                ):
+                                    return False
+                                write_log(
+                                    f"iter {iters_run}: done bar met for "
+                                    f"{watched} (closed and in sync); "
+                                    "reaping grok /goal review"
+                                )
+                                return True
+
+                            reap_when = _reap_on_done_bar
                         rc = runner.run(
                             iteration_prompt,
                             repo=worker_repo,
@@ -5916,6 +5959,7 @@ def grind(
                             fast=fast,
                             profile=implement_profile,
                             timeout=(worker_timeout if worker_timeout > 0 else None),
+                            reap_when=reap_when,
                         )
                 except subprocess.TimeoutExpired:
                     implementation_timed_out = True

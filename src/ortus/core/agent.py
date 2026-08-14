@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -218,6 +219,8 @@ class GrokRunner:
         timeout: float | None = None,
         readonly: bool = False,
         resume: str | None = None,
+        reap_when: Callable[[], bool] | None = None,
+        reap_poll: float = 2.0,
     ) -> int:
         """Spawn grok, tee output to log_path (NOT stdout), return exit code."""
         argv = self.build_argv(
@@ -232,6 +235,8 @@ class GrokRunner:
             extra_env=self.extra_env,
             timeout=timeout,
             readonly=readonly,
+            reap_when=reap_when,
+            reap_poll=reap_poll,
         )
 
     def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
