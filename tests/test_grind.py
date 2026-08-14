@@ -3073,6 +3073,47 @@ def test_grind_counts_worker_close_without_claims_block(
 
 
 @pytest.mark.slow
+@pytest.mark.codegraph_default
+def test_silent_fresh_worker_under_required_skips_post_worker_handshake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a silent worker under required does not halt on missing MCP.
+
+    The post-worker require_handshake gate is gone. Grind judges bd status:
+    a worker that closes its issue is a win even when the transcript has no
+    CodeGraph tool event.
+    """
+    from ortus.core.codegraph import CodeGraphProbe
+
+    repo = _bd_repo(tmp_path, "silent-required")
+    issue_id = _create_ready_issue(repo, "close silently")
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+
+    class _AvailableCodeGraph:
+        def probe(self, repo: Path, mode: object, *, backend: str = "claude") -> object:
+            return CodeGraphProbe(mode, True, True, True)
+
+        def refresh(self, repo: Path, probe: object) -> tuple[str, int]:
+            return ("fresh", 1)
+
+    monkeypatch.setattr(grind_mod, "_make_codegraph", lambda: _AvailableCodeGraph())
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    combined = result.stdout + result.stderr
+    assert result.exit_code == 0, combined
+    assert _issue(repo, issue_id)["status"] == "closed"
+    assert "no CodeGraph MCP" not in combined
+    assert "CodeGraph required but the implementation agent" not in combined
+    log = _grind_log(repo)
+    assert f"worker closed {issue_id}" in log
+
+
+@pytest.mark.slow
 def test_grind_leaves_unfinished_claim_in_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

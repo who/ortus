@@ -1,13 +1,15 @@
 """Hermetic tests for the pre-edit Codex CodeGraph handshake gate.
 
 Child handshake (`_codex_codegraph_handshake`) and the outer probe abort stay
-on the live grind path. The post-worker implement/verify loop gate retired
-with f2he.2: grind judges bd status and returns, so resume-from-captured and
-silent-worker halt cases no longer run in this module.
+on the live grind path. The post-worker `require_handshake(implementation_summary)`
+gate is gone: f2he.2 judges bd status and continues, so a silent worker under
+required does not halt on a missing implementation MCP event. The worker-owned
+prompt is the implementation handshake.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -26,6 +28,7 @@ from ortus.core.codegraph import (
 from ortus.core.profiles import AgentProfile, Phase
 
 runner = CliRunner()
+_GRIND_PY = Path(__file__).resolve().parents[1] / "src" / "ortus" / "commands" / "grind.py"
 
 
 def _probe(mode: CodeGraphMode) -> CodeGraphProbe:
@@ -147,3 +150,38 @@ def test_required_child_missing_halts_at_handshake_gate(tmp_path: Path) -> None:
             profile=AgentProfile("codex", Phase.IMPLEMENT),
             timeout=10,
         )
+
+
+def test_post_worker_implementation_handshake_block_is_gone() -> None:
+    """AC-1: the dead require_handshake(implementation_summary) gate is gone.
+
+    f2he.2 continues on judged bd status before that call could run. The live
+    gates are the outer probe and the Codex child handshake; the worker-owned
+    prompt is the implementation handshake.
+    """
+    tree = ast.parse(_GRIND_PY.read_text(encoding="utf-8"))
+    hits: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else ""
+        )
+        if name != "require_handshake" or not node.args:
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and arg.id == "implementation_summary":
+            hits.append(node.lineno)
+    assert hits == [], (
+        "post-worker require_handshake(implementation_summary) must stay gone; "
+        f"found at lines {hits}"
+    )
+    source = _GRIND_PY.read_text(encoding="utf-8")
+    assert "handshake-not-required" not in source
+    assert "implementation CodeGraph handshake not required" not in source
+    assert "_codex_codegraph_handshake" in source
