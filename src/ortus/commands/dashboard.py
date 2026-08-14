@@ -130,12 +130,23 @@ import typer
 
 from ortus.core import output
 from ortus.core.readiness import validate_issue
-from ortus.core.runstate import TERMINAL_PHASES, LogEvent, RunSnapshot, read_snapshot
-from ortus.core.transaction import JournalStore
+from ortus.core.runstate import (
+    TERMINAL_PHASES,
+    GROK_CRUMB_TYPES,
+    LogEvent,
+    RunSnapshot,
+    is_grok_event,
+    read_snapshot,
+    summarize_grok_tool,
+)
+from ortus.core.transaction import JOURNAL_RELATIVE_PATH, JournalStore
 
 #: Seconds between refreshes. A tick reads only the bytes the log grew by, so
 #: this is cheap even against the megabyte logs a long session produces.
 REFRESH_SECONDS = 1.0
+#: Grok crumbs land faster than one a second; 250 ms is enough to paint them
+#: as they arrive without a busy-loop. Claude and Codex stay on 1 Hz.
+GROK_REFRESH_SECONDS = 0.25
 
 #: Flags every bd invocation carries: `--readonly` keeps bd off its write paths
 #: and `--sandbox` off its auto-sync ones. `check.py` already queries bd this
@@ -145,8 +156,23 @@ BD_TIMEOUT_SECONDS = 15.0
 
 #: Width of the pulse bar, in cells.
 PULSE_WIDTH = 24
+#: Second independent mover in Grok mode: crumb-count driven, so a hang
+#: freezes this strip while the tick scanner still walks.
+GROK_ACTIVITY_WIDTH = 8
 _PULSE_MARK = "█"  # full block
 _PULSE_RULE = "─"  # box-drawing horizontal
+
+#: Newest crumbs the Grok feed keeps. A 10k burst must drop the oldest rather
+#: than grow the region without bound.
+CRUMB_FEED_LINES = 10
+CRUMB_TEXT_CHARS = 88
+CRUMB_THINK = "think"
+CRUMB_TEXT = "text"
+CRUMB_TOOL = "tool"
+TOOL_IN_FLIGHT = "in-flight"
+TOOL_DONE = "done"
+TOOL_FAIL = "fail"
+NO_CRUMBS = ""
 
 #: How long an action may be the latest before it is called blocked rather than
 #: thinking. A worker issues one tool call and then goes quiet for as long as
@@ -392,6 +418,9 @@ class Frame:
     pulse: str
     #: Region key to state class, so colour tracks the run rather than layout.
     states: tuple[tuple[str, str], ...] = ()
+    #: Grok-only crumb feed. Empty on Claude/Codex so those frames stay the
+    #: pre-change sparse panel.
+    crumbs: str = ""
 
     def bodies(self) -> dict[str, str]:
         """Region key to the text that region shows."""
@@ -407,7 +436,8 @@ class Frame:
     def texts(self) -> tuple[str, ...]:
         """Every string this frame puts on screen."""
 
-        return (*self.bodies().values(), self.pulse)
+        extra = (self.crumbs,) if self.crumbs else ()
+        return (*self.bodies().values(), self.pulse, *extra)
 
 
 def bd_argv(*args: str) -> list[str]:
@@ -444,28 +474,70 @@ def run_bd(repo: Path, *args: str, timeout: float = BD_TIMEOUT_SECONDS) -> str |
     return proc.stdout
 
 
-def pulse(tick: int, *, width: int = PULSE_WIDTH) -> str:
+def pulse(tick: int, *, width: int = PULSE_WIDTH, density: int = 1) -> str:
     """A scanner that advances one cell per tick.
 
     Position comes from the tick rather than from the clock, so the bar moves
     on every refresh even when the run itself is producing nothing. Stillness
     on screen then means the dashboard has stopped, which is a fact worth being
-    able to see.
+    able to see. Density greater than one (Grok crumb rate) adds extra marks
+    so a busy stream is visibly denser than a stall; Claude stays at 1.
     """
 
     span = max(1, width)
     cycle = max(1, 2 * span - 2)
     step = tick % cycle
     index = step if step < span else cycle - step
-    return "".join(_PULSE_MARK if i == index else _PULSE_RULE for i in range(span))
+    marks = {index}
+    extra = max(1, density)
+    if extra > 1:
+        stride = max(1, span // extra)
+        for offset in range(1, extra):
+            marks.add((index + offset * stride) % span)
+    return "".join(_PULSE_MARK if i in marks else _PULSE_RULE for i in range(span))
 
 
-def pulse_line(snapshot: RunSnapshot, tick: int, *, width: int = PULSE_WIDTH) -> str:
-    """The moving strip: the scanner, the refresh count, the observation time."""
+def pulse_density(crumb_rate: int) -> int:
+    """How many pulse marks a recent crumb count deserves. 1 is the idle scan."""
+
+    if crumb_rate <= 0:
+        return 1
+    if crumb_rate <= 2:
+        return 2
+    if crumb_rate <= 5:
+        return 3
+    return 4
+
+
+def pulse_line(
+    snapshot: RunSnapshot,
+    tick: int,
+    *,
+    width: int = PULSE_WIDTH,
+    grok: bool = False,
+    crumb_rate: int = 0,
+    crumb_count: int = 0,
+) -> str:
+    """The moving strip: the scanner, the refresh count, the observation time.
+
+    Grok mode adds a second, crumb-count-driven strip so a hung worker (tick
+    still walks, activity frozen) is distinct from a dead dashboard (both
+    frozen). Claude and Codex keep the single 1 Hz scanner.
+    """
 
     observed = snapshot.observed_at
     stamp = observed.strftime("%H:%M:%S") if observed is not None else "--:--:--"
-    return f"{pulse(tick, width=width)}  refresh {tick}  {stamp}"
+    scanner = pulse(tick, width=width, density=pulse_density(crumb_rate) if grok else 1)
+    if not grok:
+        return f"{scanner}  refresh {tick}  {stamp}"
+    activity = pulse(crumb_count, width=GROK_ACTIVITY_WIDTH)
+    return f"{scanner}  {activity}  refresh {tick}  {stamp}"
+
+
+def refresh_interval(*, grok: bool = False) -> float:
+    """Seconds between ticks. Only Grok mode drops below 1 Hz."""
+
+    return GROK_REFRESH_SECONDS if grok else REFRESH_SECONDS
 
 
 @dataclass(frozen=True)
@@ -474,6 +546,206 @@ class ReplaySource:
 
     log_path: Path
     repo: Path
+
+
+@dataclass(frozen=True)
+class Crumb:
+    """One Grok thought, text, or tool crumb for the rolling feed."""
+
+    kind: str
+    text: str
+    at: _dt.datetime | None = None
+    tool_id: str = ""
+    status: str = ""
+
+
+@dataclass(frozen=True)
+class ToolLight:
+    """One in-flight, done, or failed Grok tool, keyed by toolCallId."""
+
+    name: str
+    state: str
+    call_id: str = ""
+    detail: str = ""
+
+
+def journal_backend(repo: Path) -> str:
+    """The backend the journal names, if it names one.
+
+    CandidateJournal does not yet declare a backend field, so this reads the
+    raw JSON. A missing key is not a signal. `.ortusrc` is never consulted:
+    an idle repo must not flip into an empty NOC just because the project
+    default is grok.
+    """
+
+    path = Path(repo) / JOURNAL_RELATIVE_PATH
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    named = payload.get("backend")
+    if isinstance(named, str) and named.strip():
+        return named.strip().lower()
+    return ""
+
+
+def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) -> str:
+    """Backend implied by parsed event types, or empty when none have spoken."""
+
+    if crumbs or any(event.payload and is_grok_event(event.payload) for event in events):
+        return "grok"
+    kinds = {event.kind for event in events}
+    if kinds & {"item.started", "item.completed", "turn.completed"}:
+        return "codex"
+    if kinds & {"assistant", "user", "system", "result"}:
+        return "claude"
+    return ""
+
+
+def backend_conflict(journal: str, log: str) -> str:
+    """PLAN-GAP line when journal and log name different backends; else empty."""
+
+    if journal and log and journal != log:
+        return (
+            f"PLAN-GAP: journal backend={journal} disagrees with log backend={log}"
+        )
+    return ""
+
+
+def is_grok_mode(
+    snapshot: RunSnapshot,
+    *,
+    crumbs: tuple[Crumb, ...] = (),
+    journal: str = "",
+) -> bool:
+    """True when this run is a Grok run the dashboard should oversee.
+
+    Detected from parsed Grok event types or a journal that names backend
+    grok. A Claude log whose text contains the substring `thought` does not
+    trip this: detection never looks at unparsed text.
+    """
+
+    if crumbs:
+        return True
+    if any(event.payload and is_grok_event(event.payload) for event in snapshot.events):
+        return True
+    return journal == "grok" and snapshot.journal_present
+
+
+def classify_crumb(event: LogEvent) -> Crumb | None:
+    """Turn one incremental log event into a feed crumb, or None to drop it."""
+
+    payload = event.payload
+    if payload is None or not is_grok_event(payload):
+        return None
+    kind = event.kind or str(payload.get("type") or "")
+    if kind not in GROK_CRUMB_TYPES:
+        return None
+    if kind in ("thought", "text"):
+        data = payload.get("data")
+        body = " ".join(str(data).split()) if data is not None else ""
+        if not body:
+            return None
+        label = CRUMB_THINK if kind == "thought" else CRUMB_TEXT
+        return Crumb(
+            kind=kind,
+            text=f"{label}  {clip(body, CRUMB_TEXT_CHARS)}",
+            at=event.at,
+        )
+    if kind == "tool_call":
+        summary = summarize_grok_tool(payload)
+        call_id = str(payload.get("toolCallId") or payload.get("id") or summary)
+        return Crumb(
+            kind=kind,
+            text=f"{CRUMB_TOOL}  {clip(summary, CRUMB_TEXT_CHARS)}",
+            at=event.at,
+            tool_id=call_id,
+            status=TOOL_IN_FLIGHT,
+        )
+    status = str(payload.get("status") or "")
+    if status == "completed":
+        state = TOOL_DONE
+    elif status in ("failed", "error"):
+        state = TOOL_FAIL
+    else:
+        return None
+    call_id = str(payload.get("toolCallId") or payload.get("id") or "")
+    return Crumb(
+        kind=kind,
+        text=f"{state}  {CRUMB_TOOL}",
+        at=event.at,
+        tool_id=call_id,
+        status=state,
+    )
+
+
+def ingest_crumbs(
+    events: tuple[LogEvent, ...],
+    previous: tuple[Crumb, ...] = (),
+    tools: tuple[ToolLight, ...] = (),
+    *,
+    limit: int = CRUMB_FEED_LINES,
+) -> tuple[tuple[Crumb, ...], tuple[ToolLight, ...], int]:
+    """Fold incremental events into a bounded feed and a tool-row state.
+
+    Only `events` (this tick's tail) are classified, so a 10k burst never
+    re-parses the whole log. The feed keeps the newest `limit` crumbs.
+    """
+
+    arrived: list[Crumb] = []
+    lights = {light.call_id: light for light in tools if light.call_id}
+    unnamed = [light for light in tools if not light.call_id]
+    for event in events:
+        crumb = classify_crumb(event)
+        if crumb is None:
+            continue
+        arrived.append(crumb)
+        if crumb.kind == "tool_call":
+            name = crumb.text[len(CRUMB_TOOL) + 2 :] if crumb.text.startswith(f"{CRUMB_TOOL}  ") else crumb.text
+            lights[crumb.tool_id] = ToolLight(
+                name=name.split("  ", 1)[0] or "tool",
+                state=TOOL_IN_FLIGHT,
+                call_id=crumb.tool_id,
+                detail=name,
+            )
+        elif crumb.kind == "tool_call_update" and crumb.tool_id:
+            prior = lights.get(crumb.tool_id)
+            lights[crumb.tool_id] = ToolLight(
+                name=prior.name if prior is not None else CRUMB_TOOL,
+                state=crumb.status,
+                call_id=crumb.tool_id,
+                detail=prior.detail if prior is not None else "",
+            )
+    feed = (*previous, *arrived)[-max(1, limit) :]
+    ordered = (*unnamed, *lights.values())
+    return feed, ordered, len(arrived)
+
+
+def tool_row(tools: tuple[ToolLight, ...]) -> str:
+    """In-flight / done / fail lights for tools seen this run."""
+
+    if not tools:
+        return ""
+    parts = [f"{light.state} {light.name}" for light in tools]
+    return "tools  " + "  |  ".join(parts)
+
+
+def crumb_panel(
+    crumbs: tuple[Crumb, ...],
+    tools: tuple[ToolLight, ...] = (),
+    *,
+    limit: int = CRUMB_FEED_LINES,
+) -> str:
+    """Bounded newest-N feed plus the tool row. Empty when there are no crumbs."""
+
+    window = crumbs[-max(1, limit) :]
+    lines = [crumb.text for crumb in window]
+    row = tool_row(tools)
+    if row:
+        lines.append(row)
+    return "\n".join(lines)
 
 
 def resolve_replay(log: Path) -> ReplaySource:
@@ -1577,6 +1849,11 @@ def frame(
     verdict: VerdictState | None = None,
     workspaces: int | None = None,
     identity: IssueIdentity | None = None,
+    grok: bool = False,
+    crumbs: tuple[Crumb, ...] = (),
+    tools: tuple[ToolLight, ...] = (),
+    crumb_rate: int = 0,
+    conflict: str = "",
 ) -> Frame:
     """Build the frame for `snapshot` at `tick`. Pure: reads nothing, writes nothing.
 
@@ -1586,21 +1863,38 @@ def frame(
 
     The verdict state, the workspace count and the issue identity are passed in
     rather than read here, because all three come from disk or from bd and this
-    stays a pure function of what it is handed.
+    stays a pure function of what it is handed. Grok crumbs and tool lights
+    are likewise passed in: they accumulate across incremental tails and this
+    function must not re-parse the log.
     """
 
     state = verdict if verdict is not None else VerdictState()
+    action = action_panel(snapshot, replay=replay, workspaces=workspaces)
+    feed = crumb_panel(crumbs, tools) if grok and crumbs else NO_CRUMBS
+    if feed:
+        action = f"{action}\n\n{feed}"
+    warnings = warnings_panel(snapshot)
+    if conflict:
+        warnings = f"{warnings}\n{conflict}" if warnings else conflict
     return Frame(
         header=header_line(snapshot, replay, identity=identity),
-        current_action=action_panel(snapshot, replay=replay, workspaces=workspaces),
+        current_action=action,
         candidate=candidate_panel(snapshot),
         verdict=verdict_panel(snapshot, state),
-        warnings=warnings_panel(snapshot),
-        pulse=pulse_line(snapshot, tick, width=width),
+        warnings=warnings,
+        pulse=pulse_line(
+            snapshot,
+            tick,
+            width=width,
+            grok=grok,
+            crumb_rate=crumb_rate,
+            crumb_count=len(crumbs),
+        ),
         states=tuple(
             (spec.key, region_state(spec.key, snapshot, state, replay))
             for spec in REGIONS
         ),
+        crumbs=feed,
     )
 
 
@@ -1725,6 +2019,10 @@ def _shell() -> dict[str, type]:
             super().__init__()
             self.repo = Path(repo)
             self.refresh_seconds = refresh_seconds
+            #: Tests pin a long interval so they can drive ticks themselves.
+            #: Only the default 1 Hz loop may drop to Grok's faster cadence.
+            self._auto_refresh = refresh_seconds == REFRESH_SECONDS
+            self._refresh_timer: Any = None
             #: The pytest temporary root the current-action region counts as
             #: evidence. Resolved once rather than per tick, and injectable so a
             #: test names its own root instead of the host's.
@@ -1744,6 +2042,12 @@ def _shell() -> dict[str, type]:
             #: it is asked once per issue rather than once per refresh.
             self.identity = IssueIdentity()
             self.tick = 0
+            self.crumbs: tuple[Crumb, ...] = ()
+            self.tools: tuple[ToolLight, ...] = ()
+            self.crumb_rate = 0
+            self.grok = False
+            self.conflict = ""
+            self._crumb_log: Path | None = None
             self.last_frame = frame(
                 self.snapshot,
                 self.tick,
@@ -1764,7 +2068,12 @@ def _shell() -> dict[str, type]:
         def on_mount(self) -> None:
             self.theme = DARK_THEME
             self.refresh_run()
-            self.set_interval(self.refresh_seconds, self.refresh_run)
+            self._arm_refresh()
+
+        def _arm_refresh(self) -> None:
+            if self._refresh_timer is not None:
+                self._refresh_timer.stop()
+            self._refresh_timer = self.set_interval(self.refresh_seconds, self.refresh_run)
 
         def advance(self) -> Frame:
             """Read the next snapshot and build its frame. Renders nothing.
@@ -1790,6 +2099,30 @@ def _shell() -> dict[str, type]:
                     self.repo, self.snapshot, previous=self.identity
                 )
             self.workspaces = workspace_count(self.workspace_root)
+            if self.snapshot.log_path != self._crumb_log:
+                self.crumbs = ()
+                self.tools = ()
+                self._crumb_log = self.snapshot.log_path
+            named = journal_backend(self.repo)
+            seen = log_backend(self.snapshot.events, self.crumbs)
+            self.conflict = backend_conflict(named, seen)
+            self.crumbs, self.tools, arrived = ingest_crumbs(
+                self.snapshot.events, self.crumbs, self.tools
+            )
+            self.crumb_rate = arrived
+            # Log crumbs win for presentation; a journal/log mismatch is
+            # recorded on the frame rather than resolved by dropping either.
+            self.grok = is_grok_mode(
+                self.snapshot,
+                crumbs=self.crumbs,
+                journal="" if self.conflict else named,
+            )
+            if self._auto_refresh:
+                wanted = refresh_interval(grok=self.grok)
+                if wanted != self.refresh_seconds:
+                    self.refresh_seconds = wanted
+                    if self.is_running:
+                        self._arm_refresh()
             self.tick += 1
             self.last_frame = frame(
                 self.snapshot,
@@ -1798,6 +2131,11 @@ def _shell() -> dict[str, type]:
                 verdict=self.verdict,
                 workspaces=self.workspaces,
                 identity=self.identity,
+                grok=self.grok,
+                crumbs=self.crumbs,
+                tools=self.tools,
+                crumb_rate=self.crumb_rate,
+                conflict=self.conflict,
             )
             return self.last_frame
 

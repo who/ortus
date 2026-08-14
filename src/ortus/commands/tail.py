@@ -62,6 +62,10 @@ import typer
 from ortus.core import output
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.repo import resolve_repo
+from ortus.core.runstate import (
+    is_grok_event as _is_grok_event,
+    summarize_grok_tool as _summarize_grok_tool,
+)
 
 PREFIXES = ("grind-", "goal-", "ralph-", "plan-")
 POLL_SECONDS = 1.0
@@ -667,30 +671,6 @@ _ERROR_RE = re.compile(r"(error|Error|ERROR)")
 _SUCCESS_RE = re.compile(r"(success|Success|completed)")
 _GRIND_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} ")
 
-# Grok headless crumbs use these top-level `type` values. Claude stream-json
-# never emits them at the object root (its `text` lives inside assistant
-# content parts), so this set is a safe detector on the shared format path.
-_GROK_EVENT_TYPES = frozenset(
-    {
-        "thought",
-        "text",
-        "tool_call",
-        "tool_call_update",
-        "usage",
-        "available_commands",
-        "plan",
-    }
-)
-_GROK_TOOL_DETAIL_KEYS = (
-    "command",
-    "target_file",
-    "file_path",
-    "query",
-    "url",
-    "tool_name",
-    "pattern",
-)
-
 
 def _render_plain(line: str, palette: _Palette) -> str:
     if not line:
@@ -738,26 +718,6 @@ class _GrokCoalesce:
         if "\n" in chunk:
             out.extend(self.flush(palette))
         return out
-
-
-def _is_grok_event(obj: object) -> bool:
-    return isinstance(obj, dict) and obj.get("type") in _GROK_EVENT_TYPES
-
-
-def _summarize_grok_tool(obj: dict) -> str:
-    name = str(obj.get("toolName") or obj.get("title") or "tool")
-    raw = obj.get("rawInput")
-    if not isinstance(raw, dict):
-        return name
-    detail = ""
-    for key in _GROK_TOOL_DETAIL_KEYS:
-        value = raw.get(key)
-        if value:
-            detail = str(value).replace("\n", " ")[:160]
-            break
-    if not detail:
-        return name
-    return f"{name}  {detail}"
 
 
 def _render_grok_object(

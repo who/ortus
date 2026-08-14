@@ -28,7 +28,13 @@ from typer.models import OptionInfo
 
 from ortus.commands import dashboard as dash
 from ortus.commands import grind
-from ortus.core.runstate import RunSnapshot, RunWarning, read_snapshot
+from ortus.core.runstate import (
+    LogEvent,
+    RunSnapshot,
+    RunWarning,
+    classify_line,
+    read_snapshot,
+)
 from ortus.core.transaction import CandidateJournal, JournalStore
 from ortus.core.verdict import Verdict, render_report
 
@@ -2408,3 +2414,351 @@ def test_header_renders_an_unrecognised_phase_verbatim() -> None:
     snapshot = _header_snapshot(phase="some-future-phase")
     assert "phase some-future-phase" in dash.header_line(snapshot)
     assert "unknown" not in dash.header_line(snapshot)
+
+
+# ---------------------------------------------------------------------------
+# ortus-dp36: Grok crumb NOC
+# ---------------------------------------------------------------------------
+
+
+def _event(payload: dict[str, Any]) -> LogEvent:
+    event = classify_line(json.dumps(payload, separators=(",", ":")))
+    assert event is not None
+    return event
+
+
+def _grok_body(*lines: str) -> str:
+    return "[2026-08-08 22:10:00] iter 1: worker started\n" + "".join(
+        line if line.endswith("\n") else line + "\n" for line in lines
+    )
+
+
+_GROK_THOUGHT = '{"type":"thought","data":"The user wants a plan."}'
+_GROK_TEXT = '{"type":"text","data":"I will inspect the leftover state."}'
+_GROK_TOOL = (
+    '{"type":"tool_call","toolCallId":"c1","toolName":"read_file",'
+    '"rawInput":{"target_file":"src/ortus/commands/dashboard.py"}}'
+)
+_GROK_DONE = '{"type":"tool_call_update","toolCallId":"c1","status":"completed"}'
+_GROK_FAIL_TOOL = (
+    '{"type":"tool_call","toolCallId":"c2","toolName":"search_tool",'
+    '"rawInput":{"query":"codegraph explore"}}'
+)
+_GROK_FAIL = '{"type":"tool_call_update","toolCallId":"c2","status":"failed"}'
+_GROK_OPEN_TOOL = (
+    '{"type":"tool_call","toolCallId":"c3","toolName":"run_terminal_command",'
+    '"rawInput":{"command":"bd prime"}}'
+)
+_CLAUDE_TURN = (
+    '{"type":"assistant","message":{"role":"assistant","content":'
+    '[{"type":"text","text":"reading the packet about thought and tool_call"}]}}'
+)
+_CODEX_ITEM = (
+    '{"type":"item.started","item":{"type":"command_execution","command":"ls"}}'
+)
+
+
+def _painted_repo(tmp_path: Path, name: str, body: str, *, backend: str = "") -> Path:
+    repo = _acting_repo(tmp_path, name, body)
+    if backend:
+        path = JournalStore(repo).path
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["backend"] = backend
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return repo
+
+
+def test_grok_crumb_snapshot_paints_feed_and_rate_sensitive_pulse(
+    tmp_path: Path,
+) -> None:
+    """AC-1: Grok crumbs paint a feed; more crumbs change the pulse."""
+
+    repo = _painted_repo(
+        tmp_path,
+        "grok-live",
+        _grok_body(_GROK_THOUGHT, _GROK_TEXT, _GROK_TOOL, _GROK_DONE),
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    first = app.advance()
+
+    assert app.grok is True
+    assert first.crumbs
+    assert "think  The user wants a plan." in first.crumbs
+    assert "text  I will inspect the leftover state." in first.crumbs
+    assert "tool  read_file" in first.crumbs
+    assert "done  tool" in first.crumbs
+    assert first.crumbs in first.current_action
+    assert dash.CRUMB_THINK in first.current_action
+
+    extra = (
+        '{"type":"thought","data":"another crumb arrives"}\n'
+        '{"type":"thought","data":"and another"}\n'
+        '{"type":"thought","data":"and a third"}\n'
+        '{"type":"thought","data":"and a fourth"}\n'
+        '{"type":"thought","data":"and a fifth"}\n'
+        '{"type":"thought","data":"and a sixth"}\n'
+    )
+    log = repo / "logs" / "grind-20260808-221000.log"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(extra)
+    second = app.advance()
+
+    assert "think  another crumb arrives" in second.crumbs
+    assert second.pulse != first.pulse
+    # Same tick index is not the point: crumb rate and crumb count move the
+    # Grok pulse independently of the 1 Hz scanner.
+    sparse = dash.frame(app.snapshot, second_tick := app.tick)
+    grok_same_tick = dash.frame(
+        app.snapshot,
+        second_tick,
+        grok=True,
+        crumbs=app.crumbs,
+        tools=app.tools,
+        crumb_rate=app.crumb_rate,
+    )
+    assert sparse.pulse != grok_same_tick.pulse
+    assert grok_same_tick.crumbs == second.crumbs
+
+
+def test_claude_snapshot_same_panels_has_no_crumb_feed(tmp_path: Path) -> None:
+    """AC-1: Claude of the same header/action/candidate/verdict/warnings is sparse."""
+
+    claude_repo = _painted_repo(tmp_path, "claude-same", _grok_body(_CLAUDE_TURN))
+    grok_events = tuple(
+        event
+        for event in (
+            _event({"type": "thought", "data": "The user wants a plan."}),
+            _event({"type": "text", "data": "I will inspect the leftover state."}),
+            _event(
+                {
+                    "type": "tool_call",
+                    "toolCallId": "c1",
+                    "toolName": "read_file",
+                    "rawInput": {"target_file": "src/ortus/commands/dashboard.py"},
+                }
+            ),
+            _event({"type": "tool_call_update", "toolCallId": "c1", "status": "completed"}),
+        )
+    )
+    crumbs, tools, arrived = dash.ingest_crumbs(grok_events)
+    assert arrived == 4
+
+    app = dash.DashboardApp(claude_repo, refresh_seconds=3600)
+    claude = app.advance()
+    grok = dash.frame(
+        app.snapshot,
+        app.tick,
+        grok=True,
+        crumbs=crumbs,
+        tools=tools,
+        crumb_rate=arrived,
+    )
+
+    assert claude.header == dash.frame(app.snapshot, app.tick).header
+    assert claude.current_action == dash.action_panel(
+        app.snapshot, workspaces=app.workspaces
+    )
+    assert claude.candidate == grok.candidate
+    assert claude.verdict == grok.verdict
+    assert claude.warnings == grok.warnings
+    assert claude.crumbs == ""
+    assert dash.CRUMB_THINK not in claude.current_action
+    assert "tool  read_file" not in claude.current_action
+    assert grok.crumbs
+    assert grok.current_action != claude.current_action
+    assert claude.pulse == dash.pulse_line(app.snapshot, app.tick)
+    assert grok.pulse != claude.pulse
+    assert app.grok is False
+
+
+def test_grok_feed_is_bounded_to_newest_n() -> None:
+    """AC-2: more crumbs than the region keeps only the newest N."""
+
+    burst = tuple(
+        _event({"type": "thought", "data": f"crumb {index:04d}"}) for index in range(40)
+    )
+    feed, tools, arrived = dash.ingest_crumbs(burst)
+    assert arrived == 40
+    assert len(feed) == dash.CRUMB_FEED_LINES
+    assert "crumb 0000" not in feed[0].text
+    assert f"crumb {39:04d}" in feed[-1].text
+    panel = dash.crumb_panel(feed, tools)
+    assert panel.count("\n") + 1 <= dash.CRUMB_FEED_LINES + 1
+    assert "crumb 0000" not in panel
+    assert "crumb 0039" in panel
+
+    more = tuple(
+        _event({"type": "thought", "data": f"later {index:04d}"}) for index in range(15)
+    )
+    feed, _, _ = dash.ingest_crumbs(more, feed)
+    assert len(feed) == dash.CRUMB_FEED_LINES
+    grown = dash.crumb_panel(feed)
+    assert len(grown) <= len(panel) + 80
+    assert "later 0014" in grown
+    assert "crumb 0000" not in grown
+
+
+def test_only_grok_mode_shortens_refresh(tmp_path: Path) -> None:
+    """AC-3: Claude and Codex stay at 1 Hz; only Grok drops the interval."""
+
+    assert dash.refresh_interval() == dash.REFRESH_SECONDS == 1.0
+    assert dash.refresh_interval(grok=False) == 1.0
+    assert dash.refresh_interval(grok=True) == dash.GROK_REFRESH_SECONDS
+    assert dash.GROK_REFRESH_SECONDS < dash.REFRESH_SECONDS
+
+    claude = _painted_repo(tmp_path, "hz-claude", _grok_body(_CLAUDE_TURN))
+    codex = _painted_repo(tmp_path, "hz-codex", _grok_body(_CODEX_ITEM))
+    grok = _painted_repo(
+        tmp_path, "hz-grok", _grok_body(_GROK_THOUGHT, _GROK_TEXT, _GROK_TOOL)
+    )
+
+    claude_app = dash.DashboardApp(claude)
+    codex_app = dash.DashboardApp(codex)
+    grok_app = dash.DashboardApp(grok)
+    claude_app.advance()
+    codex_app.advance()
+    grok_app.advance()
+
+    assert claude_app.grok is False
+    assert codex_app.grok is False
+    assert grok_app.grok is True
+    assert claude_app.refresh_seconds == dash.REFRESH_SECONDS
+    assert codex_app.refresh_seconds == dash.REFRESH_SECONDS
+    assert grok_app.refresh_seconds == dash.GROK_REFRESH_SECONDS
+    assert dash.pulse_line(claude_app.snapshot, 1) == (
+        f"{dash.pulse(1)}  refresh 1  {claude_app.snapshot.observed_at.strftime('%H:%M:%S')}"
+        if claude_app.snapshot.observed_at is not None
+        else f"{dash.pulse(1)}  refresh 1  --:--:--"
+    )
+
+
+def test_grok_mode_keeps_readonly_and_has_no_emoji(tmp_path: Path) -> None:
+    """AC-4: Grok strings stay pictograph-free; every bd vector stays sandboxed."""
+
+    repo = _painted_repo(
+        tmp_path,
+        "grok-contract",
+        _grok_body(
+            _GROK_THOUGHT,
+            _GROK_TEXT,
+            _GROK_TOOL,
+            _GROK_DONE,
+            _GROK_FAIL_TOOL,
+            _GROK_FAIL,
+            _GROK_OPEN_TOOL,
+        ),
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    painted = app.advance()
+
+    for text in painted.texts():
+        assert _emoji_in(text) == [], text
+    assert _emoji_in(painted.crumbs) == []
+    assert _emoji_in(dash.tool_row(app.tools)) == []
+    assert dash.bd_argv("show", "ortus-dp36", "--json")[:3] == [
+        "bd",
+        "--readonly",
+        "--sandbox",
+    ]
+    assert _literal_sites("bd") == ["bd_argv"]
+    assert _literal_sites("git") == []
+
+
+def test_claude_thought_substring_does_not_trip_grok_mode(tmp_path: Path) -> None:
+    """Detection is the parsed JSON type, not the word thought in a Claude log."""
+
+    repo = _painted_repo(tmp_path, "false-thought", _grok_body(_CLAUDE_TURN))
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+
+    assert "thought" in frame.current_action or "thought" in app.snapshot.latest_action
+    assert app.grok is False
+    assert frame.crumbs == ""
+    assert dash.is_grok_mode(app.snapshot) is False
+
+
+def test_idle_repository_does_not_enter_grok_mode(tmp_path: Path) -> None:
+    """An idle repo stays sparse even when the project default might be grok."""
+
+    repo = _quiet_repo(tmp_path)
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+    assert app.grok is False
+    assert frame.crumbs == ""
+    assert dash.is_grok_mode(app.snapshot, journal="grok") is False
+
+
+def test_journal_backend_grok_without_crumbs_stays_sparse(tmp_path: Path) -> None:
+    """Scheduler-only grok journal: Grok refresh, no empty crumb feed."""
+
+    repo = _painted_repo(tmp_path, "journal-grok", _STARTED, backend="grok")
+    app = dash.DashboardApp(repo)
+    frame = app.advance()
+    assert dash.journal_backend(repo) == "grok"
+    assert app.grok is True
+    assert frame.crumbs == ""
+    assert dash.CRUMB_THINK not in frame.current_action
+    assert app.refresh_seconds == dash.GROK_REFRESH_SECONDS
+
+
+def test_tool_row_tracks_inflight_done_and_fail() -> None:
+    """tool_call lights the row; tool_call_update settles done or fail."""
+
+    events = (
+        _event(
+            {
+                "type": "tool_call",
+                "toolCallId": "c1",
+                "toolName": "read_file",
+                "rawInput": {"target_file": "a.py"},
+            }
+        ),
+        _event({"type": "tool_call_update", "toolCallId": "c1", "status": "completed"}),
+        _event(
+            {
+                "type": "tool_call",
+                "toolCallId": "c2",
+                "toolName": "search_tool",
+                "rawInput": {"query": "x"},
+            }
+        ),
+        _event({"type": "tool_call_update", "toolCallId": "c2", "status": "failed"}),
+        _event(
+            {
+                "type": "tool_call",
+                "toolCallId": "c3",
+                "toolName": "run_terminal_command",
+                "rawInput": {"command": "bd prime"},
+            }
+        ),
+        _event({"type": "tool_call_update", "toolCallId": "c3", "status": None}),
+        _event({"type": "usage", "usage": {"input_tokens": 1}}),
+        _event({"type": "available_commands", "tools": ["read_file"]}),
+    )
+    feed, tools, arrived = dash.ingest_crumbs(events)
+    assert arrived == 5
+    row = dash.tool_row(tools)
+    assert "done read_file" in row
+    assert "fail search_tool" in row
+    assert "in-flight run_terminal_command" in row
+    assert all(crumb.kind != "usage" for crumb in feed)
+    assert dash.crumb_panel((), tools).endswith(row)
+
+
+def test_backend_conflict_is_recorded_not_silenced(tmp_path: Path) -> None:
+    """Journal vs log disagreement is named; log crumbs still paint."""
+
+    repo = _painted_repo(
+        tmp_path,
+        "conflict",
+        _grok_body(_GROK_THOUGHT),
+        backend="claude",
+    )
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+    assert "PLAN-GAP" in app.conflict
+    assert "journal backend=claude" in app.conflict
+    assert "log backend=grok" in app.conflict
+    assert app.conflict in frame.warnings
+    assert app.grok is True
+    assert "think" in frame.crumbs

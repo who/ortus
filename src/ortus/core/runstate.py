@@ -87,6 +87,33 @@ _ORTUS_LINE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] ?(.*)$")
 _ORTUS_STAMP = "%Y-%m-%d %H:%M:%S"
 _MAX_TEXT_CHARS = 200
 
+#: Grok headless crumbs use these top-level `type` values. Claude stream-json
+#: never emits them at the object root (its `text` lives inside assistant
+#: content parts), so this set is a safe detector on a parsed JSON object.
+GROK_EVENT_TYPES = frozenset(
+    {
+        "thought",
+        "text",
+        "tool_call",
+        "tool_call_update",
+        "usage",
+        "available_commands",
+        "plan",
+    }
+)
+#: The crumbs a dashboard feed renders. `usage` and `available_commands` stay
+#: dropped; `plan` is system bookkeeping, not an activity crumb.
+GROK_CRUMB_TYPES = frozenset({"thought", "text", "tool_call", "tool_call_update"})
+_GROK_TOOL_DETAIL_KEYS = (
+    "command",
+    "target_file",
+    "file_path",
+    "query",
+    "url",
+    "tool_name",
+    "pattern",
+)
+
 
 class Writer(str, Enum):
     """Which process appended a log line."""
@@ -260,6 +287,35 @@ def read_log_tail(
             clock = event.at
         events.append(event)
     return LogTail(tuple(events), start + consumed, truncated)
+
+
+def is_grok_event(obj: object) -> bool:
+    """True when `obj` is a parsed Grok streaming-json event.
+
+    Detection is the object's top-level `type`, never a substring of the
+    rendered text: a Claude assistant turn that happens to say "thought" is
+    not a Grok crumb.
+    """
+
+    return isinstance(obj, dict) and obj.get("type") in GROK_EVENT_TYPES
+
+
+def summarize_grok_tool(obj: dict[str, Any]) -> str:
+    """One-line name plus the first useful argument of a Grok tool_call."""
+
+    name = str(obj.get("toolName") or obj.get("title") or "tool")
+    raw = obj.get("rawInput")
+    if not isinstance(raw, dict):
+        return name
+    detail = ""
+    for key in _GROK_TOOL_DETAIL_KEYS:
+        value = raw.get(key)
+        if value:
+            detail = str(value).replace("\n", " ")[:160]
+            break
+    if not detail:
+        return name
+    return f"{name}  {detail}"
 
 
 def classify_line(line: str) -> LogEvent | None:
@@ -456,6 +512,40 @@ def _describe(payload: dict[str, Any], kind: str) -> tuple[str, bool]:
         return _describe_codex_item(payload.get("item"))
     if kind == "turn.completed":
         return "turn completed", True
+    if is_grok_event(payload) or kind in GROK_EVENT_TYPES:
+        return _describe_grok(payload, kind)
+    return _clip(kind or "event"), False
+
+
+def _describe_grok(payload: dict[str, Any], kind: str) -> tuple[str, bool]:
+    """Describe a Grok crumb. Only `tool_call` is an action.
+
+    Thought and text arrive at high frequency and must not displace the
+    latest tool; they feed the dashboard crumb surface instead. Usage and
+    available_commands carry no operator-facing text.
+    """
+
+    if kind in ("usage", "available_commands"):
+        return "", False
+    if kind == "thought":
+        data = payload.get("data")
+        body = "" if data is None else str(data)
+        return _clip(f"think {body}" if body else "think"), False
+    if kind == "text":
+        data = payload.get("data")
+        body = "" if data is None else str(data)
+        return _clip(body or "text"), False
+    if kind == "tool_call":
+        return _clip(summarize_grok_tool(payload)), True
+    if kind == "tool_call_update":
+        status = str(payload.get("status") or "")
+        if status == "completed":
+            return "tool completed", False
+        if status in ("failed", "error"):
+            return "tool failed", False
+        return "tool update", False
+    if kind == "plan":
+        return "plan", False
     return _clip(kind or "event"), False
 
 
