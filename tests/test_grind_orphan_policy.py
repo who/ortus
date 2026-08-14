@@ -1,16 +1,15 @@
-"""Integration tests for --orphan-policy={warn,revert,escalate} (ortus-3ico #4).
+"""Integration tests for leftover-claim treatment under the on-main contract.
 
-Each test seeds a tiny bd workspace, installs a fake claude that CLAIMS
-an issue but doesn't close it, then verifies the configured policy is
-honored by inspecting bd state after the iteration.
+Since the grind-roots rework the worker owns selection and lifecycle: it
+continues a leftover in_progress claim or claims from `bd ready`, and grind
+judges only observable bd status after the process exits. A claimed-but-
+unclosed issue is therefore not an orphan — it is a live claim left for the
+next context window, and the next grind invocation is that window.
 
-Since ortus-pzfd.5 the default harness-select path is a candidate transaction:
-the harness claims, a worker edits, a fresh verifier judges, and Ortus alone
-closes. A claimed-but-unclosed issue there is not an orphan — it is a
-transaction awaiting its verdict. The per-iteration orphan branch therefore
-belongs to the legacy `--condition` path, where the worker still owns
-selection and lifecycle; those tests pass `-c` for exactly that reason. The
-startup sweep is lifecycle-independent and still runs on the default path.
+`--orphan-policy` still exists, but only the startup sweep consults it, and
+`revert` is coerced to `warn` there: reverting a live unfinished claim would
+discard the routing the worker recorded in bd. `escalate` still hands the
+issue to a human when the operator asked for that policy.
 """
 
 from __future__ import annotations
@@ -50,13 +49,24 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
     .claude, rather than a `bd init` plus a `bd create` (ortus-apmf).
     """
     workspace = copy_bd_workspace(tmp_path / "orphan-policy", "leaf")
-    return workspace.path, workspace.issues[0]
+    repo = workspace.path
+    (repo / ".gitignore").write_text(
+        "logs/\n.cache/\n.beads/ortus.flock\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, workspace.issues[0]
 
 
 def _claim_only_shim(tmp_path: Path) -> Path:
     return make_inline_python_shim(
         tmp_path,
-        "claude-orphans",
+        "claude-claims",
         textwrap.dedent(
             """\
             import json
@@ -70,9 +80,19 @@ def _claim_only_shim(tmp_path: Path) -> Path:
                     ["bd", "update", first, "--status", "in_progress"],
                     check=True, stdout=subprocess.DEVNULL,
                 )
-                print(f"claude (orphan-test) claimed {first} and bailed", flush=True)
+                print(f"claude (claim-test) claimed {first} and bailed", flush=True)
             """
         ),
+    )
+
+
+def _no_op_shim(tmp_path: Path) -> Path:
+    """A fake claude that does nothing — isolates the startup sweep's effect
+    from any per-iteration mutation."""
+    return make_inline_python_shim(
+        tmp_path,
+        "claude-noop",
+        'print("fake-claude (sweep-test) did nothing", flush=True)\n',
     )
 
 
@@ -105,156 +125,59 @@ def _bd_labels(repo: Path, issue_id: str) -> list[str]:
     return _bd_show(repo, issue_id).get("labels") or []
 
 
-# --- warn -----------------------------------------------------------------
+def _grind_log(repo: Path) -> str:
+    return sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
 
 
-def test_orphan_policy_warn_leaves_issue_in_progress(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--orphan-policy=warn: log only; bd state stays in_progress."""
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--iterations",
-            "1",
-            "--idle-sleep",
-            "0",
-            "--orphan-policy",
-            "warn",
-            "-c",
-            "Close exactly one bd issue you select yourself.",
-        ],
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-
-    issue = _bd_show(repo, issue_id)
-    assert issue["status"] == "in_progress", (
-        f"warn policy should NOT mutate bd state; got status={issue['status']}"
-    )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert "WARN orphan claim" in log
-    assert f"warn: orphan claim on {issue_id}" in log
-
-
-# --- revert ---------------------------------------------------------------
-
-
-def test_orphan_policy_revert_returns_issue_to_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--orphan-policy=revert: bd update <id> --status=open is called."""
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--iterations",
-            "1",
-            "--idle-sleep",
-            "0",
-            "--orphan-policy",
-            "revert",
-            "-c",
-            "Close exactly one bd issue you select yourself.",
-        ],
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-
-    issue = _bd_show(repo, issue_id)
-    assert issue["status"] == "open", (
-        f"revert policy should restore status to open; got status={issue['status']}"
-    )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert f"revert: {issue_id}" in log
-
-
-# --- escalate -------------------------------------------------------------
-
-
-def test_orphan_policy_escalate_labels_issue_human(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--orphan-policy=escalate: bd label add <id> human is called."""
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--iterations",
-            "1",
-            "--idle-sleep",
-            "0",
-            "--orphan-policy",
-            "escalate",
-            "-c",
-            "Close exactly one bd issue you select yourself.",
-        ],
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-
-    labels = _bd_labels(repo, issue_id)
-    assert "human" in labels, (
-        f"escalate policy should add 'human' label; got labels={labels}"
-    )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert f"escalate: {issue_id}" in log
-
-
-# --- startup orphan sweep (cross-restart case) ----------------------------
-
-
-def _no_op_shim(tmp_path: Path) -> Path:
-    """A fake claude that does nothing — isolates the sweep's effect from
-    any per-iteration mutation."""
-    return make_inline_python_shim(
-        tmp_path,
-        "claude-noop",
-        'print("fake-claude (sweep-test) did nothing", flush=True)\n',
-    )
-
-
-def test_startup_sweep_reverts_cross_restart_orphan_under_revert_policy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Cross-restart scenario: prior grind was killed mid-claim; the new
-    grind's startup sweep must apply --orphan-policy=revert and flip the
-    leaked in_progress issue back to open, without operator intervention.
-
-    Reproduces the failure mode where compute_delta (after - before) hides
-    pre-existing in_progress ids in `before.in_progress_ids` so the
-    per-iteration orphan detector can never surface them.
-    """
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    # Simulate the prior killed grind: pre-claim the issue before grind starts.
+def _pre_claim(repo: Path, issue_id: str) -> None:
+    """Simulate a prior grind window that claimed the issue and exited."""
     subprocess.run(
         ["bd", "update", issue_id, "--status", "in_progress"],
         cwd=str(repo),
         check=True,
         capture_output=True,
     )
-    pre = _bd_show(repo, issue_id)
-    assert pre["status"] == "in_progress", "pre-claim setup failed"
 
-    _install_shim(monkeypatch, _no_op_shim(tmp_path))
+
+# --- per-iteration: a claim left by the worker ends the window --------------
+
+
+def test_worker_claim_left_in_progress_ends_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default path: the worker claims and exits without closing. Grind judges
+    bd status, leaves the claim for the next window, and ends the run."""
+    repo, issue_id = _seed_repo(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
+
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--iterations", "3", "--idle-sleep", "0"],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    issue = _bd_show(repo, issue_id)
+    assert issue["status"] == "in_progress", (
+        f"a live claim must stay claimed for the next window; got {issue['status']}"
+    )
+    log = _grind_log(repo)
+    assert f"left {issue_id} in_progress for the next window" in log
+    # One context window per leftover claim: the run ends rather than
+    # respawning against the same claim, even with iteration budget left.
+    assert "iter 2" not in log
+
+
+def test_legacy_condition_path_leaves_claim_for_next_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy --condition path judges by snapshot delta rather than a
+    targeted `bd show`, and reaches the same verdict: claim stays, run ends."""
+    repo, issue_id = _seed_repo(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
 
     result = runner.invoke(
         app,
@@ -265,125 +188,30 @@ def test_startup_sweep_reverts_cross_restart_orphan_under_revert_policy(
             "1",
             "--idle-sleep",
             "0",
-            "--orphan-policy",
-            "revert",
+            "-c",
+            "Close exactly one bd issue you select yourself.",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert "startup orphan sweep" in log, (
-        "sweep should log distinctly so operators can see the cross-restart "
-        f"recovery; got log:\n{log}"
-    )
-    assert issue_id in log
-    assert f"revert: {issue_id}" in log
-    # The sweep's effect is observable in the post-sweep re-snapshot: the leaked
-    # claim is gone before any worker runs. The run then legitimately re-claims
-    # the now-open issue as a fresh candidate transaction, which is the point —
-    # recovery hands the work back to the loop instead of stranding it.
-    assert "post-sweep state: open=1 in_progress=0" in log
     assert _bd_show(repo, issue_id)["status"] == "in_progress"
+    log = _grind_log(repo)
+    assert f"left {issue_id} in_progress for the next window" in log
 
 
-def test_startup_sweep_warn_logs_orphan_without_mutating(
+# --- startup: a leftover claim from a prior window --------------------------
+
+
+def test_startup_leftover_claim_is_not_reverted_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With warn policy, sweep still surfaces cross-restart orphans in the
-    log (so operators are no longer silent-spinning) but does not mutate bd."""
+    """Cross-restart scenario: a prior window claimed and exited. The new
+    grind names the leftover claim at startup and must NOT revert it — a live
+    unfinished claim is not an orphan."""
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-    subprocess.run(
-        ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    _install_shim(monkeypatch, _no_op_shim(tmp_path))
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--iterations",
-            "1",
-            "--idle-sleep",
-            "0",
-            "--orphan-policy",
-            "warn",
-        ],
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-
-    issue = _bd_show(repo, issue_id)
-    assert issue["status"] == "in_progress", (
-        "warn policy must not mutate bd state at sweep time either"
-    )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert "startup orphan sweep" in log
-    assert f"warn: orphan claim on {issue_id}" in log
-
-
-def test_startup_sweep_escalate_labels_cross_restart_orphan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Escalate policy at sweep time pushes the cross-restart orphan to
-    the human queue so the agent loop stops touching it."""
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    subprocess.run(
-        ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
-    _install_shim(monkeypatch, _no_op_shim(tmp_path))
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--iterations",
-            "1",
-            "--idle-sleep",
-            "0",
-            "--orphan-policy",
-            "escalate",
-        ],
-    )
-    assert result.exit_code == 0, result.stdout + result.stderr
-
-    labels = _bd_labels(repo, issue_id)
-    assert "human" in labels, (
-        f"escalate at sweep time should add 'human' label; got labels={labels}"
-    )
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert "startup orphan sweep" in log
-    assert f"escalate: {issue_id}" in log
-
-
-def test_default_orphan_policy_is_revert_for_cross_restart_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No --orphan-policy flag → cross-restart orphans should auto-revert.
-
-    This is the Option-3 ride-along behavior change: the default shifted
-    from warn (silent spin) to revert (auto-recovery) so the most common
-    grind invocation no longer wedges on a killed prior session.
-    """
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    subprocess.run(
-        ["bd", "update", issue_id, "--status", "in_progress"],
-        cwd=str(repo),
-        check=True,
-        capture_output=True,
-    )
+    _pre_claim(repo, issue_id)
     _install_shim(monkeypatch, _no_op_shim(tmp_path))
 
     result = runner.invoke(
@@ -392,8 +220,82 @@ def test_default_orphan_policy_is_revert_for_cross_restart_recovery(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    log = sorted((repo / "logs").glob("grind-*.log"))[-1].read_text(encoding="utf-8")
-    assert f"revert: {issue_id}" in log, (
-        f"default policy should revert cross-restart orphans; got log:\n{log}"
+    log = _grind_log(repo)
+    assert "startup leftover claim(s)" in log, (
+        f"startup should name the leftover claim; got log:\n{log}"
     )
-    assert "post-sweep state: open=1 in_progress=0" in log
+    assert issue_id in log
+    assert f"revert: {issue_id}" not in log, (
+        "revert must never fire on a live claim"
+    )
+    assert _bd_show(repo, issue_id)["status"] == "in_progress"
+
+
+def test_startup_revert_policy_is_coerced_to_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--orphan-policy=revert on a leftover claim degrades to warn: the claim
+    is logged, not mutated. Reverting would erase the routing the worker
+    recorded in bd."""
+    repo, issue_id = _seed_repo(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    _pre_claim(repo, issue_id)
+    _install_shim(monkeypatch, _no_op_shim(tmp_path))
+
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "revert",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _grind_log(repo)
+    assert f"warn: orphan claim on {issue_id}" in log
+    assert f"revert: {issue_id}" not in log
+    assert _bd_show(repo, issue_id)["status"] == "in_progress", (
+        "revert policy must not mutate a live claim"
+    )
+
+
+def test_startup_escalate_labels_leftover_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Escalate stays honored at startup: the operator explicitly asked for
+    leftover claims to be handed to the human queue."""
+    repo, issue_id = _seed_repo(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    _pre_claim(repo, issue_id)
+    _install_shim(monkeypatch, _no_op_shim(tmp_path))
+
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--orphan-policy",
+            "escalate",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    labels = _bd_labels(repo, issue_id)
+    assert "human" in labels, (
+        f"escalate policy should add 'human' label; got labels={labels}"
+    )
+    log = _grind_log(repo)
+    assert "startup leftover claim(s)" in log
+    assert f"escalate: {issue_id}" in log

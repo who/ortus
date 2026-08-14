@@ -1,11 +1,12 @@
 """Integration tests for --worker-timeout: per-iteration worker watchdog (ortus-w2ib).
 
 A worker subprocess that is stuck-but-alive used to hang the entire grind
-loop indefinitely — orphan-policy and idle-sleep only run AFTER the worker
+loop indefinitely — post-exit judging and idle-sleep only run AFTER the worker
 exits, so a hung worker meant a human had to kill it by hand. --worker-timeout
 hard-caps the iteration: the orchestrator SIGTERM/SIGKILLs the worker's whole
-process group on exceed, logs the kill distinctly, then runs the SAME
-post-iteration recovery as a clean exit (bd-state delta + orphan-policy).
+process group on exceed, logs the kill distinctly, then judges observable bd
+status exactly like a clean exit (closed is a win; a claim left in_progress
+stays claimed for the next window; open is no-change).
 
 Each test installs a fake claude that hangs (sleeps far longer than the small
 --worker-timeout) and confirms grind kills it, logs the TIMEOUT, recovers from
@@ -30,12 +31,7 @@ from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from ortus.core.transaction import CandidateJournal, JournalStore
-from tests._shims import (
-    install_machine_checks,
-    make_inline_python_shim,
-    post_completion_comment,
-)
+from tests._shims import make_inline_python_shim
 from tests.conftest import copy_bd_workspace
 
 
@@ -60,7 +56,18 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
     `bd create` at roughly a second each (ortus-apmf).
     """
     workspace = copy_bd_workspace(tmp_path / "worker-timeout", "leaf")
-    return workspace.path, workspace.issues[0]
+    repo = workspace.path
+    (repo / ".gitignore").write_text(
+        "logs/\n.cache/\n.beads/ortus.flock\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, workspace.issues[0]
 
 
 def _install_shim(monkeypatch: pytest.MonkeyPatch, shim: Path) -> None:
@@ -114,19 +121,22 @@ _CLAIM_THEN_HANG = textwrap.dedent(
     """
 )
 
-# A worker that CLOSES its issue, then hangs (case 2: hung-after-close).
-# The harness already claimed the issue (in_progress) and injected its id; a
-# real worker closes that claimed issue, so we look it up via `bd list
-# --status in_progress` rather than re-running `bd ready` (now empty).
+# A worker that CLAIMS and CLOSES its issue, then hangs (case 2:
+# hung-after-close). Under the on-main contract the worker owns the claim,
+# so the shim walks the same path goal-prompt prescribes: `bd ready`, claim,
+# close, and only then wedges.
 _CLOSE_THEN_HANG = textwrap.dedent(
     """\
     import json, subprocess, time
-    inprog = json.loads(subprocess.run(
-        ["bd", "list", "--status", "in_progress", "--json"],
-        check=True, capture_output=True, text=True,
+    ready = json.loads(subprocess.run(
+        ["bd", "ready", "--json"], check=True, capture_output=True, text=True
     ).stdout)
-    first = next((i["id"] for i in inprog if i.get("issue_type") != "epic"), None)
+    first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
     if first:
+        subprocess.run(
+            ["bd", "update", first, "--status", "in_progress"],
+            check=True, stdout=subprocess.DEVNULL,
+        )
         subprocess.run(
             ["bd", "close", first, "--reason", "shipped before hanging"],
             check=True, stdout=subprocess.DEVNULL,
@@ -172,12 +182,12 @@ def test_worker_timeout_kills_hung_worker_and_proceeds(
     assert _bd_show(repo, issue_id)["status"] == "open"
 
 
-def test_worker_timeout_recovers_claimed_orphan_via_policy(
+def test_worker_timeout_leaves_claim_for_next_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Case 1 (stuck-alive): worker claims an issue then hangs. The watchdog
-    kills it, then the normal orphan-policy=revert recovery flips the
-    claimed-but-unclosed issue back to open — no human intervention."""
+    kills it, and the claim stays in_progress for the next context window —
+    bd status is ground truth, and a live claim is never reverted."""
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
@@ -186,6 +196,9 @@ def test_worker_timeout_recovers_claimed_orphan_via_policy(
         make_inline_python_shim(tmp_path, "claude-claim-hang", _CLAIM_THEN_HANG),
     )
 
+    # Headroom: the worker runs two bd calls (ready/update) against dolt
+    # before it starts hanging; 5s comfortably clears that latency while the
+    # hang (sleep 120) still trips the watchdog.
     result = runner.invoke(
         app,
         [
@@ -196,19 +209,17 @@ def test_worker_timeout_recovers_claimed_orphan_via_policy(
             "--idle-sleep",
             "0",
             "--worker-timeout",
-            "2",
-            "--orphan-policy",
-            "revert",
+            "5",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    assert _bd_show(repo, issue_id)["status"] == "open", (
-        "killed worker's claim should be reverted to open by orphan-policy"
+    assert _bd_show(repo, issue_id)["status"] == "in_progress", (
+        "killed worker's claim must stay claimed for the next window"
     )
     log = _grind_log(repo)
-    assert "worker TIMEOUT after 2s" in log
-    assert f"revert: {issue_id}" in log
+    assert "worker TIMEOUT after 5s" in log
+    assert f"left {issue_id} in_progress for the next window" in log
 
 
 def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
@@ -227,9 +238,9 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
 
     # Headroom: the worker runs three bd calls (ready/update/close) against
     # dolt before it starts hanging, so the timeout must comfortably exceed
-    # that latency — otherwise the watchdog kills it mid-close and grind sees
-    # an orphan instead of a landed close. 60s clears it; the worker still
-    # hangs (sleep 120) well past it.
+    # that latency — otherwise the watchdog kills it mid-close and the close
+    # never lands. 60s clears it; the worker still hangs (sleep 120) well
+    # past it.
     result = runner.invoke(
         app,
         [
@@ -241,8 +252,6 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
             "0",
             "--worker-timeout",
             "60",
-            "--orphan-policy",
-            "revert",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -252,7 +261,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
     )
     log = _grind_log(repo)
     assert "worker TIMEOUT after 60s" in log
-    assert "closed +1" in log
+    assert f"worker closed {issue_id}" in log
 
 
 def test_worker_timeout_zero_disables_watchdog(
@@ -286,224 +295,3 @@ def test_worker_timeout_zero_disables_watchdog(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "TIMEOUT" not in _grind_log(repo)
-
-
-def test_codex_timeout_candidate_resumes_with_existing_work_handoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    (repo / ".ortusrc").write_text('backend = "codex"\n')
-    # bd >=1.1 `init` scaffolds agent config (.agents/, .claude/, .codex/,
-    # .cursor/) into the workspace, so the template may already carry this
-    # directory; older bds leave it to the fixture.
-    (repo / ".codex").mkdir(exist_ok=True)
-    (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
-    (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "fixture baseline"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    (repo / "prior-work.txt").write_text("useful work from the prior engineer\n")
-    subprocess.run(["git", "add", "prior-work.txt"], cwd=repo, check=True)
-
-    class TimeoutAfterEdit:
-        extra_env: dict[str, str] = {}
-
-        def run(self, *args: object, repo: Path, **kwargs: object) -> int:
-            (repo / "candidate.py").write_text("RECOVERED = True\n")
-            raise subprocess.TimeoutExpired("fake-codex", 1)
-
-    monkeypatch.setattr(
-        grind_mod, "_make_runner", lambda backend="claude": TimeoutAfterEdit()
-    )
-    first = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--backend",
-            "codex",
-            "--iterations",
-            "1",
-            "--idle-sleep",
-            "0",
-            "--worker-timeout",
-            "1",
-        ],
-    )
-    assert first.exit_code == 0, first.stdout + first.stderr
-    assert _bd_show(repo, issue_id)["status"] == "in_progress"
-    journal_path = repo / "logs" / "grind-transaction.json"
-    assert journal_path.is_file()
-    assert "unowned worktree changes" not in (first.stdout + first.stderr)
-
-    # Reproduce an in-flight self-upgrade: the parent that launched the worker
-    # can still have schema v1 loaded while the worker writes schema-v2 code.
-    current = json.loads(journal_path.read_text())
-    legacy_keys = {
-        "issue_id",
-        "base_head",
-        "baseline_paths",
-        "baseline_fingerprints",
-        "candidate_paths",
-        "phase",
-    }
-    legacy = {key: value for key, value in current.items() if key in legacy_keys}
-    legacy["schema"] = 1
-    journal_path.write_text(json.dumps(legacy))
-
-    class VerifyRecoveredCandidate:
-        extra_env: dict[str, str] = {}
-
-        def run(
-            self, *args: object, repo: Path, log_path: Path, **kwargs: object
-        ) -> int:
-            journal = JournalStore(repo).load()
-            assert journal is not None
-            payload = {
-                "schema": 1,
-                "candidate_hash": journal.candidate_hash,
-                "decision": "pass",
-                "criteria": [
-                    {"id": "AC-1", "status": "pass", "evidence": "recovered"},
-                ],
-                "commands": ["uv run pytest tests/test_grind_worker_timeout.py -q"],
-                "reviewed_files": ["candidate.py"],
-                "reviewed_interfaces": ["RECOVERED"],
-                "risks": ["restart ownership"],
-                "findings": ["candidate preserved"],
-                "codegraph": ["fallback recorded"],
-            }
-            event = {
-                "type": "item.completed",
-                "item": {
-                    "type": "agent_message",
-                    "text": "ORTUS_VERDICT: " + json.dumps(payload),
-                },
-            }
-            with log_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event) + "\n")
-            return 0
-
-    monkeypatch.setattr(
-        grind_mod,
-        "_make_runner",
-        lambda backend="claude": VerifyRecoveredCandidate(),
-    )
-    # The re-claim runs the branch-scoped machine pipeline; script it green
-    # and supply the claims comment the timed-out worker never posted.
-    install_machine_checks(monkeypatch)
-    post_completion_comment(repo, issue_id, {"AC-1": "pass"})
-    second = runner.invoke(
-        app,
-        ["grind", str(repo), "--backend", "codex", "--tasks", "1"],
-    )
-
-    assert second.exit_code == 0, second.stdout + second.stderr
-    # The recovered candidate passed a fresh verifier, so Ortus finalized it:
-    # the issue is closed by the parent and the journal is consumed.
-    assert _bd_show(repo, issue_id)["status"] == "closed"
-    assert JournalStore(repo).load() is None
-    assert (repo / "candidate.py").read_text() == "RECOVERED = True\n"
-    # The prior engineer's staged work was adopted into the handoff candidate,
-    # so the verifier reviewed it and it lands in the same path-scoped commit —
-    # preserved, never discarded, and never committed unreviewed.
-    prior_work_commits = subprocess.run(
-        ["git", "log", "--format=%H", "--", "prior-work.txt"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
-    assert len(prior_work_commits) == 1
-    assert (
-        subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "--", "prior-work.txt"], cwd=repo
-        ).returncode
-        == 0
-    ), "the finalization commit consumed the staged handoff work"
-
-
-def test_codex_resume_adopts_moved_state_head_mismatch_for_handoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo, issue_id = _seed_repo(tmp_path)
-    _stub_sandbox(monkeypatch)
-    _force_fake_home(monkeypatch, tmp_path)
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "fixture baseline"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    JournalStore(repo).save(
-        CandidateJournal.start(
-            repo=repo,
-            issue_id=issue_id,
-            base_head="not-the-current-head",
-            baseline_paths=(),
-        )
-    )
-
-    prompts: list[str] = []
-
-    class ContinueHandoff:
-        extra_env: dict[str, str] = {}
-
-        def run(self, prompt: str, *args: object, repo: Path, **kwargs: object) -> int:
-            prompts.append(prompt)
-            (repo / "recovered.py").write_text("RECOVERED = True\n")
-            return 0
-
-    monkeypatch.setattr(
-        grind_mod, "_make_runner", lambda backend="claude": ContinueHandoff()
-    )
-
-    result = runner.invoke(
-        app,
-        ["grind", str(repo), "--backend", "codex", "--iterations", "1"],
-    )
-
-    assert result.exit_code == 0, result.stdout + result.stderr
-    assert _bd_show(repo, issue_id)["status"] == "in_progress"
-    assert any("RECOVERY HANDOFF" in prompt for prompt in prompts)
-    resumed_journal = JournalStore(repo).load()
-    if resumed_journal is not None and resumed_journal.workspace_path:
-        preserved = (
-            repo / resumed_journal.workspace_path / "recovered.py"
-        ).read_text()
-    else:
-        shown = subprocess.run(
-            ["git", "show", f"ortus/{issue_id}:recovered.py"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-        preserved = (
-            shown.stdout
-            if shown.returncode == 0
-            else (repo / "recovered.py").read_text()
-        )
-    assert preserved == "RECOVERED = True\n"
-    assert f"resuming {issue_id} from implementation" in (
-        result.stdout + result.stderr
-    )
-    assert "repository state moved" in _grind_log(repo)

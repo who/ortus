@@ -258,9 +258,9 @@ def test_testing_guide_documents_parallel_split() -> None:
 _MIGRATED_MODULES = (
     "tests/conftest.py",
     "tests/test_grind.py",
-    "tests/test_grind_corrections.py",
     "tests/test_grind_finalization.py",
     "tests/test_grind_orphan_policy.py",
+    "tests/test_grind_recovery.py",
     "tests/test_grind_state_delta.py",
     "tests/test_grind_worker_timeout.py",
 )
