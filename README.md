@@ -86,7 +86,6 @@ ortus grind . --tasks 5
 | `ortus spec` | Print the readiness schema issue-authoring contract |
 | `ortus unlock <repo>` | Clear a stuck grind flock; optionally revert in-progress claims |
 | `ortus curate <repo>` | Review pending lesson proposals: accept, edit, or reject |
-| `ortus retro <repo>` | Propose lessons and issues from recent run records (advisory) |
 
 Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed version.
 

@@ -12,7 +12,6 @@ from ortus.commands.human import human
 from ortus.commands.init import init
 from ortus.commands.interview import interview
 from ortus.commands.plan import plan
-from ortus.commands.retro import retro
 from ortus.commands.spec import spec
 from ortus.commands.tail import tail
 from ortus.commands.triage import triage
@@ -80,7 +79,3 @@ app.command(
     name="curate",
     help="Review pending lesson proposals: accept, edit, or reject.",
 )(curate)
-app.command(
-    name="retro",
-    help="Propose lessons and issues from recent run records (advisory).",
-)(retro)
