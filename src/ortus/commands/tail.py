@@ -1,8 +1,10 @@
 """ortus tail <repo> — follow logs/{grind,goal,ralph,plan}-*.log (idzn.4).
 
 Strictly read-only (NFR-006). Default formatting filters claude stream-json
-into human-readable turn boundaries; --raw emits lines verbatim. Polls the
-logs/ directory every 1s for new files matching the back-compat prefixes.
+into human-readable turn boundaries; --raw emits lines verbatim. Default
+follow attaches only the newest matching log and switches if a newer one
+appears; --all restores multi-file follow. Polls the logs/ directory every
+1s for new files matching the back-compat prefixes.
 
 Verbosity contract (parity with legacy ortus/tail.sh; ortus-eomm):
 
@@ -63,6 +65,7 @@ from ortus.core import output
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.repo import resolve_repo
 from ortus.core.runstate import (
+    _mtime,
     is_grok_event as _is_grok_event,
     summarize_grok_tool as _summarize_grok_tool,
 )
@@ -967,6 +970,22 @@ def _attach_window(
     return chunk_lines[start:], start
 
 
+def _newest_log(paths: Iterable[Path]) -> Path | None:
+    """Newest path by the same `(mtime, name)` key `find_log` uses."""
+    files = [path for path in paths if path.is_file()]
+    if not files:
+        return None
+    return max(files, key=lambda path: (_mtime(path), path.name))
+
+
+def _selected_logs(logs_dir: Path, *, follow_all: bool) -> set[Path]:
+    discovered = _discover_logs(logs_dir)
+    if follow_all:
+        return discovered
+    newest = _newest_log(discovered)
+    return {newest} if newest is not None else set()
+
+
 def _follow(
     logs_dir: Path,
     *,
@@ -981,38 +1000,45 @@ def _follow(
     codex: bool = False,
     err: IO[str] | None = None,
     lines: int = DEFAULT_ATTACH_LINES,
+    follow_all: bool = False,
 ) -> None:
     """Polling tail. `iterations<0` runs forever; finite values for tests.
 
     `lines` caps how much existing history each stream renders at first
     attach (0 = unlimited); follow output after attach is never trimmed.
+    Default follows only the newest discovered log and switches if a newer
+    one appears. `follow_all` attaches every matching file. An explicit
+    `initial_files` set is followed exactly and is not remapped.
     """
     out = out or sys.stdout
     err = err or sys.stderr
     if palette is None:
         palette = _resolve_palette(out)
     streams: dict[Path, _LogStream] = {}
-    seen: set[Path] = set()
+    pinned = initial_files is not None
 
-    if initial_files is not None:
+    if pinned:
         for p in initial_files:
             streams[p] = _LogStream(p)
-            seen.add(p)
 
     i = 0
     while iterations < 0 or i < iterations:
-        for p in _discover_logs(logs_dir):
-            if p not in seen:
-                seen.add(p)
-                streams[p] = _LogStream(p)
-                banner = _wrap(
-                    f"=== TAILING: {p.name} ===",
-                    palette.bold,
-                    palette.magenta,
-                    reset=palette.reset,
-                )
-                out.write(f"{banner}\n")
-                out.flush()
+        if not pinned:
+            selected = _selected_logs(logs_dir, follow_all=follow_all)
+            for stale in list(streams):
+                if stale not in selected:
+                    del streams[stale]
+            for p in selected:
+                if p not in streams:
+                    streams[p] = _LogStream(p)
+                    banner = _wrap(
+                        f"=== TAILING: {p.name} ===",
+                        palette.bold,
+                        palette.magenta,
+                        reset=palette.reset,
+                    )
+                    out.write(f"{banner}\n")
+                    out.flush()
         for stream in streams.values():
             if not stream.path.is_file():
                 continue
@@ -1138,8 +1164,16 @@ def tail(
             "(0 = unlimited; follow output is never trimmed)."
         ),
     ),
+    follow_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Follow every matching log. Default follows only the newest.",
+    ),
 ) -> None:
-    """Tail orchestrator log files (grind-*, goal-*, ralph-*, plan-*).
+    """Tail the newest orchestrator log (grind-*, goal-*, ralph-*, plan-*).
+
+    Default follows only the newest matching file and switches if a newer
+    one appears. Use --all to follow every matching log.
 
     Always shown: assistant/user text, system:init banners, top-level results,
     plain-text banners. Use -t to add tool calls/results, -s to add other
@@ -1166,6 +1200,7 @@ def tail(
     _follow(
         logs_dir,
         raw=raw,
+        follow_all=follow_all,
         show_tools=tools,
         show_system=system,
         assistant_only=assistant,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -27,7 +29,15 @@ def test_follow_picks_up_existing_grind_and_ralph_logs(tmp_path: Path) -> None:
     ralph.write_text('{"type":"assistant","message":{"content":"from ralph"}}\n')
 
     buf = io.StringIO()
-    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    _follow(
+        logs,
+        raw=False,
+        show_tools=False,
+        show_system=False,
+        iterations=1,
+        out=buf,
+        follow_all=True,
+    )
     out = buf.getvalue()
     assert "from grind" in out
     assert "from ralph" in out
@@ -479,12 +489,131 @@ def test_multiple_logs_cap_independently(tmp_path: Path) -> None:
     small.write_text(_assistant_line(0) + "\n")
 
     buf = io.StringIO()
-    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    _follow(
+        logs,
+        raw=False,
+        show_tools=False,
+        show_system=False,
+        iterations=1,
+        out=buf,
+        follow_all=True,
+        lines=2000,
+    )
     out = buf.getvalue()
     assert "SKIPPED 10 earlier lines: grind-a.log" in out
     assert "SKIPPED 20 earlier lines: grind-b.log" in out
     assert out.count("SKIPPED") == 2
     assert "L00000" in out  # the short log is untouched
+    assert "=== TAILING: grind-a.log ===" in out
+    assert "=== TAILING: grind-b.log ===" in out
+    assert "=== TAILING: grind-c.log ===" in out
+
+
+# --- ortus-rjsp: default newest-only follow --------------------------------
+
+
+def _assistant_payload(text: str) -> str:
+    return json.dumps({"type": "assistant", "message": {"content": text}}) + "\n"
+
+
+def test_default_follow_renders_only_newest_of_two_grind_logs(tmp_path: Path) -> None:
+    """AC-1: two grind logs — only the newest banner and unique lines appear."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    older = logs / "grind-older.log"
+    newer = logs / "grind-newer.log"
+    older.write_text(_assistant_payload("older-unique-line"))
+    newer.write_text(_assistant_payload("newer-unique-line"))
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_700_000_100, 1_700_000_100))
+
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    out = buf.getvalue()
+    assert "=== TAILING: grind-newer.log ===" in out
+    assert "newer-unique-line" in out
+    assert "=== TAILING: grind-older.log ===" not in out
+    assert "older-unique-line" not in out
+
+
+def test_follow_switches_to_newer_log_and_drops_old_appends(tmp_path: Path) -> None:
+    """AC-2: a newer matching log mid-follow switches; old-file appends vanish."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    older = logs / "grind-20260814-000001.log"
+    current = logs / "grind-20260814-000002.log"
+    older.write_text(_assistant_payload("older-start"))
+    current.write_text(_assistant_payload("current-unique"))
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(current, (1_700_000_100, 1_700_000_100))
+
+    buf = io.StringIO()
+
+    def _run() -> None:
+        _follow(
+            logs, raw=False, show_tools=False, show_system=False, iterations=3, out=buf
+        )
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    time.sleep(0.3)
+    incoming = logs / "grind-20260814-000003.log"
+    incoming.write_text(_assistant_payload("incoming-unique"))
+    os.utime(incoming, (1_700_000_200, 1_700_000_200))
+    time.sleep(1.2)
+    with older.open("a", encoding="utf-8") as fh:
+        fh.write(_assistant_payload("older-append-unique"))
+    # Keep the old file older by mtime so the append is a follow-on write,
+    # not a "this file just became newest" switch.
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    thread.join(timeout=6)
+    out = buf.getvalue()
+    assert "=== TAILING: grind-20260814-000003.log ===" in out
+    assert "incoming-unique" in out
+    assert "older-append-unique" not in out
+    assert "=== TAILING: grind-20260814-000001.log ===" not in out
+
+
+def test_empty_logs_dir_idles_without_banner(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    buf = io.StringIO()
+    _follow(logs, raw=False, show_tools=False, show_system=False, iterations=1, out=buf)
+    assert buf.getvalue() == ""
+
+
+def test_initial_files_are_followed_exactly_not_remapped(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    older = logs / "grind-older.log"
+    newer = logs / "grind-newer.log"
+    older.write_text(_assistant_payload("injected-older"))
+    newer.write_text(_assistant_payload("uninjected-newer"))
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_700_000_100, 1_700_000_100))
+
+    buf = io.StringIO()
+    _follow(
+        logs,
+        raw=False,
+        show_tools=False,
+        show_system=False,
+        iterations=1,
+        out=buf,
+        initial_files=[older],
+    )
+    out = buf.getvalue()
+    assert "injected-older" in out
+    assert "uninjected-newer" not in out
+    assert "=== TAILING: grind-newer.log ===" not in out
+
+
+def test_tail_help_names_newest_default_and_all_flag() -> None:
+    result = runner.invoke(app, ["tail", "--help"])
+    assert result.exit_code == 0
+    text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout or result.output)
+    assert "--all" in text
+    assert "newest" in text.lower()
 
 
 # --- ortus-zt5n.7: Grok streaming-json decoder -----------------------------
