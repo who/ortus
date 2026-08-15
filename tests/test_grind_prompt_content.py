@@ -687,14 +687,9 @@ def test_pending_proposals_are_not_injected() -> None:
 
 
 def test_proposal_contract_states_the_rules() -> None:
-    """AC-8: the contract defines the proposal block and states that a lesson
-    must be falsifiable and dated, that a project-general lesson belongs in
-    the prompt instead, and that proposals stay pending until curated."""
+    """The grind-prompt no longer tells workers to propose lessons for a
+    missing review step, and it does not name `ortus curate`."""
     body = _content()
-    assert "**Lesson proposal v1**" in body
-    assert "falsifiable and dated" in body
-    assert "date: <today, YYYY-MM-DD>" in body
-    assert "belongs in this prompt, not in one repository's lessons" in body
-    assert "pending until a human curates it" in body
-    assert "Proposing nothing is the normal case" in body
-    assert "Never restate what the code already says" in body
+    assert "### Lesson proposal (optional)" not in body
+    assert "**Lesson proposal v1**" not in body
+    assert "ortus curate" not in body

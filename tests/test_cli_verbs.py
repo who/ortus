@@ -26,7 +26,6 @@ VERBS = [
     "check",
     "spec",
     "dashboard",
-    "curate",
 ]
 
 
@@ -75,8 +74,15 @@ def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
         "unlock",
         "spec",
         "dashboard",
-        "curate",
     ]
+
+
+def test_curate_is_not_a_registered_verb() -> None:
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    assert "curate" not in result.stdout
+    unknown = runner.invoke(app, ["curate"])
+    assert unknown.exit_code != 0
 
 
 @pytest.mark.parametrize("verb", VERBS)
@@ -183,9 +189,10 @@ def test_init_emits_progress_lines(tmp_path: Path) -> None:
     # and the codegraph CLI is absent on hermetic runners.
     result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "[ortus init]" not in result.stderr
-    assert re.search(r"^\[[\d\-: ]+\] target: ", result.stderr, re.M), result.stderr
-    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
+    stderr = _ANSI.sub("", result.stderr)
+    assert "[ortus init]" not in stderr
+    assert re.search(r"^\[[\d\-: ]+\] target: ", stderr, re.M), result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", stderr, re.M), result.stderr
 
 
 def test_verb_progress_lines_open_with_timestamp_then_phase(tmp_path: Path) -> None:
@@ -196,13 +203,14 @@ def test_verb_progress_lines_open_with_timestamp_then_phase(tmp_path: Path) -> N
     target = tmp_path / "stamped"
     result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
+    stderr = _ANSI.sub("", result.stderr)
     stamped = [
         line
-        for line in result.stderr.splitlines()
+        for line in stderr.splitlines()
         if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ", line)
     ]
     assert stamped, result.stderr
-    assert "[ortus " not in result.stderr
+    assert "[ortus " not in stderr
 
 
 def test_check_emits_progress_lines(tmp_path: Path) -> None:
@@ -210,16 +218,18 @@ def test_check_emits_progress_lines(tmp_path: Path) -> None:
     # check may fail individual sub-checks in this hermetic env (no claude,
     # no real sandbox); we only assert the convention output is present.
     result = runner.invoke(app, ["check", str(repo)])
-    assert re.search(r"^\[[\d\-: ]+\] backend: ", result.stderr, re.M), result.stderr
-    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
+    stderr = _ANSI.sub("", result.stderr)
+    assert re.search(r"^\[[\d\-: ]+\] backend: ", stderr, re.M), result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", stderr, re.M), result.stderr
 
 
 def test_human_emits_progress_lines(tmp_path: Path) -> None:
     repo = _bd_repo(tmp_path)
     result = runner.invoke(app, ["human", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert re.search(r"^\[[\d\-: ]+\] target: ", result.stderr, re.M), result.stderr
-    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
+    stderr = _ANSI.sub("", result.stderr)
+    assert re.search(r"^\[[\d\-: ]+\] target: ", stderr, re.M), result.stderr
+    assert re.search(r"^\[[\d\-: ]+\] done \(", stderr, re.M), result.stderr
 
 
 def test_grind_dry_run_keeps_dry_run_output_on_stdout(tmp_path: Path) -> None:

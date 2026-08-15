@@ -84,7 +84,6 @@ ortus grind . --tasks 5
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
 | `ortus spec` | Print the readiness schema issue-authoring contract |
 | `ortus unlock <repo>` | Clear a stuck grind flock; optionally revert in-progress claims |
-| `ortus curate <repo>` | Review pending lesson proposals: accept, edit, or reject |
 
 Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed version.
 

@@ -27,19 +27,10 @@ class BdError(RuntimeError):
         )
 
 
-# Memory keys carrying this prefix are worker-proposed lessons awaiting
-# curation. They live in the same store as accepted lessons so recording one
-# writes only to the tracker, but they are structurally not lessons yet:
-# `select_lessons` never selects them, so nothing a worker proposes reaches
-# another worker until `ortus curate` accepts it under an unprefixed key.
+# Leftover worker-proposed keys still live in the same store as accepted
+# lessons. `select_lessons` never selects them, so a `proposal:` memory
+# cannot compose into a worker's contract.
 LESSON_PROPOSAL_PREFIX = "proposal:"
-
-# Body marker for a pending proposal. bd deduplicates memories by content
-# across its export round-trip, so a forgotten key whose body is byte-equal to
-# a surviving memory resurrects on the next import. Marking the pending body
-# keeps it distinct from the accepted lesson it may become, so accepting a
-# proposal verbatim can still delete the pending copy for good.
-_PENDING_BODY_MARKER = "[pending curation] "
 
 
 def _clip_lesson(text: str, max_chars: int) -> str:
@@ -251,65 +242,6 @@ class BdClient:
             limit=limit,
             max_chars=max_chars,
         )
-
-    def propose_lesson(self, key: str, body: str) -> bool:
-        """Record a worker-proposed lesson in the pending state.
-
-        Pending means stored under :data:`LESSON_PROPOSAL_PREFIX`, which
-        :func:`select_lessons` never selects — a proposal cannot reach another
-        worker until curation accepts it. Returns False without writing when
-        an accepted lesson already carries the same key or the same body, so
-        a re-proposal of known knowledge never duplicates it. `bd remember`
-        updates a matching key in place, so re-recording the same proposal
-        (a replayed run, a correction round) is idempotent too.
-        """
-        memories = self.memories()
-        accepted = {
-            k: v
-            for k, v in memories.items()
-            if not k.startswith(LESSON_PROPOSAL_PREFIX)
-        }
-        if key in accepted or body in set(accepted.values()):
-            return False
-        self._run(
-            "remember",
-            _PENDING_BODY_MARKER + body,
-            "--key",
-            LESSON_PROPOSAL_PREFIX + key,
-        )
-        return True
-
-    def pending_proposals(self) -> dict[str, str]:
-        """Worker-proposed lessons awaiting curation, keyed without the prefix."""
-        prefix = LESSON_PROPOSAL_PREFIX
-        return {
-            key[len(prefix) :]: body.removeprefix(_PENDING_BODY_MARKER)
-            for key, body in sorted(self.memories().items())
-            if key.startswith(prefix)
-        }
-
-    def accept_proposal(self, key: str, body: str | None = None) -> bool:
-        """Promote the pending proposal `key` to an accepted lesson.
-
-        `body` replaces the proposed text when the operator edits before
-        accepting; None accepts the proposal verbatim. Returns False when no
-        such proposal is pending. The accepted lesson is written first so a
-        failure between the two writes leaves the proposal pending rather
-        than lost.
-        """
-        pending = self.pending_proposals()
-        if key not in pending:
-            return False
-        self._run("remember", body if body is not None else pending[key], "--key", key)
-        self._run("forget", LESSON_PROPOSAL_PREFIX + key)
-        return True
-
-    def reject_proposal(self, key: str) -> bool:
-        """Delete the pending proposal `key`. Returns False when none is pending."""
-        if key not in self.pending_proposals():
-            return False
-        self._run("forget", LESSON_PROPOSAL_PREFIX + key)
-        return True
 
     def show(self, issue_id: str) -> dict[str, Any]:
         """Return the issue's full JSON dict. `bd show --json` returns a list

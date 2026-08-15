@@ -281,56 +281,6 @@ def test_memories_round_trip_and_lessons_are_bounded(bd_workspace: Path) -> None
     )
 
 
-def test_curation_accepts_edits_rejects(bd_workspace: Path) -> None:
-    """AC-4: curation can accept a proposal verbatim, accept it with edited
-    text, or reject it — and each decision removes the pending entry."""
-    client = BdClient(bd_workspace)
-    # An empty bd database auto-imports the JSONL export on every command,
-    # which resurrects forgotten memories; any real curation target has
-    # issues (proposals come from workers working them), so anchor one.
-    client.create(title="anchor issue")
-    assert client.propose_lesson(
-        "verbatim", "copy the tree before sweeping it (2026-08-12)"
-    )
-    assert client.propose_lesson("edited", "sceduler holds stale code (2026-08-12)")
-    assert client.propose_lesson("rejected", "restates the code (2026-08-12)")
-    assert set(client.pending_proposals()) == {"verbatim", "edited", "rejected"}
-
-    assert client.accept_proposal("verbatim")
-    assert client.accept_proposal(
-        "edited", "the scheduler holds the code it started with (2026-08-12)"
-    )
-    assert client.reject_proposal("rejected")
-
-    assert client.pending_proposals() == {}
-    memories = client.memories()
-    assert memories["verbatim"] == "copy the tree before sweeping it (2026-08-12)"
-    assert memories["edited"] == (
-        "the scheduler holds the code it started with (2026-08-12)"
-    )
-    assert "rejected" not in memories
-    # Deciding a key that is not pending is a refusal, not a write.
-    assert not client.accept_proposal("verbatim")
-    assert not client.reject_proposal("rejected")
-
-
-def test_accepted_proposal_is_readable(bd_workspace: Path) -> None:
-    """AC-5: a proposal is invisible to `lessons()` while pending and becomes
-    readable as a lesson the moment curation accepts it."""
-    client = BdClient(bd_workspace)
-    client.create(title="anchor issue")
-    body = "the verification sandbox is read-only; copy first (2026-08-12)"
-    assert client.propose_lesson("sandbox-sweep", body)
-    assert client.lessons(limit=5, max_chars=200) == ()
-
-    assert client.accept_proposal("sandbox-sweep")
-    assert dict(client.lessons(limit=5, max_chars=200)) == {"sandbox-sweep": body}
-    # Re-proposing what is now an accepted lesson is not duplicated.
-    assert not client.propose_lesson("sandbox-sweep", body)
-    assert not client.propose_lesson("another-key", body)
-    assert client.pending_proposals() == {}
-
-
 # ---------------------------------------------------------------------------
 # Explicit exports (ortus-k46v.4)
 # ---------------------------------------------------------------------------

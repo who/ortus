@@ -381,27 +381,6 @@ oos_callers: ApiRouter.login@src/api/auth/login.ts:23 -> AuthMiddleware.validate
 
 When `codegraph_available` is false under `auto` or `off`, omit the block entirely — the comment must remain byte-equivalent to a pre-PRD closure. Under `required` there is no such comment to write: the run stopped at step 4 per the **availability policy**.
 
-### Lesson proposal (optional)
-
-**If this run paid to learn a durable hazard, you may propose it as a crew lesson** by appending a `**Lesson proposal v1**` block to the completion comment. Proposing nothing is the normal case: most runs learn nothing worth every future worker's context, and an empty proposal costs nothing. A run that ends BLOCKED may still propose — put the block in the blocker comment.
-
-Schema:
-
-```
-**Lesson proposal v1**:
-key: <kebab-case-slug, at most 64 characters>
-lesson: <one sentence stating the hazard>
-date: <today, YYYY-MM-DD>
-```
-
-Rules for what qualifies:
-
-- **A lesson must be falsifiable and dated.** State it so a later reader can check it against the code and delete it when it stops being true; a lesson that cannot be checked cannot be pruned when it goes stale. The date is required — it is how a stale lesson gets found.
-- **Never restate what the code already says.** What a function does and who calls it is answered fresh by the index; a cached copy is a defect waiting to mislead. Propose only what the code cannot show — an environmental hazard, a costly surprise, a constraint that lives outside the repository.
-- **A lesson true of every Ortus project belongs in this prompt, not in one repository's lessons.** If what you learned is project-general, file a bd issue proposing the prompt change instead of a lesson proposal.
-
-**Every proposal is pending until a human curates it.** Proposals are recorded but not active: `ortus curate` accepts, edits or rejects them, and only accepted lessons are injected into later workers. Nothing you propose reaches another worker without passing that step.
-
 ## Completion Signals
 
 **BLOCKED** — When a specific issue cannot be completed due to dependencies or technical blockers. Add a comment explaining the blocker first:

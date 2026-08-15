@@ -2284,28 +2284,6 @@ def test_failed_lesson_read_degrades_on_bd_error(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# lesson proposals — a worker may propose a lesson, held pending until curated
-# ---------------------------------------------------------------------------
-
-_PROPOSAL_COMMENT = (
-    "**Changes**:\n"
-    "- src/thing.py - hardened the sweep\n"
-    "\n"
-    "**Verification**: targeted tests pass\n"
-    "\n"
-    "**Lesson proposal v1**:\n"
-    "key: sandbox-sweep\n"
-    "lesson: the verification sandbox is read-only; copy a tree before sweeping\n"
-    "date: 2026-08-12\n"
-)
-
-_PROPOSAL_BODY = (
-    "the verification sandbox is read-only; copy a tree before sweeping "
-    "(2026-08-12)"
-)
-
-
-# ---------------------------------------------------------------------------
 # Machine verification wiring (ortus-l2u9.3)
 # ---------------------------------------------------------------------------
 
