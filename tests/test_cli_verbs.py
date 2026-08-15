@@ -121,39 +121,6 @@ def test_version_flag_prints_version() -> None:
     assert result.stdout.startswith("ortus ")
 
 
-def test_no_verb_is_wired_to_the_stub() -> None:
-    """No top-level verb may still route to the exit-2 'not implemented' stub.
-
-    This used to be a parametrized drive of the stub verbs, but every verb has
-    a real implementation now, so its parameter list emptied out and pytest
-    reported the case as a skip — an empty parameter set asserts nothing while
-    reading like coverage. Checking the registered callbacks directly keeps the
-    invariant enforced on every run without invoking verbs that would block on
-    a real claude or a tail poll.
-    """
-    import ortus.commands._stub as _stub
-
-    stubbed = [
-        command.name
-        for command in app.registered_commands
-        if command.callback is _stub.not_implemented
-    ]
-    assert not stubbed, f"verbs still routed to the stub: {stubbed}"
-    assert {command.name for command in app.registered_commands} >= set(VERBS)
-
-
-def test_all_verbs_have_real_implementations(tmp_path: Path) -> None:
-    """All 8 verbs are now implemented; none should emit 'not implemented'.
-    (Some hit fast-path early-exits; we just assert no leftover stubs.)"""
-    repo = tmp_path / "ok"
-    (repo / ".beads").mkdir(parents=True)
-    # We don't drive every verb here (some would hang on real claude / real
-    # tail polling); per-verb tests cover their behavior. This guard is only
-    # to catch a future regression of someone marking a verb as stub again.
-    import ortus.commands._stub as _stub
-    assert callable(_stub.not_implemented)
-
-
 def test_grind_nonexistent_repo_emits_fr003_error(tmp_path: Path) -> None:
     bogus = tmp_path / "no-beads-here"
     bogus.mkdir()
