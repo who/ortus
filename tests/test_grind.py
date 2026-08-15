@@ -1344,9 +1344,16 @@ class _DoneBarBd:
 
 
 class _DoneBarGit:
-    def __init__(self, *, ahead: int, tip: str = "abc") -> None:
+    def __init__(
+        self,
+        *,
+        ahead: int,
+        tip: str = "abc",
+        dirty: frozenset[str] | None = frozenset(),
+    ) -> None:
         self.ahead = ahead
         self.tip = tip
+        self.dirty = dirty
 
     def remote_tip(self, branch: str) -> str:
         del branch
@@ -1356,9 +1363,12 @@ class _DoneBarGit:
         del branch
         return self.ahead
 
+    def dirty_paths(self) -> frozenset[str] | None:
+        return self.dirty
+
 
 def test_done_bar_met_requires_new_close_and_in_sync() -> None:
-    """Reap when closed count grew and origin is not behind local."""
+    """Reap when closed count grew, origin is not behind local, and the tree is clean."""
     assert (
         grind_mod._done_bar_met(_DoneBarBd(658), _DoneBarGit(ahead=0), 657, "main")
         == "closed 657->658"
@@ -1374,6 +1384,32 @@ def test_done_bar_met_requires_new_close_and_in_sync() -> None:
     assert (
         grind_mod._done_bar_met(
             _DoneBarBd(658), _DoneBarGit(ahead=0, tip=""), 657, "main"
+        )
+        is None
+    )
+
+
+def test_done_bar_met_is_false_when_worktree_is_dirty() -> None:
+    """A close with leftover edits is not done; the worker still has to commit."""
+    assert (
+        grind_mod._done_bar_met(
+            _DoneBarBd(658),
+            _DoneBarGit(ahead=0, dirty=frozenset({"src/ortus/core/github_bead.py"})),
+            657,
+            "main",
+        )
+        is None
+    )
+
+
+def test_done_bar_met_is_false_when_dirty_paths_unknown() -> None:
+    """A failed git status is not an empty tree; do not reap."""
+    assert (
+        grind_mod._done_bar_met(
+            _DoneBarBd(658),
+            _DoneBarGit(ahead=0, dirty=None),
+            657,
+            "main",
         )
         is None
     )

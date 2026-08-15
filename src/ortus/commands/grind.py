@@ -666,17 +666,22 @@ def _done_bar_met(
     baseline_closed: int,
     integration_branch: str,
 ) -> str | None:
-    """Label when closed-count grew since spawn and HEAD is in sync.
+    """Label when closed-count grew, HEAD is in sync, and the tree is clean.
 
     Predicted id does not matter: a worker that claimed a different ready
     issue still trips the bar. Missing origin tracking is not in sync.
-    Tracker or git errors are None: a poll must not kill a live worker.
+    A dirty worktree is not done: the worker still has to commit and push.
+    ``dirty_paths`` returning None is not an empty tree — same as a tracker
+    error, a poll must not kill a live worker.
     """
 
     try:
         if not git.remote_tip(integration_branch):
             return None
         if git.local_ahead_of_remote(integration_branch) != 0:
+            return None
+        dirty = git.dirty_paths()
+        if dirty != frozenset():
             return None
         closed = bd.count_by_status("closed")
     except Exception:
