@@ -1,0 +1,158 @@
+# Opt-in GitHub → beads ingest.
+# Trigger: label `bead` on an issue (or open an issue that already has it).
+# Author allowlist: only GitHub login `who`. Anyone else is ignored — no
+# comment, no close, no bead, no XAI call. Enforced by the job `if:` below
+# and again in `ortus.core.github_bead` so a local/miswired invoke cannot
+# bypass it.
+# Secret: XAI_API_KEY (xAI Grok) drafts the readiness v1 packet.
+# bd pin: 1.2.1, same as test.yml.
+# After a successful `bd create`, this job commits `.beads/issues.jsonl` and
+# pushes to main, comments `filed as <id>`, and closes the GitHub issue.
+# `bd dolt push` is attempted afterwards; failure is logged and non-fatal.
+# A create that never leaves the runner does not close the GitHub issue.
+
+name: bead-from-issue
+
+on:
+  issues:
+    types: [labeled, opened]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: bead-from-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    if: >
+      github.event.repository.default_branch == 'main' &&
+      github.event.issue.user.login == 'who' &&
+      (
+        (github.event.action == 'labeled' && github.event.label.name == 'bead') ||
+        (github.event.action == 'opened' && contains(github.event.issue.labels.*.name, 'bead'))
+      )
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Install bd (beads)
+        run: |
+          # Pinned per project convention. The release tag is `v1.2.1` but the
+          # asset filenames embed the bare version `1.2.1` (no `v`).
+          BD_VERSION="1.2.1"
+          ASSET="beads_${BD_VERSION}_linux_amd64.tar.gz"
+          URL="https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${ASSET}"
+          echo "Downloading $URL"
+          curl --fail -L -o /tmp/bd.tar.gz "$URL"
+          sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
+          bd --version
+
+      - name: Import tracker from checkout
+        run: bd import .beads/issues.jsonl
+
+      - name: Fetch issue comments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh api
+          repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments
+          > /tmp/gh-comments.json
+
+      - name: Ingest into beads
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          PYTHONPATH: src
+        run: |
+          python3 -m ortus.core.github_bead \
+            --event "$GITHUB_EVENT_PATH" \
+            --comments /tmp/gh-comments.json \
+            --repo . | tee /tmp/ingest-result.json
+
+      - name: Export, commit, and push JSONL
+        id: land
+        run: |
+          STATUS=$(python3 -c 'import json; print(json.load(open("/tmp/ingest-result.json"))["status"])')
+          echo "status=$STATUS"
+          if [ "$STATUS" != "created" ]; then
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bd export -o .beads/issues.jsonl
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .beads/issues.jsonl
+          if git diff --cached --quiet; then
+            echo "no JSONL change"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BEAD_ID=$(python3 -c 'import json; print(json.load(open("/tmp/ingest-result.json")).get("bead_id") or "")')
+          git commit -m "beads: import ${BEAD_ID} from gh-${{ github.event.issue.number }}"
+          git pull --rebase --autostash origin main || git pull --rebase --autostash origin main
+          git push origin HEAD:main
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Comment PLAN-GAP without closing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          result = json.load(open("/tmp/ingest-result.json"))
+          if result.get("status") != "validate_failed":
+              raise SystemExit(0)
+          comment = result.get("comment") or ""
+          if not comment:
+              raise SystemExit(0)
+          subprocess.run(
+              ["gh", "issue", "comment", os.environ["ISSUE_NUMBER"], "--body", comment],
+              check=True,
+          )
+          PY
+
+      - name: Comment and close after a landed bead
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          LAND_PUSHED: ${{ steps.land.outputs.pushed }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          result = json.load(open("/tmp/ingest-result.json"))
+          if result.get("status") != "created":
+              raise SystemExit(0)
+          if os.environ.get("LAND_PUSHED") != "true":
+              # bd create landed on the runner but git push did not; leave GH open.
+              raise SystemExit(0)
+          comment = result.get("comment") or ""
+          number = os.environ["ISSUE_NUMBER"]
+          if comment:
+              subprocess.run(
+                  ["gh", "issue", "comment", number, "--body", comment],
+                  check=True,
+              )
+          subprocess.run(
+              ["gh", "issue", "close", number, "--reason", "completed"],
+              check=True,
+          )
+          PY
+
+      - name: Attempt bd dolt push
+        continue-on-error: true
+        run: |
+          STATUS=$(python3 -c 'import json; print(json.load(open("/tmp/ingest-result.json"))["status"])')
+          if [ "$STATUS" != "created" ]; then
+            echo "skip dolt (status=$STATUS)"
+            exit 0
+          fi
+          bd dolt push || echo "bd dolt push failed (non-fatal)"

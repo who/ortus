@@ -332,6 +332,7 @@ class BdClient:
         acceptance: str | None = None,
         notes: str | None = None,
         labels: list[str] | None = None,
+        external_ref: str | None = None,
     ) -> str:
         """Create an issue via `bd create --silent`. Returns the new issue id."""
         args = [
@@ -354,6 +355,8 @@ class BdClient:
             args.extend(["--notes", notes])
         if labels:
             args.extend(["--labels", ",".join(labels)])
+        if external_ref:
+            args.extend(["--external-ref", external_ref])
         stdout, _ = self._run(*args)
         return stdout.strip()
 
