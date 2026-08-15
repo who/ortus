@@ -1,0 +1,220 @@
+# Manual-only hosted grind. Trigger: workflow_dispatch.
+# Author allowlist: only GitHub login `who`. Anyone else gets a no-op
+# failure and never reaches `uv run ortus grind`. Enforced by the
+# allowlist job plus `if: github.actor == 'who'` on the grind job.
+# Pins match test.yml (bd 1.2.1, CodeGraph 1.5.0, setup-uv@v10.0.1,
+# checkout@v7). Hydrate matches bead-from-issue.yml.
+# Secrets: XAI_API_KEY (grok), ANTHROPIC_API_KEY (claude),
+# OPENAI_API_KEY or CODEX_API_KEY (codex). Missing secret fails closed.
+
+name: grind
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Agent backend for this run
+        type: choice
+        required: true
+        default: claude
+        options:
+          - claude
+          - codex
+          - grok
+      tasks:
+        description: Stop after N verified closes (0 = drain the queue)
+        type: string
+        required: false
+        default: "0"
+      worker_timeout:
+        description: Hard cap (seconds) on one worker subprocess
+        type: string
+        required: false
+        default: "5400"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grind-main
+  cancel-in-progress: false
+
+jobs:
+  allowlist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restrict to who
+        run: |
+          if [ "${{ github.actor }}" != "who" ]; then
+            echo "no-op failure: only github.actor == 'who' may dispatch grind"
+            exit 1
+          fi
+
+  grind:
+    needs: allowlist
+    if: github.actor == 'who'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up uv
+        # setup-uv dropped moving major tags at v8; only full-version tags resolve.
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install bd (beads)
+        run: |
+          # Pinned per project convention. The release tag is `v1.2.1` but the
+          # asset filenames embed the bare version `1.2.1` (no `v`).
+          BD_VERSION="1.2.1"
+          ASSET="beads_${BD_VERSION}_linux_amd64.tar.gz"
+          URL="https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/${ASSET}"
+          echo "Downloading $URL"
+          curl --fail -L -o /tmp/bd.tar.gz "$URL"
+          sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
+          bd --version
+
+      - name: Hydrate tracker from checkout
+        run: |
+          set -euo pipefail
+          # Fresh Actions checkouts have committed JSONL + config.yaml but no
+          # embedded Dolt DB. Bare `bd import` exits 1: database not initialized.
+          # `bd bootstrap --yes` is the 1.2.1 fresh-clone command and imports
+          # git-tracked JSONL — but only when it does not see sync.remote or
+          # origin refs/dolt/data. With those present it either refuses the
+          # git+https URL (no DB) or clones ~48k Dolt chunks (too slow). Hide
+          # both for this step, bootstrap from JSONL (prefix ortus from
+          # config.yaml), then restore so later git push / bd dolt push work.
+          origin_url=$(git remote get-url origin)
+          git remote rename origin gha-origin
+          cp .beads/config.yaml /tmp/beads-config.yaml.bak
+          restore() {
+            cp /tmp/beads-config.yaml.bak .beads/config.yaml
+            git remote rename gha-origin origin 2>/dev/null \
+              || git remote add origin "$origin_url"
+          }
+          trap restore EXIT
+          python3 -c '
+          from pathlib import Path
+          path = Path(".beads/config.yaml")
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          out = []
+          skipping = False
+          for line in lines:
+              if line.startswith("sync:"):
+                  skipping = True
+                  continue
+              if skipping and (line.startswith(" ") or line.startswith("\t")):
+                  continue
+              skipping = False
+              out.append(line)
+          path.write_text("".join(out), encoding="utf-8")
+          '
+          chmod 700 .beads || true
+          bd bootstrap --yes
+
+      - name: Set up Node (CodeGraph engine range)
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install CodeGraph
+        run: |
+          npm install --global @colbymchenry/codegraph@1.5.0
+          codegraph --version
+
+      - name: Build the CodeGraph index
+        run: |
+          codegraph init .
+          codegraph install
+          codegraph status
+
+      - name: Install sandbox prereq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      - name: Create venv and install ortus
+        run: |
+          uv venv --python 3.12
+          uv pip install -e .
+
+      - name: Install selected backend CLI
+        env:
+          BACKEND: ${{ inputs.backend }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: |
+          set -euo pipefail
+          case "$BACKEND" in
+            claude)
+              if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+                echo "ANTHROPIC_API_KEY is required for backend=claude" >&2
+                exit 1
+              fi
+              npm install --global @anthropic-ai/claude-code
+              claude --version
+              ;;
+            grok)
+              if [ -z "${XAI_API_KEY:-}" ]; then
+                echo "XAI_API_KEY is required for backend=grok" >&2
+                exit 1
+              fi
+              curl -fsSL https://x.ai/cli/install.sh | bash
+              echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+              export PATH="$HOME/.local/bin:$PATH"
+              grok --version
+              ;;
+            codex)
+              if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${CODEX_API_KEY:-}" ]; then
+                echo "OPENAI_API_KEY or CODEX_API_KEY is required for backend=codex" >&2
+                exit 1
+              fi
+              npm install --global @openai/codex
+              codex --version
+              ;;
+            *)
+              echo "unknown backend $BACKEND" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run ortus grind
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run ortus grind . \
+            --backend "${{ inputs.backend }}" \
+            --tasks "${{ inputs.tasks }}" \
+            --worker-timeout "${{ inputs.worker_timeout }}"
+
+      - name: Upload grind logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: grind-logs
+          path: logs/grind-*.log
+          if-no-files-found: warn
