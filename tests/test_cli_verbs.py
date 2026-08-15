@@ -90,6 +90,14 @@ def test_verb_help_works(verb: str) -> None:
     assert f"ortus {verb}" in result.stdout
 
 
+def test_grind_help_does_not_list_max_corrections() -> None:
+    result = runner.invoke(app, ["grind", "--help"])
+    assert result.exit_code == 0
+    assert "--max-corrections" not in result.stdout
+    unknown = runner.invoke(app, ["grind", "--max-corrections", "1", "--dry-run"])
+    assert unknown.exit_code != 0
+
+
 def test_version_flag_prints_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0

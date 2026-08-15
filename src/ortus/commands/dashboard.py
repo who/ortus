@@ -1751,10 +1751,8 @@ def budget_line(snapshot: RunSnapshot, *, cap: int | None = None) -> str:
     """
 
     limit = declared_cap(MAX_CORRECTIONS_OPTION) if cap is None else cap
-    if limit is None:
-        return f"corrections {snapshot.corrections}"
-    if limit <= 0:
-        return f"corrections {snapshot.corrections}/{limit} - retries disabled"
+    if limit is None or limit <= 0:
+        return f"corrections {snapshot.corrections}/0 - retries disabled"
     return f"corrections {snapshot.corrections}/{limit}"
 
 

@@ -574,35 +574,6 @@ _MESSAGE_RULE_PHRASES: dict[str, str] = {
 }
 
 
-def _correction_contract() -> str:
-    """The correction task, footer included, built the way grind builds it."""
-    from ortus.commands.grind import _correction_task
-    from ortus.core.transaction import CandidateJournal
-    from ortus.core.verdict import Verdict
-
-    journal = CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        issue_packet_ref="logs/packet.json",
-        issue_packet_hash="b" * 64,
-        candidate_hash="a" * 64,
-    )
-    verdict = Verdict(
-        candidate_hash="a" * 64,
-        decision="fail",
-        criteria=({"id": "AC-1", "status": "fail", "evidence": "check failed"},),
-        commands=("uv run pytest -m fast -q",),
-        reviewed_files=("src/x.py",),
-        reviewed_interfaces=("x",),
-        risks=("none",),
-        findings=("AC-1: the check fails",),
-        codegraph=("probe",),
-    )
-    return _correction_task("repo-1", journal, verdict)
-
-
 def _message_rule_surfaces() -> tuple[tuple[str, str], ...]:
     """Every contract that tells a worker what commit message to write."""
     from ortus.commands.grind import _IMPLEMENTATION_INSTRUCTION
@@ -610,7 +581,6 @@ def _message_rule_surfaces() -> tuple[tuple[str, str], ...]:
 
     return (
         ("work-issue condition", read_work_issue_condition()),
-        ("correction footer", _correction_contract()),
         ("implementation phase instruction", _IMPLEMENTATION_INSTRUCTION),
     )
 
@@ -631,14 +601,12 @@ def test_work_issue_contract_states_the_message_rules() -> None:
     assert "repaired in place" in body
 
 
-def test_correction_footer_states_the_message_rules() -> None:
-    """AC-2: a correction worker writes a message under the same gate."""
-    body = _correction_contract()
-    for reason, phrase in _MESSAGE_RULE_PHRASES.items():
-        assert phrase in body, (
-            f"correction footer does not state the rule behind the "
-            f"rejection {reason!r} (expected the phrase {phrase!r})"
-        )
+def test_correction_spawn_is_gone() -> None:
+    """Corrections are gone; no grind function composes a correction worker."""
+    import ortus.commands.grind as grind
+
+    assert not hasattr(grind, "_correction_task")
+    assert not hasattr(grind, "_compose_correction_prompt")
 
 
 def test_message_rules_cannot_drift() -> None:
@@ -679,7 +647,6 @@ def test_packet_edit_prohibition_states_the_mechanism() -> None:
 
     for name, body in (
         ("work-issue condition", read_work_issue_condition()),
-        ("correction footer", _correction_contract()),
     ):
         assert "NEVER edit the claimed issue's packet" in body, (
             f"{name} does not forbid editing the claimed packet"

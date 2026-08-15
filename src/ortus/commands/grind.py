@@ -2173,7 +2173,6 @@ def _verify_candidate(
 
 _PLAN_GAP_MARKER = re.compile(r"(?i)plan[\s_-]?gap")
 _CORRECTION_ENTRY_CHARS = 400
-_CORRECTION_MAX_FINDINGS = 6
 
 #: The rules `validate_message` enforces on a worker's own commit message,
 #: stated where the writer writes. The first two autonomous landings both had
@@ -2216,73 +2215,37 @@ def _plan_gap_findings(verdict: Verdict) -> tuple[str, ...]:
     )
 
 
-def _failed_criteria(verdict: Verdict) -> tuple[dict[str, str], ...]:
-    return tuple(item for item in verdict.criteria if item["status"] == "fail")
+def _escalate_failed_verdict(
+    bd: BdClient,
+    issue_id: str,
+    write_log: Callable[[str], None],
+    *,
+    reason: str = "verification rejected the candidate",
+) -> None:
+    """Label a would-have-retried failed verdict human and stop.
 
-
-def _correction_task(issue_id: str, journal: CandidateJournal, verdict: Verdict) -> str:
-    """The minimal correction work spec: issue, hash, failed criteria, findings.
-
-    Deliberately excludes the verifier transcript and the full report. The
-    worker re-reads the authoritative work spec from bd; everything else here is
-    the precise delta it has to close.
+    Corrections are gone: this path never composes a correction worker
+    and never increments a retry counter. The claim stays so nothing else
+    selects the issue.
     """
 
-    criteria = "\n".join(
-        f"- {item['id']}: {item['evidence'][:_CORRECTION_ENTRY_CHARS]}"
-        for item in _failed_criteria(verdict)
-    ) or "- (the verifier recorded no criterion-level failure)"
-    findings = [
-        f"- {finding[:_CORRECTION_ENTRY_CHARS]}"
-        for finding in verdict.findings[:_CORRECTION_MAX_FINDINGS]
-    ] or ["- (no findings recorded)"]
-    header = (
-        f"CORRECTION ATTEMPT {journal.corrections} for bd issue {issue_id}. "
-        "Verification rejected the current candidate. Ortus already claimed this "
-        "issue; do not run bd ready, do not select other work, and use only the id "
-        f"{issue_id}. Read `bd show {issue_id} --json` for the authoritative work spec, "
-        "then correct ONLY the failures below.\n\n"
-        f"Issue: {journal.issue_id}\n\n"
-        f"Failed acceptance criteria:\n{criteria}\n\n"
-    )
-    footer = (
-        "\n\nCorrect the candidate in place and commit the correction on the issue "
-        "branch you are on, with a commit message describing the fix. "
-        + _MESSAGE_RULES
-        + " Then add a fresh completion comment carrying refreshed `**Changes**` "
-        f"and `{_CLAIMS_HEADER}` blocks — one `AC-N: pass` or `AC-N: fail` line "
-        "per criterion, stating the result of the check you actually ran; "
-        "verification re-runs every check and a claim that disagrees with the "
-        "measured result fails the round. Do not close "
-        "the issue, do not run git push, git stash, or git reset, do not switch "
-        "branches, and do not add a verification comment — verification re-runs "
-        "against your corrected candidate and Ortus alone merges and finalizes it. "
-        "If a finding needs a product or architecture decision the work spec does not "
-        "resolve, do not improvise: report it as a PLAN-GAP and stop. The work spec "
-        "itself is frozen for the life of the claim: NEVER edit the claimed issue's "
-        "packet (no bd update of its acceptance, design, description, title, or "
-        "notes) — verification judges the claim-time criteria by hash, so a packet "
-        "edit fails the round no matter how right it is. A finding that indicts the "
-        "spec rather than the candidate is report-and-stop: describe the defect in a "
-        f"durable comment, run `bd human {issue_id}`, and exit."
-    )
-    # Claude's /goal condition is hard-capped, so drop the least-severe findings
-    # (verifiers order them most-severe-first) rather than truncating mid-word
-    # into an unreadable instruction.
-    while findings:
-        task = header + "Verifier findings:\n" + "\n".join(findings) + footer
-        if len(task) <= _CLAUDE_GOAL_CONDITION_LIMIT - 200 or len(findings) == 1:
-            return task
-        findings.pop()
-    return header + footer
-
-
-def _compose_correction_prompt(
-    issue_id: str, journal: CandidateJournal, verdict: Verdict, backend: str
-) -> str:
-    return compose_worker_prompt(  # type: ignore[arg-type]
-        backend, _correction_task(issue_id, journal, verdict)
-    )
+    try:
+        bd.add_label(issue_id, "human")
+    except Exception as exc:
+        write_log(f"verdict: could not label {issue_id} human ({exc})")
+        output.warn(
+            f"could not label {issue_id} human ({exc}); "
+            "leaving the claim and stopping"
+        )
+    try:
+        bd.add_comment(
+            issue_id,
+            "verification failed; grind will not retry this candidate.\n\n"
+            f"{reason}",
+        )
+    except Exception as exc:
+        write_log(f"verdict: could not comment on {issue_id} ({exc})")
+    write_log(f"verdict: flagged {issue_id} human (no correction retry)")
 
 
 def _plan_gap_task(issue_id: str, findings: tuple[str, ...]) -> str:
@@ -4796,16 +4759,6 @@ def grind(
             "recovery. 0 disables the watchdog (workers may then hang indefinitely)."
         ),
     ),
-    max_corrections: int = typer.Option(
-        0,
-        "--max-corrections",
-        help=(
-            "Fresh implement+verify retries after failed acceptance checks "
-            "(default 0: escalate immediately). Each attempt is a new worker "
-            "with only the failed criteria and findings. Exhaustion flags the "
-            "issue for a human and never merges."
-        ),
-    ),
     integration_branch: str = typer.Option(
         DEFAULT_INTEGRATION_BRANCH,
         "--integration-branch",
@@ -4953,14 +4906,6 @@ def grind(
         output.info(f"tasks:          {tasks}")
         output.info(f"iterations:     {iterations}")
         output.info(f"orphan-policy:  {orphan_policy.value}")
-        output.info(
-            "corrections:    "
-            + (
-                f"up to {max_corrections} fresh attempt(s), each re-verified"
-                if max_corrections > 0
-                else "off (failed acceptance checks escalate immediately)"
-            )
-        )
         output.info(f"integration:    {integration_branch}")
         output.info(f"idle-sleep:     {idle_sleep}s")
         output.info(

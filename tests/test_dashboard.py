@@ -2251,30 +2251,21 @@ def test_header_idle_repository_shows_an_idle_header(tmp_path: Path) -> None:
 
 
 def test_header_correction_budget_is_shown_against_its_cap() -> None:
-    """AC-2: spent over the cap, so an escalation is visible before it lands.
+    """Corrections are gone: the header says retries are disabled.
 
-    The cap is read from grind's own `--max-corrections` declaration rather
-    than copied here, which is the same reason the watchdog cap is: a number
-    duplicated in the dashboard goes stale the first time the flag moves.
+    `--max-corrections` no longer exists on grind, so the dashboard must not
+    invent a cap by reading a missing declaration.
     """
 
-    declared = dash.declared_cap(dash.MAX_CORRECTIONS_OPTION)
-    assert declared is not None
-    assert (
-        declared
-        == inspect.signature(grind.grind).parameters["max_corrections"].default.default
-    )
+    assert "max_corrections" not in inspect.signature(grind.grind).parameters
+    assert dash.declared_cap(dash.MAX_CORRECTIONS_OPTION) is None
 
     snapshot = _header_snapshot(corrections=1, attempt=2, phase="correction")
-    assert f"corrections 1/{declared}" in dash.header_line(snapshot)
+    assert "retries disabled" in dash.header_line(snapshot)
+    assert "corrections 1/0" in dash.header_line(snapshot)
 
-    # The last attempt spent is the one before escalation, and it reads as such
-    # rather than only becoming visible once the human label arrives.
-    spent = _header_snapshot(corrections=declared, attempt=3, phase="correction")
-    assert f"corrections {declared}/{declared}" in dash.header_line(spent)
-
-    # A run with retries disabled says so rather than showing a budget of zero
-    # that an operator would read as exhausted.
+    # An explicit historical cap still renders spent-against-limit.
+    assert "corrections 1/2" in dash.header_line(snapshot, correction_cap=2)
     assert "retries disabled" in dash.header_line(snapshot, correction_cap=0)
 
 

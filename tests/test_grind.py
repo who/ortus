@@ -744,7 +744,8 @@ def test_grind_dry_run_prints_resolved_flags_and_exits(
     assert "repo:" in result.stdout
     assert "tasks:" in result.stdout
     assert "/goal" in result.stdout
-    assert "escalates immediately" in result.stdout
+    assert "corrections:" not in result.stdout
+    assert "--max-corrections" not in result.stdout
 
 
 def test_grind_help_lists_grok() -> None:
@@ -753,17 +754,15 @@ def test_grind_help_lists_grok() -> None:
     assert "grok" in result.stdout
 
 
-def test_grind_max_corrections_defaults_to_zero() -> None:
-    import inspect
-
-    declared = inspect.signature(grind_mod.grind).parameters[
-        "max_corrections"
-    ].default.default
-    assert declared == 0
+def test_grind_help_omits_max_corrections() -> None:
+    """AC-1: the corrections option and spawn symbols are gone."""
     result = runner.invoke(app, ["grind", "--help"])
     assert result.exit_code == 0
-    flattened = " ".join(result.stdout.split())
-    assert "default 0" in flattened
+    assert "--max-corrections" not in result.stdout
+    unknown = runner.invoke(app, ["grind", "--max-corrections", "1", "--dry-run"])
+    assert unknown.exit_code != 0
+    assert not hasattr(grind_mod, "_correction_task")
+    assert not hasattr(grind_mod, "_compose_correction_prompt")
 
 
 def test_grok_dry_run_resolves_backend_and_goal_wrap(tmp_path: Path) -> None:
@@ -1959,7 +1958,6 @@ def _narrated_grind(
     name: str,
     title: str = "narrated",
     decisions: tuple[str, ...] = ("pass",),
-    max_corrections: int | None = None,
 ) -> tuple[Path, str, object, list[str]]:
     """One harness-claimed run whose machine pipeline emits `decisions` in order.
 
@@ -2010,8 +2008,6 @@ def _narrated_grind(
     monkeypatch.setattr(grind_mod, "_make_runner", lambda: _NarratingRunner())
     monkeypatch.setattr(grind_mod, "_run_machine_checks", scripted_checks)
     args = ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
-    if max_corrections is not None:
-        args += ["--max-corrections", str(max_corrections)]
     result = runner.invoke(app, args)
     return repo, issue_id, result, hashes
 
@@ -2060,7 +2056,6 @@ def test_grind_console_prints_tally_and_finalization(
         monkeypatch,
         name="tally",
         decisions=("fail", "pass"),
-        max_corrections=2,
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     console = _squashed_console(result)
@@ -2084,7 +2079,6 @@ def test_grind_blockers_print_verbatim_on_console(
         monkeypatch,
         name="blocker",
         decisions=("fail",),
-        max_corrections=0,
     )
     console = _squashed_console(result)
     assert "bounded correction attempts exhausted (0/0)" in console
@@ -2621,7 +2615,6 @@ def _machine_grind(
     claims: dict[str, str] | None = None,
     checks_default: object | None = None,
     reviewer: bool = False,
-    max_corrections: int | None = 0,
 ) -> tuple[Path, str, object, _RecordingWorker]:
     """One branch-scoped run judged by the (scripted) machine pipeline."""
     repo = _bd_repo(tmp_path, name)
@@ -2640,8 +2633,6 @@ def _machine_grind(
         else machine_run(criteria=("AC-1", "AC-2")),
     )
     args = ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
-    if max_corrections is not None:
-        args += ["--max-corrections", str(max_corrections)]
     result = runner.invoke(app, args)
     return repo, issue_id, result, worker
 
@@ -3133,6 +3124,40 @@ def test_grind_leaves_unfinished_claim_in_progress(
     log = _grind_log(repo)
     assert f"left {issue_id} in_progress" in log
     assert "orphan-policy: revert" not in log
+    assert "human" not in (_issue(repo, issue_id).get("labels") or [])
+
+
+def test_failed_verdict_escalates_to_human_without_respawn(
+    tmp_path: Path,
+) -> None:
+    """AC-2: a failed-verdict / would-have-retried path labels human
+    and does not spawn another implement worker."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "fail-escalate")
+    issue_id = _create_ready_issue(repo, "failed verdict leaf")
+    subprocess.run(
+        ["bd", "update", issue_id, "--status=in_progress"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    notes: list[str] = []
+    bd = grind_mod._make_bd(repo)
+    grind_mod._escalate_failed_verdict(
+        bd,
+        issue_id,
+        notes.append,
+        reason="machine checks rejected the candidate",
+    )
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress"
+    assert "human" in (shown.get("labels") or [])
+    comments = _comments_blob(repo, issue_id)
+    assert "grind will not retry this candidate" in comments
+    assert "machine checks rejected the candidate" in comments
+    assert any("flagged" in line and "human" in line for line in notes)
+    assert not hasattr(grind_mod, "_compose_correction_prompt")
 
 
 @pytest.mark.slow
