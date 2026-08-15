@@ -33,7 +33,7 @@ Ortus is a Python CLI for bootstrapping and autonomously executing bd-tracked wo
 * Template files use Jinja2 syntax and a `.jinja` extension.
 * Claude-specific behavior stays in `ClaudeRunner`; Codex-specific behavior stays in `CodexRunner`.
 * Never pass a literal `/goal` to `codex exec`.
-* Adding, renaming, or removing a bd issue status or a candidate journal phase means updating the declaration in `src/ortus/core/lifecycle.py` and regenerating the `state-graph` block in `README.md`. Never assign a journal phase from a bare string literal, and never hand-edit inside the generated markers — `tests/test_state_graph_docs.py` fails and prints the correct block.
+* Adding, renaming, or removing a bd issue status means updating the declaration in `src/ortus/core/lifecycle.py` and regenerating the `state-graph` block in `README.md`. Never assign an issue status from a bare string literal, and never hand-edit inside the generated markers — `tests/test_state_graph_docs.py` fails and prints the correct block.
 * Run tests covering the changed surface; shared core or prompt changes justify the full suite.
 
 ## Command Reference

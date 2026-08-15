@@ -115,7 +115,7 @@ TERMS: tuple[Term, ...] = (
             "A defect in the work spec that no amount of implementing can "
             "resolve, which routes back to planning instead of shipping the issue."
         ),
-        home="`PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py`",
+        home="`plan_gap_guidance` in `src/ortus/core/readiness.py`",
         team_role=(
             "A developer handing a ticket back to the analyst because it cannot "
             "be built as written."
