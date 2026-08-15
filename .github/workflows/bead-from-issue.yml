@@ -56,8 +56,44 @@ jobs:
           sudo tar -xzf /tmp/bd.tar.gz -C /usr/local/bin
           bd --version
 
-      - name: Import tracker from checkout
-        run: bd import .beads/issues.jsonl
+      - name: Hydrate tracker from checkout
+        run: |
+          set -euo pipefail
+          # Fresh Actions checkouts have committed JSONL + config.yaml but no
+          # embedded Dolt DB. Bare `bd import` exits 1: database not initialized.
+          # `bd bootstrap --yes` is the 1.2.1 fresh-clone command and imports
+          # git-tracked JSONL — but only when it does not see sync.remote or
+          # origin refs/dolt/data. With those present it either refuses the
+          # git+https URL (no DB) or clones ~48k Dolt chunks (too slow). Hide
+          # both for this step, bootstrap from JSONL (prefix ortus from
+          # config.yaml), then restore so later git push / bd dolt push work.
+          origin_url=$(git remote get-url origin)
+          git remote rename origin gha-origin
+          cp .beads/config.yaml /tmp/beads-config.yaml.bak
+          restore() {
+            cp /tmp/beads-config.yaml.bak .beads/config.yaml
+            git remote rename gha-origin origin 2>/dev/null \
+              || git remote add origin "$origin_url"
+          }
+          trap restore EXIT
+          python3 -c '
+          from pathlib import Path
+          path = Path(".beads/config.yaml")
+          lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+          out = []
+          skipping = False
+          for line in lines:
+              if line.startswith("sync:"):
+                  skipping = True
+                  continue
+              if skipping and (line.startswith(" ") or line.startswith("\t")):
+                  continue
+              skipping = False
+              out.append(line)
+          path.write_text("".join(out), encoding="utf-8")
+          '
+          chmod 700 .beads || true
+          bd bootstrap --yes
 
       - name: Fetch issue comments
         env:

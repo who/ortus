@@ -196,3 +196,8 @@ def test_workflow_enforces_who_allowlist_and_secret() -> None:
     assert "python3 -m ortus.core.github_bead" in text
     assert "label.name == 'bead'" in text
     assert "github-actions[bot]" in text
+    # ortus-9zgl: hydrate a local DB from JSONL. A lone import against an
+    # uninitialized tracker is the GHA failure; bootstrap is the 1.2.1
+    # fresh-clone path (prefix ortus stays in .beads/config.yaml).
+    assert "bd bootstrap --yes" in text
+    assert "run: bd import .beads/issues.jsonl" not in text
