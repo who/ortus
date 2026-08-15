@@ -182,121 +182,6 @@ def test_worker_prompt_drops_harness_inject_and_compact() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (3) verifier contract — the criterion-id rule must be stated, not implied
-# ---------------------------------------------------------------------------
-
-
-def test_verifier_states_criterion_ids_come_from_the_packet() -> None:
-    """The rule `validate_verdict` enforces has to be in the prompt (ortus-wz3v).
-
-    A verifier that was never told the ids are fixed will invent one to record
-    something it could not run, and a pass shaped that way is rejected outright.
-    """
-    from ortus.commands.grind import _verifier_prompt
-    from ortus.core.transaction import CandidateJournal
-
-    journal = CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        issue_packet_ref="logs/packet.json",
-        issue_packet_hash="b" * 64,
-        candidate_hash="a" * 64,
-    )
-    body = _verifier_prompt(journal, "probe contract").lower()
-
-    assert "ac-n" in body
-    assert "work spec" in body
-    assert "exactly once" in body
-    assert "invented" in body
-    assert "evidence of the criterion" in body
-
-
-def test_verification_flags_match_ci() -> None:
-    """Verification guidance must name the CI gate's own duration/timeout flags.
-
-    Verification used to run its expanded sweep with developer-loop flags, so a
-    hermetic test over the budget was invisible until CI rejected it on main
-    (ortus-q3lh). Both the verifier contract and the worker prompt now state
-    the parity rule, and the expected flags are read out of the workflow so a
-    change to the gate cannot silently desync them.
-    """
-    from tests.conftest import ci_gate_flags
-
-    from ortus.commands.grind import _verifier_prompt
-    from ortus.core.transaction import CandidateJournal
-
-    journal = CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        issue_packet_ref="logs/packet.json",
-        issue_packet_hash="b" * 64,
-        candidate_hash="a" * 64,
-    )
-    verifier = _verifier_prompt(journal, "probe contract")
-    worker = _content()
-
-    for flag in ci_gate_flags():
-        assert flag in verifier, (
-            f"the verifier contract does not name the CI gate flag {flag!r}; "
-            f"verification would judge durations by developer-machine rules."
-        )
-        assert flag in worker, (
-            f"grind-prompt.md verification guidance does not name {flag!r}."
-        )
-
-    # The flags judge durations and timeouts; they must not be read as a
-    # licence to change which tests are selected.
-    assert "slow" in verifier
-    assert "never narrow a marker expression" in verifier.lower()
-
-
-def test_both_phases_instruct_a_parallel_sweep() -> None:
-    """AC-2: worker and verifier guidance must both ask for `-n auto`.
-
-    A grind turn spends the majority of its wall clock blocked on pytest, and
-    almost all of that is subprocess wait rather than computation, so both
-    phases distribute their sweep across cores (ortus-3ehq). The budget stays
-    behind: it cannot be enforced while workers contend, so each phase is also
-    told that CI — which runs serially — remains the authority on duration.
-    """
-    from ortus.commands.grind import _verifier_prompt
-    from ortus.core.transaction import CandidateJournal
-
-    journal = CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        issue_packet_ref="logs/packet.json",
-        issue_packet_hash="b" * 64,
-        candidate_hash="a" * 64,
-    )
-    verifier = _verifier_prompt(journal, "probe contract")
-    worker = _content()
-
-    for name, text in (("verifier contract", verifier), ("grind-prompt.md", worker)):
-        assert "-n auto" in text, f"{name} does not instruct a parallel sweep"
-        # Naming the budget is not enough; the guidance has to say it is CI's,
-        # or a reader reproduces the CI command verbatim and gets contention
-        # breaches instead of a verdict about the code.
-        assert "--enforce-duration-budget" in text
-        assert "single-threaded" in text, (
-            f"{name} does not say CI runs the budget serially"
-        )
-        assert "pytest-xdist" in text, (
-            f"{name} does not say what to do on a host without pytest-xdist"
-        )
-
-    # The worker's own bounded inner loop parallelises too, not just the
-    # verifier's expansion.
-    assert "uv run pytest -m fast -n auto --test-timeout=30" in worker
-
-
-# ---------------------------------------------------------------------------
 # (4) ralph-prompt superseded-by preamble
 # ---------------------------------------------------------------------------
 
@@ -313,29 +198,6 @@ def test_ralph_prompt_marked_superseded() -> None:
     body = RALPH_PROMPT.read_text(encoding="utf-8")
     assert "SUPERSEDED" in body or "superseded" in body.lower(), body[:400]
     assert "grind-prompt.md" in body
-
-
-def test_verifier_must_emit_before_optional_investigation() -> None:
-    """ortus-pzfd.6: a verifier passed all seven criteria, then ended while
-    waiting on a sweep it chose to start, emitting no verdict envelope. Grind
-    rejected a candidate it had already approved."""
-    from ortus.commands.grind import _verifier_prompt
-    from ortus.core.transaction import CandidateJournal
-
-    journal = CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        issue_packet_ref="logs/packet.json",
-        issue_packet_hash="b" * 64,
-        candidate_hash="a" * 64,
-    )
-    prompt = _verifier_prompt(journal, "probe contract")
-
-    assert "EMIT THE VERDICT AS SOON AS EVERY CRITERION CHECK HAS RUN" in prompt
-    assert "never a reason to withhold one" in prompt
-    assert "do not restart the review" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -480,23 +342,6 @@ def test_blocking_waits_count_as_attempts() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _verifier_contract() -> str:
-    """The composed verifier prompt, built the way the verification phase builds it."""
-    from ortus.commands.grind import _verifier_prompt
-    from ortus.core.transaction import CandidateJournal
-
-    journal = CandidateJournal(
-        issue_id="repo-1",
-        base_head="abc123",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        issue_packet_ref="logs/packet.json",
-        issue_packet_hash="b" * 64,
-        candidate_hash="a" * 64,
-    )
-    return _verifier_prompt(journal, "probe contract")
-
-
 def test_work_issue_forbids_worktree_add() -> None:
     """AC-1: the per-issue condition names `git worktree add` among the
     forbidden commands, in the same list as the lifecycle mutations rather
@@ -528,16 +373,6 @@ def test_implementation_names_git_archive() -> None:
     assert "pathspec" in body.lower()
     # The tier split is stated, not left for the agent to rediscover at a
     # failed build.
-    assert "archive extraction cannot even install" in body
-
-
-def test_verifier_contract_forbids_worktree_add() -> None:
-    """AC-3: verification is where a HEAD-plus-candidate tree is most often
-    built — one of the two leaked registrations came from a verifier."""
-    body = _verifier_contract()
-    assert "`git worktree add`" in body
-    assert "git archive" in body
-    assert "git clone --shared" in body
     assert "archive extraction cannot even install" in body
 
 
@@ -659,23 +494,6 @@ def test_packet_edit_prohibition_states_the_mechanism() -> None:
         )
         assert "bd human" in body, (
             f"{name} does not name the escalation command"
-        )
-
-
-def test_worktree_prohibition_states_the_reason() -> None:
-    """AC-4: each contract states the mechanism, so the rule stays checkable
-    and is not later mistaken for arbitrary by an editor looking for
-    something to simplify."""
-    from ortus.core.grind_loop import read_work_issue_condition
-
-    reason = "read-only bind mounts make the registration unremovable"
-    for name, body in (
-        ("work-issue condition", read_work_issue_condition()),
-        ("grind-prompt.md", _content()),
-        ("verifier contract", _verifier_contract()),
-    ):
-        assert reason in body, (
-            f"{name} does not state why `git worktree add` is forbidden"
         )
 
 

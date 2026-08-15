@@ -153,7 +153,7 @@ def test_dirty_source_becomes_preserved_codex_baseline(tmp_path: Path) -> None:
         == 1
     )
     assert any(
-        "preserving dirty worktree for worker handoff" in item for item in messages
+        "preserving dirty worktree as inherited dirty paths" in item for item in messages
     )
 
 

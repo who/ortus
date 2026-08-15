@@ -260,8 +260,6 @@ _MIGRATED_MODULES = (
     "tests/test_grind.py",
     "tests/test_grind_finalization.py",
     "tests/test_grind_orphan_policy.py",
-    "tests/test_grind_recovery.py",
-    "tests/test_grind_state_delta.py",
     "tests/test_grind_worker_timeout.py",
 )
 
