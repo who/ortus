@@ -557,6 +557,9 @@ class Crumb:
     at: _dt.datetime | None = None
     tool_id: str = ""
     status: str = ""
+    #: True when this thought/text crumb ended on a newline, so the next
+    #: same-kind token starts a new paragraph rather than appending.
+    ends_paragraph: bool = False
 
 
 @dataclass(frozen=True)
@@ -649,7 +652,8 @@ def classify_crumb(event: LogEvent) -> Crumb | None:
         return None
     if kind in ("thought", "text"):
         data = payload.get("data")
-        body = " ".join(str(data).split()) if data is not None else ""
+        raw = "" if data is None else str(data)
+        body = " ".join(raw.split())
         if not body:
             return None
         label = CRUMB_THINK if kind == "thought" else CRUMB_TEXT
@@ -657,6 +661,7 @@ def classify_crumb(event: LogEvent) -> Crumb | None:
             kind=kind,
             text=f"{label}  {clip(body, CRUMB_TEXT_CHARS)}",
             at=event.at,
+            ends_paragraph="\n" in raw,
         )
     if kind == "tool_call":
         summary = summarize_grok_tool(payload)
@@ -685,6 +690,32 @@ def classify_crumb(event: LogEvent) -> Crumb | None:
     )
 
 
+def _coalesce_paragraph(feed: list[Crumb], crumb: Crumb) -> bool:
+    """Append a thought/text token onto the open same-kind paragraph.
+
+    Returns True when `crumb` was merged. A newline on the previous token, a
+    kind change, or an empty feed starts a new row instead. Matches tail:
+    consecutive same-kind tokens without a newline share one paragraph.
+    """
+
+    if crumb.kind not in ("thought", "text") or not feed:
+        return False
+    last = feed[-1]
+    if last.kind != crumb.kind or last.ends_paragraph:
+        return False
+    label = CRUMB_THINK if crumb.kind == "thought" else CRUMB_TEXT
+    prefix = f"{label}  "
+    prior = last.text[len(prefix) :] if last.text.startswith(prefix) else last.text
+    incoming = crumb.text[len(prefix) :] if crumb.text.startswith(prefix) else crumb.text
+    feed[-1] = Crumb(
+        kind=last.kind,
+        text=f"{prefix}{clip(f'{prior} {incoming}', CRUMB_TEXT_CHARS)}",
+        at=crumb.at,
+        ends_paragraph=crumb.ends_paragraph,
+    )
+    return True
+
+
 def ingest_crumbs(
     events: tuple[LogEvent, ...],
     previous: tuple[Crumb, ...] = (),
@@ -695,17 +726,22 @@ def ingest_crumbs(
     """Fold incremental events into a bounded feed and a tool-row state.
 
     Only `events` (this tick's tail) are classified, so a 10k burst never
-    re-parses the whole log. The feed keeps the newest `limit` crumbs.
+    re-parses the whole log. Consecutive thought/text tokens that do not
+    contain a newline share one crumb; the feed keeps the newest `limit`
+    paragraphs. `arrived` counts classified events, not new rows.
     """
 
-    arrived: list[Crumb] = []
+    feed: list[Crumb] = list(previous)
+    arrived = 0
     lights = {light.call_id: light for light in tools if light.call_id}
     unnamed = [light for light in tools if not light.call_id]
     for event in events:
         crumb = classify_crumb(event)
         if crumb is None:
             continue
-        arrived.append(crumb)
+        arrived += 1
+        if not _coalesce_paragraph(feed, crumb):
+            feed.append(crumb)
         if crumb.kind == "tool_call":
             name = crumb.text[len(CRUMB_TOOL) + 2 :] if crumb.text.startswith(f"{CRUMB_TOOL}  ") else crumb.text
             lights[crumb.tool_id] = ToolLight(
@@ -722,9 +758,9 @@ def ingest_crumbs(
                 call_id=crumb.tool_id,
                 detail=prior.detail if prior is not None else "",
             )
-    feed = (*previous, *arrived)[-max(1, limit) :]
+    bounded = tuple(feed[-max(1, limit) :])
     ordered = (*unnamed, *lights.values())
-    return feed, ordered, len(arrived)
+    return bounded, ordered, arrived
 
 
 def tool_row(tools: tuple[ToolLight, ...]) -> str:

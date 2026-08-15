@@ -2535,10 +2535,12 @@ def test_claude_snapshot_same_panels_has_no_crumb_feed(tmp_path: Path) -> None:
 
 
 def test_grok_feed_is_bounded_to_newest_n() -> None:
-    """AC-2: more crumbs than the region keeps only the newest N."""
+    """AC-2: more paragraphs than the region keeps only the newest N."""
 
+    # A newline ends the paragraph so forty thought events stay forty rows,
+    # not one coalesced line. Bound is on paragraphs, not tokens.
     burst = tuple(
-        _event({"type": "thought", "data": f"crumb {index:04d}"}) for index in range(40)
+        _event({"type": "thought", "data": f"crumb {index:04d}\n"}) for index in range(40)
     )
     feed, tools, arrived = dash.ingest_crumbs(burst)
     assert arrived == 40
@@ -2551,7 +2553,7 @@ def test_grok_feed_is_bounded_to_newest_n() -> None:
     assert "crumb 0039" in panel
 
     more = tuple(
-        _event({"type": "thought", "data": f"later {index:04d}"}) for index in range(15)
+        _event({"type": "thought", "data": f"later {index:04d}\n"}) for index in range(15)
     )
     feed, _, _ = dash.ingest_crumbs(more, feed)
     assert len(feed) == dash.CRUMB_FEED_LINES
@@ -2559,6 +2561,54 @@ def test_grok_feed_is_bounded_to_newest_n() -> None:
     assert len(grown) <= len(panel) + 80
     assert "later 0014" in grown
     assert "crumb 0000" not in grown
+
+
+def test_grok_token_stream_thoughts_share_one_think_row() -> None:
+    """AC-1: word-at-a-time thought events paint one think row, not one per word."""
+
+    words = ("Now", "I", "need", "to", "run", "git", "push")
+    events = tuple(_event({"type": "thought", "data": word}) for word in words)
+    first, rest = events[:3], events[3:]
+    feed, _, arrived = dash.ingest_crumbs(first)
+    assert arrived == 3
+    assert len(feed) == 1
+    feed, _, arrived = dash.ingest_crumbs(rest, feed)
+    assert arrived == 4
+    assert len(feed) == 1
+    assert feed[0].kind == "thought"
+    assert feed[0].text == f"{dash.CRUMB_THINK}  {' '.join(words)}"
+    panel = dash.crumb_panel(feed)
+    assert panel == feed[0].text
+    assert "\n" not in panel
+
+    broken = (
+        _event({"type": "thought", "data": "Hello"}),
+        _event({"type": "thought", "data": "world\n"}),
+        _event({"type": "thought", "data": "Next"}),
+        _event({"type": "thought", "data": "paragraph"}),
+        _event(
+            {
+                "type": "tool_call",
+                "toolCallId": "c1",
+                "toolName": "read_file",
+                "rawInput": {"target_file": "src/ortus/commands/dashboard.py"},
+            }
+        ),
+        _event({"type": "thought", "data": "after"}),
+        _event({"type": "thought", "data": "tool"}),
+        _event({"type": "text", "data": "plain"}),
+        _event({"type": "text", "data": "words"}),
+    )
+    feed, _, arrived = dash.ingest_crumbs(broken)
+    assert arrived == 9
+    thinks = [crumb for crumb in feed if crumb.kind == "thought"]
+    texts = [crumb for crumb in feed if crumb.kind == "text"]
+    assert len(thinks) == 3
+    assert "Hello world" in thinks[0].text
+    assert "Next paragraph" in thinks[1].text
+    assert thinks[2].text == f"{dash.CRUMB_THINK}  after tool"
+    assert len(texts) == 1
+    assert texts[0].text == f"{dash.CRUMB_TEXT}  plain words"
 
 
 def test_only_grok_mode_shortens_refresh(tmp_path: Path) -> None:
