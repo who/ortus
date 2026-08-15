@@ -53,17 +53,6 @@
     }
   },
   "hooks": {
-    "PreToolUse": [
-      {
-        "hooks": [
-          {
-            "command": "uv run python scripts/grind_commit_guard.py",
-            "type": "command"
-          }
-        ],
-        "matcher": "Bash"
-      }
-    ],
     "PreCompact": [
       {
         "hooks": [

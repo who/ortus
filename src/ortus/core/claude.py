@@ -216,10 +216,7 @@ def _spawn_logged(
     """
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    # ORTUS_WORKER marks every harness-spawned agent session so the grind
-    # commit guard hook (scripts/grind_commit_guard.py) exempts pipeline
-    # sessions; operator-supplied extra_env stays authoritative.
-    env = {**os.environ, "ORTUS_WORKER": "1", **extra_env}
+    env = {**os.environ, **extra_env}
     if readonly:
         env.update(
             {
