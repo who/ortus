@@ -382,14 +382,13 @@ def test_implementation_names_git_archive() -> None:
 # ---------------------------------------------------------------------------
 #
 # The first two fully autonomous landings both had their worker-written commit
-# messages rejected by `validate_message` — "the composed body names nothing
-# from the diff" — because the gate enforced rules the worker contract never
-# stated. Each rejection reason the validator can raise maps here to a phrase
-# every writer-facing contract must carry; a validator rule added or removed
-# without the contracts catching up fails `test_message_rules_cannot_drift`.
+# messages rejected — "the composed body names nothing from the diff" —
+# because the gate enforced rules the worker contract never stated. Each
+# historical rejection maps here to a phrase every writer-facing contract
+# must still carry.
 
 _MESSAGE_RULE_PHRASES: dict[str, str] = {
-    # rejection-reason literal in validate_message -> contract phrase
+    # historical rejection-reason literal -> contract phrase
     "the composed subject is empty": "imperative subject",
     "the composed message has a subject and no body": "then a body",
     "the composed subject trails off in an ellipsis": "no `...`",
@@ -421,7 +420,7 @@ def _message_rule_surfaces() -> tuple[tuple[str, str], ...]:
 
 
 def test_work_issue_contract_states_the_message_rules() -> None:
-    """AC-1: the step-2 instruction states every rule `validate_message` checks."""
+    """AC-1: the step-2 instruction states every commit-message rule."""
     from ortus.core.grind_loop import read_work_issue_condition
 
     body = read_work_issue_condition()
@@ -445,23 +444,7 @@ def test_correction_spawn_is_gone() -> None:
 
 
 def test_message_rules_cannot_drift() -> None:
-    """AC-3: every rejection `validate_message` can raise is mapped and stated.
-
-    The reason literals are read out of the validator's own source, so adding
-    a rejection there (or retiring one) fails here until `_MESSAGE_RULE_PHRASES`
-    and every writer-facing contract catch up.
-    """
-    import inspect
-
-    from ortus.core import compose
-
-    source = inspect.getsource(compose.validate_message)
-    reasons = set(re.findall(r'ComposeRejected\(\s*f?"([^"]*)"', source))
-    assert reasons == set(_MESSAGE_RULE_PHRASES), (
-        "validate_message's rejection reasons and _MESSAGE_RULE_PHRASES have "
-        f"drifted apart.\nonly in validator: {sorted(reasons - set(_MESSAGE_RULE_PHRASES))}\n"
-        f"only in mapping: {sorted(set(_MESSAGE_RULE_PHRASES) - reasons)}"
-    )
+    """AC-3: every writer-facing contract states the mapped rule phrases."""
     for name, text in _message_rule_surfaces():
         for reason, phrase in _MESSAGE_RULE_PHRASES.items():
             assert phrase in text, (

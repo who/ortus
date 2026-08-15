@@ -64,7 +64,6 @@ from ortus.core.codegraph import (
     phase_contract,
     require_handshake,
 )
-from ortus.core.compose import with_default_model
 from ortus.core.config import DEFAULT_MERGE_GATE_TIMEOUT, load_config
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 from ortus.core.readiness import (
@@ -219,11 +218,10 @@ def _checkpoint_codex_preflight(
     return remaining
 
 
-#: The rules `validate_message` enforces on a worker's own commit message,
-#: stated where the writer writes. The first two autonomous landings both had
-#: their messages rejected for breaking rules the contract never stated, so
-#: every writer-facing contract carries this same rule set;
-#: tests/test_grind_prompt_content.py pins it against the validator's.
+#: Commit-message rules stated where the writer writes. The first two
+#: autonomous landings both had their messages rejected for breaking rules
+#: the contract never stated, so every writer-facing contract carries this
+#: same rule set; tests/test_grind_prompt_content.py pins the phrasing.
 _MESSAGE_RULES = (
     "Commit-message rules (a message that breaks one is replaced by a weaker "
     "deterministic assembly; only an over-long subject is repaired in place): "
@@ -954,11 +952,8 @@ def grind(
         # Repairing an unready work spec is authoring work, not implementation, so
         # the self-heal pass runs on the planning profile.
         plan_profile = config.resolve_profile(resolved_backend, Phase.PLAN)
-        # Writing the commit message is bounded prose over material the pass is
-        # handed, so it defaults to the cheap tier unless an operator says
-        # otherwise in `.ortusrc`.
-        finalize_profile = with_default_model(
-            config.resolve_profile(resolved_backend, Phase.FINALIZE)
+        finalize_profile = config.resolve_profile(
+            resolved_backend, Phase.FINALIZE
         )
     except (BackendError, ProfileError) as exc:
         output.error(str(exc))
