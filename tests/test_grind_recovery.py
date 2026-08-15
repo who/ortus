@@ -174,7 +174,7 @@ def test_leftover_claim_with_dirty_work_is_resumed_not_replaced(
     """A leftover in_progress plus uncommitted work is the next window's goal.
 
     Grind must spawn against that claim (not a newer ready leaf) and hand the
-    worker a RECOVERY HANDOFF that names the inherited path.
+    worker a RECOVERY: that names the inherited path.
     """
     repo, leftover_id = _seed(tmp_path, "rec-leftover")
     other_id = _create_ready(repo, "do not pick this one")
@@ -188,7 +188,7 @@ def test_leftover_claim_with_dirty_work_is_resumed_not_replaced(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert worker.prompts, "a leftover claim must spawn a worker"
-    assert "RECOVERY HANDOFF" in worker.prompts[0]
+    assert "RECOVERY:" in worker.prompts[0]
     assert LEFTOVER in worker.prompts[0]
     assert worker.seen == [leftover_id]
     log = _grind_log(repo)
@@ -230,7 +230,7 @@ def test_historical_journal_schema_is_context_not_a_startup_failure(
     log = _grind_log(repo)
     assert "journal schema 1" in log
     assert "is not the supported" in log
-    assert worker.prompts and "RECOVERY HANDOFF" in worker.prompts[0]
+    assert worker.prompts and "RECOVERY:" in worker.prompts[0]
     assert f"continuing leftover claim {leftover_id}" in log
     assert _bd_show(repo, leftover_id)["status"] == "in_progress"
 

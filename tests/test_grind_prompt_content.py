@@ -430,7 +430,7 @@ def test_unfinished_check_is_not_failed_work() -> None:
     assert "report it as unfinished rather than as failed work" in body
     assert "normal completion, not a wedge" in body
     # Giving up on a check never means giving up the candidate.
-    assert "leave the candidate edits intact" in body
+    assert "leave the owned paths intact" in body
 
 
 # ---------------------------------------------------------------------------
@@ -470,8 +470,8 @@ def test_blocking_waits_count_as_attempts() -> None:
     body = _content()
     assert "blocking waits count against the same attempt bound" in body
     assert "`TaskOutput`" in body
-    # Recovery never reaches for the harness's own tasks.
-    assert "Never kill a harness task you did not start" in body
+    # Recovery never reaches for a tracked task this worker did not start.
+    assert "Never kill a tracked task you did not start" in body
 
 
 # ---------------------------------------------------------------------------

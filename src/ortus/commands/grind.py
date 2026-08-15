@@ -354,7 +354,7 @@ def _checkpoint_codex_preflight(
         write_log("preflight: HALT — tracker housekeeping commit failed")
         output.error(
             "grind: failed to checkpoint generated Beads state",
-            hint="inspect the staged tracker exports and git configuration",
+            hint="inspect the staged .beads/ files and git configuration",
         )
         raise typer.Exit(code=1)
     if tracker_paths:
@@ -372,7 +372,7 @@ def _checkpoint_codex_preflight(
         raise typer.Exit(code=1)
     if accept_baseline and remaining:
         write_log(
-            "preflight: preserving dirty worktree for worker handoff: "
+            "preflight: preserving dirty worktree as inherited dirty paths: "
             + ", ".join(sorted(remaining))
         )
     return remaining
@@ -390,7 +390,7 @@ def _capture_codex_candidate(
 
     dirty = git.dirty_paths()
     if dirty is None:
-        output.error("grind: could not capture Codex candidate paths")
+        output.error("grind: could not capture Codex owned paths")
         raise typer.Exit(code=1)
     # A branch-scoped candidate is everything between the recorded base and
     # the working tree: commits the worker made on its issue branch as well
@@ -403,14 +403,14 @@ def _capture_codex_candidate(
     if base and tip and tip != base:
         changed = git.changed_paths(base, tip)
         if changed is None:
-            output.error("grind: could not read the candidate's committed range")
+            output.error("grind: could not read the owned committed range")
             raise typer.Exit(code=1)
         range_changed = changed
     paths = _candidate_paths(dirty | range_changed, baseline)
     try:
         diff = candidate_diff(git.repo, paths, base=base)
     except RuntimeError as exc:
-        output.error(f"grind: could not create candidate diff: {exc}")
+        output.error(f"grind: could not create owned-paths diff: {exc}")
         raise typer.Exit(code=1) from exc
     digest, diff_ref = store.save_diff(diff)
     updated = journal.with_candidate(
@@ -523,26 +523,26 @@ def _absorb_unrelated_declaration(
         pass
     if ignored:
         write_log(
-            "handoff: ignoring unrelated declaration outside the inherited work: "
+            "recovery: ignoring unrelated declaration outside the inherited work: "
             + ", ".join(ignored[:_HANDOFF_PROMPT_PATHS])
         )
     if own_work:
         write_log(
-            "handoff: ignoring unrelated declaration for inherited work belonging "
-            f"to {journal.issue_id}; kept in the candidate: "
+            "recovery: ignoring unrelated declaration for inherited work belonging "
+            f"to {journal.issue_id}; kept in the owned paths: "
             + ", ".join(own_work[:_HANDOFF_PROMPT_PATHS])
         )
     if readopted:
         write_log(
-            "handoff: declaration refused; the worker edited this path after "
-            "disowning it and every changed region is "
-            f"{journal.issue_id}'s, so it returns to the candidate: "
+            "recovery: declaration refused; the worker edited this path after "
+            "marking it unrelated and every changed region is "
+            f"{journal.issue_id}'s, so it returns to the owned paths: "
             + ", ".join(readopted[:_HANDOFF_PROMPT_PATHS])
         )
         output.progress(
             "grind",
-            f"{len(readopted)} disowned path(s) edited afterwards; re-adopted into "
-            "the candidate",
+            f"{len(readopted)} unrelated path(s) edited afterwards; re-adopted into "
+            "the owned paths",
         )
     updated = journal
     if readopted:
@@ -562,10 +562,10 @@ def _absorb_unrelated_declaration(
         # improvisation the planning-gap route exists to prevent.
         updated = updated.route_plan_gap()
         for gap in gaps[:_HANDOFF_PROMPT_PATHS]:
-            write_log(f"handoff: PLAN-GAP — mixed ownership in a disowned path; {gap}")
+            write_log(f"recovery: PLAN-GAP — mixed ownership in an unrelated path; {gap}")
         output.progress(
             "grind",
-            f"planning gap: {len(gaps)} disowned path(s) carry regions owned by more "
+            f"planning gap: {len(gaps)} unrelated path(s) carry regions owned by more "
             "than one issue",
         )
     if honored:
@@ -575,7 +575,7 @@ def _absorb_unrelated_declaration(
     store.save(updated)
     if honored:
         write_log(
-            "handoff: worker declared unrelated; left untouched and never committed: "
+            "recovery: worker declared unrelated; left untouched and never committed: "
             + ", ".join(sorted(honored))
         )
         output.progress(
@@ -651,7 +651,7 @@ class _HandoffState:
         hidden = len(self.handoff_paths) - len(listed)
         rendered = ", ".join(listed) + (f", +{hidden} more" if hidden > 0 else "")
         text = (
-            " RECOVERY HANDOFF: a prior engineer left uncommitted work"
+            " RECOVERY: a prior engineer left uncommitted work"
             + (f" and stopped at {self.prior_phase}" if self.prior_phase else "")
             + ". Run `git status` and `git diff HEAD` for the live state"
             + (f"; the captured diff is {self.diff_ref}" if self.diff_ref else "")
@@ -703,7 +703,7 @@ def _rebuild_journal_from_claim(
     try:
         digest, diff_ref = store.save_diff(candidate_diff(repo, paths))
     except RuntimeError as exc:
-        write_log(f"transaction handoff: could not diff the inherited work ({exc})")
+        write_log(f"recovery: could not diff the inherited work ({exc})")
         return None
     journal = CandidateJournal.start(
         repo=repo,
@@ -715,7 +715,7 @@ def _rebuild_journal_from_claim(
     )
     store.save(journal)
     write_log(
-        "transaction handoff: rebuilt unusable journal from claimed issue "
+        "recovery: rebuilt unusable run record from claimed issue "
         f"{issue_hint} and the current worktree"
     )
     return journal
@@ -743,7 +743,7 @@ def _prepare_handoff(
 
     journal, notes = store.load_state()
     for note in notes:
-        write_log(f"transaction handoff: {note}")
+        write_log(f"recovery: {note}")
     rebuilt = False
     if journal is None and store.path.exists():
         journal = _rebuild_journal_from_claim(
@@ -753,14 +753,14 @@ def _prepare_handoff(
         if journal is None:
             notes = (
                 *notes,
-                "the prior journal was unusable and no single claimed issue named the goal",
+                "the prior run record was unusable and no single claimed issue named the goal",
             )
             write_log(
-                "transaction handoff: journal is unusable and no single claimed issue "
+                "recovery: run record is unusable and no single claimed issue "
                 "identifies the work; continuing with the current worktree as context"
             )
         else:
-            notes = (*notes, "the prior journal was rebuilt from bd and the worktree")
+            notes = (*notes, "the prior run record was rebuilt from bd and the worktree")
 
     if journal is not None:
         # Finalization replay already ran, so a journal still here owes work. If
@@ -777,7 +777,7 @@ def _prepare_handoff(
         )
         if unroutable:
             write_log(
-                f"transaction handoff: {journal.issue_id} {unroutable}; not resuming "
+                f"recovery: {journal.issue_id} {unroutable}; not resuming "
                 "it. Its uncommitted work is presented as context instead"
             )
             notes = (
@@ -798,7 +798,7 @@ def _prepare_handoff(
         else:
             dirty = git.dirty_paths() if git.is_git_repo() else frozenset()
             if dirty is None:
-                write_log("transaction handoff: git status failed; assuming clean tree")
+                write_log("recovery: git status failed; assuming clean tree")
                 dirty = frozenset()
             inherited = frozenset(
                 path
@@ -812,7 +812,7 @@ def _prepare_handoff(
             if len(claimed) == 1:
                 issue_id = next(iter(claimed))
                 write_log(
-                    "transaction handoff: resuming the single claimed issue "
+                    "recovery: resuming the single claimed issue "
                     f"{issue_id}"
                 )
                 return _HandoffState(resume_issue_id=issue_id, notes=notes)
@@ -823,7 +823,7 @@ def _prepare_handoff(
             # prefer that issue over selecting anything new.
             state.resume_issue_id = next(iter(claimed))
             write_log(
-                "transaction handoff: resuming the single claimed issue "
+                "recovery: resuming the single claimed issue "
                 f"{state.resume_issue_id}"
             )
         elif len(claimed) > 1:
@@ -839,11 +839,11 @@ def _prepare_handoff(
             # tree has an owner, which is what the hint below asks for.
             rendered = ", ".join(sorted(claimed))
             write_log(
-                "transaction handoff: HALT — uncommitted work cannot be routed; "
+                "recovery: HALT — uncommitted work cannot be routed; "
                 f"claimed issues: {rendered}; paths: {', '.join(sorted(inherited))}"
             )
             output.error(
-                "grind: uncommitted work with no journal and more than one claimed "
+                "grind: uncommitted work with no run record and more than one claimed "
                 f"issue ({rendered}); nothing was changed",
                 hint=(
                     "decide which issue owns these paths, leave only that one "
@@ -857,13 +857,13 @@ def _prepare_handoff(
                 _, state.diff_ref = store.save_diff(candidate_diff(repo, inherited))
             except RuntimeError as exc:
                 write_log(
-                    f"transaction handoff: could not capture the inherited diff ({exc})"
+                    f"recovery: could not capture the inherited diff ({exc})"
                 )
         write_log(
-            "transaction handoff: presenting existing uncommitted changes to the next "
+            "recovery: presenting existing uncommitted changes to the next "
             "worker for relevance assessment: " + ", ".join(sorted(inherited))
         )
-        write_log("transaction handoff: git status\n" + (git.status_text() or "(none)"))
+        write_log("recovery: git status\n" + (git.status_text() or "(none)"))
         output.progress(
             "grind",
             f"handing {len(inherited)} uncommitted path(s) to the next worker",
@@ -873,7 +873,7 @@ def _prepare_handoff(
     prior_phase = journal.phase
     dirty = git.dirty_paths() if git.is_git_repo() else frozenset()
     if dirty is None:
-        output.error("grind: could not read the worktree for recovery handoff")
+        output.error("grind: could not read the worktree for recovery")
         raise typer.Exit(code=1)
     current_head = git.head_oid() if git.is_git_repo() else ""
     moved = list(notes)
@@ -908,7 +908,7 @@ def _prepare_handoff(
     if git.is_git_repo():
         view = _candidate_view(git, journal, baseline)
         if view is None:
-            moved.append("the candidate's committed range could not be read")
+            moved.append("the owned committed range could not be read")
             candidate = _candidate_paths(dirty, baseline)
         else:
             candidate, diff_base = view
@@ -921,7 +921,7 @@ def _prepare_handoff(
     else:
         candidate = _candidate_paths(dirty, baseline)
     if prior_phase in _SEALED_PHASES and candidate != frozenset(journal.candidate_paths):
-        moved.append("the candidate path set changed since the prior worker")
+        moved.append("the owned path set changed since the prior worker")
     try:
         diff = (
             candidate_diff(repo, candidate, base=diff_base, tip=diff_tip)
@@ -929,14 +929,14 @@ def _prepare_handoff(
             else b""
         )
     except RuntimeError as exc:
-        moved.append(f"the candidate could not be re-diffed ({exc})")
+        moved.append(f"the owned paths could not be re-diffed ({exc})")
         diff = b""
     if sha256_bytes(diff) != journal.candidate_hash:
         digest, diff_ref = store.save_diff(diff)
         journal = journal.with_candidate(
             candidate, phase=prior_phase, candidate_hash=digest, diff_ref=diff_ref
         )
-        moved.append(f"the candidate changed; refreshed to {digest[:12]}")
+        moved.append(f"the owned paths changed; refreshed to {digest[:12]}")
     else:
         journal = journal.with_candidate(candidate, phase=prior_phase)
     # Fingerprint the disowned paths too, not just the candidate: that record is
@@ -968,17 +968,17 @@ def _prepare_handoff(
     drift = moved[len(notes) :]
     if drift:
         write_log(
-            "transaction handoff: repository state moved since the prior worker; "
+            "recovery: repository state moved since the prior worker; "
             "adopting the current worktree for model review"
         )
     for note in drift:
-        write_log(f"transaction handoff: {note}")
+        write_log(f"recovery: {note}")
     write_log(
-        f"transaction resume: issue={journal.issue_id} phase={prior_phase} "
-        f"candidate_paths={sorted(candidate)} "
+        f"transaction resume: issue={journal.issue_id} step={prior_phase} "
+        f"owned_paths={sorted(candidate)} "
         f"unrelated={sorted(journal.unrelated_paths)}"
     )
-    write_log("transaction handoff: git status\n" + (git.status_text() or "(none)"))
+    write_log("recovery: git status\n" + (git.status_text() or "(none)"))
     output.progress(
         "grind",
         f"resuming {journal.issue_id} from {prior_phase} with "
@@ -1609,16 +1609,16 @@ def _machine_verify_candidate(
         log, decision=verdict.decision, candidate_hash=journal.candidate_hash
     )
     write_log(
-        f"iter {iteration}: verifier verdict={verdict.decision} "
-        f"candidate={journal.candidate_hash}"
+        f"iter {iteration}: verifier decision={verdict.decision} "
+        f"owned={journal.candidate_hash}"
     )
     passed_count = sum(1 for r in run.results if r.verdict == MACHINE_PASS)
     claims_word = "disagree" if disagreements else "agree"
     output.progress(
         "grind",
-        f"verdict: {verdict.decision.upper()} — machine checks passed "
+        f"acceptance checks: {verdict.decision.upper()} — machine checks passed "
         f"{passed_count}/{len(run.results)} criteria, claims {claims_word} "
-        f"(candidate {journal.candidate_hash[:12]}) after "
+        f"(owned {journal.candidate_hash[:12]}) after "
         f"{_fmt_duration(time.monotonic() - verify_started)}",
     )
     return _VerificationResult(
@@ -2159,13 +2159,13 @@ def _verify_candidate(
         log, decision=verdict.decision, candidate_hash=journal.candidate_hash
     )
     write_log(
-        f"iter {iteration}: verifier verdict={verdict.decision} "
-        f"candidate={journal.candidate_hash}"
+        f"iter {iteration}: verifier decision={verdict.decision} "
+        f"owned={journal.candidate_hash}"
     )
     output.progress(
         "grind",
-        f"verdict: {verdict.decision.upper()} "
-        f"(candidate {journal.candidate_hash[:12]}) after "
+        f"acceptance checks: {verdict.decision.upper()} "
+        f"(owned {journal.candidate_hash[:12]}) after "
         f"{_fmt_duration(time.monotonic() - verify_started)}",
     )
     return _VerificationResult(journal=journal, summary=summary, verdict=verdict)
@@ -2190,8 +2190,8 @@ _MESSAGE_RULES = (
     "backticks at least one function, class, or file that actually appears in "
     "your diff and none that does not (a diff with no nameable symbol still "
     "names one of its files), never an inventory of the files touched, and "
-    "never narration of how the commit was produced (attempt counts, verifier "
-    "verdicts, phase names, candidate hashes)."
+    "never narration of how the commit was produced (attempt counts, "
+    "criterion results, step names, owned-path hashes)."
 )
 
 #: The implementation phase rules injected ahead of the worker's condition.
@@ -2731,7 +2731,7 @@ def _change_description(
             return _bounded_block(bullets)
     summary = _codegraph_summary(latest) if latest else ""
     write_log(
-        f"finalization: no usable **Changes** bullets for {issue_id}; the commit "
+        f"session-close: no usable **Changes** bullets for {issue_id}; the commit "
         "body degrades to "
         + ("the CodeGraph block" if summary else "the issue objective alone")
     )
@@ -2911,16 +2911,16 @@ def _finalization_blocker(
         if journal.branch_head and tip != journal.branch_head:
             return (
                 f"issue branch {journal.issue_branch} moved after the passing "
-                f"verdict ({journal.branch_head[:12]} → {(tip or 'gone')[:12]})"
+                f"acceptance checks ({journal.branch_head[:12]} → {(tip or 'gone')[:12]})"
             )
         if integration_tip not in (journal.base_head, tip):
             return (
-                f"{integration_branch} moved after the passing verdict; the "
+                f"{integration_branch} moved after the passing acceptance checks; the "
                 f"fast-forward from {journal.base_head[:12]} no longer applies"
             )
     elif side.head_oid() != journal.base_head:
         return (
-            f"base commit {journal.base_head} is no longer HEAD; the candidate was "
+            f"base commit {journal.base_head} is no longer HEAD; the owned paths were "
             "verified against a different tree"
         )
     dirty = side.dirty_paths()
@@ -2930,13 +2930,13 @@ def _finalization_blocker(
     if base and side.head_oid() != base:
         changed = side.changed_paths(base)
         if changed is None:
-            return "could not read the candidate's committed range"
+            return "could not read the owned committed range"
         range_changed = changed
     owned = _candidate_paths(dirty | range_changed, baseline)
     if owned != frozenset(journal.candidate_paths):
         drifted = sorted(owned.symmetric_difference(journal.candidate_paths))
         return (
-            "candidate path set changed after the passing verdict: "
+            "owned path set changed after the passing acceptance checks: "
             + ", ".join(drifted)
         )
     try:
@@ -2981,7 +2981,7 @@ def _message_composer(
     ) -> str:
         reference = journal.candidate_diff_ref
         if not reference:
-            raise ComposeFailed("the transaction recorded no candidate diff")
+            raise ComposeFailed("the transaction recorded no owned-paths diff")
         artifact = Path(reference)
         if not artifact.is_absolute():
             artifact = repo / artifact
@@ -2989,7 +2989,7 @@ def _message_composer(
             diff = artifact.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             raise ComposeFailed(
-                f"the candidate diff at {reference} is unreadable ({exc})"
+                f"the owned-paths diff at {reference} is unreadable ({exc})"
             ) from exc
         return compose_commit_message(
             repo,
@@ -3007,7 +3007,7 @@ def _message_composer(
             # through, so one patch point still swaps the whole backend.
             runner_factory=_make_runner,
             note=lambda text: write_log(
-                f"finalization: commit-message pass for {issue_id}: {text}"
+                f"session-close: commit-message pass for {issue_id}: {text}"
             ),
         )
 
@@ -3034,8 +3034,8 @@ def _refresh_tracker_exports(
     except Exception as exc:  # noqa: BLE001 - a broken bd is a blocker, not a crash
         reason = str(exc)
     if reason:
-        return f"could not regenerate the tracker exports: {reason}"
-    write_log("finalization: tracker exports regenerated via bd export")
+        return f"could not regenerate the .beads/ files: {reason}"
+    write_log("session-close: .beads/ files regenerated via bd export")
     return None
 
 
@@ -3096,7 +3096,7 @@ def _land_from_workspace(
                 "the worker's commit: " + ", ".join(late_exports)
             )
         write_log(
-            "finalization: folded into the worker's commit: "
+            "session-close: folded into the worker's commit: "
             + ", ".join(late_exports)
         )
     raw = workspace_git.head_message().strip()
@@ -3127,11 +3127,11 @@ def _land_from_workspace(
                 else "normalized"
             )
             write_log(
-                f"finalization: worker commit message {note} for {issue_id}"
+                f"session-close: worker commit message {note} for {issue_id}"
             )
     except ComposeRejected as exc:
         write_log(
-            f"finalization: worker commit message rejected ({exc}); "
+            f"session-close: worker commit message rejected ({exc}); "
             "replaced by the deterministic assembly"
         )
         replacement = _commit_message(
@@ -3179,13 +3179,13 @@ def _land_from_workspace(
             f"{branch} — resolve and re-run grind"
         )
     write_log(
-        f"finalization: {integration_branch} fast-forwarded to "
+        f"session-close: {integration_branch} fast-forwarded to "
         f"{branch} at {branch_head[:12]}"
     )
     journal = journal.with_finalization("commit", git.head_oid())
     store.save(journal)
     write_log(
-        f"finalization: committed owned paths for {issue_id}: "
+        f"session-close: committed owned paths for {issue_id}: "
         + (", ".join(late_exports) or "none")
     )
     return journal, None
@@ -3247,7 +3247,7 @@ def _finalize_candidate(
             return journal, f"final report could not be persisted ({exc})"
         journal = journal.with_finalization("report")
         store.save(journal)
-        write_log(f"finalization: report persisted for {issue_id}")
+        write_log(f"session-close: report persisted for {issue_id}")
 
     if not journal.finalized("close"):
         try:
@@ -3264,7 +3264,7 @@ def _finalize_candidate(
         journal = journal.with_finalization("close")
         store.save(journal)
         write_log(
-            f"finalization: {issue_id} "
+            f"session-close: {issue_id} "
             + ("closed by Ortus" if closed else "was already closed; close skipped")
         )
 
@@ -3272,7 +3272,7 @@ def _finalize_candidate(
         composed = ""
         if compose is None:
             write_log(
-                f"finalization: commit-message pass retired for {issue_id}; "
+                f"session-close: commit-message pass retired for {issue_id}; "
                 "the worker's own message or the deterministic assembly stands"
             )
         else:
@@ -3298,13 +3298,13 @@ def _finalize_candidate(
             try:
                 guard_read_only(before, after)
             except ComposeExceededAuthority as exc:
-                write_log(f"finalization: HALT — {exc}")
+                write_log(f"session-close: HALT — {exc}")
                 journal = replace(journal, phase=_FINALIZATION_BLOCKED_PHASE)
                 store.save(journal)
                 return journal, str(exc)
             if failure:
                 write_log(
-                    f"finalization: commit-message pass for {issue_id} produced "
+                    f"session-close: commit-message pass for {issue_id} produced "
                     f"nothing usable ({failure}); the deterministic body stands"
                 )
         journal = journal.with_finalization(
@@ -3312,7 +3312,7 @@ def _finalize_candidate(
         )
         store.save(journal)
         if composed:
-            write_log(f"finalization: commit message composed for {issue_id}")
+            write_log(f"session-close: commit message composed for {issue_id}")
 
     if not journal.finalized("commit"):
         if not git.is_git_repo():
@@ -3364,7 +3364,7 @@ def _finalize_candidate(
                 if not git.checkout(journal.issue_branch):
                     return journal, (
                         f"could not check out {journal.issue_branch} to commit "
-                        "the candidate"
+                        "the owned paths"
                     )
             export_blocker = _refresh_tracker_exports(bd, write_log)
             if export_blocker is not None:
@@ -3379,7 +3379,7 @@ def _finalize_candidate(
             unrelated = dirty - stage - _TRACKER_EXPORT_PATHS
             if unrelated:
                 write_log(
-                    "finalization: leaving unrelated worktree paths untouched: "
+                    "session-close: leaving unrelated worktree paths untouched: "
                     + ", ".join(sorted(unrelated))
                 )
             worker_committed = bool(
@@ -3391,14 +3391,14 @@ def _finalize_candidate(
                 message = _composed_message(journal)
                 if message:
                     write_log(
-                        f"finalization: committing {issue_id} with the composed "
+                        f"session-close: committing {issue_id} with the composed "
                         "message"
                     )
                 else:
                     packet = _commit_packet(bd, issue_id)
                     if not packet:
                         write_log(
-                            "finalization: work spec unreadable; committing "
+                            "session-close: work spec unreadable; committing "
                             f"{issue_id} with a degraded subject"
                         )
                     message = _commit_message(
@@ -3417,7 +3417,7 @@ def _finalize_candidate(
                     blocked = "path-scoped commit of the owned candidate failed"
                     if committed.reason:
                         blocked = f"{blocked}; {committed.reason}"
-                    write_log(f"finalization: HALT — {blocked}")
+                    write_log(f"session-close: HALT — {blocked}")
                     return journal, blocked
             else:
                 # The head commit is the worker's own. The transaction's late
@@ -3436,7 +3436,7 @@ def _finalize_candidate(
                             "the worker's commit: " + ", ".join(sorted(stage))
                         )
                     write_log(
-                        "finalization: folded into the worker's commit: "
+                        "session-close: folded into the worker's commit: "
                         + ", ".join(sorted(stage))
                     )
                 raw = git.head_message().strip()
@@ -3470,12 +3470,12 @@ def _finalize_candidate(
                             else "normalized"
                         )
                         write_log(
-                            f"finalization: worker commit message {note} "
+                            f"session-close: worker commit message {note} "
                             f"for {issue_id}"
                         )
                 except ComposeRejected as exc:
                     write_log(
-                        f"finalization: worker commit message rejected ({exc}); "
+                        f"session-close: worker commit message rejected ({exc}); "
                         "replaced by the deterministic assembly"
                     )
                     replacement = _commit_message(
@@ -3532,13 +3532,13 @@ def _finalize_candidate(
                         "out; check the working tree and re-run grind"
                     )
                 write_log(
-                    f"finalization: {integration_branch} fast-forwarded to "
+                    f"session-close: {integration_branch} fast-forwarded to "
                     f"{journal.issue_branch} at {branch_head[:12]}"
                 )
             journal = journal.with_finalization("commit", git.head_oid())
             store.save(journal)
             write_log(
-                f"finalization: committed owned paths for {issue_id}: "
+                f"session-close: committed owned paths for {issue_id}: "
                 + (", ".join(sorted(stage)) or "none")
             )
 
@@ -3546,12 +3546,12 @@ def _finalize_candidate(
         if not git.is_git_repo() or not git.has_remote():
             journal = journal.with_finalization("sync", "no-remote")
             store.save(journal)
-            write_log("finalization: no remote configured; nothing to push")
+            write_log("session-close: no remote configured; nothing to push")
         else:
             pushed = _announced_push(git, integration_branch)
             if not pushed:
                 write_log(
-                    "finalization: push rejected; pulling --rebase and retrying once"
+                    "session-close: push rejected; pulling --rebase and retrying once"
                 )
                 output.progress(
                     "grind", "push rejected; rebasing on origin and retrying"
@@ -3570,7 +3570,7 @@ def _finalize_candidate(
                 )
             journal = journal.with_finalization("sync", "pushed")
             store.save(journal)
-            write_log(f"finalization: {integration_branch} synchronized with origin")
+            write_log(f"session-close: {integration_branch} synchronized with origin")
 
     store.clear()
     return journal, None
@@ -4034,7 +4034,7 @@ def _apply_merge_gate(
     if not issue_branch:
         return journal, None
     if not git.is_git_repo() or not git.has_remote():
-        write_log("finalization: merge gate skipped (no remote)")
+        write_log("session-close: merge gate skipped (no remote)")
         return journal, None
 
     tip = git.branch_tip(issue_branch) or journal.branch_head
@@ -4050,17 +4050,17 @@ def _apply_merge_gate(
         journal = replace(journal, finalization=record)
         store.save(journal)
         write_log(
-            f"finalization: pushed {issue_branch} at {tip[:12]} for merge-gate checks"
+            f"session-close: pushed {issue_branch} at {tip[:12]} for merge-gate checks"
         )
     else:
         write_log(
-            f"finalization: {issue_branch} already on origin at "
+            f"session-close: {issue_branch} already on origin at "
             f"{str(already)[:12]}; re-entering the check wait"
         )
 
     deadline = clock() + merge_gate_timeout
     write_log(
-        f"finalization: waiting up to {int(merge_gate_timeout)}s for checks "
+        f"session-close: waiting up to {int(merge_gate_timeout)}s for checks "
         f"on {issue_branch}"
     )
     output.progress(
@@ -4071,7 +4071,7 @@ def _apply_merge_gate(
     while True:
         conclusion = git.branch_checks(issue_branch)
         if conclusion == "success":
-            write_log(f"finalization: checks on {issue_branch} passed")
+            write_log(f"session-close: checks on {issue_branch} passed")
             return journal, None
         if conclusion == "failure":
             return journal, (
@@ -4763,7 +4763,7 @@ def grind(
         "--condition",
         help=(
             "Legacy: custom per-iteration /goal condition whose worker also "
-            "selects its own issue (replaces the harness-claimed work-issue.txt "
+            "selects its own issue (replaces the grind-claimed work-issue.txt "
             "flow and its verified-close transaction)."
         ),
     ),
@@ -4792,7 +4792,7 @@ def grind(
             "Hard cap (secs) on a single iteration's worker subprocess. On exceed, "
             "SIGTERM then SIGKILL the worker's whole process group (killing any child "
             "bd/dolt/build processes and releasing their locks). Codex preserves the "
-            "claimed candidate for restart; Claude runs bd-state/orphan-policy "
+            "claimed owned paths for restart; Claude runs bd-state/orphan-policy "
             "recovery. 0 disables the watchdog (workers may then hang indefinitely)."
         ),
     ),
@@ -4800,7 +4800,7 @@ def grind(
         0,
         "--max-corrections",
         help=(
-            "Fresh implement+verify retries after a failed verdict "
+            "Fresh implement+verify retries after failed acceptance checks "
             "(default 0: escalate immediately). Each attempt is a new worker "
             "with only the failed criteria and findings. Exhaustion flags the "
             "issue for a human and never merges."
@@ -4958,7 +4958,7 @@ def grind(
             + (
                 f"up to {max_corrections} fresh attempt(s), each re-verified"
                 if max_corrections > 0
-                else "off (a failed verdict escalates immediately)"
+                else "off (failed acceptance checks escalate immediately)"
             )
         )
         output.info(f"integration:    {integration_branch}")
@@ -5040,9 +5040,9 @@ def grind(
                 "=== ortus grind started "
                 f"(subprocess-per-task shape; backend={resolved_backend}) ==="
             )
-            write_log(f"phase profile: {implement_profile.display_name}")
-            write_log(f"phase profile: {verify_profile.display_name}")
-            write_log(f"phase profile: {finalize_profile.display_name}")
+            write_log(f"profile: {implement_profile.display_name}")
+            write_log(f"profile: {verify_profile.display_name}")
+            write_log(f"profile: {finalize_profile.display_name}")
             # The commit-message model pass is retired (branch-scoped
             # candidates, commit B): the worker writes its message at commit
             # time and finalization repairs or replaces it deterministically.
@@ -5098,13 +5098,13 @@ def grind(
                 and pending_finalization.phase in _FINALIZABLE_PHASES
             ):
                 write_log(
-                    "finalization resume: journal for "
+                    "session-close resume: run record for "
                     f"{pending_finalization.issue_id} stopped at "
-                    f"{pending_finalization.phase}; replaying remaining phase transitions"
+                    f"{pending_finalization.phase}; replaying remaining session-close steps"
                 )
                 output.progress(
                     "grind",
-                    f"resuming finalization of {pending_finalization.issue_id}",
+                    f"resuming session-close of {pending_finalization.issue_id}",
                 )
                 pending_finalization, blocker = _finalize_candidate(
                     bd,
@@ -5129,10 +5129,10 @@ def grind(
                     merge_gate_timeout=merge_gate_timeout,
                 )
                 if blocker is not None:
-                    write_log(f"finalization resume: HALT — {blocker}")
+                    write_log(f"session-close resume: HALT — {blocker}")
                     output.error(
                         _console_safe(
-                            "could not finish the pending finalization of "
+                            "could not finish the pending session-close of "
                             + _issue_reference_from_bd(
                                 bd, pending_finalization.issue_id
                             )
@@ -5142,13 +5142,13 @@ def grind(
                             )
                         ),
                         hint=(
-                            "the transaction journal under logs/ retains the "
+                            "the run record under logs/ retains the "
                             "recoverable state; resolve the blocker and re-run grind"
                         ),
                     )
                     raise typer.Exit(code=1)
                 write_log(
-                    "finalization resume: completed for "
+                    "session-close resume: completed for "
                     f"{pending_finalization.issue_id}"
                 )
             # Any unsuccessful exit after a claim leaves the assigned issue and
@@ -5642,7 +5642,7 @@ def grind(
                     if active_journal is None or active_journal.issue_id != issue_id:
                         if active_journal is not None:
                             write_log(
-                                "transaction handoff: journal owned "
+                                "recovery: journal owned "
                                 f"{active_journal.issue_id} but this iteration claimed "
                                 f"{issue_id}; starting a new transaction"
                             )
@@ -5706,7 +5706,7 @@ def grind(
                             or active_journal.issue_packet_ref != packet_ref
                         ):
                             write_log(
-                                "transaction handoff: work spec changed since the "
+                                "recovery: work spec changed since the "
                                 "prior worker; adopting the current authoritative work spec"
                             )
                             active_journal = replace(
@@ -5756,7 +5756,7 @@ def grind(
                         transaction_store.save(active_journal)
                     dirty_after_claim = candidate_git.dirty_paths()
                     if dirty_after_claim is None:
-                        output.error("grind: could not record candidate ownership")
+                        output.error("grind: could not record path ownership")
                         raise typer.Exit(code=1)
                     active_journal = active_journal.with_candidate(
                         dirty_after_claim

@@ -227,11 +227,11 @@ NO_WARNINGS = "none - no ortus warning line in this run"
 #: deliberately excluded, which is the judgement that failed once already.
 OWNED = "owned"
 INHERITED = "inherited"
-DISOWNED = "disowned"
-#: The candidate region with no journal at all. Nothing was ever captured, which
-#: is a different fact from a candidate holding nothing, and the region says
+DISOWNED = "unrelated"
+#: The owned-paths region with no run record at all. Nothing was ever captured,
+#: which is a different fact from a region holding nothing, and the region says
 #: which rather than rendering an empty one.
-CANDIDATE_IDLE = "idle - no candidate captured"
+CANDIDATE_IDLE = "idle - no owned paths captured"
 #: A journal in flight whose candidate is still empty: nothing has gone dirty
 #: since the claim. Stated rather than left blank, so the region reads as a
 #: finding instead of a broken panel.
@@ -261,10 +261,10 @@ NOT_REACHED = "not reached"
 
 #: The verdict region when there is no run to judge at all.
 VERDICT_IDLE = "idle - no run to judge"
-#: The decision line before any envelope exists. A verifier that reviews a whole
-#: candidate and then ends without emitting one is a real failure mode, and it
-#: costs a run, so it is named while it is happening rather than afterwards.
-VERDICT_PENDING = "decision pending - no verdict envelope emitted yet"
+#: The decision line before any envelope exists. A worker that reviews a whole
+#: edit set and then ends without emitting criterion results is a real failure
+#: mode, and it is named while it is happening rather than afterwards.
+VERDICT_PENDING = "decision pending - no criterion results emitted yet"
 #: No verifier report has been written for this run yet, so every criterion is
 #: outstanding rather than failing.
 NO_REPORT = "no verifier report yet"
@@ -309,15 +309,15 @@ OUTCOMES: dict[str, str] = {
     "corrections-exhausted": "correction attempts exhausted",
     "correction-rejected": "correction rejected",
     "plan-gap-escalated": "escalated as a planning gap",
-    "orphaned-candidate": "candidate left orphaned",
-    "incomplete-candidate": "candidate left incomplete",
+    "orphaned-candidate": "work left orphaned",
+    "incomplete-candidate": "work left incomplete",
 }
 #: A `finalized-*` phase is the run reaching a finalization phase transition, which is
 #: the only clean ending there is. Replay must say so rather than invent a
 #: failure for a run that simply finished.
 CLEAN_OUTCOME = "finished cleanly"
 #: A replayed run whose journal is gone: the log alone is still worth reading.
-NO_JOURNAL_OUTCOME = "no journal - replayed from the log alone"
+NO_JOURNAL_OUTCOME = "no run record - replayed from the log alone"
 
 #: The header with no transaction in flight. An absent journal is a valid state
 #: rather than an error, so an idle repository says so instead of being given a
@@ -366,8 +366,8 @@ class RegionSpec:
 REGIONS: tuple[RegionSpec, ...] = (
     RegionSpec("header", "run"),
     RegionSpec("current-action", "current action"),
-    RegionSpec("candidate", "candidate"),
-    RegionSpec("verdict", "verdict"),
+    RegionSpec("candidate", "owned paths"),
+    RegionSpec("verdict", "acceptance checks"),
     RegionSpec("warnings", "warnings"),
 )
 
@@ -1133,7 +1133,7 @@ def criteria_mismatch(state: VerdictState) -> str:
     if unexpected:
         parts.append(f"not in the work spec: {', '.join(unexpected)}")
     if missing:
-        parts.append(f"missing from the verdict: {', '.join(missing)}")
+        parts.append(f"missing from the criterion results: {', '.join(missing)}")
     return f"id mismatch - {'; '.join(parts)}" if parts else ""
 
 
@@ -1162,7 +1162,7 @@ def decision_line(state: VerdictState) -> str:
             f"current {short(state.candidate_hash)}"
         )
     elif envelope.candidate_hash:
-        line += f"   candidate {short(envelope.candidate_hash)}"
+        line += f"   owned paths {short(envelope.candidate_hash)}"
     return line
 
 
@@ -1530,12 +1530,12 @@ def outcome_line(snapshot: RunSnapshot) -> str:
     if snapshot.idle:
         return NO_JOURNAL_OUTCOME
     if not snapshot.terminal:
-        return f"no terminal state recorded - last phase {snapshot.phase}"
+        return f"no terminal state recorded - last step {snapshot.phase}"
     if snapshot.phase in TERMINAL_PHASES:
         ended = OUTCOMES.get(snapshot.phase, snapshot.phase)
     else:
         ended = CLEAN_OUTCOME
-    return f"{ended}   phase {snapshot.phase}"
+    return f"{ended}   step {snapshot.phase}"
 
 
 # --- header ----------------------------------------------------------------
@@ -1733,7 +1733,7 @@ def identity_line(snapshot: RunSnapshot, identity: IssueIdentity | None = None) 
 def state_line(snapshot: RunSnapshot) -> str:
     """Phase, iteration and elapsed run time. Phase leads, and is never clipped."""
 
-    parts = [f"phase {snapshot.phase}", f"iteration {iteration(snapshot)}"]
+    parts = [f"step {snapshot.phase}", f"iteration {iteration(snapshot)}"]
     elapsed = run_elapsed(snapshot)
     if elapsed is not None:
         parts.append(f"elapsed {duration(elapsed)}")

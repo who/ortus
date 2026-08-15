@@ -1314,7 +1314,7 @@ def test_claude_goal_stays_under_cap_with_recovery_handoff() -> None:
         phase_contract,
     )
 
-    handoff = " RECOVERY HANDOFF: " + "x" * 1500
+    handoff = " RECOVERY: " + "x" * 1500
     bare = grind_mod._compose_work_prompt(
         "",
         {"id": "x", "title": "t"},
@@ -2042,10 +2042,10 @@ def test_grind_console_prints_verdict_line(
     assert hashes, "the machine pipeline never ran"
     console = _squashed_console(result)
     assert (
-        "verdict: PASS — machine checks passed 2/2 criteria, claims agree "
-        f"(candidate {hashes[-1][:12]}) after" in console
+        "acceptance checks: PASS — machine checks passed 2/2 criteria, claims agree "
+        f"(owned {hashes[-1][:12]}) after" in console
     )
-    assert f"candidate={hashes[-1]}" in _grind_log(repo)
+    assert f"owned={hashes[-1]}" in _grind_log(repo)
 
 
 @pytest.mark.slow
@@ -2065,8 +2065,8 @@ def test_grind_console_prints_tally_and_finalization(
     assert result.exit_code == 0, result.stdout + result.stderr
     console = _squashed_console(result)
     assert (
-        "verdict: FAIL — machine checks passed 0/2 criteria, claims disagree "
-        f"(candidate {hashes[0][:12]})" in console
+        "acceptance checks: FAIL — machine checks passed 0/2 criteria, claims disagree "
+        f"(owned {hashes[0][:12]})" in console
     )
     assert f"correction attempt 1/2 for {issue_id}" in console
     assert f"landed {issue_id} on main — 1 done this run, 0 open" in console

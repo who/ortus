@@ -29,23 +29,11 @@ README = REPO / "README.md"
 #: `TERMS` fails instead of quietly shrinking what is documented.
 REQUIRED_TERMS = frozenset(
     {
-        "candidate",
-        "degraded",
-        "disown",
-        "finalization",
-        "handoff",
-        "happy path",
-        "harness",
-        "journal",
         "orphan",
-        "phase",
-        "phase transition",
         "planning gap",
         "readiness",
-        "seal",
+        "session-close",
         "task",
-        "tracker export",
-        "verdict",
         "work spec",
         "worker",
     }

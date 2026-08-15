@@ -293,7 +293,7 @@ RULES
 - Explain jargon on first use. A reader six months out has the code and
   nothing else.
 - Never narrate how this commit was produced: no attempt counts, correction
-  rounds, verifier verdicts, phase names, or candidate hashes. Domain
+  rounds, criterion results, step names, or owned-path hashes. Domain
   vocabulary is not process narration — if the code under change is about
   verification, say so freely.
 - One coherent explanation for the whole change, even when it spans files. A

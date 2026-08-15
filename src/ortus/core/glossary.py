@@ -1,12 +1,12 @@
 """Ortus's vocabulary, declared once as data.
 
-Ortus's words appear in operator-facing log lines, in the phase contracts
-handed to workers, and in error messages — always with a precise sense a
-reader cannot recover from context alone. Most are standard
+Ortus's words appear in operator-facing log lines, in the CodeGraph
+contracts handed to workers, and in error messages — always with a precise
+sense a reader cannot recover from context alone. Most are standard
 software-engineering vocabulary carrying one Ortus-specific sense: a *work
 spec* is the authored bd issue content a worker treats as authoritative, a
-*phase transition* is one journaled finalization step. A few
-(``candidate``, ``disown``, ``seal``) name concepts with no standard term.
+*session-close* is the worker's own commit, close and push at the end of
+one issue.
 
 Naming bar
 ----------
@@ -90,140 +90,9 @@ def sort_key(term: str) -> str:
 #: Ortus's vocabulary, alphabetically. Any grouping by subsystem would only
 #: invite an argument about which group a word belongs to, and helps nobody
 #: looking a word up. This declaration is the source of truth for spelling,
-#: including hyphenation: `planning gap` and `tracker export` appear in logs
+#: including hyphenation: `planning gap` and `session-close` appear in logs
 #: exactly as they are glossed here.
 TERMS: tuple[Term, ...] = (
-    Term(
-        term="candidate",
-        definition=(
-            "The edit set one worker produced for one issue, which it "
-            "session-closes after its acceptance checks pass."
-        ),
-        home="`CandidateJournal.candidate_paths` in `src/ortus/core/transaction.py`",
-        team_role=(
-            "The branch a developer has pushed but not merged: complete enough "
-            "to review, and not yet anyone else's problem."
-        ),
-        analogy=(
-            "A plated dish waiting under the pass. Finished, not yet carried "
-            "out, and still the kitchen's to fix."
-        ),
-    ),
-    Term(
-        term="degraded",
-        definition=(
-            "A step that completed with less information than usual instead of "
-            "failing, such as a commit subject written without a readable work spec."
-        ),
-        home="finalization logging in `src/ortus/commands/grind.py`",
-        team_role=(
-            "Shipping the release notes with a section missing rather than "
-            "holding the release for it."
-        ),
-        analogy=(
-            "A flight that departs with the entertainment system broken rather "
-            "than cancelling the flight."
-        ),
-    ),
-    Term(
-        term="disown",
-        definition=(
-            "A worker declaring that an inherited uncommitted path is not its "
-            "issue's work, which keeps the path out of the candidate rather "
-            "than merely leaving it alone."
-        ),
-        home="`src/ortus/core/attribution.py`",
-        team_role=(
-            "Telling your reviewer that half the diff on this shared branch "
-            "belongs to someone else's ticket, so please do not attribute it."
-        ),
-        analogy=(
-            "Labelling a shelf in a shared fridge so nobody cooks with someone "
-            "else's ingredients by mistake."
-        ),
-    ),
-    Term(
-        term="finalization",
-        definition=(
-            "The worker's own commit-and-close at the end of an issue — owned "
-            "paths, bd close, and push — after which grind reaps and moves on."
-        ),
-        home="`_done_bar_met()` in `src/ortus/commands/grind.py`",
-        team_role=(
-            "The developer closing their own ticket after the checks they ran, "
-            "not a release manager doing it for them."
-        ),
-        analogy=(
-            "The couple signing their own register. The registrar is not in "
-            "the room."
-        ),
-    ),
-    Term(
-        term="handoff",
-        definition=(
-            "The uncommitted paths a fresh worker inherits from whoever edited "
-            "the tree before it, recorded so attribution can tell them apart "
-            "from the worker's own edits."
-        ),
-        home="`CandidateJournal.with_handoff()` in `src/ortus/core/transaction.py`",
-        team_role=(
-            "Sitting down at a shared machine and finding a colleague's "
-            "half-finished work still in the editor."
-        ),
-        analogy=(
-            "The night shift arriving to find the day shift's notes and "
-            "half-finished paperwork on the desk."
-        ),
-    ),
-    Term(
-        term="happy path",
-        definition=(
-            "The route through a state machine taken when nothing goes wrong, "
-            "which is the only part the README diagram draws."
-        ),
-        home="`StateMachine.happy_path` in `src/ortus/core/lifecycle.py`",
-        team_role=(
-            "The walkthrough a runbook documents first, with the failure modes "
-            "in an appendix."
-        ),
-        analogy=(
-            "The route drawn on a map, with the diversions listed on the back "
-            "instead of drawn over the top of it."
-        ),
-    ),
-    Term(
-        term="harness",
-        definition=(
-            "The grind scheduler process that launches one fresh worker per "
-            "issue and reaps it once the issue is closed and HEAD is in sync "
-            "with origin."
-        ),
-        home="`src/ortus/core/grind_loop.py`",
-        team_role=(
-            "The team lead who assigns the ticket and books the room. Engineers "
-            "do not pick their own work here."
-        ),
-        analogy=(
-            "A taxi dispatcher assigning the next fare. The driver does not "
-            "choose which call comes in."
-        ),
-    ),
-    Term(
-        term="journal",
-        definition=(
-            "The one JSON file holding a candidate transaction's phase, paths, "
-            "hashes and evidence, which is what lets an interrupted run resume."
-        ),
-        home="`JOURNAL_RELATIVE_PATH` in `src/ortus/core/transaction.py`",
-        team_role=(
-            "The build log a pipeline keeps so an interrupted run can resume "
-            "where it stopped, rather than the code it was building."
-        ),
-        analogy=(
-            "A ship's log, kept so a relieving officer knows exactly where the "
-            "voyage stands without asking anyone."
-        ),
-    ),
     Term(
         term="orphan",
         definition=(
@@ -241,42 +110,10 @@ TERMS: tuple[Term, ...] = (
         ),
     ),
     Term(
-        term="phase",
-        definition=(
-            "The candidate journal's current state, which lives only as long as "
-            "one candidate transaction and is never a bd issue status."
-        ),
-        home="`CandidateJournal.phase` in `src/ortus/core/transaction.py`",
-        team_role=(
-            "Where a pull request sits right now — draft, in review, approved — "
-            "which is not the same thing as the ticket's status on the board."
-        ),
-        analogy=(
-            "Where a dish is right now — prepping, cooking, plating — which is "
-            "not the same as whether the table has been served."
-        ),
-    ),
-    Term(
-        term="phase transition",
-        definition=(
-            "One finalization step that is journaled as it lands, so a restart "
-            "resumes at the first step that did not."
-        ),
-        home="`FINALIZATION_STEPS` in `src/ortus/core/lifecycle.py`",
-        team_role=(
-            "A ticked line on the release manager's checklist. Interrupt the "
-            "release and the next person resumes at the first line not ticked."
-        ),
-        analogy=(
-            "A passport stamp at each border. The last stamp says where the "
-            "journey resumes, not where it began."
-        ),
-    ),
-    Term(
         term="planning gap",
         definition=(
             "A defect in the work spec that no amount of implementing can "
-            "resolve, which routes back to planning instead of producing a candidate."
+            "resolve, which routes back to planning instead of shipping the issue."
         ),
         home="`PLAN_GAP_ROUTED` in `src/ortus/core/lifecycle.py`",
         team_role=(
@@ -305,20 +142,19 @@ TERMS: tuple[Term, ...] = (
         ),
     ),
     Term(
-        term="seal",
+        term="session-close",
         definition=(
-            "Recording the candidate's diff hash so a later observer can prove "
-            "which edit set the worker closed, rather than whatever the tree "
-            "holds now."
+            "The worker's own commit, bd close, bd dolt push and git push at "
+            "the end of one issue, after which grind reaps."
         ),
-        home="`CandidateJournal.candidate_hash` in `src/ortus/core/transaction.py`",
+        home="`src/ortus/prompts/goal-prompt.md` step 4",
         team_role=(
-            "Approving a pull request at a named commit, so the sign-off refers "
-            "to one exact diff rather than to whatever the branch holds later."
+            "The developer closing their own ticket after the checks they ran, "
+            "not a release manager doing it for them."
         ),
         analogy=(
-            "A tamper-evident evidence bag. The signature refers to what was "
-            "inside at the moment it was sealed."
+            "The couple signing their own register. The registrar is not in "
+            "the room."
         ),
     ),
     Term(
@@ -335,39 +171,6 @@ TERMS: tuple[Term, ...] = (
         analogy=(
             "An errand you can finish on one trip, rather than a house move "
             "that has to be broken into trips first."
-        ),
-    ),
-    Term(
-        term="tracker export",
-        definition=(
-            "The generated beads files under `.beads/` that bd rewrites whenever "
-            "an issue changes, checkpointed apart from a worker's own edits."
-        ),
-        home="`src/ortus/commands/grind.py`",
-        team_role=(
-            "The issue tracker's own database, as distinct from the source code "
-            "— written by the tool, not by the engineer."
-        ),
-        analogy=(
-            "The library's catalogue as opposed to the books: written by the "
-            "librarian's system, not by an author."
-        ),
-    ),
-    Term(
-        term="verdict",
-        definition=(
-            "The pass-or-fail result of the issue's acceptance checks, which "
-            "the worker runs itself before session-close, with one entry per "
-            "acceptance criterion."
-        ),
-        home="`parse_verdict()` in `src/ortus/core/verdict.py`",
-        team_role=(
-            "The reviewer's formal approve or request-changes, with a note "
-            "against each acceptance criterion."
-        ),
-        analogy=(
-            "A building inspector's pass or fail, marked against each item of "
-            "the code rather than as a general impression."
         ),
     ),
     Term(

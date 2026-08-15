@@ -1173,7 +1173,7 @@ def test_verdict_identifier_mismatch_renders_both_sets(tmp_path: Path) -> None:
 
     mismatch = dash.criteria_mismatch(app.verdict)
     assert "not in the work spec: AC-9" in mismatch
-    assert "missing from the verdict: AC-2, AC-3" in mismatch
+    assert "missing from the criterion results: AC-2, AC-3" in mismatch
     assert mismatch in panel
 
 
@@ -2226,14 +2226,14 @@ def test_header_live_run_shows_issue_phase_iteration_and_elapsed(
     header = app.advance().header
 
     assert _HEADER_ISSUE in header
-    assert "phase implementation" in header
+    assert "step implementation" in header
     assert "iteration 1" in header
     assert "elapsed 30m" in header
     assert dash.region_state("header", app.snapshot) == "state-live"
-    # Phase and budget lead their own lines, so a narrow terminal clips the
+    # Step and budget lead their own lines, so a narrow terminal clips the
     # title before it clips either of the two fields an operator scans for.
     lines = header.splitlines()
-    assert lines[1].startswith("phase ")
+    assert lines[1].startswith("step ")
     assert lines[2].startswith("corrections ")
 
 
@@ -2246,7 +2246,7 @@ def test_header_idle_repository_shows_an_idle_header(tmp_path: Path) -> None:
     assert frame.header == dash.HEADER_IDLE
     assert dash.region_state("header", app.snapshot) == "state-idle"
     # Nothing is fabricated: no phase, no iteration, no countdown.
-    for invented in ("phase ", "iteration ", "watchdog", "corrections"):
+    for invented in ("step ", "iteration ", "watchdog", "corrections"):
         assert invented not in frame.header
 
 
@@ -2356,7 +2356,7 @@ def test_header_degrades_without_bd_to_the_issue_id_alone(
     assert app.identity == dash.IssueIdentity(issue_id=_HEADER_ISSUE, queried=True)
     # Everything read off disk is still on screen; only the enrichment is gone.
     assert _HEADER_ISSUE in frame.header
-    assert "phase implementation" in frame.header
+    assert "step implementation" in frame.header
     assert "corrections 0/" in frame.header
 
     # The question is asked once per issue rather than once per refresh: bd
@@ -2412,7 +2412,7 @@ def test_header_renders_an_unrecognised_phase_verbatim() -> None:
     """Edge case: a phase this model does not know is shown, not called unknown."""
 
     snapshot = _header_snapshot(phase="some-future-phase")
-    assert "phase some-future-phase" in dash.header_line(snapshot)
+    assert "step some-future-phase" in dash.header_line(snapshot)
     assert "unknown" not in dash.header_line(snapshot)
 
 
