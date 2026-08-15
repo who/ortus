@@ -173,8 +173,8 @@ def test_leftover_claim_with_dirty_work_is_resumed_not_replaced(
 ) -> None:
     """A leftover in_progress plus uncommitted work is the next window's goal.
 
-    Grind must spawn against that claim (not a newer ready leaf) and hand the
-    worker a RECOVERY: that names the inherited path.
+    Grind must spawn against that claim (not a newer ready leaf). The dirty
+    tree stays in place; grind does not snapshot it into a journal.
     """
     repo, leftover_id = _seed(tmp_path, "rec-leftover")
     other_id = _create_ready(repo, "do not pick this one")
@@ -188,11 +188,10 @@ def test_leftover_claim_with_dirty_work_is_resumed_not_replaced(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert worker.prompts, "a leftover claim must spawn a worker"
-    assert "RECOVERY:" in worker.prompts[0]
-    assert LEFTOVER in worker.prompts[0]
     assert worker.seen == [leftover_id]
     log = _grind_log(repo)
     assert f"continuing leftover claim {leftover_id}" in log
+    assert "transaction handoff" not in log
     assert _bd_show(repo, leftover_id)["status"] == "in_progress"
     assert _bd_show(repo, other_id)["status"] == "open"
     assert (repo / LEFTOVER).read_text(encoding="utf-8") == "HALF_DONE = True\n"
@@ -201,8 +200,7 @@ def test_leftover_claim_with_dirty_work_is_resumed_not_replaced(
 def test_historical_journal_schema_is_context_not_a_startup_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A schema-1 journal still names the leftover claim. The mismatch is a
-    log note; grind must start and resume rather than refuse the tree."""
+    """A leftover schema-1 journal is ignored. Resume keys off bd in_progress."""
     repo, leftover_id = _seed(tmp_path, "rec-schema")
     _claim(repo, leftover_id)
     (repo / LEFTOVER).write_text("SCHEMA_DRIFT = True\n", encoding="utf-8")
@@ -210,9 +208,6 @@ def test_historical_journal_schema_is_context_not_a_startup_failure(
     worker = _RecordingContinueWorker(repo)
     _install(monkeypatch, tmp_path, worker)
 
-    # Codex has no 4,000-character /goal cap. The schema-1 note is extra
-    # handoff context and must not become a startup refusal; Claude's wrap
-    # limit is a different surface.
     result = runner.invoke(
         app,
         [
@@ -228,9 +223,10 @@ def test_historical_journal_schema_is_context_not_a_startup_failure(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     log = _grind_log(repo)
-    assert "journal schema 1" in log
-    assert "is not the supported" in log
-    assert worker.prompts and "RECOVERY:" in worker.prompts[0]
+    assert "session-close resume" not in log
+    assert "HALT" not in log
+    assert not (repo / "logs" / "grind-transaction.json").exists()
+    assert worker.prompts
     assert f"continuing leftover claim {leftover_id}" in log
     assert _bd_show(repo, leftover_id)["status"] == "in_progress"
 
@@ -275,7 +271,7 @@ def test_off_main_tree_with_stray_commits_halts(
 def test_stale_journal_does_not_reopen_a_closed_issue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A journal whose issue already closed is routing context, not a reopen."""
+    """A leftover journal whose issue already closed is discarded, not reopened."""
     repo, issue_id = _seed(tmp_path, "rec-closed")
     _claim(repo, issue_id)
     subprocess.run(
@@ -295,7 +291,9 @@ def test_stale_journal_does_not_reopen_a_closed_issue(
     assert result.exit_code == 0, result.stdout + result.stderr
     assert _bd_show(repo, issue_id)["status"] == "closed"
     log = _grind_log(repo)
-    assert f"{issue_id} is already closed" in log
+    assert "session-close resume" not in log
+    assert "HALT" not in log
+    assert not (repo / "logs" / "grind-transaction.json").exists()
     assert worker.prompts == [], "a closed leftover must not be respawned"
 
 

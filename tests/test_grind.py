@@ -1509,7 +1509,30 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
                     text=True,
                 ).stdout
             )
-            claimed = next(item["id"] for item in claimed_rows if item.get("id"))
+            claimed = next(
+                (item["id"] for item in claimed_rows if item.get("id")), None
+            )
+            if claimed is None:
+                ready = json.loads(
+                    subprocess.run(
+                        ["bd", "ready", "--json"],
+                        cwd=primary,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    ).stdout
+                )
+                claimed = next(
+                    item["id"]
+                    for item in ready
+                    if item.get("issue_type") != "epic"
+                )
+                subprocess.run(
+                    ["bd", "update", claimed, "--status=in_progress"],
+                    cwd=primary,
+                    check=True,
+                    capture_output=True,
+                )
             subprocess.run(
                 ["bd", "close", claimed, "--reason", "fake codex completed it"],
                 cwd=primary,
@@ -1530,10 +1553,12 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
         ["grind", str(repo), "--backend", "codex", "--idle-sleep", "0"],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert len(prompts) == 1
-    journal = JournalStore(repo).load()
-    assert journal is not None
-    assert journal.phase == "implementation-rejected"
+    assert prompts, "a Codex worker must spawn"
+    assert not (repo / "logs" / "grind-transaction.json").exists()
+    assert JournalStore(repo).load() is None
+    log = _grind_log(repo)
+    assert "transaction handoff" not in log
+    assert "journal owned" not in log
     commits = subprocess.run(
         ["git", "log", "--format=%s"],
         cwd=repo,
@@ -1542,14 +1567,6 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
         text=True,
     ).stdout.splitlines()
     assert sum("complete Codex grind task" in subject for subject in commits) == 0
-    in_progress = subprocess.run(
-        ["bd", "list", "--status", "in_progress", "--json"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert len(json.loads(in_progress.stdout)) == 1
 
 
 def test_dry_run_startup_under_500ms(tmp_path: Path) -> None:
@@ -3274,3 +3291,90 @@ def test_grind_requires_git_repo(tmp_path: Path) -> None:
     assert result.exit_code == 1
     combined = result.stdout + result.stderr
     assert "not a git repository" in combined.lower() or "git" in combined.lower()
+
+
+@pytest.mark.slow
+def test_grind_does_not_write_journal_after_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a two-issue grind does not write a journal or handoff line."""
+    repo = _bd_repo(tmp_path, "no-handoff")
+    first = _create_ready_issue(repo, "first close")
+    second = _create_ready_issue(repo, "second close")
+    _baseline_commit(repo)
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "2", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _issue(repo, first)["status"] == "closed"
+    assert _issue(repo, second)["status"] == "closed"
+    assert not (repo / "logs" / "grind-transaction.json").exists()
+    assert JournalStore(repo).load() is None
+    log = _grind_log(repo)
+    assert "transaction handoff" not in log
+    assert "journal owned" not in log
+    assert "starting a new transaction" not in log
+    assert f"worker closed {first}" in log or f"worker closed {second}" in log
+
+
+@pytest.mark.slow
+def test_startup_ignores_leftover_finalized_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: leftover finalized-* journal is discarded, never finalized, no HALT."""
+    repo = _bd_repo(tmp_path, "stale-finalized")
+    leftover_id = _create_ready_issue(repo, "already shipped")
+    ready_id = _create_ready_issue(repo, "next ready")
+    _baseline_commit(repo)
+    subprocess.run(
+        ["bd", "close", leftover_id, "--reason", "already shipped"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    journal_path = repo / "logs" / "grind-transaction.json"
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    journal_path.write_text(
+        json.dumps(
+            {
+                "schema": 4,
+                "issue_id": leftover_id,
+                "base_head": "0" * 40,
+                "baseline_paths": [],
+                "baseline_fingerprints": {},
+                "candidate_paths": [],
+                "phase": "finalized-commit",
+                "finalization": {"report": True, "close": True, "compose": True, "commit": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    finalize_calls: list[str] = []
+
+    def _forbidden_finalize(*args: object, **kwargs: object) -> tuple[object, str]:
+        finalize_calls.append(str(kwargs.get("issue_id") or leftover_id))
+        raise AssertionError("_finalize_candidate must not run at startup")
+
+    monkeypatch.setattr(grind_mod, "_finalize_candidate", _forbidden_finalize)
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert finalize_calls == []
+    assert not journal_path.exists()
+    assert _issue(repo, leftover_id)["status"] == "closed"
+    assert _issue(repo, ready_id)["status"] == "closed"
+    log = _grind_log(repo)
+    assert "session-close resume" not in log
+    assert "HALT" not in log
+    assert "discarded leftover candidate journal" in log

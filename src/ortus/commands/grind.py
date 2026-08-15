@@ -4710,6 +4710,33 @@ def _log_writer(log_path: Path) -> Callable[[str], None]:
     return _write
 
 
+def _discard_leftover_journal(
+    repo: Path, write_log: Callable[[str], None]
+) -> None:
+    """Ignore a leftover candidate journal. It is not a resume key.
+
+    Leftover work is the leftover ``in_progress`` claim in bd plus the git
+    tree. A ``finalized-*`` file must not replay ``_finalize_candidate`` or
+    HALT the run.
+    """
+
+    path = JournalStore(repo).path
+    if not path.exists():
+        return
+    try:
+        path.unlink()
+    except OSError as exc:
+        write_log(
+            "startup: leftover candidate journal could not be removed "
+            f"({exc}); ignoring it"
+        )
+        return
+    write_log(
+        "startup: discarded leftover candidate journal; leftover work is "
+        "in_progress in bd plus the git tree"
+    )
+
+
 def grind(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
@@ -4990,12 +5017,8 @@ def grind(
             write_log(f"profile: {finalize_profile.display_name}")
             # The commit-message model pass is retired (branch-scoped
             # candidates, commit B): the worker writes its message at commit
-            # time and finalization repairs or replaces it deterministically.
-            # The journal's compose step vocabulary survives until the
-            # machine-verification deletion task so a legacy journal stranded
-            # at finalized-compose still resumes; a None pass journals the
-            # phase transition as unavailable and moves on.
-            compose_message: ComposeCallable | None = None
+            # time. A leftover journal is not a resume key and is discarded
+            # below rather than replayed through compose/finalize.
             output.progress("grind", f"starting; log → {log.relative_to(target)}")
 
             bd = _make_bd(target)
@@ -5003,123 +5026,28 @@ def grind(
             if not git.is_git_repo():
                 output.error("grind: working tree is not a git repository")
                 raise typer.Exit(code=1)
-            transaction_store = JournalStore(target)
             # Re-assert branch discipline before anything else: a stray branch
             # left by a prior crashed grind (or a manual checkout) is caught
             # here and either re-checked-out or halted on, so we never start
-            # spawning workers on top of stranded work (ortus-6fu6). The one
-            # sanctioned exception is the journal's own issue branch, whose
-            # stranded commit the finalization replay below integrates.
-            startup_journal = transaction_store.load()
-            if startup_journal is not None and startup_journal.workspace_path:
-                # A crashed run left its worker workspace behind. Rescue any
-                # uncommitted tail onto the issue branch, bring the branch
-                # home, and remove the clone — the resume below then works
-                # from the primary repository's ref like any other.
-                swept = _retire_workspace(
-                    git,
-                    startup_journal,
-                    repo=target,
-                    write_log=write_log,
-                    rescue_uncommitted=True,
-                )
-                if swept is not startup_journal:
-                    transaction_store.save(swept)
-                    startup_journal = swept
+            # spawning workers on top of stranded work (ortus-6fu6).
+            _discard_leftover_journal(target, write_log)
             _enforce_branch_discipline(
                 git,
                 integration_branch,
                 write_log,
                 phase="startup",
             )
-            # AC-6: a run killed between any two finalization phase transitions left a
-            # journal that still owes work. Replay it BEFORE selecting anything,
-            # and never select another issue while one is outstanding. Each step
-            # re-checks observable bd/git state, so a replay of a phase transition that
-            # actually landed is a no-op rather than a duplicate.
-            pending_finalization = transaction_store.load()
-            if (
-                pending_finalization is not None
-                and pending_finalization.phase in _FINALIZABLE_PHASES
-            ):
-                write_log(
-                    "session-close resume: run record for "
-                    f"{pending_finalization.issue_id} stopped at "
-                    f"{pending_finalization.phase}; replaying remaining session-close steps"
-                )
-                output.progress(
-                    "grind",
-                    f"resuming session-close of {pending_finalization.issue_id}",
-                )
-                pending_finalization, blocker = _finalize_candidate(
-                    bd,
-                    git,
-                    transaction_store,
-                    pending_finalization,
-                    repo=target,
-                    issue_id=pending_finalization.issue_id,
-                    integration_branch=integration_branch,
-                    # The operator baseline this transaction started from, not
-                    # an empty set: grind supports resuming into a dirty tree,
-                    # so pre-existing unrelated edits must stay excluded from
-                    # the owned-path comparison or every such resume would
-                    # block as a phantom "candidate path set changed".
-                    baseline=_candidate_baseline(
-                        pending_finalization,
-                        frozenset(pending_finalization.baseline_paths),
-                    ),
-                    write_log=write_log,
-                    compose=compose_message,
-                    merge_gate=merge_gate,
-                    merge_gate_timeout=merge_gate_timeout,
-                )
-                if blocker is not None:
-                    write_log(f"session-close resume: HALT — {blocker}")
-                    output.error(
-                        _console_safe(
-                            "could not finish the pending session-close of "
-                            + _issue_reference_from_bd(
-                                bd, pending_finalization.issue_id
-                            )
-                            + f" — {blocker}\n"
-                            + _safety_sentence(
-                                _candidate_state_phrase(git, pending_finalization)
-                            )
-                        ),
-                        hint=(
-                            "the run record under logs/ retains the "
-                            "recoverable state; resolve the blocker and re-run grind"
-                        ),
-                    )
-                    raise typer.Exit(code=1)
-                write_log(
-                    "session-close resume: completed for "
-                    f"{pending_finalization.issue_id}"
-                )
-            # Any unsuccessful exit after a claim leaves the assigned issue and
-            # its uncommitted edits behind. Resume that pair — for either
-            # backend — before considering new work (AC-1, AC-2).
-            handoff = _prepare_handoff(
-                bd,
-                git,
-                transaction_store,
-                repo=target,
-                backend=resolved_backend,
-                integration_branch=integration_branch,
-                write_log=write_log,
+            # Leftover work is the leftover in_progress claim in bd plus the
+            # git tree. A leftover journal is never the resume key.
+            leftover_claims = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+            resume_issue_id = (
+                next(iter(leftover_claims)) if len(leftover_claims) == 1 else None
             )
-            active_journal: CandidateJournal | None = handoff.journal
-            codex_baseline = frozenset[str]()
-            startup_handoff_paths = handoff.handoff_paths
-            resume_issue_id = handoff.resume_issue_id
-            resume_candidate_ready = handoff.candidate_ready
-            recovery_handoff = handoff.active
-            # Run-scoped, because a disowned path outlives the transaction that
-            # disowned it: it is still in the tree, and the next issue's
-            # candidate must not absorb and commit it either.
-            disowned_paths = frozenset(
-                handoff.journal.unrelated_paths if handoff.journal else ()
-            )
+            if resume_issue_id is not None:
+                write_log(
+                    "recovery: resuming the single claimed issue "
+                    f"{resume_issue_id}"
+                )
             initial_snapshot = _snapshot(bd)
             write_log(
                 f"initial state: open={initial_snapshot.open} "
@@ -5134,24 +5062,17 @@ def grind(
             )
 
             # We hold the exclusive flock, so any in_progress issue at this
-            # point is a cross-restart orphan: a prior grind claimed it and
-            # was killed before closing. Per-iteration orphan detection
-            # (compute_delta on the before/after diff) can never see these
-            # because they sit in `before.in_progress_ids` and get subtracted
-            # out of every later delta.
+            # point is a leftover from a prior window: a prior grind claimed
+            # it and the worker left it unfinished. Per-iteration orphan
+            # detection (compute_delta on the before/after diff) can never
+            # see these because they sit in `before.in_progress_ids` and get
+            # subtracted out of every later delta.
             #
-            # A journal-backed transaction is the one exemption: Ortus owns
-            # that claim, knows exactly which candidate it covers, and is about
-            # to resume it, so --orphan-policy is not what governs its bd
-            # lifecycle. A bare claim with no journal is precisely the
-            # cross-restart orphan the policy exists for, and it stays under
-            # the policy even when the handoff resumes its goal — the routing
-            # hint was captured above before any sweep runs, so `revert` costs
-            # nothing (the loop re-claims the same issue) and the operator
-            # keeps warn|revert|escalate on the state grind cannot explain.
-            orphan_ids = initial_snapshot.in_progress_ids - (
-                {handoff.journal.issue_id} if handoff.journal is not None else set()
-            )
+            # f2he.2: a live unfinished claim is not an orphan. Revert is
+            # remapped to warn so leftover in_progress stays the next
+            # window's goal. Escalate still hands the issue to a human when
+            # the operator asked for that policy.
+            orphan_ids = set(initial_snapshot.in_progress_ids)
             if orphan_ids:
                 write_log(
                     f"startup leftover claim(s): {len(orphan_ids)} "
@@ -5200,15 +5121,13 @@ def grind(
                 )
 
             if resume_issue_id is not None:
-                # A journal resume names its issue directly, bypassing the
+                # A leftover resume names its issue directly, bypassing the
                 # label filter every snapshot gate applies. Feeding an excluded
                 # issue to a worker arms a trap: the worker runs, verification
                 # cannot see the claim, and the finished candidate is silently
                 # dropped (ortus-lf02). Skip the resume loudly instead — no
-                # worker ever runs for a hidden claim; its journal, branch, and
-                # claim stay parked, and the queue continues past it. The
-                # transaction-handoff path retires its workspace when another
-                # issue is claimed.
+                # worker ever runs for a hidden claim; its claim stays parked
+                # and the queue continues past it.
                 try:
                     resumed_issue = bd.show(resume_issue_id)
                 except Exception:
@@ -5223,14 +5142,13 @@ def grind(
                         f"excluded label(s) {', '.join(excluded)}, so no worker "
                         "may run for it — every snapshot gate would ignore its "
                         "claim and a finished candidate would be silently "
-                        "dropped. Its claim, journal, and work stay parked; "
+                        "dropped. Its claim and work stay parked; "
                         "read the issue's newest comment, decide, and relabel "
                         "it for the queue. The queue continues past it."
                     )
                     write_log(f"startup: {skip_note}")
                     output.warn(skip_note)
                     resume_issue_id = None
-                    resume_candidate_ready = False
 
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
@@ -5281,12 +5199,7 @@ def grind(
                 # operates on the primary repository (legacy --condition mode
                 # never leaves it).
                 worker_repo = target
-                candidate_git = git
                 implementation_probe = codegraph_probe
-                # True once Ortus itself completed report/close/commit/sync for
-                # this iteration, so the legacy worker-owned commit path stays
-                # out of the way.
-                finalized = False
                 if queue_drained(before):
                     write_log(
                         f"queue drained; exiting outer loop. tasks_completed={tasks_completed}"
@@ -5305,22 +5218,15 @@ def grind(
                 )
 
                 # Queue reads can auto-export generated Beads state between
-                # iterations. Checkpoint that state while preserving the dirty
-                # current handoff and any active candidate context.
+                # iterations. Checkpoint that state. A dirty tree is allowed —
+                # the worker sees it via goal-prompt; grind does not snapshot
+                # candidate paths into a journal.
                 if resolved_backend == "codex":
-                    allowed = codex_baseline | startup_handoff_paths | disowned_paths
-                    if active_journal is not None:
-                        allowed |= frozenset(active_journal.candidate_paths)
-                        # Disowned work is deliberately outside the candidate; it
-                        # is still expected to sit in the tree untouched.
-                        allowed |= frozenset(active_journal.unrelated_paths)
-                        allowed |= _TRACKER_EXPORT_PATHS
                     _checkpoint_codex_preflight(
                         git,
                         integration_branch,
                         write_log,
-                        allowed_dirty=allowed,
-                        checkpoint_tracker=active_journal is None,
+                        accept_baseline=True,
                     )
 
                 # Default path: select + claim the next ready issue IN-HARNESS,
@@ -5571,107 +5477,6 @@ def grind(
                             f"iter prep: worker will claim {issue_id} via goal-prompt"
                         )
                     target_issue = bd.show(issue_id)
-                    phase_profiles = {
-                        "implementation": implement_profile.display_name,
-                        "verification": verify_profile.display_name,
-                        "finalization": finalize_profile.display_name,
-                    }
-                    packet_digest, packet_ref = transaction_store.save_packet(
-                        issue_id, target_issue
-                    )
-                    # A resumed transaction keeps its journal: it carries the
-                    # inherited work, the disowned paths, and the prior evidence
-                    # this iteration is continuing from. Anything else — a first
-                    # claim, or a journal that owns a different issue — starts
-                    # fresh.
-                    if active_journal is None or active_journal.issue_id != issue_id:
-                        if active_journal is not None:
-                            write_log(
-                                "recovery: journal owned "
-                                f"{active_journal.issue_id} but this iteration claimed "
-                                f"{issue_id}; starting a new transaction"
-                            )
-                            if active_journal.workspace_path:
-                                # The abandoned journal's clone may hold the
-                                # only copy of its branch (rebases and amends
-                                # happen in the clone; the primary ref lags).
-                                # Retire it — rescue, fetch home, remove —
-                                # before the new transaction buries the record
-                                # that owned it (ortus-0wyq).
-                                transaction_store.save(
-                                    _retire_workspace(
-                                        git,
-                                        active_journal,
-                                        repo=target,
-                                        write_log=write_log,
-                                        rescue_uncommitted=True,
-                                    )
-                                )
-                        # The resume belongs to the inherited candidate, not to
-                        # the run: a transaction starting here has no captured
-                        # implementation by definition, so this issue gets a
-                        # real implementation phase like any first claim.
-                        resume_candidate_ready = False
-                        active_journal = CandidateJournal.start(
-                            repo=target,
-                            issue_id=issue_id,
-                            base_head=git.head_oid(),
-                            baseline_paths=codex_baseline,
-                            packet_hash=packet_digest,
-                            packet_ref=packet_ref,
-                            profiles=phase_profiles,
-                        )
-                        if recovery_handoff and startup_handoff_paths:
-                            # Inherited work with no routable journal: record what
-                            # the worker is being shown so it can disown any of it.
-                            active_journal = active_journal.with_handoff(
-                                repo=target,
-                                paths=startup_handoff_paths | disowned_paths,
-                                notes=handoff.notes,
-                            )
-                        if disowned_paths:
-                            active_journal = active_journal.with_unrelated(
-                                disowned_paths
-                            )
-                        transaction_store.save(active_journal)
-                    else:
-                        if not active_journal.issue_packet_hash:
-                            active_journal = replace(
-                                active_journal,
-                                issue_packet_hash=packet_digest,
-                                issue_packet_ref=packet_ref,
-                            )
-                            transaction_store.save(active_journal)
-                            write_log(
-                                "transaction migration: bound schema-v1 candidate "
-                                f"to work spec {packet_digest}"
-                            )
-                        elif (
-                            active_journal.issue_packet_hash != packet_digest
-                            or active_journal.issue_packet_ref != packet_ref
-                        ):
-                            write_log(
-                                "recovery: work spec changed since the "
-                                "prior worker; adopting the current authoritative work spec"
-                            )
-                            active_journal = replace(
-                                active_journal,
-                                issue_packet_hash=packet_digest,
-                                issue_packet_ref=packet_ref,
-                            )
-                            transaction_store.save(active_journal)
-                        if active_journal.profiles != phase_profiles:
-                            active_journal = replace(
-                                active_journal, profiles=phase_profiles
-                            )
-                            transaction_store.save(active_journal)
-                    # Branch-scoped candidates (Phase L0) in a disposable
-                    # workspace (ortus-u4zv.2): every claim materializes a
-                    # shared clone on `ortus/<issue-id>`, cut at the
-                    # integration head. The worker's commits accumulate there;
-                    # finalization fetches the branch home. The primary
-                    # checkout never leaves the integration branch, so
-                    # operator intake can no longer collide with a candidate.
                     # f2he.4: work on the primary checkout (main). Do not cut
                     # ortus/<id> or clone logs/grind-workspaces/<id>.
                     if git.has_commits():
@@ -5691,28 +5496,6 @@ def grind(
                             )
                             raise typer.Exit(code=1)
                     worker_repo = target
-                    candidate_git = git
-                    if active_journal is not None:
-                        active_journal = replace(
-                            active_journal,
-                            issue_branch="",
-                            workspace_path="",
-                        )
-                        transaction_store.save(active_journal)
-                    dirty_after_claim = candidate_git.dirty_paths()
-                    if dirty_after_claim is None:
-                        output.error("grind: could not record path ownership")
-                        raise typer.Exit(code=1)
-                    active_journal = active_journal.with_candidate(
-                        dirty_after_claim
-                        - _candidate_baseline(active_journal, codex_baseline)
-                        - _TRACKER_EXPORT_PATHS
-                        - _TRACKER_TOOL_STATE,
-                        phase=active_journal.phase
-                        if resume_candidate_ready
-                        else IMPLEMENTATION,
-                    )
-                    transaction_store.save(active_journal)
                     resume_issue_id = None
                     configure_codegraph = getattr(runner, "configure_codegraph", None)
                     if callable(configure_codegraph):
@@ -5721,8 +5504,6 @@ def grind(
                     if callable(configure_codegraph):
                         configure_codegraph(implementation_probe.capability)
                     implementation_instruction = _IMPLEMENTATION_INSTRUCTION
-                    if recovery_handoff and not resume_candidate_ready:
-                        implementation_instruction += handoff.instruction()
                     try:
                         iteration_prompt = _compose_work_prompt(
                             work_template,
@@ -5805,53 +5586,41 @@ def grind(
                             "grind",
                             "implementation CodeGraph handshake fallback active",
                         )
-                    if resume_candidate_ready:
-                        implementation_worker_ran = False
-                        rc = int(
-                            active_journal.evidence[-1].get("returncode", 0)
-                            if active_journal and active_journal.evidence
-                            else 0
-                        )
-                        write_log(
-                            f"iter {iters_run}: implementation already captured; "
-                            "resuming at verification"
-                        )
-                    else:
-                        reap_when = None
-                        if resolved_backend == "grok":
-                            try:
-                                baseline_closed = bd.count_by_status("closed")
-                            except Exception:
-                                baseline_closed = None
-                            if baseline_closed is not None:
+                    reap_when = None
+                    if resolved_backend == "grok":
+                        try:
+                            baseline_closed = bd.count_by_status("closed")
+                        except Exception:
+                            baseline_closed = None
+                        if baseline_closed is not None:
 
-                                def _reap_on_done_bar() -> bool:
-                                    label = _done_bar_met(
-                                        bd,
-                                        git,
-                                        baseline_closed,
-                                        integration_branch,
-                                    )
-                                    if not label:
-                                        return False
-                                    write_log(
-                                        f"iter {iters_run}: done bar met "
-                                        f"({label}, in sync); "
-                                        "reaping grok /goal review"
-                                    )
-                                    return True
+                            def _reap_on_done_bar() -> bool:
+                                label = _done_bar_met(
+                                    bd,
+                                    git,
+                                    baseline_closed,
+                                    integration_branch,
+                                )
+                                if not label:
+                                    return False
+                                write_log(
+                                    f"iter {iters_run}: done bar met "
+                                    f"({label}, in sync); "
+                                    "reaping grok /goal review"
+                                )
+                                return True
 
-                                reap_when = _reap_on_done_bar
-                        rc = runner.run(
-                            iteration_prompt,
-                            repo=worker_repo,
-                            log_path=log,
-                            fast=fast,
-                            profile=implement_profile,
-                            timeout=(worker_timeout if worker_timeout > 0 else None),
-                            reap_when=reap_when,
-                            on_poll=_poll_impl_handshake,
-                        )
+                            reap_when = _reap_on_done_bar
+                    rc = runner.run(
+                        iteration_prompt,
+                        repo=worker_repo,
+                        log_path=log,
+                        fast=fast,
+                        profile=implement_profile,
+                        timeout=(worker_timeout if worker_timeout > 0 else None),
+                        reap_when=reap_when,
+                        on_poll=_poll_impl_handshake,
+                    )
                 except subprocess.TimeoutExpired:
                     implementation_timed_out = True
                     rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
@@ -5922,18 +5691,6 @@ def grind(
                     else:
                         judged_status = "open"
                         judged_id = "issue"
-                if (
-                    active_journal is not None
-                    and active_journal.workspace_path
-                ):
-                    active_journal = _retire_workspace(
-                        git,
-                        active_journal,
-                        repo=target,
-                        write_log=write_log,
-                        rescue_uncommitted=True,
-                    )
-                    transaction_store.save(active_journal)
                 if judged_status == "closed":
                     tasks_completed += closed_delta
                     write_log(
@@ -5976,12 +5733,12 @@ def grind(
                 continue
 
             final_snapshot = _snapshot(bd)
-            if resolved_backend == "codex" and active_journal is None:
+            if resolved_backend == "codex":
                 _checkpoint_codex_preflight(
                     git,
                     integration_branch,
                     write_log,
-                    allowed_dirty=codex_baseline | disowned_paths,
+                    accept_baseline=True,
                 )
             write_log(
                 f"=== ortus grind ended; closed {tasks_completed} "
@@ -5989,27 +5746,17 @@ def grind(
                 f"in_progress: {final_snapshot.in_progress}, "
                 f"iters_run={iters_run}) ==="
             )
-            # The exit line accounts for unfinished work in words instead of
-            # burying it in a status-count tuple: "awaiting retry" is a
-            # claimed issue whose journal survived the run.
-            # Checked against bd directly, not the label-filtered snapshot: an
-            # escalated issue is excluded from the queue but its claim and
-            # journal still hold unfinished work the operator must hear about.
-            exit_journal = transaction_store.load()
-            awaiting_retry = int(
-                exit_journal is not None
-                and bd.status(exit_journal.issue_id) == "in_progress"
-            )
+            leftover = final_snapshot.in_progress
             output.progress(
                 "grind",
                 f"done — {tasks_completed} landed this session, "
-                f"{awaiting_retry} awaiting retry, {final_snapshot.open} open",
+                f"{leftover} in_progress, {final_snapshot.open} open",
             )
-            if awaiting_retry and exit_journal is not None:
+            if leftover:
                 output.progress(
                     "grind",
-                    "next: "
-                    + _NEXT_ACTION_BY_PHASE.get(exit_journal.phase, _RESUME_ACTION),
+                    "next: run `ortus grind` again; it continues leftover "
+                    "in_progress",
                 )
     except FlockBusy as exc:
         output.error(str(exc), hint="another `ortus grind` is already running here")
