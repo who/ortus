@@ -551,18 +551,6 @@ def test_human_writes_todo(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# triage verb — interactive, skipped per AC #8
-# ---------------------------------------------------------------------------
-
-
-def test_triage_skipped_interactive() -> None:
-    pytest.skip(
-        "interactive; AskUserQuestion can't be mocked headless. "
-        "Covered by tests/test_triage.py with monkeypatched prompts."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Slow tests — gated behind `@pytest.mark.slow`. Run via `--slow`.
 # These spend real claude API budget.
 # ---------------------------------------------------------------------------

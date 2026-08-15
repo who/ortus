@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fake claude shim used by tests/test_interview.py and tests/test_triage.py.
+"""Fake claude shim used by tests/test_interview.py.
 
 Echoes its argv (the test inspects the log for substituted feature_id /
 prompt content) then exits 0 without touching bd.

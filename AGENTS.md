@@ -27,7 +27,7 @@ Every non-interactive `ortus` verb emits per-phase progress lines so the operato
 
 Exempt verbs:
 - `tail` — streaming-by-design, the output IS the work.
-- `interview`, `triage` — interactive; the operator's typing provides the rhythm.
+- `interview` — interactive; the operator's typing provides the rhythm.
 
 ## Acceptance-criteria convention
 

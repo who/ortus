@@ -80,7 +80,6 @@ ortus grind . --tasks 5
 | `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude, Codex, or Grok subprocess |
 | `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
 | `ortus tail <repo>` | Follow `logs/grind-*.log` with stream-json filtering |
-| `ortus triage <repo>` | Walk the human-flagged bd queue interactively |
 | `ortus human <repo>` | Render `HUMAN-TODO.md` from bd issues flagged for a human decision |
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
 | `ortus spec` | Print the readiness schema issue-authoring contract |
