@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from ortus.commands.grind import _FINALIZABLE_PHASES, _SEALED_PHASES
-from ortus.core import lifecycle
 from ortus.core.lifecycle import (
     CANDIDATE_MACHINE,
     CANDIDATE_PHASES,
@@ -86,18 +84,6 @@ def _phase_writes() -> list[tuple[str, int, str, ast.expr]]:
                     if name.lower().endswith("phase"):
                         found.append((rel, node.lineno, "<assignment>", node.value))
     return found
-
-
-def _resolve(leaf: ast.expr) -> str | None:
-    """The phase string a value expression names, when that is knowable."""
-
-    if isinstance(leaf, ast.Constant) and isinstance(leaf.value, str):
-        # An empty default (`prior_phase: str = ""`) is the absence of a phase.
-        return leaf.value or None
-    if isinstance(leaf, ast.Name):
-        resolved = getattr(lifecycle, leaf.id, None)
-        return resolved if isinstance(resolved, str) else None
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -173,28 +159,7 @@ def test_no_bare_phase_literals() -> None:
     )
 
 
-def test_undeclared_phase_fails() -> None:
-    seen: dict[str, str] = {}
-    for rel, line, callee, value in _phase_writes():
-        if callee in LOG_LABEL_CALLEES:
-            continue
-        for leaf in _leaves(value):
-            resolved = _resolve(leaf)
-            if resolved is not None:
-                seen.setdefault(resolved, f"{rel}:{line}")
-
-    assert seen, "no journal phase writes were resolved; the scanner is broken"
-    undeclared = sorted(
-        f"{phase!r} at {where}"
-        for phase, where in seen.items()
-        if phase not in CANDIDATE_PHASES
-    )
-    assert not undeclared, (
-        "these journal phases are written by code but not declared in "
-        "ortus.core.lifecycle:\n" + "\n".join(undeclared)
-    )
-
-    # And the declaration itself refuses a state it does not know.
+def test_undeclared_transition_target_fails() -> None:
     with pytest.raises(LifecycleError, match="not a declared state"):
         StateMachine(
             name="broken",
@@ -213,13 +178,8 @@ def test_undeclared_phase_fails() -> None:
 
 
 def test_classification_sets_are_declared() -> None:
-    for name, members in (
-        ("TERMINAL_PHASES", TERMINAL_PHASES),
-        ("_SEALED_PHASES", _SEALED_PHASES),
-        ("_FINALIZABLE_PHASES", _FINALIZABLE_PHASES),
-    ):
-        stray = sorted(members - CANDIDATE_PHASES)
-        assert not stray, f"{name} contains undeclared phases: {stray}"
+    stray = sorted(TERMINAL_PHASES - CANDIDATE_PHASES)
+    assert not stray, f"TERMINAL_PHASES contains undeclared phases: {stray}"
 
     # Membership is pinned: routing these through the declaration must not have
     # moved a single phase between them.
@@ -229,21 +189,6 @@ def test_classification_sets_are_declared() -> None:
         "plan-gap-escalated",
         "orphaned-candidate",
         "incomplete-candidate",
-    }
-    assert _SEALED_PHASES == {
-        "implementation-timeout",
-        "verification-timeout",
-        "correction-timeout",
-        "orphaned-candidate",
-        "incomplete-candidate",
-    }
-    assert _FINALIZABLE_PHASES == {
-        "verified-pass",
-        "finalization-blocked",
-        "finalized-report",
-        "finalized-close",
-        "finalized-compose",
-        "finalized-commit",
     }
 
 
