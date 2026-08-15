@@ -182,7 +182,7 @@ _EXAMPLE = {
         "A disowned path is now re-adopted the moment its contents move. "
         "Disowning still means \"this is somebody else's leftover\"; it no "
         "longer means \"nobody may touch this file again this run\".\n\n"
-        "`_prepare_handoff()` already fingerprints every inherited path when a "
+        "Recovery already fingerprints every inherited path when a "
         "worker is handed the tree. That record is what makes the decision "
         "possible: `own_inherited_work()` compares the stored fingerprint "
         "against the file on disk and drops any path whose bytes changed out "

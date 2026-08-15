@@ -6,9 +6,9 @@ as short lowercase strings:
 * the **bd issue status** machine — ``open`` / ``in_progress`` / ``closed``,
   owned by bd and read and written by :mod:`ortus.core.bd`; it outlives any
   single grind run; and
-* the **candidate journal phase** machine — the ``phase`` field of
-  :class:`ortus.core.transaction.CandidateJournal`, which exists only for the
-  duration of one candidate transaction.
+* the **candidate journal phase** machine — historical phase names for one
+  candidate transaction, kept as data so the README state-graph stays
+  generated from one declaration.
 
 Both are declared here, together with the points at which they interact, and
 both are rendered into ``README.md`` between the ``state-graph`` generated
@@ -22,11 +22,8 @@ Journal phases versus log labels
 ``phase=`` appears as a keyword argument at two unrelated kinds of call site,
 and only one of them writes journal state. Classified by callee:
 
-*Journal phases* (persisted into ``CandidateJournal.phase``) come from
-``CandidateJournal.with_candidate``, ``finish_verification``,
-``begin_verification``, ``begin_correction``, ``route_plan_gap``,
-``with_finalization``, ``dataclasses.replace(journal, phase=...)`` and grind's
-``_capture_codex_candidate`` / ``_reject`` wrappers around them.
+*Journal phases* are the historical candidate-transaction names declared
+below. The live grind loop no longer persists them.
 
 *Log labels* are the ``phase=`` argument of
 ``grind._enforce_branch_discipline``. They tag a line in the run log with when
@@ -539,7 +536,7 @@ def build_candidate_machine(
         name="candidate",
         title="Candidate journal phase",
         summary=(
-            "`CandidateJournal.phase` for one candidate transaction, from the "
+            "Historical phase names for one candidate transaction, from the "
             "first worker edit to a committed candidate or a halt a human owns."
         ),
         initial=IMPLEMENTATION,

@@ -24,7 +24,6 @@ from ortus.core.git import CommitResult, GitClient
 from ortus.core.readiness import _REQUIRED_SECTIONS
 from ortus.core.profiles import Phase
 from ortus.core.sandbox import SandboxInfo
-from ortus.core.transaction import JournalStore
 from tests._platform import skip_unless_bwrap_usable
 from tests._shims import (
     install_machine_checks,
@@ -43,6 +42,13 @@ pytestmark = pytest.mark.integration
 _F2HE2_NO_VERIFY = pytest.mark.skip(
     reason="f2he.2: grind judges bd status only; no Claims, verifier, or Ortus close"
 )
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Console capture without Rich highlight codes."""
+
+    return _ANSI.sub("", text or "")
 
 
 def _fake_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -589,7 +595,7 @@ def test_grind_repair_budget_exhausted_prints_diagnostics_and_follow_up(
     assert repairs == [], "an exhausted budget must not be spent anyway"
     assert _issue(repo, first)["status"] == "open"
     assert _issue(repo, second)["status"] == "open"
-    combined = result.stdout + result.stderr
+    combined = _plain(result.stdout + result.stderr)
     assert "readiness repair budget exhausted (0/0 pass(es) used)" in combined
     # Rich hard-wraps long lines mid-token, so compare whitespace-free.
     squashed = re.sub(r"\s+", "", combined)
@@ -638,7 +644,7 @@ def test_grind_readiness_warning_dedupes_per_run(
     assert (
         log_text.count("readiness skip (left open for planning/human repair)") == 2
     ), "the log must record every occurrence"
-    squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
+    squashed = re.sub(r"\s+", "", _plain(result.stdout + result.stderr))
     total = sum(1 for section in _REQUIRED_SECTIONS if section.required)
     skip_line = re.sub(
         r"\s+",
@@ -717,7 +723,7 @@ def test_grind_queue_blocked_exit_uses_summary(
     result = runner.invoke(app, ["grind", str(repo), "--idle-sleep", "0"])
 
     assert result.exit_code == 0, result.stdout + result.stderr
-    squashed = re.sub(r"\s+", "", result.stdout + result.stderr)
+    squashed = re.sub(r"\s+", "", _plain(result.stdout + result.stderr))
     total = sum(1 for section in _REQUIRED_SECTIONS if section.required)
     assert (
         re.sub(
@@ -795,8 +801,9 @@ def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
     )
     result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "claude/implement (model=sonnet, effort=provider-default)" in result.stdout
-    assert "claude/verify (model=provider-default, effort=high)" in result.stdout
+    plain = _plain(result.stdout)
+    assert "claude/implement (model=sonnet, effort=provider-default)" in plain
+    assert "claude/verify (model=provider-default, effort=high)" in plain
 
 
 @pytest.mark.slow
@@ -1111,37 +1118,6 @@ def test_verification_preflight_covers_the_repo_agent_dir(
     # A probe has no business leaving anything behind in either case.
     for repo in (without, with_dir):
         assert not (repo / ".claude" / claude_mod._PREFLIGHT_SCRATCH).exists()
-
-
-def test_candidate_paths_exclude_tool_state_written_during_review() -> None:
-    """ortus-v8fn: the inverted posture lets the inner sandbox write for real.
-
-    A repo that does not ignore `<repo>/.claude/hooks` reports the placeholder as
-    untracked, which moved the candidate path set and had the mutation guard
-    reject a sound verdict — observed on two repos. Tool state is carved out for
-    the same reason the bd exports are: written by the machinery, never code
-    under test.
-    """
-    dirty = frozenset(
-        {
-            "src/app.py",
-            "tests/test_app.py",
-            ".claude/hooks",
-            ".git/config.lock",
-            ".gitconfig",
-            ".beads/issues.jsonl",
-            "docs/pre-existing.md",
-        }
-    )
-    baseline = frozenset({"docs/pre-existing.md"})
-
-    assert grind_mod._candidate_paths(dirty, baseline) == frozenset(
-        {"src/app.py", "tests/test_app.py"}
-    )
-    # A path that merely starts with a tool-state name is still candidate content.
-    assert grind_mod._candidate_paths(frozenset({".gitignore-ish/x"}), frozenset()) == (
-        frozenset({".gitignore-ish/x"})
-    )
 
 
 def _blocked_verifier_grind(
@@ -1842,118 +1818,6 @@ def _post_claims(repo: Path, criteria: tuple[str, ...] = ("AC-1", "AC-2")) -> No
         )
 
 
-def _stranded_claim_repo(tmp_path: Path) -> tuple[Path, object, bytes]:
-    """A git repo manufactured into the observed strand: the tree on a prior
-    issue's branch whose committed exports diverge from main, newer export
-    bytes staged, and a journal owning that prior issue."""
-    from ortus.core.git import GitClient
-    from ortus.core.transaction import CandidateJournal
-
-    repo = tmp_path / "strand"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "ortus-tests@example.invalid"],
-        cwd=repo,
-        check=True,
-    )
-    subprocess.run(["git", "config", "user.name", "Ortus Tests"], cwd=repo, check=True)
-    exports = repo / ".beads" / "issues.jsonl"
-    exports.parent.mkdir()
-    exports.write_text("baseline\n")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "commit", "-qm", "baseline"], cwd=repo, check=True, capture_output=True
-    )
-    base = subprocess.run(
-        ["git", "rev-parse", "main"], cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    subprocess.run(["git", "checkout", "-qb", "ortus/tmpl-strand"], cwd=repo, check=True)
-    exports.write_text("baseline\nstranded-commit\n")
-    subprocess.run(["git", "commit", "-aqm", "stranded exports"], cwd=repo, check=True)
-    tip = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    newest = b"baseline\nstranded-commit\nnewest-staged\n"
-    exports.write_bytes(newest)
-    subprocess.run(["git", "add", ".beads/issues.jsonl"], cwd=repo, check=True)
-    journal = CandidateJournal.start(
-        repo=repo, issue_id="tmpl-strand", base_head=base, baseline_paths=()
-    ).with_branch("ortus/tmpl-strand", tip)
-    return repo, journal, newest
-
-
-def test_claim_after_plan_gap_with_diverged_exports(tmp_path: Path) -> None:
-    """ortus-mfyu AC-1/AC-2: claiming a different issue across the strand
-    reasserts main, carries the newest export bytes, and cuts the new branch
-    at the integration head."""
-    from ortus.core.git import GitClient
-
-    repo, journal, newest = _stranded_claim_repo(tmp_path)
-    git = GitClient(repo)
-    lines: list[str] = []
-
-    branch, blocker, resumed = grind_mod._prepare_issue_branch(
-        git,
-        issue_id="tmpl-next",
-        integration_branch="main",
-        journal=journal,
-        write_log=lines.append,
-    )
-
-    assert blocker == ""
-    assert resumed is False
-    assert branch == "ortus/tmpl-next"
-    assert git.current_branch() == "ortus/tmpl-next"
-    assert (repo / ".beads" / "issues.jsonl").read_bytes() == newest
-    assert git.branch_tip("ortus/tmpl-next") == git.branch_tip("main")
-    # The stranded branch keeps its commit untouched.
-    assert git.branch_tip("ortus/tmpl-strand") == journal.branch_head
-
-
-def test_tolerance_only_for_the_journals_own_issue(tmp_path: Path) -> None:
-    """ortus-mfyu AC-6: a different issue's claim ends the stranded branch's
-    hold via reassert; the journal's own issue resumes its branch by checkout,
-    commits and all — the keystone's durable-home promise."""
-    from ortus.core.git import GitClient
-
-    repo, journal, newest = _stranded_claim_repo(tmp_path)
-    git = GitClient(repo)
-    lines: list[str] = []
-
-    # Same-issue resume: checkout, never a reset, never a refusal.
-    branch, blocker, resumed = grind_mod._prepare_issue_branch(
-        git,
-        issue_id="tmpl-strand",
-        integration_branch="main",
-        journal=journal,
-        write_log=lines.append,
-    )
-    assert blocker == ""
-    assert resumed is True
-    assert branch == "ortus/tmpl-strand"
-    assert git.current_branch() == "ortus/tmpl-strand"
-    assert git.branch_tip("ortus/tmpl-strand") == journal.branch_head
-    assert any("resumed existing ortus/tmpl-strand" in line for line in lines)
-
-    # Different-issue claim from the same strand: the hold ends by reassert.
-    lines.clear()
-    branch, blocker, resumed = grind_mod._prepare_issue_branch(
-        git,
-        issue_id="tmpl-other",
-        integration_branch="main",
-        journal=journal,
-        write_log=lines.append,
-    )
-    assert blocker == ""
-    assert resumed is False
-    assert git.current_branch() == "ortus/tmpl-other"
-    assert any(
-        "reasserted main (exports carried) before claiming" in line for line in lines
-    )
-    assert (repo / ".beads" / "issues.jsonl").read_bytes() == newest
-
-
 # --- console milestones (ortus-kawu) -----------------------------------------
 #
 # The console narrates the run at executive altitude — claim with title,
@@ -2228,50 +2092,6 @@ def test_verdictless_failure_names_issue_and_action(
     assert "candidate left uncommitted" not in console
 
 
-def test_candidate_state_phrasing_is_computed() -> None:
-    """ortus-ipyq AC-3: candidate-state phrasing derives from the journal and
-    the repository — branch commits, dirty paths, both, or nothing."""
-    from ortus.core.transaction import CandidateJournal
-
-    class _FakeGit:
-        def __init__(self, tip: str, dirty: frozenset[str] | None) -> None:
-            self._tip = tip
-            self._dirty = dirty
-
-        def is_git_repo(self) -> bool:
-            return True
-
-        def branch_exists(self, name: str) -> bool:
-            return True
-
-        def branch_tip(self, name: str) -> str:
-            return self._tip
-
-        def dirty_paths(self) -> frozenset[str] | None:
-            return self._dirty
-
-    journal = CandidateJournal(
-        issue_id="x-1",
-        base_head="base",
-        baseline_paths=(),
-        baseline_fingerprints={},
-        candidate_paths=("a.py",),
-        issue_branch="ortus/x-1",
-    )
-    phrase = grind_mod._candidate_state_phrase
-    assert phrase(_FakeGit("tip2", frozenset()), journal) == "committed on ortus/x-1"
-    assert (
-        phrase(_FakeGit("base", frozenset({"a.py"})), journal)
-        == "uncommitted edits preserved in the tree"
-    )
-    assert phrase(_FakeGit("tip2", frozenset({"a.py"})), journal) == (
-        "committed on ortus/x-1, with further uncommitted edits "
-        "preserved in the tree"
-    )
-    assert phrase(_FakeGit("base", frozenset()), journal) == "no changes were made"
-    assert phrase(_FakeGit("base", frozenset()), None) == "no changes were made"
-
-
 @pytest.mark.slow
 @_F2HE2_NO_VERIFY
 def test_exit_line_accounts_for_retry(
@@ -2447,124 +2267,6 @@ _PROPOSAL_BODY = (
     "the verification sandbox is read-only; copy a tree before sweeping "
     "(2026-08-12)"
 )
-
-
-def test_proposal_block_is_parsed() -> None:
-    """AC-1: a completion comment's `**Lesson proposal v1**` block parses into
-    a (key, dated body) pair, and text carrying the block delimiters cannot
-    corrupt the surrounding comment's parsing."""
-    proposals, malformed = grind_mod._lesson_proposals(_PROPOSAL_COMMENT)
-    assert malformed == []
-    assert proposals == [("sandbox-sweep", _PROPOSAL_BODY)]
-    # The same comment still yields its **Changes** bullets untouched.
-    assert grind_mod._changes_bullets(_PROPOSAL_COMMENT) == [
-        "src/thing.py - hardened the sweep"
-    ]
-
-    # A block followed by another bolded header ends cleanly at the delimiter.
-    hostile = (
-        "**Lesson proposal v1**:\n"
-        "key: delimiters\n"
-        "lesson: a lesson may name **Changes** without breaking anything\n"
-        "date: 2026-08-12\n"
-        "**Verification**: written after the block\n"
-    )
-    proposals, malformed = grind_mod._lesson_proposals(hostile)
-    assert malformed == []
-    assert proposals == [
-        ("delimiters", "a lesson may name **Changes** without breaking anything (2026-08-12)")
-    ]
-
-
-def test_proposal_is_recorded_pending(tmp_path: Path) -> None:
-    """AC-2 + AC-3: a parsed proposal lands in the tracker under the pending
-    prefix, where lesson selection never reads it."""
-    from ortus.core.bd import BdClient
-
-    repo = copy_bd_workspace(tmp_path / "repo", "bare").path
-    issue_id = _create_ready_issue(repo, "Learn a hazard")
-    subprocess.run(
-        ["bd", "comments", "add", issue_id, _PROPOSAL_COMMENT],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-
-    log: list[str] = []
-    grind_mod._record_lesson_proposals(
-        BdClient(repo), issue_id, write_log=log.append
-    )
-
-    client = BdClient(repo)
-    assert client.pending_proposals() == {"sandbox-sweep": _PROPOSAL_BODY}
-    assert client.lessons(limit=5, max_chars=400) == ()
-    assert any("pending until curated" in line for line in log)
-    # Recording again (a correction round rescans the comments) is idempotent.
-    grind_mod._record_lesson_proposals(
-        BdClient(repo), issue_id, write_log=log.append
-    )
-    assert client.pending_proposals() == {"sandbox-sweep": _PROPOSAL_BODY}
-
-
-def test_no_proposal_is_unchanged(tmp_path: Path) -> None:
-    """AC-6: a worker that proposes nothing writes nothing and logs nothing."""
-    from ortus.core.bd import BdClient
-
-    repo = copy_bd_workspace(tmp_path / "repo", "bare").path
-    issue_id = _create_ready_issue(repo, "Ordinary completion")
-    subprocess.run(
-        [
-            "bd",
-            "comments",
-            "add",
-            issue_id,
-            "**Changes**:\n- src/thing.py - did the work\n\n**Verification**: ok",
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-
-    log: list[str] = []
-    grind_mod._record_lesson_proposals(
-        BdClient(repo), issue_id, write_log=log.append
-    )
-    assert log == []
-    assert BdClient(repo).memories() == {}
-
-
-def test_malformed_proposal_is_ignored(tmp_path: Path) -> None:
-    """AC-7: a malformed block earns a log line, records nothing, and never
-    raises — including when the workspace itself cannot be read."""
-    from ortus.core.bd import BdClient
-
-    repo = copy_bd_workspace(tmp_path / "repo", "bare").path
-    issue_id = _create_ready_issue(repo, "Learned it badly")
-    subprocess.run(
-        [
-            "bd",
-            "comments",
-            "add",
-            issue_id,
-            # Undated, and the key is not a kebab-case slug.
-            "**Lesson proposal v1**:\nkey: Not A Slug\nlesson: something\n",
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-
-    log: list[str] = []
-    grind_mod._record_lesson_proposals(
-        BdClient(repo), issue_id, write_log=log.append
-    )
-    assert any("ignored a malformed block" in line for line in log)
-    assert BdClient(repo).memories() == {}
-
-    # No bd workspace at all: the recorder degrades to a no-op, never a raise.
-    grind_mod._record_lesson_proposals(
-        BdClient(tmp_path / "nowhere"), issue_id, write_log=log.append
-    )
 
 
 def test_retro_does_not_run_in_an_iteration() -> None:
@@ -2763,85 +2465,6 @@ def test_reviewer_flag_runs_after_green_only(
     assert worker.readonly_spawns == 0, "a red machine run spends no reviewer tokens"
     assert "reviewer skipped — the machine pipeline is red" in _grind_log(repo)
     assert _issue(repo, issue_id)["status"] == "in_progress"
-
-
-@pytest.mark.slow
-def test_acceptance_hash_rechecked_before_judgment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-6: the acceptance_criteria hash taken at claim is rechecked before
-    judgment; an edit landing mid-run blocks rather than being re-read."""
-    from ortus.core.codegraph import CodeGraphMode, CodeGraphProbe
-
-    repo = _bd_repo(tmp_path, "mach6")
-    issue_id = _create_ready_issue(repo, "hash guarded leaf")
-    _baseline_commit(repo)
-    packet = _issue(repo, issue_id)
-    git = GitClient(repo)
-    store = grind_mod.JournalStore(repo)
-    packet_digest, packet_ref = store.save_packet(issue_id, packet)
-    branch = f"ortus/{issue_id}"
-    subprocess.run(["git", "branch", branch, "main"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "-c", "core.hooksPath=/dev/null", "checkout", branch],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    journal = (
-        grind_mod.CandidateJournal.start(
-            repo=repo,
-            issue_id=issue_id,
-            base_head=git.head_oid(),
-            baseline_paths=(),
-            packet_hash=packet_digest,
-            packet_ref=packet_ref,
-        )
-        .with_branch(branch, git.head_oid())
-        .with_candidate((), phase="candidate-captured", candidate_hash="0" * 64)
-    )
-    store.save(journal)
-
-    comments: list[str] = []
-    statuses: list[str] = []
-    edited = dict(packet)
-    edited["acceptance_criteria"] = str(packet["acceptance_criteria"]) + "\n- AC-9: invented later."
-
-    class _EditedBd:
-        def show(self, _issue_id: str) -> dict:
-            return edited
-
-        def add_comment(self, _issue_id: str, body: str) -> None:
-            comments.append(body)
-
-        def update_status(self, _issue_id: str, status: str) -> None:
-            statuses.append(status)
-
-    log = repo / "logs" / "grind-hash.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.touch()
-    outcome = grind_mod._machine_verify_candidate(
-        bd=_EditedBd(),
-        git=git,
-        store=store,
-        journal=journal,
-        repo=repo,
-        log=log,
-        write_log=lambda _line: None,
-        issue_id=issue_id,
-        probe=CodeGraphProbe(CodeGraphMode.OFF, False, False, False),
-        baseline=frozenset(),
-        freshness="not-refreshed",
-        sync_ms=0,
-        iteration=1,
-        integration_branch="main",
-    )
-    assert outcome.failure is not None
-    assert "acceptance criteria changed after claim" in outcome.failure
-    assert outcome.spec_defect, "frozen claim-time state can never pass a resume"
-    assert outcome.journal.phase == "verification-rejected"
-    assert any("acceptance criteria changed after claim" in body for body in comments)
-    assert statuses == ["in_progress"], "the claim is restored before the report"
 
 
 # ---------------------------------------------------------------------------
@@ -3144,39 +2767,6 @@ def test_grind_leaves_unfinished_claim_in_progress(
     assert "human" not in (_issue(repo, issue_id).get("labels") or [])
 
 
-def test_failed_verdict_escalates_to_human_without_respawn(
-    tmp_path: Path,
-) -> None:
-    """AC-2: a failed-verdict / would-have-retried path labels human
-    and does not spawn another implement worker."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "fail-escalate")
-    issue_id = _create_ready_issue(repo, "failed verdict leaf")
-    subprocess.run(
-        ["bd", "update", issue_id, "--status=in_progress"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-    notes: list[str] = []
-    bd = grind_mod._make_bd(repo)
-    grind_mod._escalate_failed_verdict(
-        bd,
-        issue_id,
-        notes.append,
-        reason="machine checks rejected the candidate",
-    )
-    shown = _issue(repo, issue_id)
-    assert shown["status"] == "in_progress"
-    assert "human" in (shown.get("labels") or [])
-    comments = _comments_blob(repo, issue_id)
-    assert "grind will not retry this candidate" in comments
-    assert "machine checks rejected the candidate" in comments
-    assert any("flagged" in line and "human" in line for line in notes)
-    assert not hasattr(grind_mod, "_compose_correction_prompt")
-
-
 @pytest.mark.slow
 def test_grind_implement_argv_has_no_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3222,20 +2812,6 @@ def test_leftover_claim_spawn_has_no_resume(
     assert recorded.calls
     assert "resume" not in recorded.calls[0]
     assert _issue(repo, issue_id)["status"] == "in_progress"
-
-
-def test_intake_export_is_not_candidate() -> None:
-    """f2he.3 AC-2: tracker export paths never become candidate paths."""
-    dirty = frozenset(
-        {
-            "src/ortus/commands/grind.py",
-            ".beads/issues.jsonl",
-            ".beads/interactions.jsonl",
-            ".beads/embeddeddolt/x",
-        }
-    )
-    paths = grind_mod._candidate_paths(dirty, frozenset())
-    assert paths == frozenset({"src/ortus/commands/grind.py"})
 
 
 @pytest.mark.slow
@@ -3314,7 +2890,6 @@ def test_grind_does_not_write_journal_after_close(
     assert _issue(repo, first)["status"] == "closed"
     assert _issue(repo, second)["status"] == "closed"
     assert not (repo / "logs" / "grind-transaction.json").exists()
-    assert JournalStore(repo).load() is None
     log = _grind_log(repo)
     assert "transaction handoff" not in log
     assert "journal owned" not in log
@@ -3354,13 +2929,7 @@ def test_startup_ignores_leftover_finalized_journal(
         ),
         encoding="utf-8",
     )
-    finalize_calls: list[str] = []
-
-    def _forbidden_finalize(*args: object, **kwargs: object) -> tuple[object, str]:
-        finalize_calls.append(str(kwargs.get("issue_id") or leftover_id))
-        raise AssertionError("_finalize_candidate must not run at startup")
-
-    monkeypatch.setattr(grind_mod, "_finalize_candidate", _forbidden_finalize)
+    assert not hasattr(grind_mod, "_finalize_candidate")
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -3370,7 +2939,6 @@ def test_startup_ignores_leftover_finalized_journal(
         app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert finalize_calls == []
     assert not journal_path.exists()
     assert _issue(repo, leftover_id)["status"] == "closed"
     assert _issue(repo, ready_id)["status"] == "closed"

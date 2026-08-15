@@ -45,7 +45,6 @@ from ortus.core.lifecycle import (
     ORPHANED_CANDIDATE,
     PLAN_GAP_ESCALATED,
 )
-from ortus.core.transaction import CandidateJournal, JournalStore
 
 #: Grind writes one timestamped log per run under the already-ignored logs/
 #: tree; the newest is the live one.
@@ -183,8 +182,8 @@ class RunSnapshot:
     baseline_paths: tuple[str, ...] = ()
     verifier_refs: tuple[str, ...] = ()
     journal_present: bool = False
-    #: What `JournalStore.load_state` said about an older or partly unreadable
-    #: journal. Context for the operator, never a failure.
+    #: Notes about an older or partly unreadable leftover journal file.
+    #: Context for the operator, never a failure.
     journal_notes: tuple[str, ...] = ()
     created_at: _dt.datetime | None = None
     updated_at: _dt.datetime | None = None
@@ -389,7 +388,6 @@ def read_snapshot(
 
     repo = Path(repo)
     observed = _aware(now) or _dt.datetime.now(_dt.timezone.utc)
-    journal, notes = JournalStore(repo).load_state()
     path = log_path if log_path is not None else find_log(repo)
 
     # A different log means a different run, so nothing carries over.
@@ -423,8 +421,7 @@ def read_snapshot(
             break
 
     return replace(
-        _journal_fields(journal),
-        journal_notes=notes,
+        RunSnapshot(),
         log_path=path,
         offset=tail.offset,
         events=tail.events,
@@ -440,37 +437,6 @@ def read_snapshot(
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
-
-
-def _journal_fields(journal: CandidateJournal | None) -> RunSnapshot:
-    """The journal half of a snapshot; an absent journal is a valid idle run."""
-
-    if journal is None:
-        return RunSnapshot()
-    return RunSnapshot(
-        issue_id=journal.issue_id,
-        phase=journal.phase or PHASE_IDLE,
-        attempt=journal.attempt,
-        attempts=tuple(journal.attempts),
-        corrections=journal.corrections,
-        plan_gap_routed=journal.plan_gap_routed,
-        base_head=journal.base_head,
-        candidate_hash=journal.candidate_hash,
-        issue_packet_ref=journal.issue_packet_ref,
-        issue_packet_hash=journal.issue_packet_hash,
-        candidate_paths=tuple(journal.candidate_paths),
-        handoff_paths=tuple(journal.handoff_paths),
-        unrelated_paths=tuple(journal.unrelated_paths),
-        baseline_paths=tuple(journal.baseline_paths),
-        verifier_refs=tuple(journal.verifier_refs),
-        journal_present=True,
-        created_at=_parse_time(journal.created_at),
-        updated_at=_parse_time(journal.updated_at),
-        implementation_started_at=_parse_time(journal.implementation_started_at),
-        implementation_finished_at=_parse_time(journal.implementation_finished_at),
-        verification_started_at=_parse_time(journal.verification_started_at),
-        verification_finished_at=_parse_time(journal.verification_finished_at),
-    )
 
 
 def _split_ortus_line(text: str) -> tuple[_dt.datetime | None, str]:

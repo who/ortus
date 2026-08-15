@@ -139,7 +139,7 @@ from ortus.core.runstate import (
     read_snapshot,
     summarize_grok_tool,
 )
-from ortus.core.transaction import JOURNAL_RELATIVE_PATH, JournalStore
+from ortus.core.transaction import JOURNAL_RELATIVE_PATH
 
 #: Seconds between refreshes. A tick reads only the bytes the log grew by, so
 #: this is cheap even against the megabyte logs a long session produces.
@@ -570,10 +570,10 @@ class ToolLight:
 
 
 def journal_backend(repo: Path) -> str:
-    """The backend the journal names, if it names one.
+    """The backend a leftover journal file names, if it names one.
 
-    CandidateJournal does not yet declare a backend field, so this reads the
-    raw JSON. A missing key is not a signal. `.ortusrc` is never consulted:
+    The leftover file has no typed backend field, so this reads the raw
+    JSON. A missing key is not a signal. `.ortusrc` is never consulted:
     an idle repo must not flip into an empty NOC just because the project
     default is grok.
     """
@@ -911,7 +911,7 @@ def packet_path(repo: Path, snapshot: RunSnapshot) -> Path | None:
     try:
         found = [
             path
-            for path in JournalStore(repo).artifacts.glob(pattern)
+            for path in (repo / "logs" / "grind-transactions").glob(pattern)
             if path.is_file()
         ]
     except OSError:
