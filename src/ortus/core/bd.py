@@ -76,15 +76,18 @@ def select_lessons(
 
 
 @dataclass
-class BdClient:
-    """Thin typed surface over the bd CLI, scoped to a single repo workspace."""
+class BeadsTracker:
+    """Public ``run`` interface for the beads tracker.
+
+    ``BdClient`` remains the typed verb surface. This type is the named
+    entry the beads-tracker test suite imports and drives.
+    """
 
     repo: Path
     binary: str = "bd"
 
-    # --- subprocess primitive -------------------------------------------
-
-    def _run(self, *args: str, parse_json: bool = False) -> tuple[str, Any]:
+    def run(self, *args: str, parse_json: bool = False) -> tuple[str, Any]:
+        """Invoke ``bd`` in this workspace and return stdout plus parsed JSON."""
         argv = [self.binary, *args]
         proc = subprocess.run(
             argv,
@@ -97,6 +100,21 @@ class BdClient:
             raise BdError(argv, proc.returncode, proc.stderr)
         parsed = json.loads(proc.stdout) if parse_json and proc.stdout.strip() else None
         return proc.stdout, parsed
+
+
+@dataclass
+class BdClient:
+    """Thin typed surface over the bd CLI, scoped to a single repo workspace."""
+
+    repo: Path
+    binary: str = "bd"
+
+    # --- subprocess primitive -------------------------------------------
+
+    def _run(self, *args: str, parse_json: bool = False) -> tuple[str, Any]:
+        return BeadsTracker(self.repo, binary=self.binary).run(
+            *args, parse_json=parse_json
+        )
 
     # --- typed surface --------------------------------------------------
 
