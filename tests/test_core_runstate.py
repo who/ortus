@@ -1,4 +1,4 @@
-"""Run-state model: journal parsing, incremental log tail, writer discrimination."""
+"""Run-state model: log identity, incremental log tail, writer discrimination."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from ortus.core.runstate import (
     read_log_tail,
     read_snapshot,
 )
-from ortus.core.transaction import CandidateJournal, JournalStore
 
 
 def _stamp(moment: _dt.datetime) -> str:
@@ -44,69 +43,56 @@ def _tool_use(name: str, tool_input: dict) -> dict:
     }
 
 
-def _journal(**overrides) -> CandidateJournal:
-    fields = {
-        "issue_id": "ortus-0udo.1",
-        "base_head": "abc1234def",
-        "baseline_paths": ("operator.txt",),
-        "baseline_fingerprints": {},
-        "candidate_paths": ("src/ortus/core/runstate.py", "tests/test_core_runstate.py"),
-        "candidate_hash": "deadbeefcafe",
-        "phase": "verification",
-        "attempt": 2,
-        "attempts": (
-            {"number": 1, "phase": "implementation"},
-            {"number": 2, "phase": "verification"},
-        ),
-        "corrections": 1,
-        "handoff_paths": ("README.md", "notes.txt"),
-        "unrelated_paths": ("README.md",),
-        "verifier_refs": ("logs/grind-transactions/deadbeef.verifier-1.md",),
-    }
-    fields.update(overrides)
-    return CandidateJournal(**fields)
+def _write_log(repo: Path, body: str, name: str = "grind-20260808-120000.log") -> Path:
+    log = repo / "logs" / name
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(body, encoding="utf-8")
+    return log
 
 
-def test_snapshot_from_journal_reports_identity_and_candidate(tmp_path: Path) -> None:
-    """AC-1: issue, phase, attempt, corrections and candidate composition."""
+def test_snapshot_from_log_reports_identity(tmp_path: Path) -> None:
+    """AC-1: issue, phase and attempt come off the grind log, not a journal."""
 
-    JournalStore(tmp_path).save(_journal())
+    moment = _dt.datetime(2026, 8, 8, 12, 0, 0).astimezone()
+    _write_log(
+        tmp_path,
+        _ortus(moment, "iter 2: goal-prompt ready for ortus-0udo.1 (claude)")
+        + _ortus(moment, "iter 2: verification started"),
+    )
+    leftover = tmp_path / "logs" / "grind-transaction.json"
+    leftover.write_text('{"issue_id": "should-be-ignored", "phase": "verification"}')
 
     snapshot = read_snapshot(tmp_path)
 
     assert snapshot.issue_id == "ortus-0udo.1"
     assert snapshot.phase == "verification"
     assert snapshot.attempt == 2
-    assert snapshot.corrections == 1
-    assert snapshot.candidate_paths == (
-        "src/ortus/core/runstate.py",
-        "tests/test_core_runstate.py",
-    )
-    assert snapshot.handoff_paths == ("README.md", "notes.txt")
-    assert snapshot.unrelated_paths == ("README.md",)
-    assert snapshot.baseline_paths == ("operator.txt",)
-    assert snapshot.base_head == "abc1234def"
-    assert snapshot.candidate_hash == "deadbeefcafe"
-    assert snapshot.verifier_refs == (
-        "logs/grind-transactions/deadbeef.verifier-1.md",
-    )
-    assert snapshot.journal_present is True
+    assert snapshot.backend == "claude"
+    assert snapshot.candidate_paths == ()
+    assert snapshot.journal_present is False
+    assert leftover.is_file()
     assert snapshot.idle is False
     assert snapshot.terminal is False
 
 
-def test_snapshot_from_journal_reports_a_terminal_phase(tmp_path: Path) -> None:
-    JournalStore(tmp_path).save(_journal(phase="finalized-sync"))
+def test_snapshot_from_log_reports_a_terminal_phase(tmp_path: Path) -> None:
+    moment = _dt.datetime(2026, 8, 8, 12, 0, 0).astimezone()
+    _write_log(tmp_path, _ortus(moment, "iter 1: worker closed ortus-0udo.1"))
 
     assert read_snapshot(tmp_path).terminal is True
 
-    JournalStore(tmp_path).save(_journal(phase="corrections-exhausted"))
+    _write_log(
+        tmp_path,
+        _ortus(moment, "iter 1: step corrections-exhausted"),
+        name="grind-20260808-130000.log",
+    )
 
     assert read_snapshot(tmp_path).terminal is True
 
 
 def test_unknown_phase_renders_verbatim(tmp_path: Path) -> None:
-    JournalStore(tmp_path).save(_journal(phase="some-future-phase"))
+    moment = _dt.datetime(2026, 8, 8, 12, 0, 0).astimezone()
+    _write_log(tmp_path, _ortus(moment, "iter 1: step some-future-phase"))
 
     snapshot = read_snapshot(tmp_path)
 
@@ -114,18 +100,14 @@ def test_unknown_phase_renders_verbatim(tmp_path: Path) -> None:
     assert snapshot.terminal is False
 
 
-def test_older_journal_schema_and_unknown_fields_stay_usable(tmp_path: Path) -> None:
-    store = JournalStore(tmp_path)
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    store.path.write_text(
+def test_leftover_journal_without_a_log_is_ignored(tmp_path: Path) -> None:
+    leftover = tmp_path / "logs" / "grind-transaction.json"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text(
         json.dumps(
             {
                 "schema": 1,
                 "issue_id": "ortus-legacy",
-                "base_head": "abc123",
-                "baseline_paths": [],
-                "baseline_fingerprints": {},
-                "candidate_paths": ["candidate.py"],
                 "phase": "implementation-timeout",
                 "invented_by_a_newer_writer": {"x": 1},
             }
@@ -135,10 +117,12 @@ def test_older_journal_schema_and_unknown_fields_stay_usable(tmp_path: Path) -> 
 
     snapshot = read_snapshot(tmp_path)
 
-    assert snapshot.issue_id == "ortus-legacy"
-    assert snapshot.phase == "implementation-timeout"
-    assert snapshot.candidate_paths == ("candidate.py",)
-    assert any("unknown fields" in note for note in snapshot.journal_notes)
+    assert snapshot.issue_id == ""
+    assert snapshot.phase == PHASE_IDLE
+    assert snapshot.candidate_paths == ()
+    assert snapshot.journal_present is False
+    assert snapshot.idle is True
+    assert leftover.is_file()
 
 
 def test_incremental_offset_reads_only_appended_bytes(tmp_path: Path) -> None:
@@ -356,7 +340,7 @@ def test_blocked_duration_never_goes_negative(tmp_path: Path) -> None:
 def test_degraded_inputs_survive_truncation_rotation_and_absence(
     tmp_path: Path,
 ) -> None:
-    """AC-4: a half-written line, a rotated log and an absent journal."""
+    """AC-4: a half-written line, a rotated log and an absent grind log."""
 
     # No logs directory at all: idle, not an error.
     empty = read_snapshot(tmp_path)
@@ -374,11 +358,12 @@ def test_degraded_inputs_survive_truncation_rotation_and_absence(
     partial = '{"type":"assistant","message":{"cont'  # cut mid-key, as a live log is
     log.write_text(complete + partial, "utf-8")
 
-    # A log with no journal is valid, and the half-written final line is
-    # skipped rather than raising or being parsed as an ortus line.
+    # A log with no leftover journal is valid, and the half-written final line
+    # is skipped rather than raising or being parsed as an ortus line.
     first = read_snapshot(tmp_path)
     assert first.journal_present is False
-    assert first.phase == PHASE_IDLE
+    assert first.phase == "implementation"
+    assert first.idle is False
     assert first.offset == len(complete.encode("utf-8"))
     assert [event.text for event in first.events] == [
         "iter 1: implementation worker started"
@@ -400,21 +385,30 @@ def test_degraded_inputs_survive_truncation_rotation_and_absence(
     assert third.offset == log.stat().st_size
     assert third.warnings == ()
 
-    # A journal that is not valid JSON is context, not a crash.
-    store = JournalStore(tmp_path)
-    store.path.write_text("{not json", encoding="utf-8")
+    # A leftover journal that is not valid JSON is ignored, not a crash.
+    leftover = tmp_path / "logs" / "grind-transaction.json"
+    leftover.write_text("{not json", encoding="utf-8")
     fourth = read_snapshot(tmp_path, previous=third)
     assert fourth.journal_present is False
-    assert fourth.journal_notes
+    assert fourth.idle is False
+    assert leftover.is_file()
 
 
-def test_degraded_inputs_tolerate_a_journal_with_no_log(tmp_path: Path) -> None:
-    JournalStore(tmp_path).save(_journal())
+def test_degraded_inputs_tolerate_a_leftover_journal_with_no_log(
+    tmp_path: Path,
+) -> None:
+    leftover = tmp_path / "logs" / "grind-transaction.json"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text(
+        json.dumps({"issue_id": "ortus-0udo.1", "phase": "verification"}),
+        encoding="utf-8",
+    )
 
     snapshot = read_snapshot(tmp_path)
 
-    assert snapshot.issue_id == "ortus-0udo.1"
+    assert snapshot.issue_id == ""
     assert snapshot.log_path is None
+    assert snapshot.idle is True
     assert snapshot.latest_action == ""
     assert snapshot.blocked_seconds == 0.0
 

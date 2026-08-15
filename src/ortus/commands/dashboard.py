@@ -135,11 +135,11 @@ from ortus.core.runstate import (
     GROK_CRUMB_TYPES,
     LogEvent,
     RunSnapshot,
+    find_log,
     is_grok_event,
     read_snapshot,
     summarize_grok_tool,
 )
-from ortus.core.transaction import JOURNAL_RELATIVE_PATH
 
 #: Seconds between refreshes. A tick reads only the bytes the log grew by, so
 #: this is cheap even against the megabyte logs a long session produces.
@@ -232,9 +232,9 @@ DISOWNED = "unrelated"
 #: which is a different fact from a region holding nothing, and the region says
 #: which rather than rendering an empty one.
 CANDIDATE_IDLE = "idle - no owned paths captured"
-#: A journal in flight whose candidate is still empty: nothing has gone dirty
-#: since the claim. Stated rather than left blank, so the region reads as a
-#: finding instead of a broken panel.
+#: A live-from-log run whose owned-path list is empty: the dashboard does not
+#: invent paths from a dirty tree. Stated rather than left blank, so the
+#: region reads as a finding instead of a broken panel.
 CANDIDATE_EMPTY = "no paths captured yet"
 #: Path rows the region shows across all three groups. A candidate larger than
 #: this is truncated with a count rather than scrolling the layout.
@@ -319,11 +319,11 @@ CLEAN_OUTCOME = "finished cleanly"
 #: A replayed run whose journal is gone: the log alone is still worth reading.
 NO_JOURNAL_OUTCOME = "no run record - replayed from the log alone"
 
-#: The header with no transaction in flight. An absent journal is a valid state
-#: rather than an error, so an idle repository says so instead of being given a
+#: The header with no grind log. An absent log is a valid state rather than
+#: an error, so an idle repository says so instead of being given a
 #: fabricated phase.
-HEADER_IDLE = "idle - no transaction in flight"
-#: A journal in flight that names no issue, which an older journal can be.
+HEADER_IDLE = "idle - no run record"
+#: A live-from-log run that names no issue, which a log with no claim line is.
 UNKNOWN_ISSUE = "unknown issue"
 #: Longest issue title the header renders. A title is free text and the header
 #: is one region among five, so the title is the field that gives way — never
@@ -542,7 +542,7 @@ def refresh_interval(*, grok: bool = False) -> float:
 
 @dataclass(frozen=True)
 class ReplaySource:
-    """A finished run to render: its log, and the repository holding its journal."""
+    """A finished run to render: its log, and the repository that log sits under."""
 
     log_path: Path
     repo: Path
@@ -569,26 +569,29 @@ class ToolLight:
     detail: str = ""
 
 
-def journal_backend(repo: Path) -> str:
-    """The backend a leftover journal file names, if it names one.
+def named_backend(repo: Path) -> str:
+    """The backend the newest grind log names on its start line, if any.
 
-    The leftover file has no typed backend field, so this reads the raw
-    JSON. A missing key is not a signal. `.ortusrc` is never consulted:
-    an idle repo must not flip into an empty NOC just because the project
-    default is grok.
+    Grind writes `backend=` on the opening line. `.ortusrc` is never
+    consulted: an idle repo must not flip into an empty NOC just because
+    the project default is grok. A leftover journal file is ignored.
     """
 
-    path = Path(repo) / JOURNAL_RELATIVE_PATH
+    path = find_log(Path(repo))
+    if path is None:
+        return ""
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8", errors="replace")[:8192]
+    except OSError:
         return ""
-    if not isinstance(payload, dict):
-        return ""
-    named = payload.get("backend")
-    if isinstance(named, str) and named.strip():
-        return named.strip().lower()
-    return ""
+    match = re.search(r"\bbackend=([a-z]+)\b", text)
+    return match.group(1) if match is not None else ""
+
+
+def journal_backend(repo: Path) -> str:
+    """Compatibility alias: backend named by the grind log, never a journal."""
+
+    return named_backend(repo)
 
 
 def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) -> str:
@@ -604,12 +607,12 @@ def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) ->
     return ""
 
 
-def backend_conflict(journal: str, log: str) -> str:
-    """PLAN-GAP line when journal and log name different backends; else empty."""
+def backend_conflict(named: str, log: str) -> str:
+    """PLAN-GAP line when the start line and event types disagree; else empty."""
 
-    if journal and log and journal != log:
+    if named and log and named != log:
         return (
-            f"PLAN-GAP: journal backend={journal} disagrees with log backend={log}"
+            f"PLAN-GAP: named backend={named} disagrees with event backend={log}"
         )
     return ""
 
@@ -622,16 +625,17 @@ def is_grok_mode(
 ) -> bool:
     """True when this run is a Grok run the dashboard should oversee.
 
-    Detected from parsed Grok event types or a journal that names backend
+    Detected from parsed Grok event types or a grind log that names backend
     grok. A Claude log whose text contains the substring `thought` does not
-    trip this: detection never looks at unparsed text.
+    trip this: detection never looks at unparsed text. An idle repository
+    stays sparse even when a caller passes journal="grok".
     """
 
     if crumbs:
         return True
     if any(event.payload and is_grok_event(event.payload) for event in snapshot.events):
         return True
-    return journal == "grok" and snapshot.journal_present
+    return journal == "grok" and not snapshot.idle
 
 
 def classify_crumb(event: LogEvent) -> Crumb | None:
@@ -749,12 +753,11 @@ def crumb_panel(
 
 
 def resolve_replay(log: Path) -> ReplaySource:
-    """Pair a grind log with the journal that sits alongside it.
+    """Pair a grind log with the repository that log sits under.
 
-    Grind writes both under one `logs/` tree, so the repository is the log's
-    grandparent and the journal is found by the same store live mode uses. That
-    is the whole resolution: it means replaying a log copied out of a run whose
-    journal is gone still renders, from the log alone.
+    Grind writes logs under one `logs/` tree, so the repository is the log's
+    grandparent. A leftover journal file in that tree is ignored; replay
+    renders from the pinned log alone.
     """
 
     log = Path(log)
@@ -893,12 +896,29 @@ class VerdictState:
     candidate_hash: str = ""
 
 
+def latest_report_ref(repo: Path) -> str:
+    """Newest verifier report under `logs/grind-transactions`, or empty."""
+
+    root = Path(repo) / "logs" / "grind-transactions"
+    try:
+        found = [path for path in root.glob("*.verifier-*.md") if path.is_file()]
+    except OSError:
+        return ""
+    if not found:
+        return ""
+    newest = max(found, key=_mtime)
+    try:
+        return str(newest.relative_to(repo))
+    except ValueError:
+        return str(newest)
+
+
 def packet_path(repo: Path, snapshot: RunSnapshot) -> Path | None:
     """The authoritative work-spec artifact for this run, if it is on disk.
 
-    The journal names it exactly. The glob is the fallback for a journal
-    written before that reference was recorded: the store prefixes a work spec
-    with its issue, so the newest one for this issue is the run's own.
+    A constructed snapshot may name it exactly. The glob is the live path:
+    artifacts are prefixed with the issue the log claimed, so the newest one
+    for this issue is the run's own.
     """
 
     if snapshot.issue_packet_ref:
@@ -1019,11 +1039,13 @@ def read_report(repo: Path, snapshot: RunSnapshot) -> VerifierReport | None:
     """The latest verifier report artifact, or None when none exists yet.
 
     Latest rather than merged: a correction round writes a second report for
-    the same issue, and the journal appends each reference as it is written, so
-    the last one is the attempt now in force.
+    the same issue. Constructed snapshots may name the refs; live-from-log
+    falls back to the newest `*.verifier-*.md` artifact on disk.
     """
 
     ref = snapshot.verifier_refs[-1] if snapshot.verifier_refs else ""
+    if not ref:
+        ref = latest_report_ref(repo)
     if not ref:
         return None
     try:
@@ -1476,10 +1498,9 @@ def action_panel(
 
     The action survives a heartbeat because the model only displaces it with
     another action, so a stretch of content-free events keeps showing the suite
-    the worker is blocked on rather than blanking. A live view with no journal
-    shows no action even when an old log is lying around, since that action
-    belongs to a run that has already ended; replay is the one reader that wants
-    a finished run's last action, and it says so by pinning the log.
+    the worker is blocked on rather than blanking. A live view with no grind
+    log shows no action; a leftover log is the run live mode follows. Replay
+    is the reader that pins a specific finished log.
 
     The workspace count corroborates an action that is still current, so a run
     that has ended does not carry one: the directory would still be there, and
@@ -1543,7 +1564,7 @@ def outcome_line(snapshot: RunSnapshot) -> str:
 
 @dataclass(frozen=True)
 class IssueIdentity:
-    """What bd says the run's issue is, beyond the id the journal records."""
+    """What bd says the run's issue is, beyond the id the log records."""
 
     issue_id: str = ""
     title: str = ""
@@ -1704,10 +1725,9 @@ def run_elapsed(snapshot: RunSnapshot) -> float | None:
 def iteration(snapshot: RunSnapshot) -> int:
     """Which pass over the issue this is.
 
-    The journal's counter starts at one and a journal in flight is always on at
-    least its first pass, so a journal that recorded a zero — an older schema,
-    or one saved before the first phase transition — reads as one rather than as a run
-    that has not started.
+    The log's iter counter starts at one and a live-from-log run is always on at
+    least its first pass, so a record that captured a zero reads as one rather
+    than as a run that has not started.
     """
 
     return max(1, snapshot.attempt)
@@ -1717,7 +1737,7 @@ def identity_line(snapshot: RunSnapshot, identity: IssueIdentity | None = None) 
     """Which issue the run claimed: its id, and its priority and title if known.
 
     The id is always shown and always first, because it is the one field the
-    journal itself carries; everything else came from bd and may be missing.
+    grind log itself carries; everything else came from bd and may be missing.
     """
 
     issue = snapshot.issue_id or UNKNOWN_ISSUE
@@ -1783,7 +1803,7 @@ def header_line(
 ) -> str:
     """The header region: which issue, which phase, and how much budget is left.
 
-    An absent journal is a valid state, not an error, so a repository with no
+    An absent grind log is a valid state, not an error, so a repository with no
     run in flight opens idle rather than showing a fabricated phase. A run that
     ended while the view was open reports its terminal phase rather than
     freezing on the last live frame, and carries no countdown: a finished worker
@@ -2101,14 +2121,14 @@ def _shell() -> dict[str, type]:
                 self.crumbs = ()
                 self.tools = ()
                 self._crumb_log = self.snapshot.log_path
-            named = journal_backend(self.repo)
+            named = self.snapshot.backend or named_backend(self.repo)
             seen = log_backend(self.snapshot.events, self.crumbs)
             self.conflict = backend_conflict(named, seen)
             self.crumbs, self.tools, arrived = ingest_crumbs(
                 self.snapshot.events, self.crumbs, self.tools
             )
             self.crumb_rate = arrived
-            # Log crumbs win for presentation; a journal/log mismatch is
+            # Event crumbs win for presentation; a start-line/event mismatch is
             # recorded on the frame rather than resolved by dropping either.
             self.grok = is_grok_mode(
                 self.snapshot,
@@ -2193,9 +2213,10 @@ def dashboard(
     q to exit.
 
     `--replay <log>` renders a finished run through the same panels, including
-    how it ended, and takes its journal from the log's own directory rather
-    than from the repo argument, so replaying a log names one run without
-    ambiguity. A log still being written replays too, up to its current end.
+    how it ended, and pins that log rather than watching the newest one in
+    the repo argument, so replaying a log names one run without ambiguity.
+    A leftover journal file is ignored. A log still being written replays
+    too, up to its current end.
     """
 
     try:

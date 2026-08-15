@@ -1,9 +1,10 @@
-"""Read-only run state for one grind run: journal plus an incremental log tail.
+"""Read-only run state for one grind run: an incremental grind-log tail.
 
-One model of a grind run, assembled from two files already on disk: the
-transaction journal at `logs/grind-transaction.json` and the grind log. Every
-dashboard panel reads this snapshot rather than the files, so the surfaces
-cannot disagree about what a run is doing.
+One model of a grind run, assembled from the newest grind log already on disk.
+A leftover `logs/grind-transaction.json` is ignored: live grind no longer
+writes one, and dashboard frames must not require it. Every dashboard panel
+reads this snapshot rather than the file, so the surfaces cannot disagree
+about what a run is doing.
 
 Two properties shape the implementation.
 
@@ -22,7 +23,7 @@ substring shortcut is what made a stopgap script report seven phantom
 timeouts. Warnings are therefore counted from plain ortus lines only.
 
 Nothing here writes, shells out, or touches bd or git: the module is a pure
-function of two files, so it works while a grind holds the flock and is
+function of the grind log, so it works while a grind holds the flock and is
 testable without a workspace. It must never import Textual, so the model stays
 usable headless.
 """
@@ -49,7 +50,7 @@ from ortus.core.lifecycle import (
 #: Grind writes one timestamped log per run under the already-ignored logs/
 #: tree; the newest is the live one.
 LOG_GLOB = "grind-*.log"
-#: Phase reported when no transaction is in flight. Journal absence is a valid
+#: Phase reported when no grind log is present. Log absence is a valid
 #: state, not an error, so panels render idle rather than a fabricated phase.
 PHASE_IDLE = "idle"
 #: Journal phases that mean the run is over. `finalized-*` is written per
@@ -161,7 +162,7 @@ class LogTail:
 class RunSnapshot:
     """Everything a panel needs about one grind run at one moment."""
 
-    # --- journal ---------------------------------------------------------
+    # --- run identity (derived from the grind log, or constructed in tests)
     issue_id: str = ""
     phase: str = PHASE_IDLE
     attempt: int = 0
@@ -181,10 +182,14 @@ class RunSnapshot:
     unrelated_paths: tuple[str, ...] = ()
     baseline_paths: tuple[str, ...] = ()
     verifier_refs: tuple[str, ...] = ()
+    #: Constructor override for frame-helper tests that build a live snapshot
+    #: without a log path. `read_snapshot` never sets this from a leftover
+    #: journal file.
     journal_present: bool = False
-    #: Notes about an older or partly unreadable leftover journal file.
-    #: Context for the operator, never a failure.
+    #: Unused leftover-journal notes. Kept so constructed snapshots stay valid.
     journal_notes: tuple[str, ...] = ()
+    #: Backend named on the grind start line (`backend=grok`), if any.
+    backend: str = ""
     created_at: _dt.datetime | None = None
     updated_at: _dt.datetime | None = None
     implementation_started_at: _dt.datetime | None = None
@@ -201,7 +206,7 @@ class RunSnapshot:
     latest_action: str = ""
     latest_action_at: _dt.datetime | None = None
     #: How long the latest action has been the latest, clamped at zero so a
-    #: local journal timestamp against a UTC log clock cannot go negative.
+    #: local log timestamp against a UTC observation clock cannot go negative.
     blocked_seconds: float = 0.0
     warnings: tuple[RunWarning, ...] = ()
     #: The newest timestamp seen in the log, carried between calls so events
@@ -211,13 +216,13 @@ class RunSnapshot:
 
     @property
     def idle(self) -> bool:
-        """No transaction is in flight."""
+        """No grind log is present, and no constructed run record was supplied."""
 
-        return not self.journal_present
+        return self.log_path is None and not self.journal_present
 
     @property
     def terminal(self) -> bool:
-        """The journal records a run that has finished, one way or another."""
+        """The log (or a constructed record) names a run that has finished."""
 
         return self.phase.startswith(_TERMINAL_PREFIX) or self.phase in TERMINAL_PHASES
 
@@ -371,6 +376,132 @@ def scan_warning(event: LogEvent) -> RunWarning | None:
     return None
 
 
+_ITER_RE = re.compile(r"\biter (\d+):")
+_BACKEND_EQ_RE = re.compile(r"\bbackend=([a-z]+)\b")
+_SPAWNING_RE = re.compile(r"\bspawning ([a-z]+) \(single-issue worker\)")
+_READY_BACKEND_RE = re.compile(r"goal-prompt ready for \S+ \(([a-z]+)\)")
+_STEP_RE = re.compile(r"\bstep ([a-z][a-z0-9-]*)")
+_FINALIZED_RE = re.compile(r"\b(finalized-[a-z0-9-]+)\b")
+_ISSUE_PHRASE_RES = (
+    re.compile(r"goal-prompt ready for (\S+)"),
+    re.compile(r"claimed issue (\S+)"),
+    re.compile(r"leftover claim (\S+)"),
+    re.compile(r"will claim (\S+)"),
+    re.compile(r"worker closed (\S+)"),
+    re.compile(r"left (\S+) in_progress"),
+    re.compile(r"flagged (\S+) human"),
+)
+_GENERIC_ISSUE = re.compile(r"^[a-z][a-z0-9]{1,24}-[a-z0-9]{3,}(?:\.\d+)*$")
+_SKIP_ISSUE_TOKENS = frozenset({"issue"})
+
+
+@dataclass(frozen=True)
+class _LogIdentity:
+    """Issue, phase, attempt and backend inferred from one slice of the log."""
+
+    issue_id: str = ""
+    phase: str = ""
+    attempt: int = 0
+    backend: str = ""
+    created_at: _dt.datetime | None = None
+    updated_at: _dt.datetime | None = None
+
+
+def _issue_token(token: str) -> str:
+    cleaned = token.rstrip(".,;:)")
+    if cleaned in _SKIP_ISSUE_TOKENS or cleaned.startswith("grind-"):
+        return ""
+    return cleaned if _GENERIC_ISSUE.fullmatch(cleaned) else ""
+
+
+def _phase_from_text(text: str) -> str | None:
+    """The phase one ortus line names, if it names one."""
+
+    step = _STEP_RE.search(text)
+    if step is not None:
+        return step.group(1)
+    finalized = _FINALIZED_RE.search(text)
+    if finalized is not None:
+        return finalized.group(1)
+    lower = text.lower()
+    if "corrections-exhausted" in lower or "correction attempts exhausted" in lower:
+        return "corrections-exhausted"
+    if "correction-rejected" in lower or "correction rejected" in lower:
+        return "correction-rejected"
+    if "plan-gap-escalated" in lower:
+        return "plan-gap-escalated"
+    if "orphaned-candidate" in lower:
+        return "orphaned-candidate"
+    if "incomplete-candidate" in lower:
+        return "incomplete-candidate"
+    if "timeout" in lower:
+        return "implementation-timeout"
+    if "worker closed" in lower or "grind ended" in lower:
+        return "finalized-sync"
+    if re.search(r"\bverified\b", lower):
+        return "finalized-verified"
+    if "verification started" in lower:
+        return "verification"
+    if (
+        "spawning" in lower
+        or "worker started" in lower
+        or "goal-prompt ready" in lower
+        or "in_progress" in lower
+    ):
+        return "implementation"
+    return None
+
+
+def scan_log_identity(events: tuple[LogEvent, ...]) -> _LogIdentity:
+    """Issue, phase, attempt and backend carried by one slice of ortus lines."""
+
+    issue_id = ""
+    phase = ""
+    attempt = 0
+    backend = ""
+    created_at: _dt.datetime | None = None
+    updated_at: _dt.datetime | None = None
+    for event in events:
+        if event.writer is not Writer.ORTUS:
+            if event.at is not None:
+                created_at = created_at or event.at
+                updated_at = event.at
+            continue
+        text = event.text
+        if event.at is not None:
+            created_at = created_at or event.at
+            updated_at = event.at
+        for pattern in _ISSUE_PHRASE_RES:
+            match = pattern.search(text)
+            if match is None:
+                continue
+            found = _issue_token(match.group(1))
+            if found:
+                issue_id = found
+                break
+        iter_match = _ITER_RE.search(text)
+        if iter_match is not None:
+            attempt = int(iter_match.group(1))
+        named = _BACKEND_EQ_RE.search(text)
+        if named is None:
+            named = _SPAWNING_RE.search(text)
+        if named is None:
+            named = _READY_BACKEND_RE.search(text)
+        if named is not None:
+            backend = named.group(1)
+        inferred = _phase_from_text(text)
+        if inferred is not None:
+            phase = inferred
+    return _LogIdentity(
+        issue_id=issue_id,
+        phase=phase,
+        attempt=attempt,
+        backend=backend,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
 def read_snapshot(
     repo: Path,
     *,
@@ -420,8 +551,42 @@ def read_snapshot(
             clock = event.at
             break
 
+    identity = scan_log_identity(tail.events)
+    if carried and previous is not None:
+        issue_id = identity.issue_id or previous.issue_id
+        phase = identity.phase or previous.phase
+        attempt = identity.attempt or previous.attempt
+        backend = identity.backend or previous.backend
+        created_at = previous.created_at or identity.created_at
+        updated_at = identity.updated_at or previous.updated_at
+    else:
+        issue_id = identity.issue_id
+        phase = identity.phase or (PHASE_IDLE if path is None else phase_for_log(path))
+        attempt = identity.attempt
+        backend = identity.backend
+        created_at = identity.created_at
+        updated_at = identity.updated_at
+
+    started = created_at.isoformat() if created_at is not None else None
+    attempts: tuple[dict[str, Any], ...] = ()
+    if attempt:
+        record: dict[str, Any] = {"number": attempt, "phase": phase or "implementation"}
+        if started is not None:
+            record["started_at"] = started
+        attempts = (record,)
+    elif carried and previous is not None:
+        attempts = previous.attempts
+
     return replace(
         RunSnapshot(),
+        issue_id=issue_id,
+        phase=phase,
+        attempt=attempt,
+        attempts=attempts,
+        backend=backend,
+        created_at=created_at,
+        updated_at=updated_at,
+        implementation_started_at=created_at,
         log_path=path,
         offset=tail.offset,
         events=tail.events,
@@ -432,6 +597,12 @@ def read_snapshot(
         clock=clock,
         observed_at=observed,
     )
+
+
+def phase_for_log(path: Path | None) -> str:
+    """A log with no phase-naming line is still a live run, not idle."""
+
+    return "implementation" if path is not None else PHASE_IDLE
 
 
 # ---------------------------------------------------------------------------

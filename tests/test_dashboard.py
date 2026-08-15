@@ -35,7 +35,6 @@ from ortus.core.runstate import (
     classify_line,
     read_snapshot,
 )
-from ortus.core.transaction import CandidateJournal, JournalStore
 from ortus.core.verdict import Verdict, render_report
 
 _MODULE_SOURCE = Path(dash.__file__).read_text(encoding="utf-8")
@@ -47,35 +46,27 @@ _MODULE_SOURCE = Path(dash.__file__).read_text(encoding="utf-8")
 
 
 def _quiet_repo(tmp_path: Path) -> Path:
-    """A repository with no bd workspace, no logs directory and no journal."""
+    """A repository with no bd workspace and no grind log."""
 
     repo = tmp_path / "quiet"
     repo.mkdir()
     return repo
 
 
+def _ortus_line(stamp: str, message: str) -> str:
+    return f"[{stamp}] {message}\n"
+
+
 def _live_repo(tmp_path: Path) -> Path:
-    """A repository mid-run: a journal in flight plus a grind log with content."""
+    """A repository mid-run: a grind log with a claim line and no journal file."""
 
     repo = tmp_path / "live"
     (repo / "logs").mkdir(parents=True)
     (repo / ".beads").mkdir()
-    JournalStore(repo).save(
-        CandidateJournal(
-            issue_id="ortus-0udo.2",
-            base_head="abc1234def",
-            baseline_paths=(),
-            baseline_fingerprints={},
-            candidate_paths=("src/ortus/commands/dashboard.py",),
-            candidate_hash="deadbeefcafe",
-            phase="implementation",
-            attempt=1,
-            corrections=0,
-        )
-    )
     (repo / "logs" / "grind-20260808-221000.log").write_text(
-        "[2026-08-08 22:10:00] iter 1: worker started\n"
-        '{"type":"assistant","message":{"role":"assistant","content":'
+        _ortus_line("2026-08-08 22:10:00", "iter 1: goal-prompt ready for ortus-0udo.2 (claude)")
+        + _ortus_line("2026-08-08 22:10:00", "iter 1: worker started")
+        + '{"type":"assistant","message":{"role":"assistant","content":'
         '[{"type":"text","text":"reading the packet"}]}}\n',
         encoding="utf-8",
     )
@@ -181,6 +172,14 @@ def _literal_sites(literal: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # AC-2: every bd invocation is read-only
 # ---------------------------------------------------------------------------
+
+
+def test_dashboard_module_does_not_import_journal_types() -> None:
+    """AC-2: the dashboard command module never names JournalStore or CandidateJournal."""
+
+    assert "JournalStore" not in _MODULE_SOURCE
+    assert "CandidateJournal" not in _MODULE_SOURCE
+    assert "JOURNAL_RELATIVE_PATH" not in _MODULE_SOURCE
 
 
 def test_readonly_bd_flags_on_every_bd_invocation(
@@ -405,18 +404,17 @@ def test_a_run_that_starts_while_open_is_picked_up_on_the_next_tick(
     repo.mkdir()
     app = dash.DashboardApp(repo, refresh_seconds=3600)
 
-    assert app.advance().header == "idle - no transaction in flight"
+    assert app.advance().header == dash.HEADER_IDLE
     assert app.snapshot.idle
 
     (repo / "logs").mkdir()
-    JournalStore(repo).save(
-        CandidateJournal(
-            issue_id="ortus-0udo.2",
-            base_head="abc1234def",
-            baseline_paths=(),
-            baseline_fingerprints={},
-            phase="implementation",
+    (repo / "logs" / "grind-20260808-221000.log").write_text(
+        _ortus_line(
+            "2026-08-08 22:10:00",
+            "iter 1: goal-prompt ready for ortus-0udo.2 (claude)",
         )
+        + _ortus_line("2026-08-08 22:10:00", "iter 1: spawning claude (single-issue worker)"),
+        encoding="utf-8",
     )
 
     header = app.advance().header
@@ -434,10 +432,9 @@ def test_a_run_that_ends_while_open_shows_its_terminal_state(tmp_path: Path) -> 
     assert not app.snapshot.terminal
     assert dash.region_state("header", app.snapshot) == "state-live"
 
-    store = JournalStore(repo)
-    journal = store.load()
-    assert journal is not None
-    store.save(replace(journal, phase="finalized-verified"))
+    log = next((repo / "logs").glob("grind-*.log"))
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(_ortus_line("2026-08-08 22:40:00", "iter 1: worker closed ortus-0udo.2"))
 
     app.advance()
     assert app.snapshot.terminal
@@ -526,16 +523,6 @@ def _warned_repo(tmp_path: Path, name: str, body: str) -> Path:
 
     repo = tmp_path / name
     (repo / "logs").mkdir(parents=True)
-    JournalStore(repo).save(
-        CandidateJournal(
-            issue_id="ortus-0udo.7",
-            base_head="abc1234def",
-            baseline_paths=(),
-            baseline_fingerprints={},
-            phase="implementation",
-            attempt=1,
-        )
-    )
     (repo / "logs" / "grind-20260808-221000.log").write_text(body, encoding="utf-8")
     return repo
 
@@ -666,28 +653,27 @@ def _finished_run(
 
     repo = tmp_path / name
     (repo / "logs").mkdir(parents=True)
-    JournalStore(repo).save(
-        CandidateJournal(
-            issue_id="ortus-0udo.7",
-            base_head="abc1234def",
-            baseline_paths=(),
-            baseline_fingerprints={},
-            candidate_paths=("src/ortus/commands/dashboard.py",),
-            candidate_hash="deadbeefcafe",
-            phase=phase,
-            attempt=1,
-        )
-    )
     log = repo / "logs" / log_name
-    log.write_text(
-        body
-        if body is not None
-        else (
-            "[2026-08-08 22:10:00] iter 1: worker started\n"
-            f"[2026-08-08 22:40:00] {_WATCHDOG_LINE}\n"
-        ),
-        encoding="utf-8",
-    )
+    if body is None:
+        body = (
+            _ortus_line(
+                "2026-08-08 22:10:00",
+                "iter 1: goal-prompt ready for ortus-0udo.7 (claude)",
+            )
+            + _ortus_line("2026-08-08 22:10:00", "iter 1: worker started")
+            + _ortus_line("2026-08-08 22:40:00", _WATCHDOG_LINE)
+            + _ortus_line("2026-08-08 22:40:01", f"iter 1: step {phase}")
+        )
+    elif f"step {phase}" not in body and "goal-prompt ready" not in body:
+        body = (
+            _ortus_line(
+                "2026-08-08 22:10:00",
+                "iter 1: goal-prompt ready for ortus-0udo.7 (claude)",
+            )
+            + body
+            + _ortus_line("2026-08-08 22:40:01", f"iter 1: step {phase}")
+        )
+    log.write_text(body, encoding="utf-8")
     return repo, log
 
 
@@ -768,16 +754,18 @@ def test_replay_renders_an_unknown_terminal_phase_verbatim(tmp_path: Path) -> No
 def test_replay_of_a_run_whose_journal_is_gone_renders_from_the_log_alone(
     tmp_path: Path,
 ) -> None:
-    """The log outlives the journal, and is still worth reading on its own."""
+    """A leftover journal is ignored; replay still reads the grind log."""
 
     repo, log = _finished_run(tmp_path, "orphan-log")
-    JournalStore(repo).path.unlink()
+    leftover = repo / "logs" / "grind-transaction.json"
+    leftover.write_text('{"issue_id": "should-be-ignored"}', encoding="utf-8")
 
     app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
     frame = app.advance()
 
-    assert app.snapshot.idle
-    assert dash.NO_JOURNAL_OUTCOME in frame.header
+    assert not app.snapshot.idle
+    assert leftover.is_file()
+    assert "ortus-0udo.7" in frame.header
     assert log.name in frame.header
     # The warnings still come off the log, which is the point of replaying it.
     assert _WATCHDOG_LINE in frame.warnings
@@ -832,14 +820,14 @@ def test_replay_follows_a_log_that_is_still_being_written(tmp_path: Path) -> Non
     assert _WATCHDOG_LINE in app.advance().warnings
 
 
-def test_replay_resolves_the_journal_from_the_log_directory(tmp_path: Path) -> None:
-    """Step 3: the journal comes from the log's own tree, not the caller's cwd."""
+def test_replay_resolves_the_repo_from_the_log_directory(tmp_path: Path) -> None:
+    """Step 3: the repo is the log's own tree, not the caller's cwd."""
 
     repo, log = _finished_run(tmp_path, "resolve")
     assert dash.resolve_replay(log) == dash.ReplaySource(log_path=log, repo=repo)
 
     # A log copied somewhere with no logs/ parent still resolves to a directory
-    # rather than raising; the journal is simply absent there.
+    # rather than raising; there is no claim line there so identity is empty.
     loose = tmp_path / "elsewhere" / "grind-copy.log"
     loose.parent.mkdir()
     loose.write_text("[2026-08-08 22:10:00] iter 1: worker started\n", encoding="utf-8")
@@ -848,7 +836,9 @@ def test_replay_resolves_the_journal_from_the_log_directory(tmp_path: Path) -> N
     app = dash.DashboardApp(
         loose.parent, refresh_seconds=3600, replay=dash.resolve_replay(loose)
     )
-    assert app.advance().header.splitlines()[1] == dash.NO_JOURNAL_OUTCOME
+    header = app.advance().header
+    assert loose.name in header
+    assert "implementation" in header
 
 
 # ---------------------------------------------------------------------------
@@ -939,28 +929,22 @@ def _judged_repo(
     acceptance: str = _ACCEPTANCE,
     candidate_hash: str = _VERDICT_CANDIDATE,
 ) -> Path:
-    """A repository mid-verification: a packet artifact, a journal, a log."""
+    """A repository mid-verification: a packet artifact and a grind log."""
 
+    del candidate_hash
     repo = tmp_path / name
-    (repo / "logs").mkdir(parents=True)
-    store = JournalStore(repo)
-    digest, ref = store.save_packet(_VERDICT_ISSUE, _packet(acceptance))
-    store.save(
-        CandidateJournal(
-            issue_id=_VERDICT_ISSUE,
-            base_head="abc1234def",
-            baseline_paths=(),
-            baseline_fingerprints={},
-            candidate_paths=("src/ortus/commands/dashboard.py",),
-            candidate_hash=candidate_hash,
-            issue_packet_hash=digest,
-            issue_packet_ref=ref,
-            phase="verification",
-            attempt=1,
-        )
+    (repo / "logs" / "grind-transactions").mkdir(parents=True)
+    packet_path = (
+        repo / "logs" / "grind-transactions" / f"{_VERDICT_ISSUE}-claimed.issue.json"
     )
+    packet_path.write_text(json.dumps(_packet(acceptance)), encoding="utf-8")
     (repo / "logs" / _VERDICT_LOG).write_text(
-        "[2026-08-08 23:10:00] iter 1: verification started\n", encoding="utf-8"
+        _ortus_line(
+            "2026-08-08 23:10:00",
+            f"iter 1: goal-prompt ready for {_VERDICT_ISSUE} (claude)",
+        )
+        + _ortus_line("2026-08-08 23:10:00", "iter 1: verification started"),
+        encoding="utf-8",
     )
     return repo
 
@@ -989,16 +973,18 @@ def _write_report(
         findings=("none",),
         codegraph=("explored the verdict region",),
     )
-    store = JournalStore(repo)
-    ref = store.save_report(
-        candidate_hash,
-        render_report(verdict, issue_id=_VERDICT_ISSUE, attempt=attempt),
-        attempt=attempt,
+    dest = (
+        repo
+        / "logs"
+        / "grind-transactions"
+        / f"{candidate_hash}.verifier-{attempt}.md"
     )
-    journal = store.load()
-    assert journal is not None
-    store.save(replace(journal, verifier_refs=(*journal.verifier_refs, ref)))
-    return ref
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(
+        render_report(verdict, issue_id=_VERDICT_ISSUE, attempt=attempt),
+        encoding="utf-8",
+    )
+    return str(dest.relative_to(repo))
 
 
 def _log_envelope(
@@ -1224,13 +1210,20 @@ def test_verdict_for_a_stale_candidate_is_shown_as_stale(tmp_path: Path) -> None
     _log_envelope(repo, decision="pass", candidate_hash="0123456789ab")
 
     app = dash.DashboardApp(repo, refresh_seconds=3600)
-    panel = app.advance().verdict
+    live = app.advance().verdict
+    # Live-from-log has no current owned-path hash, so it does not invent one
+    # just to paint stale. The envelope still names what was judged.
+    assert "stale" not in live
+    assert "0123456789ab" in live
 
+    snapshot = replace(app.snapshot, candidate_hash=_VERDICT_CANDIDATE)
+    state = replace(app.verdict, candidate_hash=_VERDICT_CANDIDATE)
+    panel = dash.verdict_panel(snapshot, state)
     assert "stale" in panel
     assert "0123456789ab" in panel
     assert dash.short(_VERDICT_CANDIDATE) in panel
     # Stale is attention rather than the green of a current pass.
-    assert dash.region_state("verdict", app.snapshot, app.verdict) == "state-ended"
+    assert dash.region_state("verdict", snapshot, state) == "state-ended"
 
 
 def test_verdict_packet_without_criterion_identifiers_is_a_readiness_failure(
@@ -1325,29 +1318,29 @@ def test_verdict_summarises_a_report_too_large_to_show_rather_than_clipping_it(
 def test_verdict_of_a_replayed_run_whose_journal_is_gone_still_names_the_decision(
     tmp_path: Path,
 ) -> None:
-    """The log outlives the journal, and the decision in it is worth reading."""
+    """The decision lives in the grind log; a leftover journal is ignored."""
 
     repo = _judged_repo(tmp_path, "replayed")
     _log_envelope(repo, decision="fail", reason="AC-2 did not hold")
-    JournalStore(repo).path.unlink()
+    leftover = repo / "logs" / "grind-transaction.json"
+    leftover.write_text("{}", encoding="utf-8")
 
     log = repo / "logs" / _VERDICT_LOG
     app = dash.DashboardApp(repo, refresh_seconds=3600, replay=dash.resolve_replay(log))
     panel = app.advance().verdict
 
-    assert app.snapshot.idle
+    assert not app.snapshot.idle
+    assert leftover.is_file()
     assert dash.VERDICT_IDLE not in panel
     assert f"decision {dash.STATUS_FAIL}" in panel
     assert "AC-2 did not hold" in panel
-    # Without the journal there is no packet reference, and the panel says so
-    # rather than rendering an issue with nothing to satisfy.
-    assert dash.NO_PACKET in panel
+    assert app.verdict.criteria == ("AC-1", "AC-2", "AC-3")
 
 
 def test_verdict_region_reads_the_packet_the_run_was_claimed_against(
     tmp_path: Path,
 ) -> None:
-    """The journal names the packet; an older journal falls back to the store.
+    """The log's issue id finds the packet artifact by prefix.
 
     The artifact is the packet the verifier is held to, so the panel and the
     verdict validator answer the same question rather than the panel answering
@@ -1358,10 +1351,10 @@ def test_verdict_region_reads_the_packet_the_run_was_claimed_against(
     snapshot = dash.read_snapshot(repo)
     named = dash.packet_path(repo, snapshot)
     assert named is not None
-    assert str(named.relative_to(repo)) == snapshot.issue_packet_ref
+    assert named.name.startswith(_VERDICT_ISSUE)
 
-    # A journal written before the reference existed still finds it, because
-    # the store prefixes a packet artifact with the issue that owns it.
+    # A snapshot that never recorded a packet ref still finds it, because
+    # the artifact is prefixed with the issue that owns it.
     older = replace(snapshot, issue_packet_ref="")
     assert dash.packet_path(repo, older) == named
 
@@ -1421,36 +1414,41 @@ _CANDIDATE_BASE = "9f1c4b7ad2e6c8b0"
 _CANDIDATE_LOG = "grind-20260809-031500.log"
 
 
-def _candidate_repo(
-    tmp_path: Path,
-    name: str,
+def _candidate_snapshot(
     *,
     candidate: tuple[str, ...] = (),
     handoff: tuple[str, ...] = (),
     unrelated: tuple[str, ...] = (),
     base_head: str = _CANDIDATE_BASE,
     phase: str = "implementation",
-) -> Path:
-    """A repository whose journal records one candidate composition."""
+) -> RunSnapshot:
+    """A constructed live snapshot with one candidate composition."""
+
+    return RunSnapshot(
+        issue_id=_CANDIDATE_ISSUE,
+        base_head=base_head,
+        candidate_paths=candidate,
+        candidate_hash="deadbeefcafe",
+        handoff_paths=handoff,
+        unrelated_paths=unrelated,
+        phase=phase,
+        attempt=1,
+        journal_present=True,
+    )
+
+
+def _candidate_repo(tmp_path: Path, name: str) -> Path:
+    """A log-only repo: live-from-log, no invented owned paths."""
 
     repo = tmp_path / name
     (repo / "logs").mkdir(parents=True)
-    JournalStore(repo).save(
-        CandidateJournal(
-            issue_id=_CANDIDATE_ISSUE,
-            base_head=base_head,
-            baseline_paths=(),
-            baseline_fingerprints={},
-            candidate_paths=candidate,
-            candidate_hash="deadbeefcafe",
-            handoff_paths=handoff,
-            unrelated_paths=unrelated,
-            phase=phase,
-            attempt=1,
-        )
-    )
     (repo / "logs" / _CANDIDATE_LOG).write_text(
-        "[2026-08-09 03:15:00] iter 1: worker started\n", encoding="utf-8"
+        _ortus_line(
+            "2026-08-09 03:15:00",
+            f"iter 1: goal-prompt ready for {_CANDIDATE_ISSUE} (claude)",
+        )
+        + _ortus_line("2026-08-09 03:15:00", "iter 1: worker started"),
+        encoding="utf-8",
     )
     return repo
 
@@ -1464,8 +1462,7 @@ def test_candidate_owned_paths_and_their_count_are_shown(tmp_path: Path) -> None
     """
 
     owned = ("src/ortus/commands/dashboard.py", "tests/test_dashboard.py")
-    repo = _candidate_repo(tmp_path, "owned", candidate=owned)
-    panel = dash.DashboardApp(repo, refresh_seconds=3600).advance().candidate
+    panel = dash.candidate_panel(_candidate_snapshot(candidate=owned))
 
     assert f"{dash.OWNED} {len(owned)}" in panel
     for path in owned:
@@ -1487,6 +1484,10 @@ def test_candidate_of_a_repository_with_no_journal_shows_no_candidate(
     panel = dash.DashboardApp(empty, refresh_seconds=3600).advance().candidate
     assert panel != dash.CANDIDATE_IDLE
     assert dash.CANDIDATE_EMPTY in panel
+    leftover = empty / "logs" / "grind-transaction.json"
+    leftover.write_text("{}", encoding="utf-8")
+    again = dash.DashboardApp(empty, refresh_seconds=3600).advance().candidate
+    assert dash.CANDIDATE_EMPTY in again
 
 
 def test_candidate_inherited_and_disowned_are_labelled_apart_from_owned(
@@ -1500,9 +1501,7 @@ def test_candidate_inherited_and_disowned_are_labelled_apart_from_owned(
     twice under two labels.
     """
 
-    repo = _candidate_repo(
-        tmp_path,
-        "composed",
+    snapshot = _candidate_snapshot(
         candidate=("src/ortus/core/runstate.py", "src/ortus/commands/dashboard.py"),
         handoff=(
             "src/ortus/commands/dashboard.py",
@@ -1511,9 +1510,8 @@ def test_candidate_inherited_and_disowned_are_labelled_apart_from_owned(
         ),
         unrelated=("scratch/leftover.txt", "README.md"),
     )
-    app = dash.DashboardApp(repo, refresh_seconds=3600)
-    panel = app.advance().candidate
-    groups = dash.candidate_groups(app.snapshot)
+    panel = dash.candidate_panel(snapshot)
+    groups = dash.candidate_groups(snapshot)
     by_label = {group.label: group.paths for group in groups}
 
     assert by_label[dash.OWNED] == ("src/ortus/core/runstate.py",)
@@ -1532,28 +1530,21 @@ def test_candidate_inherited_and_disowned_are_labelled_apart_from_owned(
         assert f"{label} {count}" in panel
     # Disowning is the judgement that went wrong once, so the region claims a
     # colour for it rather than sitting quiet.
-    assert dash.region_state("candidate", app.snapshot) == "state-ended"
-    kept = _candidate_repo(tmp_path, "kept", candidate=("src/a.py",))
-    quiet_app = dash.DashboardApp(kept, refresh_seconds=3600)
-    quiet_app.advance()
-    assert dash.region_state("candidate", quiet_app.snapshot) == "state-idle"
+    assert dash.region_state("candidate", snapshot) == "state-ended"
+    kept = _candidate_snapshot(candidate=("src/a.py",))
+    assert dash.region_state("candidate", kept) == "state-idle"
 
 
 def test_candidate_base_commit_is_shown(tmp_path: Path) -> None:
     """AC-3: the tree the candidate was captured on, which a moved base invalidates."""
 
-    repo = _candidate_repo(tmp_path, "based", candidate=("src/a.py",))
-    panel = dash.DashboardApp(repo, refresh_seconds=3600).advance().candidate
+    panel = dash.candidate_panel(_candidate_snapshot(candidate=("src/a.py",)))
 
     assert f"base {_CANDIDATE_BASE[:12]}" in panel
 
-    # A journal that never recorded one says so rather than showing a blank.
-    unknown = _candidate_repo(
-        tmp_path, "baseless", candidate=("src/a.py",), base_head=""
-    )
-    assert "base unknown" in (
-        dash.DashboardApp(unknown, refresh_seconds=3600).advance().candidate
-    )
+    # A record that never captured a base says so rather than showing a blank.
+    unknown = _candidate_snapshot(candidate=("src/a.py",), base_head="")
+    assert "base unknown" in dash.candidate_panel(unknown)
 
 
 def test_candidate_truncates_a_long_list_with_a_remaining_count(
@@ -1568,10 +1559,9 @@ def test_candidate_truncates_a_long_list_with_a_remaining_count(
 
     owned = tuple(f"src/generated/module_{index:04d}.py" for index in range(1200))
     disowned = ("scratch/one.txt", "scratch/two.txt", "scratch/three.txt")
-    repo = _candidate_repo(
-        tmp_path, "large", candidate=owned, handoff=disowned, unrelated=disowned
+    panel = dash.candidate_panel(
+        _candidate_snapshot(candidate=owned, handoff=disowned, unrelated=disowned)
     )
-    panel = dash.DashboardApp(repo, refresh_seconds=3600).advance().candidate
     lines = panel.splitlines()
 
     assert f"{dash.OWNED} {len(owned)}" in panel
@@ -1595,23 +1585,14 @@ def test_candidate_path_with_unusual_characters_does_not_break_the_layout(
     """
 
     odd = "src/[bracketed]/na\tme\x1b[31m.py"
-    repo = _candidate_repo(tmp_path, "odd", candidate=(odd, "src/plain.py"))
-    app = dash.DashboardApp(repo, refresh_seconds=3600)
-    panel = app.advance().candidate
+    panel = dash.candidate_panel(
+        _candidate_snapshot(candidate=(odd, "src/plain.py"))
+    )
 
     assert "\x1b" not in panel and "\t" not in panel
     assert len(panel.splitlines()) == 4  # base, heading, two paths
     assert "[bracketed]" in panel
-
-    painted: list[str] = []
-
-    async def _steps(pilot: Any) -> None:
-        await pilot.pause()
-        painted.append(_screen_text(app))
-
-    _drive(app, _steps)
-    assert painted and "[bracketed]" in painted[0]
-    assert not _emoji_in(painted[0])
+    assert dash.printable(odd) == "src/[bracketed]/na?me?[31m.py"
 
 
 def test_candidate_of_a_finalized_run_shows_what_was_committed(
@@ -1619,33 +1600,26 @@ def test_candidate_of_a_finalized_run_shows_what_was_committed(
 ) -> None:
     """A run that finished still explains its candidate rather than blanking."""
 
-    repo = _candidate_repo(
-        tmp_path,
-        "finalized",
+    snapshot = _candidate_snapshot(
         candidate=("src/ortus/commands/dashboard.py",),
         unrelated=("README.md",),
         phase="finalized-committed",
     )
-    app = dash.DashboardApp(repo, refresh_seconds=3600)
-    panel = app.advance().candidate
+    panel = dash.candidate_panel(snapshot)
 
-    assert app.snapshot.terminal
+    assert snapshot.terminal
     assert "src/ortus/commands/dashboard.py" in panel
     assert f"{dash.DISOWNED} 1" in panel and "README.md" in panel
 
 
-def test_candidate_region_writes_nothing_while_it_reads_the_journal(
+def test_candidate_region_writes_nothing_while_it_reads_the_log(
     tmp_path: Path,
 ) -> None:
     """AC-3 of the shell still holds with the candidate region filled."""
 
-    repo = _candidate_repo(
-        tmp_path,
-        "readonly",
-        candidate=("src/a.py",),
-        handoff=("src/a.py", "docs/b.md"),
-        unrelated=("docs/b.md",),
-    )
+    repo = _candidate_repo(tmp_path, "readonly")
+    leftover = repo / "logs" / "grind-transaction.json"
+    leftover.write_text('{"candidate_paths": ["must-not-be-read.py"]}', encoding="utf-8")
     app = dash.DashboardApp(repo, refresh_seconds=3600)
     app.advance()
     before = _fingerprint(repo)
@@ -1653,7 +1627,8 @@ def test_candidate_region_writes_nothing_while_it_reads_the_journal(
         app.advance()
 
     assert _fingerprint(repo) == before
-    assert dash.DISOWNED in app.last_frame.candidate
+    assert dash.CANDIDATE_EMPTY in app.last_frame.candidate
+    assert "must-not-be-read.py" not in app.last_frame.candidate
 
 
 def test_candidate_row_budget_gives_every_group_a_floor() -> None:
@@ -1713,16 +1688,12 @@ def _acting_repo(tmp_path: Path, name: str, body: str) -> Path:
 
     repo = tmp_path / name
     (repo / "logs").mkdir(parents=True)
-    JournalStore(repo).save(
-        CandidateJournal(
-            issue_id="ortus-0udo.4",
-            base_head="abc1234def",
-            baseline_paths=(),
-            baseline_fingerprints={},
-            phase="implementation",
-            attempt=1,
-        )
+    claim = _ortus_line(
+        "2026-08-08 22:10:00",
+        "iter 1: goal-prompt ready for ortus-0udo.4 (claude)",
     )
+    if body and "goal-prompt ready" not in body and "ortus grind started" not in body:
+        body = claim + body
     (repo / "logs" / "grind-20260808-221000.log").write_text(body, encoding="utf-8")
     return repo
 
@@ -1841,10 +1812,8 @@ def test_action_blocked_threshold_clears_when_the_worker_finishes(
     # And once the run itself reaches a terminal phase, the last action is over
     # rather than blocked: an age that keeps growing after a run has ended is
     # the stall this region exists to report, and it never happened.
-    store = JournalStore(repo)
-    journal = store.load()
-    assert journal is not None
-    store.save(replace(journal, phase="finalized-verified"))
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(_ortus_line("2026-08-08 22:20:06", "iter 1: worker closed ortus-0udo.4"))
     ended = dash.action_panel(read_snapshot(repo, previous=finished, now=_at(23, 0, 0)))
 
     assert dash.ACTION_ENDED in ended
@@ -1904,17 +1873,29 @@ def test_action_idle_shows_no_action_rather_than_a_stale_one(
     the stale reading an operator would act on.
     """
 
-    repo = _acting_repo(tmp_path, "over", _STARTED + _SUITE_CALL + _SESSION_END)
-    JournalStore(repo).path.unlink()
+    quiet = read_snapshot(_quiet_repo(tmp_path), now=_at(23, 30, 0))
+    assert quiet.idle
+    assert dash.action_panel(quiet) == dash.ACTION_IDLE
+    assert dash.region_state("current-action", quiet) == "state-idle"
+
+    repo = _acting_repo(
+        tmp_path,
+        "over",
+        _STARTED
+        + _SUITE_CALL
+        + _ortus_line("2026-08-08 22:20:06", "iter 1: worker closed ortus-0udo.4")
+        + _SESSION_END,
+    )
     snapshot = read_snapshot(repo, now=_at(23, 30, 0))
 
-    assert snapshot.idle
+    assert not snapshot.idle
+    assert snapshot.terminal
     assert snapshot.latest_action, "the log still holds the run's last action"
-    assert dash.action_panel(snapshot) == dash.ACTION_IDLE
-    assert dash.region_state("current-action", snapshot) == "state-idle"
+    assert dash.ACTION_ENDED in dash.action_panel(snapshot)
+    assert dash.region_state("current-action", snapshot) == "state-ended"
 
-    # Replay is the one reader that wants a finished run's last action, and it
-    # says so by pinning the log rather than by showing an age that keeps growing.
+    # Replay is the one reader that pins a finished run's last action rather
+    # than watching the newest log in the tree.
     source = dash.resolve_replay(repo / "logs" / "grind-20260808-221000.log")
     replayed = dash.action_panel(snapshot, replay=source)
     assert "worker session ended" in replayed
@@ -2163,40 +2144,25 @@ def _header_snapshot(**fields: Any) -> RunSnapshot:
 
 
 def _header_repo(tmp_path: Path, name: str, **journal: Any) -> Path:
-    """A repository mid-run whose journal carries real phase timestamps.
+    """A repository mid-run whose grind log carries real phase timestamps.
 
     Its stamps hang off the wall clock rather than off `_HEADER_NOW`, because
     the app reads the run through `read_snapshot`, which observes at the real
-    now; a pinned journal would be compared against it and read as however long
+    now; a pinned stamp would be compared against it and read as however long
     ago the fixture was written.
     """
 
+    del journal
     repo = tmp_path / name
     (repo / "logs").mkdir(parents=True)
-    started = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=30)
-    fields: dict[str, Any] = {
-        "issue_id": _HEADER_ISSUE,
-        "base_head": "abc1234def",
-        "baseline_paths": (),
-        "baseline_fingerprints": {},
-        "phase": "implementation",
-        "attempt": 1,
-        "corrections": 0,
-        "created_at": started.isoformat(),
-        "updated_at": started.isoformat(),
-        "implementation_started_at": started.isoformat(),
-        "attempts": (
-            {
-                "number": 1,
-                "phase": "implementation",
-                "started_at": started.isoformat(),
-            },
-        ),
-    }
-    fields.update(journal)
-    JournalStore(repo).save(CandidateJournal(**fields))
+    started = _dt.datetime.now().astimezone() - _dt.timedelta(minutes=30)
+    stamp = started.strftime("%Y-%m-%d %H:%M:%S")
     (repo / "logs" / "grind-20260809-043000.log").write_text(
-        "[2026-08-09 04:30:00] iter 1: spawning claude (single-issue worker)\n",
+        _ortus_line(
+            stamp,
+            f"iter 1: goal-prompt ready for {_HEADER_ISSUE} (claude)",
+        )
+        + _ortus_line(stamp, "iter 1: spawning claude (single-issue worker)"),
         encoding="utf-8",
     )
     return repo
@@ -2238,7 +2204,7 @@ def test_header_live_run_shows_issue_phase_iteration_and_elapsed(
 
 
 def test_header_idle_repository_shows_an_idle_header(tmp_path: Path) -> None:
-    """Compatibility: no transaction in flight is a state, not a blank panel."""
+    """Compatibility: no grind log is a state, not a blank panel."""
 
     app = dash.DashboardApp(_quiet_repo(tmp_path), refresh_seconds=3600)
     frame = app.advance()
@@ -2450,13 +2416,19 @@ _CODEX_ITEM = (
 
 
 def _painted_repo(tmp_path: Path, name: str, body: str, *, backend: str = "") -> Path:
-    repo = _acting_repo(tmp_path, name, body)
     if backend:
-        path = JournalStore(repo).path
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["backend"] = backend
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return repo
+        body = (
+            _ortus_line(
+                "2026-08-08 22:09:59",
+                f"=== ortus grind started (subprocess-per-task shape; backend={backend}) ===",
+            )
+            + _ortus_line(
+                "2026-08-08 22:10:00",
+                f"iter 1: goal-prompt ready for ortus-0udo.4 ({backend})",
+            )
+            + body
+        )
+    return _acting_repo(tmp_path, name, body)
 
 
 def test_grok_crumb_snapshot_paints_feed_and_rate_sensitive_pulse(
@@ -2748,8 +2720,8 @@ def test_backend_conflict_is_recorded_not_silenced(tmp_path: Path) -> None:
     app = dash.DashboardApp(repo, refresh_seconds=3600)
     frame = app.advance()
     assert "PLAN-GAP" in app.conflict
-    assert "journal backend=claude" in app.conflict
-    assert "log backend=grok" in app.conflict
+    assert "named backend=claude" in app.conflict
+    assert "event backend=grok" in app.conflict
     assert app.conflict in frame.warnings
     assert app.grok is True
     assert "think" in frame.crumbs
