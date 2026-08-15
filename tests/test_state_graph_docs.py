@@ -6,14 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from ortus.core import lifecycle
 from ortus.core.lifecycle import (
     BEGIN_MARKER,
-    CANDIDATE_MACHINE,
-    COUPLINGS,
     END_MARKER,
     ISSUE_MACHINE,
     LifecycleError,
-    mermaid_candidate_graph,
     mermaid_issue_graph,
     readme_block,
     render_readme_block,
@@ -31,12 +29,12 @@ def test_readme_contains_the_issue_graph_only() -> None:
 
     assert block.count("```mermaid") == 1
     assert mermaid_issue_graph() in block
-    assert mermaid_candidate_graph() not in block
     assert ISSUE_MACHINE.title in block
-    assert CANDIDATE_MACHINE.title not in block
+    assert "Candidate journal phase" not in block
     assert "Where the two machines meet" not in block
-    for coupling in COUPLINGS:
-        assert coupling.description not in block
+    assert not hasattr(lifecycle, "CANDIDATE_MACHINE")
+    assert not hasattr(lifecycle, "mermaid_candidate_graph")
+    assert not hasattr(lifecycle, "COUPLINGS")
 
 
 def _assert_block_matches(text: str) -> None:
@@ -82,15 +80,6 @@ def test_every_transition_is_documented_even_when_the_diagram_omits_it() -> None
             f"{ISSUE_MACHINE.name}: {transition.source} -> {transition.target} "
             "is declared but absent from the README transition table"
         )
-    for transition in CANDIDATE_MACHINE.transitions:
-        row = (
-            f"| `{transition.source}` | {transition.trigger} | "
-            f"`{transition.target}` |"
-        )
-        assert row not in block, (
-            f"{CANDIDATE_MACHINE.name}: {transition.source} -> "
-            f"{transition.target} must not appear in the README block"
-        )
 
 
 def test_readme_block_matches_renderer() -> None:
@@ -104,20 +93,15 @@ def test_generated_block_is_deterministic() -> None:
 def test_mermaid_state_ids_are_hyphen_free() -> None:
     """Hyphens are not legal in a bare Mermaid state id; they must be aliased."""
 
-    for machine, graph in (
-        (ISSUE_MACHINE, mermaid_issue_graph()),
-        (CANDIDATE_MACHINE, mermaid_candidate_graph()),
-    ):
-        assert graph.startswith("stateDiagram-v2")
-        # Only the happy path is drawn, so only the happy path needs aliasing;
-        # the states left out are carried by the transition table instead.
-        for state in machine.happy_path or machine.states:
-            if "-" not in state:
-                continue
-            assert f'state "{state}" as {state.replace("-", "_")}' in graph
-            for line in graph.splitlines():
-                if "-->" in line:
-                    assert state not in line.split(":", 1)[0]
+    graph = mermaid_issue_graph()
+    assert graph.startswith("stateDiagram-v2")
+    for state in ISSUE_MACHINE.happy_path or ISSUE_MACHINE.states:
+        if "-" not in state:
+            continue
+        assert f'state "{state}" as {state.replace("-", "_")}' in graph
+        for line in graph.splitlines():
+            if "-->" in line:
+                assert state not in line.split(":", 1)[0]
 
 
 @pytest.mark.parametrize(

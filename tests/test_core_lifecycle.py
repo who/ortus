@@ -1,8 +1,8 @@
-"""The declared state machines, and their agreement with the running code.
+"""The declared issue machine, and its agreement with the running code.
 
-These tests are the drift alarm: a new journal phase, a renamed state, or a
-classification set that stops matching the declaration fails here rather than
-quietly making `README.md` wrong.
+These tests are the drift alarm: a renamed status, or a log-label that stops
+matching the declaration, fails here rather than quietly making `README.md`
+wrong.
 """
 
 from __future__ import annotations
@@ -12,17 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from ortus.core import lifecycle
 from ortus.core.lifecycle import (
-    CANDIDATE_MACHINE,
-    CANDIDATE_PHASES,
-    FINALIZATION_STEPS,
     ISSUE_MACHINE,
     LOG_LABELS,
     LifecycleError,
     StateMachine,
     Transition,
-    build_candidate_machine,
-    finalized_phase,
 )
 from ortus.core.runstate import PHASE_IDLE, TERMINAL_PHASES
 
@@ -87,52 +83,38 @@ def _phase_writes() -> list[tuple[str, int, str, ast.expr]]:
 
 
 # ---------------------------------------------------------------------------
-# AC-1 / AC-2: the declaration
+# The declaration
 # ---------------------------------------------------------------------------
 
 
-def test_declares_both_machines() -> None:
-    for machine in (ISSUE_MACHINE, CANDIDATE_MACHINE):
-        assert machine.initial in machine.states
-        assert machine.terminal
-        assert machine.terminal <= set(machine.states)
-        assert machine.transitions
-        for transition in machine.transitions:
-            assert transition.source in machine.states
-            assert transition.target in machine.states
-            assert transition.trigger.strip()
-        machine.validate()
+def test_candidate_machine_is_gone() -> None:
+    for name in (
+        "CANDIDATE_MACHINE",
+        "CANDIDATE_PHASES",
+        "COUPLINGS",
+        "FINALIZATION_STEPS",
+        "FINALIZED_PREFIX",
+        "build_candidate_machine",
+        "finalized_phase",
+        "mermaid_candidate_graph",
+    ):
+        assert not hasattr(lifecycle, name), name
+
+
+def test_declares_issue_machine() -> None:
+    machine = ISSUE_MACHINE
+    assert machine.initial in machine.states
+    assert machine.terminal
+    assert machine.terminal <= set(machine.states)
+    assert machine.transitions
+    for transition in machine.transitions:
+        assert transition.source in machine.states
+        assert transition.target in machine.states
+        assert transition.trigger.strip()
+    machine.validate()
 
     assert ISSUE_MACHINE.initial == "open"
     assert set(ISSUE_MACHINE.states) == {"open", "in_progress", "closed"}
-    assert CANDIDATE_MACHINE.initial == "implementation"
-    # The two machines are deliberately separate: no state name is shared.
-    assert not set(ISSUE_MACHINE.states) & set(CANDIDATE_MACHINE.states)
-
-
-def test_finalized_states_derived_from_steps() -> None:
-    declared = [s for s in CANDIDATE_MACHINE.states if s.startswith("finalized-")]
-    assert declared == [finalized_phase(step) for step in FINALIZATION_STEPS]
-
-    # A new boundary must appear in the graph without editing the declaration.
-    # `attest` is hypothetical on purpose: a step this repository already
-    # declares would prove the derivation only for a state someone had already
-    # hand-checked into the graph.
-    grown = build_candidate_machine((*FINALIZATION_STEPS[:-1], "attest", "sync"))
-    assert finalized_phase("attest") in grown.states
-    assert grown.terminal >= {finalized_phase("sync")}
-    # ... wired into the chain, not stranded.
-    grown.validate()
-    assert finalized_phase("attest") in grown.reachable()
-    assert any(
-        t.source == finalized_phase("attest") and t.target == finalized_phase("sync")
-        for t in grown.transitions
-    )
-
-
-# ---------------------------------------------------------------------------
-# AC-5 / AC-9: code agrees with the declaration
-# ---------------------------------------------------------------------------
 
 
 def test_no_bare_phase_literals() -> None:
@@ -154,7 +136,7 @@ def test_no_bare_phase_literals() -> None:
             bare.append(f"{rel}:{line}: phase={leaf.value!r} (callee {callee})")
 
     assert not bare, (
-        "journal phases must be assigned from an ortus.core.lifecycle constant:\n"
+        "journal phases must not be written; live grind does not persist them:\n"
         + "\n".join(bare)
     )
 
@@ -173,16 +155,11 @@ def test_undeclared_transition_target_fails() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC-6: the runtime classification sets
+# Runtime leftover-log heuristics stay local to runstate
 # ---------------------------------------------------------------------------
 
 
-def test_classification_sets_are_declared() -> None:
-    stray = sorted(TERMINAL_PHASES - CANDIDATE_PHASES)
-    assert not stray, f"TERMINAL_PHASES contains undeclared phases: {stray}"
-
-    # Membership is pinned: routing these through the declaration must not have
-    # moved a single phase between them.
+def test_terminal_phases_are_local_historical_names() -> None:
     assert TERMINAL_PHASES == {
         "corrections-exhausted",
         "correction-rejected",
@@ -190,36 +167,36 @@ def test_classification_sets_are_declared() -> None:
         "orphaned-candidate",
         "incomplete-candidate",
     }
+    assert not hasattr(lifecycle, "CORRECTIONS_EXHAUSTED")
+    assert not hasattr(lifecycle, "FINALIZED_PREFIX")
 
 
 # ---------------------------------------------------------------------------
-# AC-7 / AC-8: graph completeness, and what is not a state
+# Graph completeness, and what is not a state
 # ---------------------------------------------------------------------------
 
 
 def test_graph_is_reachable_and_has_no_dead_ends() -> None:
-    for machine in (ISSUE_MACHINE, CANDIDATE_MACHINE):
-        assert machine.unreachable() == (), (
-            f"{machine.name}: states unreachable from {machine.initial!r}: "
-            f"{machine.unreachable()}"
-        )
-        assert machine.dead_ends() == (), (
-            f"{machine.name}: non-terminal states with no way out: "
-            f"{machine.dead_ends()}"
-        )
-        for state in machine.terminal:
-            assert machine.outgoing(state) == ()
+    machine = ISSUE_MACHINE
+    assert machine.unreachable() == (), (
+        f"{machine.name}: states unreachable from {machine.initial!r}: "
+        f"{machine.unreachable()}"
+    )
+    assert machine.dead_ends() == (), (
+        f"{machine.name}: non-terminal states with no way out: "
+        f"{machine.dead_ends()}"
+    )
+    for state in machine.terminal:
+        assert machine.outgoing(state) == ()
 
 
 def test_log_labels_are_not_states() -> None:
     assert LOG_LABELS == ("startup", "pre-iter", "post-close", "post-housekeeping")
+    issue_states = set(ISSUE_MACHINE.states)
     for label in LOG_LABELS:
-        assert label not in CANDIDATE_PHASES
-        assert label not in set(ISSUE_MACHINE.states)
-    # The idle sentinel a snapshot reports without a journal is not one either.
-    assert PHASE_IDLE not in CANDIDATE_PHASES
+        assert label not in issue_states
+    assert PHASE_IDLE not in issue_states
 
-    # Every log label the code actually passes is one of the declared four.
     used = {
         leaf.value
         for _rel, _line, callee, value in _phase_writes()

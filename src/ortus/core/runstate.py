@@ -38,37 +38,28 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ortus.core.lifecycle import (
-    CORRECTION_REJECTED,
-    CORRECTIONS_EXHAUSTED,
-    FINALIZED_PREFIX,
-    INCOMPLETE_CANDIDATE,
-    ORPHANED_CANDIDATE,
-    PLAN_GAP_ESCALATED,
-)
-
 #: Grind writes one timestamped log per run under the already-ignored logs/
 #: tree; the newest is the live one.
 LOG_GLOB = "grind-*.log"
 #: Phase reported when no grind log is present. Log absence is a valid
 #: state, not an error, so panels render idle rather than a fabricated phase.
 PHASE_IDLE = "idle"
-#: Journal phases that mean the run is over. `finalized-*` is written per
-#: finalization phase transition, the rest are the halts grind records before it
-#: leaves a candidate uncommitted. Anything else — including the resumable
-#: `*-timeout` phases — is reported verbatim and treated as live. Every member
-#: is a state declared in `ortus.core.lifecycle`; the graph there also records
-#: why grind still treats the non-final `finalized-*` phases as resumable.
+#: Historical grind-log halt names. Live grind no longer writes a journal;
+#: leftover logs still mention these, and the dashboard must not crash on them.
+#: `finalized-*` is the old finalization-step prefix; the named members are the
+#: halts those logs recorded before leaving a candidate uncommitted. Anything
+#: else — including the resumable `*-timeout` names — is reported verbatim
+#: and treated as live.
 TERMINAL_PHASES = frozenset(
     {
-        CORRECTIONS_EXHAUSTED,
-        CORRECTION_REJECTED,
-        PLAN_GAP_ESCALATED,
-        ORPHANED_CANDIDATE,
-        INCOMPLETE_CANDIDATE,
+        "corrections-exhausted",
+        "correction-rejected",
+        "plan-gap-escalated",
+        "orphaned-candidate",
+        "incomplete-candidate",
     }
 )
-_TERMINAL_PREFIX = FINALIZED_PREFIX
+_TERMINAL_PREFIX = "finalized-"
 #: Warning vocabulary, taken from grind's own `write_log` calls. Matched only
 #: against plain ortus lines, so agent content quoting any of it counts for
 #: nothing. First match wins, so one line is at most one warning.
