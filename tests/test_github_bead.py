@@ -11,12 +11,15 @@ from pathlib import Path
 
 from ortus.core.github_bead import (
     ALLOWED_AUTHOR,
+    INGEST_FAILED_PREFIX,
     GrokDraftError,
     MemoryBeadStore,
     assemble_issue,
+    grok_user_prompt,
     ingest_github_issue,
     main,
     parse_json_object,
+    readiness_failure_comment,
 )
 from tests.test_readiness import ready_issue
 
@@ -59,8 +62,15 @@ class _RecordingDrafter:
         self.draft = draft
         self.calls: list[tuple[str, str, int]] = []
 
-    def __call__(self, *, title: str, body: str, number: int) -> dict:
-        self.calls.append((title, body, number))
+    def __call__(
+        self,
+        *,
+        title: str,
+        body: str,
+        number: int,
+        comments: list[str] | None = None,
+    ) -> dict:
+        self.calls.append((title, body, number, tuple(comments or ())))
         if isinstance(self.draft, BaseException):
             raise self.draft
         return self.draft
@@ -84,7 +94,7 @@ def test_maps_payload_and_creates_when_validate_passes() -> None:
     assert "## Objective" in packet["description"]
     assert "## Readiness schema" in packet["design"]
     assert "AC-1" in packet["acceptance_criteria"]
-    assert drafter.calls == [("Preview flag", "Add a preview path.", 14)]
+    assert drafter.calls == [("Preview flag", "Add a preview path.", 14, ())]
 
 
 def test_validate_failure_does_not_create() -> None:
@@ -94,7 +104,10 @@ def test_validate_failure_does_not_create() -> None:
     assert result.status == "validate_failed"
     assert not result.created
     assert result.close_issue is False
-    assert result.comment is not None and result.comment.startswith("PLAN-GAP:")
+    assert result.comment is not None
+    assert result.comment.startswith(INGEST_FAILED_PREFIX)
+    assert "Reason:" in result.comment
+    assert "re-runs ingest" in result.comment
     assert store.created == []
 
 
@@ -184,8 +197,45 @@ def test_grok_error_is_plan_gap_not_create() -> None:
     drafter = _RecordingDrafter(GrokDraftError("XAI_API_KEY is not set"))
     result = ingest_github_issue(_payload(), store=store, drafter=drafter)
     assert result.status == "validate_failed"
+    assert INGEST_FAILED_PREFIX in (result.comment or "")
     assert "XAI_API_KEY" in (result.comment or "")
     assert store.created == []
+
+
+def test_drafter_receives_issue_comments() -> None:
+    store = MemoryBeadStore()
+    drafter = _RecordingDrafter(_valid_draft())
+    notes = ["PLAN-GAP: missing command", "Add `uv run pytest tests/test_github_bead.py`"]
+    result = ingest_github_issue(_payload(), comments=notes, store=store, drafter=drafter)
+    assert result.status == "created"
+    assert drafter.calls == [
+        (
+            "Translate a GitHub issue",
+            "Match the spec and test the pipeline.",
+            14,
+            tuple(notes),
+        )
+    ]
+
+
+def test_grok_prompt_includes_comments() -> None:
+    text = grok_user_prompt(
+        title="T",
+        body="Body text",
+        number=17,
+        comments=["first note", "targeted tests: `uv run pytest tests/x.py`"],
+    )
+    assert "GitHub issue #17" in text
+    assert "Body text" in text
+    assert "first note" in text
+    assert "uv run pytest tests/x.py" in text
+
+
+def test_readiness_failure_comment_tells_who_to_reply() -> None:
+    body = readiness_failure_comment("gh-17-draft: targeted tests: missing command")
+    assert body.startswith(INGEST_FAILED_PREFIX)
+    assert "gh-17-draft: targeted tests: missing command" in body
+    assert "Comment on this issue (as `who`)" in body
 
 
 def test_workflow_enforces_who_allowlist_and_secret() -> None:
@@ -196,6 +246,9 @@ def test_workflow_enforces_who_allowlist_and_secret() -> None:
     assert "python3 -m ortus.core.github_bead" in text
     assert "label.name == 'bead'" in text
     assert "github-actions[bot]" in text
+    assert "issue_comment:" in text
+    assert "github.event.comment.user.login == 'who'" in text
+    assert "Fail the job when readiness rejected the draft" in text
     # ortus-9zgl: hydrate a local DB from JSONL. A lone import against an
     # uninitialized tracker is the GHA failure; bootstrap is the 1.2.1
     # fresh-clone path (prefix ortus stays in .beads/config.yaml).

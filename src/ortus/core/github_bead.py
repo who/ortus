@@ -4,6 +4,8 @@ The GitHub Action in ``.github/workflows/bead-from-issue.yml`` invokes this
 module. Author allowlist, Grok drafting, ``validate_issue``, and ``bd create``
 live here so a miswired workflow cannot bypass them. Git commit/push and the
 GitHub comment/close are owned by the workflow, which reads the JSON result.
+A readiness reject is reported on the issue; the workflow fails that run.
+A later comment from ``who`` retriggers ingest with comments in the draft.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ ALLOWED_AUTHOR = "who"
 FILED_PREFIX = "filed as "
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 DEFAULT_MODEL = "grok-4"
+INGEST_FAILED_PREFIX = "Ingest failed readiness and did not create a bead."
 
 _FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
@@ -67,6 +70,8 @@ Each observable criterion is one line `- AC-N (proves-new|guards-existing): ...`
 and Criterion checks must list the same AC-N identifiers, each with exactly one
 runnable command in backticks (prefer `uv run pytest tests/<module>.py -q`).
 Do not invent downstream project names. Linux + macOS only; do not add Windows paths.
+When comments are present, later coordinator comments amend the issue body.
+Honor those amendments when they resolve a prior readiness failure.
 """
 
 
@@ -269,12 +274,42 @@ def assemble_issue(
     }
 
 
-def grok_user_prompt(*, title: str, body: str, number: int) -> str:
+def readiness_failure_comment(reason: str) -> str:
+    """Issue comment when validate_issue rejects the draft.
+
+    The coordinator replies on the same GitHub issue; that comment re-runs
+    ingest. The workflow also fails the job so the run is red, not green.
+    """
+
+    detail = (reason or "").strip() or "unknown readiness failure"
     return (
-        f"GitHub issue #{number}\n"
-        f"Title: {title}\n\n"
-        f"Body:\n{body or '(empty)'}\n"
+        f"{INGEST_FAILED_PREFIX}\n\n"
+        f"Reason: {detail}\n\n"
+        "Comment on this issue (as `who`) with the missing detail. "
+        "That comment re-runs ingest."
     )
+
+
+def grok_user_prompt(
+    *, title: str, body: str, number: int, comments: list[str] | None = None
+) -> str:
+    parts = [
+        f"GitHub issue #{number}",
+        f"Title: {title}",
+        "",
+        f"Body:\n{body or '(empty)'}",
+    ]
+    cleaned = [item.strip() for item in (comments or []) if item and item.strip()]
+    if cleaned:
+        rendered = "\n\n---\n\n".join(cleaned)
+        parts.extend(
+            [
+                "",
+                "Comments (oldest first; later comments amend the body):",
+                rendered,
+            ]
+        )
+    return "\n".join(parts) + "\n"
 
 
 def draft_packet_via_grok(
@@ -282,6 +317,7 @@ def draft_packet_via_grok(
     title: str,
     body: str,
     number: int,
+    comments: list[str] | None = None,
     api_key: str | None = None,
     model: str | None = None,
     url: str = XAI_CHAT_URL,
@@ -298,7 +334,9 @@ def draft_packet_via_grok(
             {"role": "system", "content": _GROK_SYSTEM},
             {
                 "role": "user",
-                "content": grok_user_prompt(title=title, body=body, number=number),
+                "content": grok_user_prompt(
+                    title=title, body=body, number=number, comments=comments
+                ),
             },
         ],
     }
@@ -367,13 +405,15 @@ def ingest_github_issue(
     if drafter is None:
         drafter = draft_packet_via_grok
     try:
-        draft = drafter(title=title, body=body, number=number)
+        draft = drafter(title=title, body=body, number=number, comments=bodies)
     except GrokDraftError as exc:
         diagnostic = str(exc)
         return IngestResult(
             status="validate_failed",
             reason=diagnostic,
-            comment=f"PLAN-GAP: could not draft readiness packet: {diagnostic}",
+            comment=readiness_failure_comment(
+                f"could not draft readiness packet: {diagnostic}"
+            ),
         )
     packet = assemble_issue(draft, title_fallback=title, draft_id=f"{ref}-draft")
     report = validate_issue(packet)
@@ -381,7 +421,7 @@ def ingest_github_issue(
         return IngestResult(
             status="validate_failed",
             reason=report.diagnostic(),
-            comment=f"PLAN-GAP: {report.diagnostic()}",
+            comment=readiness_failure_comment(report.diagnostic()),
         )
     bead_id = store.create_packet(packet, external_ref=ref)
     return IngestResult(
