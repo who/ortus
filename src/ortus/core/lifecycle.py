@@ -292,8 +292,10 @@ ISSUE_MACHINE = StateMachine(
     name="issue",
     title="bd issue status",
     summary=(
-        "The statuses Ortus reads and writes through `bd`. One issue moves "
-        "through this machine across however many grind runs it takes."
+        "The statuses Ortus reads and writes through `bd`. A worker claims an "
+        "open issue, session-closes it, or leaves the claim in_progress for "
+        "the next window or a human. Leftover in_progress is not reverted "
+        "to open."
     ),
     initial=ISSUE_OPEN,
     states=(ISSUE_OPEN, ISSUE_IN_PROGRESS, ISSUE_CLOSED),
@@ -304,12 +306,12 @@ ISSUE_MACHINE = StateMachine(
         Transition(
             ISSUE_IN_PROGRESS,
             ISSUE_IN_PROGRESS,
-            "grind restores a claim a worker released without authority",
+            "the leftover claim continues in the next window",
         ),
         Transition(
             ISSUE_IN_PROGRESS,
-            ISSUE_OPEN,
-            "orphan policy revert releases a claim that outlived its worker",
+            ISSUE_IN_PROGRESS,
+            "grind labels human and stops",
         ),
         Transition(
             ISSUE_IN_PROGRESS,
@@ -664,8 +666,6 @@ def render_mermaid(machine: StateMachine) -> str:
         lines.append(f"    [*] --> {_node_id(machine.initial)}")
     for transition in machine.transitions:
         if transition.source not in included or transition.target not in included:
-            continue
-        if transition.source == transition.target:
             continue
         lines.append(
             f"    {_node_id(transition.source)} --> "

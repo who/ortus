@@ -136,11 +136,10 @@ more than one issue is claimed, nothing can decide which goal owns it, so grind
 preserves everything and stops with the issue ids and paths for a human to
 route.
 
-A claim left behind with no run record is still a cross-restart orphan, so
-`--orphan-policy=warn|revert|escalate` continues to govern it at startup. Its
-goal is captured before the sweep runs, so the default `revert` costs nothing —
-the loop re-claims the same issue and resumes the same worktree — while
-`escalate` hands the issue to a human and leaves the uncommitted work in place.
+A claim left unfinished is leftover `in_progress`, not an orphan: the next
+grind continues that id. `--orphan-policy=escalate` still labels it `human`
+and leaves the tree untouched. `revert` is remapped to warn so it cannot
+bounce the claim back to `open`.
 
 ## Why ortus
 
@@ -238,24 +237,26 @@ not invent an answer.
 
 ### State graphs
 
-A bd issue's status outlives any single grind run. The diagram below is the
-path an issue takes when grind launches a worker and that worker
-session-closes it. It is generated from `src/ortus/core/lifecycle.py` —
-changing a status without regenerating it fails the test suite.
+A bd issue's status outlives any single grind run. The diagram below is
+how that status moves under `/goal` grind: the worker claims, session-closes,
+or leaves the claim `in_progress` for the next window or a human. It is
+generated from `src/ortus/core/lifecycle.py` — changing a status without
+regenerating it fails the test suite.
 
 <!-- BEGIN GENERATED: state-graph -->
 <!-- Generated from src/ortus/core/lifecycle.py. Do not edit by hand: tests/test_state_graph_docs.py fails and prints the correct block. -->
 
 #### bd issue status
 
-The statuses Ortus reads and writes through `bd`. One issue moves through this machine across however many grind runs it takes.
+The statuses Ortus reads and writes through `bd`. A worker claims an open issue, session-closes it, or leaves the claim in_progress for the next window or a human. Leftover in_progress is not reverted to open.
 
 ```mermaid
 stateDiagram-v2
     direction TB
     [*] --> open
     open --> in_progress: the worker claims the selected issue
-    in_progress --> open: orphan policy revert releases a claim that outlived its worker
+    in_progress --> in_progress: the leftover claim continues in the next window
+    in_progress --> in_progress: grind labels human and stops
     in_progress --> closed: the worker session-closes the issue
     closed --> [*]
 ```
@@ -265,8 +266,8 @@ stateDiagram-v2
 | From | Trigger | To |
 | --- | --- | --- |
 | `open` | the worker claims the selected issue | `in_progress` |
-| `in_progress` | grind restores a claim a worker released without authority | `in_progress` |
-| `in_progress` | orphan policy revert releases a claim that outlived its worker | `open` |
+| `in_progress` | the leftover claim continues in the next window | `in_progress` |
+| `in_progress` | grind labels human and stops | `in_progress` |
 | `in_progress` | the worker session-closes the issue | `closed` |
 
 </details>
