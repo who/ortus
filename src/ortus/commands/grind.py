@@ -70,7 +70,6 @@ from ortus.core.readiness import (
     READINESS_MEMORY_KEY,
     ReadinessReport,
 )
-from ortus.core.transaction import JOURNAL_RELATIVE_PATH
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
     FlockBusy,
@@ -798,7 +797,7 @@ def _discard_leftover_journal(
     tree. A leftover ``finalized-*`` file must not HALT the run.
     """
 
-    path = repo / JOURNAL_RELATIVE_PATH
+    path = repo / "logs" / "grind-transaction.json"
     if not path.exists():
         return
     try:

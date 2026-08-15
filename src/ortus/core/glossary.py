@@ -180,7 +180,7 @@ TERMS: tuple[Term, ...] = (
             "criteria, notes — that a worker treats as authoritative, not any "
             "message on a queue."
         ),
-        home="`src/ortus/core/transaction.py`",
+        home="`src/ortus/core/readiness.py`",
         team_role=(
             "The ticket as the analyst wrote it: the spec of record a developer "
             "builds from and argues with, not a chat message."
