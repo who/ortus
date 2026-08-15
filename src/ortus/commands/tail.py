@@ -849,6 +849,124 @@ class _LogStream:
     grok: _GrokCoalesce = field(default_factory=_GrokCoalesce)
 
 
+def _json_object(line: str) -> dict | None:
+    stripped = line.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        obj = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _grok_event_kind(line: str) -> str | None:
+    obj = _json_object(line)
+    if obj is None or not _is_grok_event(obj):
+        return None
+    kind = obj.get("type")
+    return str(kind) if kind else None
+
+
+def _claude_has_thinking(line: str) -> bool:
+    obj = _json_object(line)
+    if obj is None or obj.get("type") != "assistant":
+        return False
+    message = obj.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    parts = content if isinstance(content, list) else []
+    return any(isinstance(part, dict) and part.get("type") == "thinking" for part in parts)
+
+
+def _grok_crumb_data(line: str) -> str | None:
+    obj = _json_object(line)
+    if (
+        obj is None
+        or not _is_grok_event(obj)
+        or obj.get("type") not in ("thought", "text")
+    ):
+        return None
+    data = obj.get("data")
+    return "" if data is None else str(data)
+
+
+def _expand_grok_paragraph(lines: list[str], start: int) -> int:
+    """Walk `start` back to the first crumb of the current thought/text run."""
+    if start >= len(lines):
+        return start
+    kind = _grok_event_kind(lines[start])
+    if kind not in ("thought", "text"):
+        if (
+            kind
+            in (
+                "tool_call",
+                "tool_call_update",
+                "usage",
+                "available_commands",
+                "plan",
+            )
+            and start > 0
+            and _grok_event_kind(lines[start - 1]) in ("thought", "text")
+        ):
+            return _expand_grok_paragraph(lines, start - 1)
+        return start
+    while start > 0 and _grok_event_kind(lines[start - 1]) == kind:
+        prev_data = _grok_crumb_data(lines[start - 1])
+        if prev_data is not None and "\n" in prev_data:
+            break
+        start -= 1
+    return start
+
+
+def _walk_attach_start(lines: list[str], start: int, *, show_system: bool) -> int:
+    """Move `start` earlier so a small cap still holds the current think block."""
+    n = len(lines)
+    if start <= 0 or start >= n:
+        return start
+
+    dropped = frozenset({"usage", "available_commands"})
+    while start > 0 and all(_grok_event_kind(line) in dropped for line in lines[start:]):
+        start -= 1
+
+    start = _expand_grok_paragraph(lines, start)
+
+    if show_system and not any(_claude_has_thinking(line) for line in lines[start:]):
+        probe = start
+        while probe > 0:
+            prev = lines[probe - 1]
+            if _json_object(prev) is None or _grok_event_kind(prev) is not None:
+                break
+            probe -= 1
+            if _claude_has_thinking(prev):
+                start = probe
+                break
+    return start
+
+
+def _attach_window(
+    chunk_lines: list[str],
+    cap: int,
+    *,
+    raw: bool,
+    show_system: bool,
+) -> tuple[list[str], int]:
+    """Attach-time slice only. Follow-after-attach never calls this.
+
+    `cap` is the operator ``--lines`` budget (must be > 0). Raw mode is a
+    strict last-N raw-line slice. Decoded mode walks the skipped prefix so
+    the current Grok thought/text paragraph, a think that a trailing
+    ``usage`` would hide, and (when ``show_system``) the previous Claude
+    assistant thinking event stay in the window.
+    """
+    total = len(chunk_lines)
+    if cap <= 0 or total <= cap:
+        return chunk_lines, 0
+    start = total - cap
+    if not raw:
+        start = _walk_attach_start(chunk_lines, start, show_system=show_system)
+    return chunk_lines[start:], start
+
+
 def _follow(
     logs_dir: Path,
     *,
@@ -907,20 +1025,22 @@ def _follow(
             chunk_lines: list[str] = []
             if chunk:
                 chunk_lines = chunk.splitlines()
-                # The cap trims input lines before rendering and only on the
-                # attach read; position accounting above stays byte-accurate, so
-                # follow reads are untouched.
-                if first_read and lines > 0 and len(chunk_lines) > lines:
-                    skipped = len(chunk_lines) - lines
-                    chunk_lines = chunk_lines[-lines:]
-                    notice = _wrap(
-                        f"=== SKIPPED {skipped} earlier lines: {stream.path.name} "
-                        "(use --lines 0 for full history) ===",
-                        palette.bold,
-                        palette.magenta,
-                        reset=palette.reset,
+                # The cap selects the attach window before rendering and only
+                # on the first read; position accounting above stays
+                # byte-accurate, so follow reads are untouched.
+                if first_read and lines > 0:
+                    chunk_lines, skipped = _attach_window(
+                        chunk_lines, lines, raw=raw, show_system=show_system
                     )
-                    out.write(f"{notice}\n")
+                    if skipped > 0:
+                        notice = _wrap(
+                            f"=== SKIPPED {skipped} earlier lines: {stream.path.name} "
+                            "(use --lines 0 for full history) ===",
+                            palette.bold,
+                            palette.magenta,
+                            reset=palette.reset,
+                        )
+                        out.write(f"{notice}\n")
                 for line in chunk_lines:
                     if raw:
                         out.write(line + "\n")

@@ -592,3 +592,116 @@ def test_grok_format_line_standalone_flushes_one_crumb() -> None:
         show_system=False,
     )
     assert rendered == "  think  Hello from grok"
+
+
+# --- ortus-haxd: small --lines must keep the current think paragraph --------
+
+
+def test_verbose_lines_one_keeps_current_grok_think_paragraph(tmp_path: Path) -> None:
+    """AC-1: many type=thought crumbs ending in usage still coalesce under --lines 1."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    older = "".join(
+        json.dumps({"type": "thought", "data": word}) + "\n"
+        for word in ("Old", " paragraph.", "\n")
+    )
+    current = "".join(
+        json.dumps({"type": "thought", "data": word}) + "\n"
+        for word in ("Now", " I", " will", " inspect", " the", " leftover", " state.")
+    )
+    usage = json.dumps({"type": "usage", "input_tokens": 12}) + "\n"
+    (logs / "grind-grok-crumbs.log").write_text(older + current + usage, encoding="utf-8")
+
+    buf = io.StringIO()
+    _follow(
+        logs,
+        raw=False,
+        show_tools=True,
+        show_system=True,
+        iterations=1,
+        out=buf,
+        lines=1,
+    )
+    out = buf.getvalue()
+    assert "  think  Now I will inspect the leftover state." in out
+    assert "  think  Old paragraph." not in out
+    assert "input_tokens" not in out
+    assert "SKIPPED" in out
+
+
+def test_verbose_small_lines_keeps_prior_claude_thinking(tmp_path: Path) -> None:
+    """AC-2: last raw line is not thinking; previous assistant thinking still prints."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    rows = [
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": f"old-{i}"}]},
+            }
+        )
+        for i in range(20)
+    ]
+    rows.append(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "thinking", "thinking": "weigh the attach cap"}]
+                },
+            }
+        )
+    )
+    rows.append(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t", "content": "ok"}
+                    ]
+                },
+            }
+        )
+    )
+    (logs / "grind-claude.log").write_text(
+        "".join(row + "\n" for row in rows), encoding="utf-8"
+    )
+
+    buf = io.StringIO()
+    _follow(
+        logs,
+        raw=False,
+        show_tools=True,
+        show_system=True,
+        iterations=1,
+        out=buf,
+        lines=1,
+    )
+    out = buf.getvalue()
+    assert "(thinking)" in out
+    assert "weigh the attach cap" in out
+    assert "old-0" not in out
+
+
+def test_raw_lines_one_is_still_the_last_raw_line(tmp_path: Path) -> None:
+    """--raw --lines 1 stays the last raw line, even when that line is usage."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    thought = json.dumps({"type": "thought", "data": "hidden by raw cap"}) + "\n"
+    usage = json.dumps({"type": "usage", "input_tokens": 9}) + "\n"
+    (logs / "grind-raw-cap.log").write_text(thought + usage, encoding="utf-8")
+
+    buf = io.StringIO()
+    _follow(
+        logs,
+        raw=True,
+        show_tools=True,
+        show_system=True,
+        iterations=1,
+        out=buf,
+        lines=1,
+    )
+    out = buf.getvalue()
+    assert '{"type": "usage", "input_tokens": 9}' in out
+    assert "hidden by raw cap" not in out
