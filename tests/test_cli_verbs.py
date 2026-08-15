@@ -100,6 +100,21 @@ def test_grind_help_does_not_list_max_corrections() -> None:
     assert unknown.exit_code != 0
 
 
+def test_grind_help_does_not_list_repair_flags() -> None:
+    result = runner.invoke(app, ["grind", "--help"])
+    assert result.exit_code == 0
+    assert "--repair-unready" not in result.stdout
+    assert "--repair-budget" not in result.stdout
+    unknown = runner.invoke(app, ["grind", "--repair-unready", "--dry-run"])
+    assert unknown.exit_code != 0
+    unknown_budget = runner.invoke(
+        app, ["grind", "--repair-budget", "1", "--dry-run"]
+    )
+    assert unknown_budget.exit_code != 0
+    repo_root = Path(__file__).resolve().parents[1]
+    assert not (repo_root / "src" / "ortus" / "core" / "repair.py").is_file()
+
+
 def test_version_flag_prints_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0

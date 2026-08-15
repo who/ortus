@@ -213,124 +213,6 @@ def _emit_verdict(
         fh.write(json.dumps(event) + "\n")
 
 
-def _repair_packet_into(repo: Path, issue_id: str) -> None:
-    """Stand in for what the repair subprocess does: update the packet in place."""
-    packet = ready_issue()
-    subprocess.run(
-        [
-            "bd",
-            "update",
-            issue_id,
-            "--description",
-            packet["description"],
-            "--design",
-            packet["design"],
-            "--acceptance",
-            packet["acceptance_criteria"],
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-    )
-
-
-@pytest.mark.slow
-@_F2HE2_NO_VERIFY
-def test_grind_repair_then_claim_repairs_an_unready_leaf_in_place(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-1 (ortus-xhrj.7): a queue whose only ready leaf fails readiness is
-    repaired in place and then claimed, creating no new issue ids.
-
-    Before this behavior grind logged a readiness skip, found nothing workable,
-    and broke out of the outer loop — which reads to an operator as a grind
-    failure rather than as an authoring defect in one packet.
-    """
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "rpair")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
-    _baseline_commit(repo)
-    _enable_reviewer(repo)
-    primary = repo
-    ids_before = _issue_ids(repo)
-    phases: list[Phase] = []
-
-    class RepairingClaude:
-        extra_env: dict[str, str] = {}
-
-        def run(
-            self,
-            prompt: str,
-            *,
-            repo: Path,
-            log_path: Path,
-            profile: object,
-            **kwargs: object,
-        ) -> int:
-            phases.append(profile.phase)  # type: ignore[union-attr]
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.touch(exist_ok=True)
-            if profile.phase is Phase.PLAN:  # type: ignore[union-attr]
-                assert "READINESS REPAIR PASS" in prompt
-                assert f"Repair ONLY these existing issue IDs: {issue_id}" in prompt
-                # Grind has no PRD, so the pass is grounded in the packet itself.
-                assert "which has no PRD" in prompt
-                _repair_packet_into(primary, issue_id)
-            elif profile.phase is Phase.IMPLEMENT:  # type: ignore[union-attr]
-                _post_claims(primary)
-            elif profile.phase is Phase.VERIFY:  # type: ignore[union-attr]
-                # The verifier is read-only: it emits a verdict rather than
-                # closing. Ortus finalizes on the strength of that verdict.
-                _emit_verdict(primary, log_path, criteria=("AC-1", "AC-2"))
-            return 0
-
-    _fake_sandbox(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: RepairingClaude())
-    install_machine_checks(
-        monkeypatch, default=machine_run(criteria=("AC-1", "AC-2"))
-    )
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--repair-unready",
-            "--tasks",
-            "1",
-            "--idle-sleep",
-            "0",
-        ],
-    )
-
-    assert result.exit_code == 0, result.stdout + result.stderr
-    # The repair ran on the planning profile, ahead of the implement/verify
-    # pair. That ordering is what this test is about.
-    assert phases[:3] == [Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY]
-    # Finalization's commit-message pass is allowed to decline: it raises
-    # before spawning when the candidate diff is empty, and this queue's worker
-    # writes no code, so whether a diff exists at all is incidental to the
-    # repair behavior under test and has differed by platform.
-    assert phases[3:] in ([], [Phase.FINALIZE])
-    assert _issue_ids(repo) == ids_before, "repair must update in place, not create"
-    assert JournalStore(repo).load() is None, "the passing candidate is finalized"
-    assert _issue(repo, issue_id)["status"] == "closed"
-    log_text = _grind_log(repo)
-    assert "readiness repair pass 1/2" in log_text
-    assert f"readiness repair: {issue_id} now passes readiness" in log_text
-    assert f"goal-prompt ready for {issue_id}" in log_text
-    comments = subprocess.run(
-        ["bd", "comments", issue_id, "--json"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    assert "readiness repair pass" in comments
-
-
 @pytest.mark.slow
 def test_grind_unready_does_not_repair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -548,157 +430,6 @@ def test_grind_leftover_in_progress_is_not_unready_target(
 
 
 @pytest.mark.slow
-def test_grind_repair_budget_exhausted_prints_diagnostics_and_follow_up(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-3: once the per-run budget is spent, grind stops as it does today but
-    names each per-issue failure and the exact follow-up command.
-
-    A grind run now owns exactly one candidate transaction (the loop stops at a
-    verdict, because finalization belongs to the dependent lifecycle issue), so
-    exhaustion is exercised with a spent-on-arrival budget over two unready
-    leaves rather than across two iterations.
-    """
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "budget")
-    first = _create_unready_issue(repo, "first hand authored leaf", priority="1")
-    second = _create_unready_issue(repo, "second hand authored leaf", priority="1")
-    repairs: list[str] = []
-
-    class NoPassClaude:
-        extra_env: dict[str, str] = {}
-
-        def run(self, prompt: str, **kwargs: object) -> int:
-            repairs.append(prompt)
-            raise AssertionError("a spent repair budget must not spawn a subprocess")
-
-    _fake_sandbox(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoPassClaude())
-
-    result = runner.invoke(
-        app,
-        [
-            "grind",
-            str(repo),
-            "--repair-unready",
-            "--repair-budget",
-            "0",
-            "--idle-sleep",
-            "0",
-        ],
-    )
-
-    assert result.exit_code == 0, result.stdout + result.stderr
-    assert repairs == [], "an exhausted budget must not be spent anyway"
-    assert _issue(repo, first)["status"] == "open"
-    assert _issue(repo, second)["status"] == "open"
-    combined = _plain(result.stdout + result.stderr)
-    assert "readiness repair budget exhausted (0/0 pass(es) used)" in combined
-    # Rich hard-wraps long lines mid-token, so compare whitespace-free.
-    squashed = re.sub(r"\s+", "", combined)
-    assert (
-        re.sub(r"\s+", "", f'skipped "first hand authored leaf" ({first})')
-        in squashed
-    )
-    assert (
-        re.sub(r"\s+", "", f'skipped "second hand authored leaf" ({second})')
-        in squashed
-    )
-    assert re.sub(r"\s+", "", f"follow-up: bd update {second}") in squashed
-    assert re.sub(r"\s+", "", f"then re-run: ortus grind {repo}") in squashed
-
-
-@pytest.mark.slow
-def test_grind_readiness_warning_dedupes_per_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-3: the console warns once per issue per run; the log keeps every
-    occurrence. A repair pass that fixes nothing forces a second selection
-    pass over the same unready leaf inside one run."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "dedupe")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
-
-    class NoFixClaude:
-        extra_env: dict[str, str] = {}
-
-        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.touch(exist_ok=True)
-            return 0
-
-    _fake_sandbox(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoFixClaude())
-
-    result = runner.invoke(
-        app, ["grind", str(repo), "--repair-unready", "--idle-sleep", "0"]
-    )
-
-    assert result.exit_code == 0, result.stdout + result.stderr
-    log_text = _grind_log(repo)
-    assert (
-        log_text.count("readiness skip (left open for planning/human repair)") == 2
-    ), "the log must record every occurrence"
-    squashed = re.sub(r"\s+", "", _plain(result.stdout + result.stderr))
-    total = sum(1 for section in _REQUIRED_SECTIONS if section.required)
-    skip_line = re.sub(
-        r"\s+",
-        "",
-        f'skipped "hand authored leaf" ({issue_id}) — no readiness work spec '
-        f"({total} of {total} sections missing)",
-    )
-    # Once as the warn, once in the exit listing — a second warn would make 3.
-    assert squashed.count(skip_line) == 2
-    assert squashed.count(re.sub(r"\s+", "", "It stays open and unclaimed.")) == 1
-
-
-@pytest.mark.slow
-def test_grind_repair_prompt_keeps_full_enumeration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-4: the console summary does not leak into the repair pass — its
-    prompt still carries the section-by-section work order."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "renum")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
-    prompts: list[str] = []
-
-    class NoFixClaude:
-        extra_env: dict[str, str] = {}
-
-        def run(self, prompt: str, *, log_path: Path, **kwargs: object) -> int:
-            prompts.append(prompt)
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            log_path.touch(exist_ok=True)
-            return 0
-
-    _fake_sandbox(monkeypatch)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
-    monkeypatch.setattr(grind_mod, "_make_runner", lambda: NoFixClaude())
-
-    result = runner.invoke(
-        app, ["grind", str(repo), "--repair-unready", "--idle-sleep", "0"]
-    )
-
-    assert result.exit_code == 0, result.stdout + result.stderr
-    assert len(prompts) == 1, "exactly one repair pass runs for one unready leaf"
-    prompt = prompts[0]
-    assert "READINESS REPAIR PASS" in prompt
-    assert (
-        f"{issue_id}: description/objective: missing, empty, or placeholder section"
-        in prompt
-    )
-    assert prompt.count("missing, empty, or placeholder section") == sum(
-        1 for section in _REQUIRED_SECTIONS if section.required
-    )
-
-
-@pytest.mark.slow
 def test_grind_queue_blocked_exit_uses_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -713,7 +444,7 @@ def test_grind_queue_blocked_exit_uses_summary(
         extra_env: dict[str, str] = {}
 
         def run(self, prompt: str, **kwargs: object) -> int:
-            raise AssertionError("--no-repair-unready must not spawn any subprocess")
+            raise AssertionError("unready-only grind must not spawn any subprocess")
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -768,6 +499,22 @@ def test_grind_help_omits_max_corrections() -> None:
     assert unknown.exit_code != 0
     assert not hasattr(grind_mod, "_correction_task")
     assert not hasattr(grind_mod, "_compose_correction_prompt")
+
+
+def test_grind_help_omits_repair_flags() -> None:
+    """Retired readiness-repair flags are unknown options, not hidden no-ops."""
+    result = runner.invoke(app, ["grind", "--help"])
+    assert result.exit_code == 0
+    assert "--repair-unready" not in result.stdout
+    assert "--repair-budget" not in result.stdout
+    unknown = runner.invoke(app, ["grind", "--repair-unready", "--dry-run"])
+    assert unknown.exit_code != 0
+    unknown_budget = runner.invoke(
+        app, ["grind", "--repair-budget", "1", "--dry-run"]
+    )
+    assert unknown_budget.exit_code != 0
+    assert not hasattr(grind_mod, "_run_readiness_repair")
+    assert not hasattr(grind_mod, "_repair_context")
 
 
 def test_grok_dry_run_resolves_backend_and_goal_wrap(tmp_path: Path) -> None:

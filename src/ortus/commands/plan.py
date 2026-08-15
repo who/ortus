@@ -36,11 +36,6 @@ from ortus.core.readiness import (
     spec_markdown,
     validate_issues,
 )
-from ortus.core.repair import (
-    RepairCreatedReplacements,
-    guard_no_replacements,
-    repair_readiness,
-)
 from ortus.core.repo import resolve_repo
 
 
@@ -286,68 +281,18 @@ def plan(
     output.progress("plan", "validating readiness of newly-created issues")
     reports = _issue_reports(client, new_ids)
     defects = failed_reports(reports)
-    repair_summary = None
     if defects:
         for report in defects:
-            output.warn(f"readiness: {report.diagnostic()}")
-        ids_before_repair = {issue["id"] for issue in client.list_all()}
-        repair_log = log_path.with_name(f"{log_path.stem}-repair{log_path.suffix}")
-        output.progress(
-            "plan",
-            "repairing incomplete work specs via one fresh planning pass "
-            "(this typically takes 1-3 min)",
+            output.error(f"readiness: {report.diagnostic()}")
+        output.error(
+            "plan left executable issues incomplete; no work was claimed"
         )
-        repair_rc = repair_readiness(
-            target,
-            defects,
-            log_path=repair_log,
-            backend=resolved_backend,
-            profile=profile,
-            contract=phase_contract(CodeGraphPhase.PLANNING, probe),
-            capability=probe.capability,
-            runner_factory=_make_runner,
-        )
-        if repair_rc != 0:
-            output.error(
-                f"readiness repair failed ({resolved_backend} exit {repair_rc}); "
-                f"see {repair_log}"
-            )
-            raise typer.Exit(code=repair_rc)
-
-        repair_summary = parse_transcript(
-            repair_log, phase=CodeGraphPhase.PLANNING, probe=probe
-        )
-        append_normalized(repair_log, repair_summary)
-        try:
-            require_handshake(repair_summary)
-        except CodeGraphUnavailable as exc:
-            output.error(str(exc))
-            raise typer.Exit(code=1)
-
-        ids_after_repair = {issue["id"] for issue in client.list_all()}
-        try:
-            guard_no_replacements(ids_before_repair, ids_after_repair)
-        except RepairCreatedReplacements as exc:
-            output.error(str(exc))
-            raise typer.Exit(code=1)
-
-        output.progress("plan", "revalidating repaired work specs")
-        defects = failed_reports(_issue_reports(client, new_ids))
-        if defects:
-            for report in defects:
-                output.error(f"readiness: {report.diagnostic()}")
-            output.error(
-                "plan left executable issues incomplete after the single repair pass; "
-                "no work was claimed"
-            )
-            raise typer.Exit(code=1)
+        raise typer.Exit(code=1)
 
     # Plan metadata travels with every implementation work spec. This remains
     # useful in auto/off mode because an explicit fallback is durable evidence.
     for issue_id in new_ids:
         client.add_comment(issue_id, summary.report())
-        if repair_summary is not None:
-            client.add_comment(issue_id, repair_summary.report())
 
     output.progress("plan", f"done ({len(new_ids)} new issue(s) created)")
     output.success(f"plan created {len(new_ids)} issue(s) in {target}/.beads/")

@@ -18,10 +18,15 @@ from ortus.core.profiles import AgentProfile, Phase
 from ortus.core.prompts import READINESS_SPEC_PLACEHOLDER, resolve_prompt
 from ortus.core.readiness import spec_markdown, validate_issue
 from tests._shims import shim_path
-from tests.test_readiness import ready_issue
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 runner = CliRunner()
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Console capture without Rich highlight codes."""
+    return _ANSI.sub("", text)
 
 FAKE_CLAUDE_PLAN = shim_path("fake-claude-plan")
 # Exits 0 without creating a single issue — stands in for a decomposition
@@ -49,8 +54,8 @@ def _swap_runner(monkeypatch: pytest.MonkeyPatch, binary: str) -> None:
     )
 
 
-def _planner_factory(repo: Path, *, repair: str) -> tuple[type, list[str]]:
-    """Return fresh fake runners sharing a small invocation journal."""
+def _planner_factory(repo: Path) -> tuple[type, list[str]]:
+    """Return a fake runner that creates one incomplete leaf and records prompts."""
 
     calls: list[str] = []
 
@@ -67,49 +72,6 @@ def _planner_factory(repo: Path, *, repair: str) -> tuple[type, list[str]]:
                         "--silent",
                         "--title",
                         "incomplete leaf",
-                        "--type",
-                        "task",
-                    ],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                )
-            elif repair == "complete":
-                issue_id = subprocess.run(
-                    ["bd", "list", "--status", "open", "--json"],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout
-                import json
-
-                target = json.loads(issue_id)[0]["id"]
-                packet = ready_issue(target)
-                subprocess.run(
-                    [
-                        "bd",
-                        "update",
-                        target,
-                        "--description",
-                        packet["description"],
-                        "--design",
-                        packet["design"],
-                        "--acceptance",
-                        packet["acceptance_criteria"],
-                    ],
-                    cwd=repo,
-                    check=True,
-                    capture_output=True,
-                )
-            elif repair == "duplicate":
-                subprocess.run(
-                    [
-                        "bd",
-                        "create",
-                        "--silent",
-                        "--title",
-                        "replacement leaf",
                         "--type",
                         "task",
                     ],
@@ -241,7 +203,7 @@ def test_plan_summary_lists_each_new_id(
     result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
     assert result.exit_code == 0
     # Summary includes 3 ids; each should match the prefix-id pattern.
-    assert "plan created 3 issue(s)" in result.stdout
+    assert "plan created 3 issue(s)" in _plain(result.stdout)
     assert result.stdout.count("fixture-") >= 3
 
 
@@ -275,16 +237,32 @@ def test_plan_zero_issues_exits_one(
     assert "plan-" in combined and ".log" in combined
 
 
-def test_plan_repairs_incomplete_leaf_once(
+def test_plan_unready_leaf_fails_immediately(
     bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    planner, calls = _planner_factory(bd_workspace, repair="complete")
+    """Unready new issues fail plan after validate; no second planning spawn."""
+    planner, calls = _planner_factory(bd_workspace)
     monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
     result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
-    assert result.exit_code == 0, result.stdout + result.stderr
-    assert len(calls) == 2
-    assert "Repair ONLY these existing issue IDs" in calls[1]
-    issue_id = subprocess.run(
+    assert result.exit_code == 1, result.stdout + result.stderr
+    assert len(calls) == 1
+    assert "READINESS REPAIR PASS" not in calls[0]
+    combined = result.stdout + result.stderr
+    assert "readiness:" in combined
+    assert "plan left executable issues incomplete" in combined
+    assert "single repair pass" not in combined
+    assert "repairing incomplete" not in combined
+
+
+def test_plan_unready_leaf_does_not_spawn_repair(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner, calls = _planner_factory(bd_workspace)
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    listed = subprocess.run(
         ["bd", "list", "--status", "open", "--json"],
         cwd=bd_workspace,
         check=True,
@@ -293,37 +271,30 @@ def test_plan_repairs_incomplete_leaf_once(
     ).stdout
     import json
 
-    issue = json.loads(issue_id)[0]
-    shown = subprocess.run(
-        ["bd", "show", issue["id"], "--json"],
+    issues = json.loads(listed)
+    assert len(issues) == 1
+    assert issues[0]["title"] == "incomplete leaf"
+
+
+def test_plan_unready_does_not_create_replacements(
+    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planner, calls = _planner_factory(bd_workspace)
+    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
+    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    listed = subprocess.run(
+        ["bd", "list", "--json"],
         cwd=bd_workspace,
         check=True,
         capture_output=True,
         text=True,
     ).stdout
-    assert validate_issue(json.loads(shown)[0]).ready
+    import json
 
-
-def test_plan_irreparable_leaf_exits_after_one_repair(
-    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    planner, calls = _planner_factory(bd_workspace, repair="none")
-    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
-    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
-    assert result.exit_code == 1
-    assert len(calls) == 2
-    assert "single repair pass" in result.stderr
-
-
-def test_plan_repair_rejects_replacement_duplicate(
-    bd_workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    planner, calls = _planner_factory(bd_workspace, repair="duplicate")
-    monkeypatch.setattr(plan_mod, "_make_runner", lambda: planner())
-    result = runner.invoke(app, ["plan", str(bd_workspace), str(TINY_PRD)])
-    assert result.exit_code == 1
-    assert len(calls) == 2
-    assert "replacement issue" in result.stderr
+    titles = [issue["title"] for issue in json.loads(listed)]
+    assert titles == ["incomplete leaf"]
 
 
 def test_plan_epic_only_decomposition_needs_no_repair(
@@ -409,7 +380,9 @@ def test_plan_emits_progress_lines(
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "[ortus plan]" not in result.stderr
     assert "reading PRD" in result.stderr
-    assert re.search(r"^\[[\d\-: ]+\] done \(", result.stderr, re.M), result.stderr
+    assert re.search(
+        r"^\[[\d\-: ]+\] done \(", _plain(result.stderr), re.M
+    ), result.stderr
 
 
 def test_plan_writes_timestamped_log(
