@@ -23,6 +23,8 @@ from ortus.core.agent_files import (
     MANAGED_FILES,
     AgentFileError,
     ManagedFile,
+    duplicate_headings_message,
+    duplicated_headings,
     gitignore_match,
     read_block,
     render_block,
@@ -431,6 +433,42 @@ def check_agent_file(repo: Path, managed: ManagedFile) -> CheckResult:
     return CheckResult(name, True, f"block={managed.block} schema={bundled} current")
 
 
+def check_agent_file_duplicates(repo: Path, managed: ManagedFile) -> Optional[CheckResult]:
+    """Info-level row when host prose repeats headings the managed block owns.
+
+    The dangerous state is check-green-with-duplicates: init preserves every
+    byte outside the markers, so a stale pre-marker copy of the block's
+    sections sits above the current one until an operator deletes it, and
+    agents reading top-down hit the stale copy first. Never a failure — the
+    row points at the manual cleanup, and a clean file adds no row at all.
+    """
+    path = repo / managed.filename
+    if not path.is_file():
+        return None
+    try:
+        duplicates = duplicated_headings(path.read_text(encoding="utf-8"), path=path)
+    except (OSError, AgentFileError):
+        # The strict row already reports unreadable or malformed files.
+        return None
+    if not duplicates:
+        return None
+    return CheckResult(
+        managed.filename,
+        False,
+        duplicate_headings_message(managed.filename, duplicates),
+        level="info",
+    )
+
+
+def _agent_file_rows(repo: Path, managed: ManagedFile) -> list[CheckResult]:
+    """The strict block row, plus the duplicate-headings WARN row when earned."""
+    rows = [check_agent_file(repo, managed)]
+    duplicate = check_agent_file_duplicates(repo, managed)
+    if duplicate is not None:
+        rows.append(duplicate)
+    return rows
+
+
 def _stale_plan_prompt(repo: Path) -> Optional[str]:
     """Name the winning plan-prompt override if it predates the placeholder.
 
@@ -565,7 +603,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     for c in checks:
         output.progress("check", f"{c.__name__.removeprefix('check_')} ...")
         results.append(c())
-    repo_checks: list[tuple[Callable[[Path], CheckResult], str]] = [
+    repo_checks: list[tuple[Callable[[Path], CheckResult | list[CheckResult]], str]] = [
         (check_beads_dir, ".beads/"),
         (check_readiness_memory, "bd readiness memory"),
         (settings_check, settings_label),
@@ -579,7 +617,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         [
             # Bound early so each lambda keeps its own managed file rather than
             # the last one the loop saw.
-            (lambda r, m=managed: check_agent_file(r, m), managed.filename)
+            (lambda r, m=managed: _agent_file_rows(r, m), managed.filename)
             for managed in MANAGED_FILES
         ]
     )
@@ -592,7 +630,11 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     )
     for fn, label in repo_checks:
         output.progress("check", f"{label} ...")
-        results.append(fn(repo))
+        outcome = fn(repo)
+        if isinstance(outcome, CheckResult):
+            results.append(outcome)
+        else:
+            results.extend(outcome)
     for other in BACKENDS:
         if other == backend:
             continue

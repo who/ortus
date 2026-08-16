@@ -817,6 +817,52 @@ def test_check_reports_malformed_markers_with_a_line_number(tmp_path: Path) -> N
     assert "AGENTS.md:3" in result.message
 
 
+def test_check_reports_duplicate_headings_as_info(tmp_path: Path) -> None:
+    """AC-2: a stale pre-marker copy earns an info row naming its headings."""
+    path = _healthy_repo(tmp_path) / "AGENTS.md"
+    path.write_text(
+        "### Session-close protocol\n\nstale copy\n\n"
+        + path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    row = check_mod.check_agent_file_duplicates(tmp_path / "healthy", MANAGED_FILES[0])
+    assert row is not None
+    assert not row.ok
+    assert row.level == "info"
+    assert "duplicates managed-block headings" in row.message
+    assert "Session-close protocol" in row.message
+    assert "outside the ortus markers" in row.message
+
+
+def test_check_agent_file_duplicates_adds_no_row_when_clean(tmp_path: Path) -> None:
+    """Repos with clean files see no new output."""
+    repo = _healthy_repo(tmp_path)
+    for managed in MANAGED_FILES:
+        assert check_mod.check_agent_file_duplicates(repo, managed) is None
+
+
+def test_check_duplicate_headings_warn_keeps_exit_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the row renders as WARN and never drives the exit code."""
+    repo = _healthy_repo(tmp_path)
+    path = repo / "AGENTS.md"
+    path.write_text(
+        "### Session-close protocol\n\nstale copy\n\n"
+        + path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+    compact = _compact(result.stdout)
+    assert "duplicatesmanaged-blockheadings" in compact
+    # The strict row for the same file still reports the block as current.
+    assert "block=agentsschema=1current" in compact
+
+
 def test_check_agent_files_make_no_writes(tmp_path: Path) -> None:
     """NFR-006: the strict block check reads; `ortus init` is what repairs."""
     repo = _healthy_repo(tmp_path)

@@ -16,6 +16,8 @@ from ortus.core.agent_files import (
     AgentFileError,
     BlockOutcome,
     apply_block,
+    duplicate_headings_message,
+    duplicated_headings,
     gitignore_match,
     render_block,
 )
@@ -148,6 +150,14 @@ def _write_agent_files(repo: Path, codegraph: str) -> None:
             output.success(f"{managed.filename} ortus block already current")
         else:
             output.success(f"{outcome.value} {managed.filename} ortus block")
+        # apply_block just parsed this file, so the re-read cannot fail; the
+        # stale copies live outside the markers and are never cleaned up
+        # automatically, so the operator hears about them while present.
+        duplicates = duplicated_headings(
+            path.read_text(encoding="utf-8"), path=path
+        )
+        if duplicates:
+            output.warn(duplicate_headings_message(managed.filename, duplicates))
 
 
 def _normalize_initial_branch(repo: Path, branch: str = "main") -> None:

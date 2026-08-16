@@ -555,6 +555,26 @@ def test_init_preserves_host_prose_around_the_block(tmp_path: Path) -> None:
     assert read_block(target / "AGENTS.md", "agents") is not None
 
 
+def test_init_warns_when_host_prose_duplicates_block_headings(tmp_path: Path) -> None:
+    """AC-1: a pre-marker render left above the block is named, never edited."""
+    target = tmp_path / "premarker"
+    target.mkdir()
+    legacy = (
+        "### Issue tracking with bd\n\nOld claim flow without bd close.\n\n"
+        "### Session-close protocol\n\n1. git commit\n"
+    )
+    (target / "AGENTS.md").write_text(legacy, encoding="utf-8")
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    # The console wraps long lines, so asserts squash whitespace first.
+    out = "".join((result.stdout + result.stderr).split())
+    assert "duplicatesmanaged-blockheadings" in out
+    assert "Issuetrackingwithbd" in out
+    assert "Session-closeprotocol" in out
+    # The warning is a pointer, not a migration: host bytes survive untouched.
+    assert (target / "AGENTS.md").read_text(encoding="utf-8").startswith(legacy)
+
+
 def test_init_refuses_a_gitignored_agent_file(tmp_path: Path) -> None:
     """AC-2 counterpart: a repo that hides AGENTS.md gets a refusal, not a block."""
     target = tmp_path / "ignored"

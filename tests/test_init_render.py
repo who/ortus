@@ -19,6 +19,8 @@ from ortus.core.agent_files import (
     begin_marker,
     block_template_source,
     codegraph_section,
+    duplicate_headings_message,
+    duplicated_headings,
     end_marker,
     gitignore_match,
     read_block,
@@ -510,6 +512,80 @@ def test_gitignore_match_reads_the_repo_ignore_rules(
 def test_gitignore_match_honors_a_later_negation(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("*.md\n!AGENTS.md\n", encoding="utf-8")
     assert gitignore_match(tmp_path, "AGENTS.md") is None
+
+
+# --- duplicate-heading detection ---------------------------------------------
+
+
+def test_duplicated_headings_reports_a_stale_pre_marker_copy() -> None:
+    """The field case: a legacy whole-file render left above the block."""
+    text = (
+        "### Issue tracking with bd\n\nOld claim flow.\n\n"
+        "### Session-close protocol\n\n1. git commit\n\n"
+        + render_block("agents")
+        + "\n"
+    )
+    assert duplicated_headings(text) == (
+        "Issue tracking with bd",
+        "Session-close protocol",
+    )
+
+
+def test_duplicated_headings_normalizes_case_and_whitespace() -> None:
+    """Variants still match, reported under the block's own spelling."""
+    text = "##   session-CLOSE   Protocol\n\nstale\n\n" + render_block("agents") + "\n"
+    assert duplicated_headings(text) == ("Session-close protocol",)
+
+
+def test_duplicated_headings_ignores_host_only_headings() -> None:
+    text = "## House rules\n\nNever force-push main.\n\n" + render_block("agents") + "\n"
+    assert duplicated_headings(text) == ()
+
+
+def test_duplicated_headings_is_empty_for_a_block_only_file() -> None:
+    assert duplicated_headings(render_block("agents") + "\n") == ()
+
+
+def test_duplicated_headings_is_empty_without_markers() -> None:
+    """Pre-init state: nothing managed yet, so nothing to compare against."""
+    assert duplicated_headings("### Session-close protocol\n\nprose\n") == ()
+
+
+def test_duplicated_headings_skips_fenced_code() -> None:
+    """A `#` shell comment inside a fence is not a heading on either side."""
+    text = (
+        "```bash\n# ... do the work ...\n```\n\n" + render_block("agents") + "\n"
+    )
+    assert duplicated_headings(text) == ()
+
+
+def test_duplicated_headings_reports_a_repeated_heading_once() -> None:
+    stale = "### Session-close protocol\n\nstale\n\n"
+    text = stale + stale + render_block("agents") + "\n"
+    assert duplicated_headings(text) == ("Session-close protocol",)
+
+
+def test_duplicated_headings_unions_both_blocks() -> None:
+    """agents + pointer in one file: host prose is compared against both."""
+    text = (
+        "## Ortus session rules\n\nstale pointer copy\n\n"
+        + render_block("agents")
+        + "\n\n"
+        + render_block("pointer")
+        + "\n"
+    )
+    assert duplicated_headings(text) == ("Ortus session rules",)
+
+
+def test_duplicate_headings_message_names_file_headings_and_remedy() -> None:
+    message = duplicate_headings_message(
+        "AGENTS.md", ("Issue tracking with bd", "Session-close protocol")
+    )
+    assert message == (
+        "AGENTS.md host prose duplicates managed-block headings: "
+        "Issue tracking with bd, Session-close protocol — "
+        "delete the stale copies outside the ortus markers"
+    )
 
 
 # Acceptance #1 (broader) — render_all produces every file on disk.

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib.resources import files
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from ortus import __version__ as ORTUS_VERSION
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
@@ -415,3 +415,81 @@ def gitignore_match(repo: Path, name: str) -> str | None:
             if any(fnmatch.fnmatch(name, candidate) for candidate in candidates):
                 verdict = None if negated else line
     return verdict
+
+
+_ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}[ \t]+(?P<title>.+?)[ \t]*$")
+_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+
+
+def _normalized_heading(value: str) -> str:
+    """Case- and punctuation-insensitive heading key (mirrors readiness)."""
+
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
+
+
+def _atx_headings(text: str) -> list[str]:
+    """ATX heading titles in `text`, in order, skipping fenced code.
+
+    Fences matter because the managed bodies carry shell snippets whose `#`
+    comment lines would otherwise read as level-one headings. Setext headings
+    (underlined with === or ---) are out of scope: every legacy whole-file
+    render that motivates this detector used ATX.
+    """
+
+    titles: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines():
+        opened = _FENCE_RE.match(line)
+        if opened:
+            marker = opened.group(1)
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        heading = _ATX_HEADING_RE.match(line)
+        if heading:
+            titles.append(heading.group("title"))
+    return titles
+
+
+def duplicated_headings(text: str, *, path: Path | None = None) -> tuple[str, ...]:
+    """Managed-block headings that host prose outside the markers repeats.
+
+    Compares normalized headings in the host prose against the union of every
+    managed block present in `text` — the field case is a pre-marker render
+    left above the block by a forced re-init, which agents then read first.
+    Each heading is reported once, in block order, under the block's own
+    spelling. A file with no markers has nothing to compare and yields
+    nothing. Detection only: callers warn, and host prose stays untouched no
+    matter what it duplicates.
+    """
+
+    blocks = parse_blocks(text, path=path)
+    if not blocks:
+        return ()
+    host = text
+    for parsed in sorted(blocks.values(), key=lambda b: b.start, reverse=True):
+        host = host[: parsed.start] + host[parsed.end :]
+    outside = {_normalized_heading(title) for title in _atx_headings(host)}
+    outside.discard("")
+    duplicated: list[str] = []
+    seen: set[str] = set()
+    for parsed in sorted(blocks.values(), key=lambda b: b.start):
+        for title in _atx_headings(parsed.body):
+            key = _normalized_heading(title)
+            if key and key in outside and key not in seen:
+                seen.add(key)
+                duplicated.append(title)
+    return tuple(duplicated)
+
+
+def duplicate_headings_message(filename: str, headings: Sequence[str]) -> str:
+    """The one warning line `ortus init` prints and `ortus check` reports."""
+
+    return (
+        f"{filename} host prose duplicates managed-block headings: "
+        f"{', '.join(headings)} — delete the stale copies outside the ortus markers"
+    )
