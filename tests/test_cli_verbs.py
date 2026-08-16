@@ -165,10 +165,17 @@ def _bd_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_init_emits_progress_lines(tmp_path: Path) -> None:
+def test_init_emits_progress_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     target = tmp_path / "fresh"
+    # Pretend the backend CLIs are installed: init exits 1 when the pinned run
+    # backend's CLI is absent, and hermetic runners have none of them.
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_backend_cli", lambda name: f"/usr/bin/{name}")
     # This is about the progress-line shape, not the CodeGraph prerequisite,
     # and the codegraph CLI is absent on hermetic runners.
     result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
@@ -179,12 +186,19 @@ def test_init_emits_progress_lines(tmp_path: Path) -> None:
     assert re.search(r"^\[[\d\-: ]+\] done \(", stderr, re.M), result.stderr
 
 
-def test_verb_progress_lines_open_with_timestamp_then_phase(tmp_path: Path) -> None:
+def test_verb_progress_lines_open_with_timestamp_then_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every progress line a real verb emits opens with the stamp, then the
     phase — no `[ortus <verb>]` tag in between (ortus-kawu)."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     target = tmp_path / "stamped"
+    # Same hermeticity stub as test_init_emits_progress_lines: a missing
+    # pinned-run-backend CLI would fail init before any lines are asserted.
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_backend_cli", lambda name: f"/usr/bin/{name}")
     result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
     assert result.exit_code == 0, result.stdout + result.stderr
     stderr = _ANSI.sub("", result.stderr)

@@ -49,6 +49,20 @@ def _fake_codegraph(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _fake_backend_clis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend every backend CLI is installed.
+
+    The default `--backend all` summarizes CLI availability per backend and
+    fails when the pinned run backend's CLI is absent, so an unfaked lookup
+    would make these tests answer for the host's installs. Tests about a
+    missing CLI re-patch `_backend_cli` themselves.
+    """
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_backend_cli", lambda name: f"/usr/bin/{name}")
+
+
 def _ortusrc(target: Path) -> dict:
     return tomllib.loads((target / ".ortusrc").read_text())
 
