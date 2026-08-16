@@ -303,6 +303,103 @@ def test_prompt_show_three_layer_origin(
     assert origin.stdout.split() == ["repo", str(override)]
 
 
+# --- ortus prompt eject (ortus-apv5.2) --------------------------------------
+
+
+def test_prompt_eject_writes_stamped_repo_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the ejected file is the bundled text under a provenance stamp."""
+    from ortus.core.prompts import bundled_prompt_text, bundled_sha256, parse_eject_stamp
+
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["prompt", "eject", "goal", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    destination = repo / ".ortus" / "prompts" / "goal-prompt.md"
+    assert destination.is_file()
+    stamp_line, body = destination.read_text().split("\n", 1)
+    bundled = bundled_prompt_text("goal-prompt")
+    assert body == bundled
+    parsed = parse_eject_stamp(stamp_line)
+    assert parsed is not None
+    assert parsed[1] == bundled_sha256(bundled)
+
+
+def test_prompt_eject_refuses_existing_destination_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a second eject refuses; --force overwrites."""
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert runner.invoke(app, ["prompt", "eject", "goal", str(repo)]).exit_code == 0
+    destination = repo / ".ortus" / "prompts" / "goal-prompt.md"
+    destination.write_text("local edits")
+    refused = runner.invoke(app, ["prompt", "eject", "goal", str(repo)])
+    assert refused.exit_code != 0
+    assert "--force" in refused.stderr
+    assert destination.read_text() == "local edits"
+    forced = runner.invoke(app, ["prompt", "eject", "goal", str(repo), "--force"])
+    assert forced.exit_code == 0, forced.stdout + forced.stderr
+    assert destination.read_text() != "local edits"
+
+
+def test_prompt_eject_copies_bundled_even_when_an_override_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source purity: a winning user override never feeds the ejected copy."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    _isolate_home(monkeypatch, tmp_path)
+    user_override = tmp_path / "home" / ".ortus" / "prompts" / "goal-prompt.md"
+    user_override.parent.mkdir(parents=True)
+    user_override.write_text("USER-LAYER-SENTINEL")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["prompt", "eject", "goal", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    text = (repo / ".ortus" / "prompts" / "goal-prompt.md").read_text()
+    assert "USER-LAYER-SENTINEL" not in text
+    assert text.split("\n", 1)[1] == bundled_prompt_text("goal-prompt")
+
+
+def test_prompt_eject_user_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_home(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["prompt", "eject", "goal", "--user"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (tmp_path / "home" / ".ortus" / "prompts" / "goal-prompt.md").is_file()
+
+
+def test_prompt_eject_requires_exactly_one_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No cwd default: name a repo or pass --user, never both."""
+    _isolate_home(monkeypatch, tmp_path)
+    neither = runner.invoke(app, ["prompt", "eject", "goal"])
+    assert neither.exit_code == 2
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    both = runner.invoke(app, ["prompt", "eject", "goal", str(repo), "--user"])
+    assert both.exit_code == 2
+    assert not (repo / ".ortus").exists()
+
+
+def test_prompt_eject_unknown_name_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["prompt", "eject", "nope", str(repo)])
+    assert result.exit_code == 2
+    assert "goal" in result.stderr
+    assert not (repo / ".ortus").exists()
+
+
 def test_grind_dry_run_keeps_dry_run_output_on_stdout(tmp_path: Path) -> None:
     """--dry-run results stay on stdout (machine-readable); only progress is stderr.
 

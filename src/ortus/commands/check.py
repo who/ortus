@@ -33,8 +33,12 @@ from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.init_render import BACKEND_TEMPLATES
 from ortus.core.prompts import (
+    PROMPT_REGISTRY,
     READINESS_SPEC_PLACEHOLDER,
     PromptNotFound,
+    bundled_prompt_text,
+    bundled_sha256,
+    parse_eject_stamp,
     resolve_prompt,
 )
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_command
@@ -432,24 +436,64 @@ def _stale_plan_prompt(repo: Path) -> Optional[str]:
     return f"{resolved.source} plan-prompt.md ({resolved.path})"
 
 
-def check_prompt_overrides(repo: Path) -> CheckResult:
-    """Optional informational check — flags any per-repo prompt overrides.
+def _override_warning(override_dir: Path, filename: str) -> Optional[str]:
+    """The warning one repo override earns, or None for a clean ejected copy.
 
-    A stale override is reported, not failed: it still runs, and failing here
-    would break CI in repos whose overrides are otherwise deliberate.
+    Three cases, checked in order: a filename the resolver never loads, a
+    copy with no provenance stamp, and a stamp whose recorded hash no longer
+    matches the current bundled text (the default moved since the eject).
+    User edits below a current stamp are expected and never reported.
+    """
+    known = {f"{entry.filename}.md" for entry in PROMPT_REGISTRY}
+    if filename not in known:
+        return f"{filename} is not a bundled prompt filename and is never loaded"
+    try:
+        text = (override_dir / filename).read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"{filename} unreadable: {exc}"
+    stamp = parse_eject_stamp(text)
+    if stamp is None:
+        return (
+            f"{filename} has no ejected-from stamp — provenance unknown; "
+            "re-create it with `ortus prompt eject`"
+        )
+    version, digest = stamp
+    if digest != bundled_sha256(bundled_prompt_text(filename[: -len(".md")])):
+        return (
+            f"{filename} was ejected from ortus/{version} and the bundled "
+            "default has moved since — review, then re-eject with --force"
+        )
+    return None
+
+
+def check_prompt_overrides(repo: Path) -> CheckResult:
+    """Informational check — flags per-repo prompt overrides and their health.
+
+    Findings are warnings, never failures: an override still runs, and
+    failing here would break CI in repos whose overrides are deliberate.
     """
     override_dir = repo / ".ortus" / "prompts"
+    overrides: list[str] = []
     if not override_dir.is_dir():
         message = "no overrides (using bundled)"
     elif overrides := sorted(p.name for p in override_dir.glob("*.md")):
         message = f"overrides: {', '.join(overrides)}"
     else:
         message = "directory empty"
+    warnings = [
+        warning
+        for filename in overrides
+        if (warning := _override_warning(override_dir, filename))
+    ]
     stale = _stale_plan_prompt(repo)
     if stale:
-        message += (
-            f"; stale {stale} predates {READINESS_SPEC_PLACEHOLDER} and teaches a "
+        warnings.append(
+            f"stale {stale} predates {READINESS_SPEC_PLACEHOLDER} and teaches a "
             "frozen readiness contract — refresh or delete it"
+        )
+    if warnings:
+        return CheckResult(
+            ".ortus/prompts/", False, message + "; " + "; ".join(warnings), level="info"
         )
     return CheckResult(".ortus/prompts/", True, message)
 

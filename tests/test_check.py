@@ -389,6 +389,87 @@ def test_check_leaves_a_current_override_out_of_the_stale_override_report(
     assert "stale" not in compact
 
 
+def _stamped_override(repo: Path, stem: str, *, of_text: str | None = None) -> Path:
+    """Write an ejected-style override; of_text swaps in a drifted source."""
+    from ortus.core.prompts import bundled_prompt_text, eject_stamp
+
+    bundled = bundled_prompt_text(stem)
+    stamped_source = bundled if of_text is None else of_text
+    path = repo / ".ortus" / "prompts" / f"{stem}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(eject_stamp("0.0.0-test", stamped_source) + "\n" + bundled)
+    return path
+
+
+def test_check_warns_when_eject_stamp_predates_bundled_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a stamp hash that no longer matches bundled text warns, exit 0."""
+    repo = _healthy_repo(tmp_path)
+    _stamped_override(repo, "goal-prompt", of_text="an older bundled body\n")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+    assert "FAIL" not in result.stdout
+    compact = "".join(result.stdout.split())
+    assert "goal-prompt.md" in compact
+    assert "moved" in compact
+
+
+def test_check_warns_on_unstamped_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a hand-created override with no provenance stamp warns, exit 0."""
+    repo = _healthy_repo(tmp_path)
+    overrides = repo / ".ortus" / "prompts"
+    overrides.mkdir(parents=True)
+    (overrides / "goal-prompt.md").write_text("hand-rolled override\n")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+    assert "FAIL" not in result.stdout
+    # Rich wraps cells at hyphens, so match on one unbreakable word.
+    compact = "".join(result.stdout.split())
+    assert "provenance" in compact
+
+
+def test_check_warns_on_unknown_override_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a typo'd filename in .ortus/prompts/ warns that it never loads."""
+    repo = _healthy_repo(tmp_path)
+    overrides = repo / ".ortus" / "prompts"
+    overrides.mkdir(parents=True)
+    (overrides / "gaol-prompt.md").write_text("never loaded\n")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+    assert "FAIL" not in result.stdout
+    compact = "".join(result.stdout.split())
+    assert "gaol-prompt.md" in compact
+    assert "neverloaded" in compact
+
+
+def test_check_passes_a_current_ejected_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a stamped copy of the current bundled text is an ordinary PASS."""
+    repo = _healthy_repo(tmp_path)
+    _stamped_override(repo, "goal-prompt")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" not in result.stdout
+    assert "FAIL" not in result.stdout
+
+
 def test_check_reports_present_readiness_memory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

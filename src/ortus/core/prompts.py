@@ -11,6 +11,8 @@ wheel/sdist installs without filesystem assumptions.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -176,6 +178,55 @@ def resolve_prompt(
     return ResolvedPrompt(
         name=name, source="bundled", path=bundled_path, text=bundled_text
     )
+
+
+def bundled_prompt_text(name: str) -> str:
+    """The bundled text for a prompt stem, bypassing every override layer.
+
+    Eject and staleness checks both need the installed default even when a
+    repo or user override currently wins resolution (source purity).
+    """
+    bundled = files(PROMPT_PACKAGE).joinpath(f"{name}.md")
+    if not bundled.is_file():
+        raise PromptNotFound(f"{name}.md is not bundled in {PROMPT_PACKAGE}")
+    return bundled.read_text(encoding="utf-8")
+
+
+def bundled_sha256(text: str) -> str:
+    """Content hash the eject stamp records and the check recomputes."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# First line of an ejected override. Hash is of the bundled text the copy was
+# taken from, before the stamp itself, so the check can tell "the bundled
+# default moved since this eject" apart from "the user edited their copy"
+# (edits are expected and not reported).
+_STAMP_TEMPLATE = "<!-- ejected-from: ortus/{version} bundled-sha256={digest} -->"
+_STAMP_RE = re.compile(
+    r"<!--\s*ejected-from:\s*ortus/(?P<version>\S+)\s+"
+    r"bundled-sha256=(?P<digest>[0-9a-f]{64})\s*-->"
+)
+
+
+def eject_stamp(version: str, bundled_text: str) -> str:
+    """The provenance header `ortus prompt eject` writes above the copy."""
+    return _STAMP_TEMPLATE.format(
+        version=version, digest=bundled_sha256(bundled_text)
+    )
+
+
+def parse_eject_stamp(text: str) -> tuple[str, str] | None:
+    """(version, digest) from an override's first line, or None if unstamped.
+
+    Only the first line counts: that is where eject puts the stamp, and a
+    hand-created override with prose above a pasted stamp is treated as
+    unstamped rather than guessing at its provenance.
+    """
+    first_line = text.split("\n", 1)[0]
+    match = _STAMP_RE.search(first_line)
+    if match is None:
+        return None
+    return match.group("version"), match.group("digest")
 
 
 def substitute(text: str, /, **values: str) -> str:

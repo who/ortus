@@ -10,6 +10,10 @@ from ortus.core.prompts import (
     PROMPT_REGISTRY,
     READINESS_SPEC_PLACEHOLDER,
     PromptNotFound,
+    bundled_prompt_text,
+    bundled_sha256,
+    eject_stamp,
+    parse_eject_stamp,
     prompts_in_package,
     registry_entry,
     resolve_named_prompt,
@@ -147,3 +151,32 @@ def test_registry_entry_unknown_name_lists_valid_names() -> None:
     message = str(exc.value)
     for entry in PROMPT_REGISTRY:
         assert entry.name in message
+
+
+def test_bundled_prompt_text_ignores_override_layers(tmp_path: Path) -> None:
+    """Source purity: eject copies the install default, never a winner."""
+    _write(tmp_path / ".ortus" / "prompts" / "goal-prompt.md", "repo override")
+    bundled = bundled_prompt_text("goal-prompt")
+    assert bundled != "repo override"
+    resolved = resolve_prompt("goal-prompt", repo=None, home=tmp_path / "home")
+    assert bundled == resolved.text
+
+
+def test_bundled_prompt_text_unknown_stem_raises() -> None:
+    with pytest.raises(PromptNotFound):
+        bundled_prompt_text("no-such-prompt")
+
+
+def test_eject_stamp_round_trips_through_parse() -> None:
+    body = "prompt body\nwith $placeholders\n"
+    stamp = eject_stamp("1.2.3", body)
+    parsed = parse_eject_stamp(stamp + "\n" + body)
+    assert parsed == ("1.2.3", bundled_sha256(body))
+    # Hash covers the bundled text before the stamp, so it is stamp-independent.
+    assert bundled_sha256(body) != bundled_sha256(stamp + "\n" + body)
+
+
+def test_parse_eject_stamp_reads_only_the_first_line() -> None:
+    stamp = eject_stamp("1.2.3", "body")
+    assert parse_eject_stamp("prose above\n" + stamp + "\nbody") is None
+    assert parse_eject_stamp("hand-written override, no stamp\n") is None
