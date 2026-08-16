@@ -102,6 +102,28 @@ def random_prefix() -> str:
     return "smoke" + secrets.token_hex(3)
 
 
+def _stub_backend_env(tmp_path: Path) -> dict[str, str]:
+    """Env for `ortus init` subprocesses: fake backend CLIs prepended to PATH.
+
+    Since ortus-apv5.5 init exits 1 when the pinned run backend's CLI is not
+    on PATH, which hermetic CI runners cannot satisfy. init only *locates*
+    backend CLIs via shutil.which and never executes them, so an exit-0 shell
+    script per backend name is enough. All three backends are stubbed so init
+    under the default `--backend all` reports every backend, and a future
+    pinned-backend change cannot resurrect the failure. POSIX-only (`#!/bin/sh`
+    + executable bit): the CI matrix is ubuntu/macos and Windows support was
+    dropped. Scope the returned env to init invocations only — `ortus check`
+    runs must keep the real environment so they exercise true CLI discovery.
+    """
+    shims = tmp_path / "backend-shims"
+    shims.mkdir(exist_ok=True)
+    for cli in ("claude", "codex", "grok"):
+        shim = shims / cli
+        shim.write_text("#!/bin/sh\nexit 0\n")
+        shim.chmod(0o755)
+    return {**os.environ, "PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}
+
+
 @pytest.fixture()
 def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
     """Hermetic project root, pre-`ortus init`-ed with a random bd prefix.
@@ -133,6 +155,7 @@ def tmp_repo(tmp_path: Path, random_prefix: str) -> Path:
         capture_output=True,
         text=True,
         stdin=subprocess.DEVNULL,
+        env=_stub_backend_env(tmp_path),
     )
     if proc.returncode != 0:
         # check=True swallows stderr/stdout into a stringified
@@ -323,19 +346,24 @@ def test_init_settings_shape(tmp_repo: Path) -> None:
     )
 
 
-def test_init_idempotency_force(local_ortus: OrtusCallable, tmp_repo: Path) -> None:
+def test_init_idempotency_force(
+    local_ortus: OrtusCallable, tmp_repo: Path, tmp_path: Path
+) -> None:
     """AC #6: re-running init without --force is refused; --force succeeds.
 
     The `tmp_repo` fixture has already invoked init once; this test verifies
     that a second init refuses and a third init with --force succeeds.
     """
     _require("bd")
-    again = local_ortus("init", str(tmp_repo), "--codegraph", "off")
+    env = _stub_backend_env(tmp_path)
+    again = local_ortus("init", str(tmp_repo), "--codegraph", "off", env=env)
     assert again.returncode != 0, (
         "second `ortus init` without --force exited 0; expected refusal "
         "since .beads/ already exists (would silently clobber state)."
     )
-    forced = local_ortus("init", str(tmp_repo), "--force", "--codegraph", "off")
+    forced = local_ortus(
+        "init", str(tmp_repo), "--force", "--codegraph", "off", env=env
+    )
     assert forced.returncode == 0, (
         f"`ortus init --force` exited {forced.returncode}.\n"
         f"stdout:\n{forced.stdout}\nstderr:\n{forced.stderr}"
