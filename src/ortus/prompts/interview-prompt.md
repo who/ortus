@@ -181,18 +181,13 @@ If approved, do the following in sequence:
    bd label add {{FEATURE_ID}} interviewed
    ```
 
-3. **Generate PRD document** using the appropriate template based on project type.
-
-   **Template Selection**:
-
-   Use the template at `prd/templates/PRD-TEMPLATE-GENERIC.md` as your guide. This template includes:
+3. **Generate PRD document** with these sections:
    - Standard PRD sections (Overview, Background, Users, Requirements)
    - System Architecture
    - Milestones & Phases
    - Epic Breakdown
 
-
-   **Important**: Read the template file to understand the full structure, then fill it in with the information gathered from the interview. Adapt sections as needed based on interview responses - not every section may be relevant.
+   **Important**: Fill the sections in with the information gathered from the interview. Adapt sections as needed based on interview responses - not every section may be relevant.
 
 4. **Save the PRD** to `prd/PRD-<feature-slug>.md`
 

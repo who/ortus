@@ -24,6 +24,41 @@ READINESS_SPEC_PLACEHOLDER = "$readiness_spec"
 
 
 @dataclass(frozen=True)
+class PromptInfo:
+    """One bundled runtime prompt as the registry names it."""
+
+    name: str  # short user-facing name, e.g. "goal"
+    filename: str  # bundled stem without .md, e.g. "goal-prompt"
+    phase: str  # workflow phase the prompt drives
+    description: str  # one line for `ortus prompt list`
+
+
+# The only enumerator of the bundled runtime prompts. Every `*.md` directly
+# under src/ortus/prompts/ (not conditions/) has exactly one entry here;
+# tests reconcile the two so a new file cannot ship unnamed.
+PROMPT_REGISTRY: tuple[PromptInfo, ...] = (
+    PromptInfo(
+        name="goal",
+        filename="goal-prompt",
+        phase="implementation",
+        description="One-issue worker loop grind points /goal workers at.",
+    ),
+    PromptInfo(
+        name="interview",
+        filename="interview-prompt",
+        phase="interview",
+        description="Interactive PRD-building interview script.",
+    ),
+    PromptInfo(
+        name="plan",
+        filename="plan-prompt",
+        phase="planning",
+        description="PRD decomposition into readiness-v1 bd issues.",
+    ),
+)
+
+
+@dataclass(frozen=True)
 class ResolvedPrompt:
     """A resolved prompt with its on-disk source and content."""
 
@@ -35,6 +70,44 @@ class ResolvedPrompt:
 
 class PromptNotFound(LookupError):
     """Raised when no prompt by that name exists in any layer."""
+
+
+def registry_entry(name: str) -> PromptInfo:
+    """The registry entry for a short prompt name, or PromptNotFound.
+
+    The error names the valid choices so a CLI caller can print it verbatim.
+    """
+    for entry in PROMPT_REGISTRY:
+        if entry.name == name:
+            return entry
+    valid = ", ".join(entry.name for entry in PROMPT_REGISTRY)
+    raise PromptNotFound(f"unknown prompt {name!r}; valid names: {valid}")
+
+
+def prompts_in_package() -> tuple[str, ...]:
+    """Stems of every bundled `*.md` directly under the prompt package.
+
+    Excludes conditions/ by construction (subdirectories are not files).
+    Works on both unpacked and zip-backed installs via Traversable.
+    """
+    root = files(PROMPT_PACKAGE)
+    return tuple(
+        sorted(
+            entry.name[: -len(".md")]
+            for entry in root.iterdir()
+            if entry.is_file() and entry.name.endswith(".md")
+        )
+    )
+
+
+def resolve_named_prompt(
+    name: str,
+    *,
+    repo: Path | None = None,
+    home: Path | None = None,
+) -> ResolvedPrompt:
+    """Thin registry-name alias for resolve_prompt (`goal` -> `goal-prompt`)."""
+    return resolve_prompt(registry_entry(name).filename, repo=repo, home=home)
 
 
 def _repo_layer_path(repo: Path, name: str) -> Path:

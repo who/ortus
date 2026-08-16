@@ -11,6 +11,7 @@ from ortus.commands.human import human
 from ortus.commands.init import init
 from ortus.commands.interview import interview
 from ortus.commands.plan import plan
+from ortus.commands.prompt import prompt_app
 from ortus.commands.spec import spec
 from ortus.commands.tail import tail
 from ortus.commands.unlock import unlock
@@ -72,3 +73,4 @@ app.command(
     name="dashboard",
     help="Watch one grind run in a read-only live view.",
 )(dashboard)
+app.add_typer(prompt_app, name="prompt")

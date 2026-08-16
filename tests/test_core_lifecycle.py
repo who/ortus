@@ -20,12 +20,18 @@ from ortus.core.lifecycle import (
     StateMachine,
     Transition,
 )
+from ortus.core.prompts import PROMPT_REGISTRY
 from ortus.core.runstate import PHASE_IDLE, TERMINAL_PHASES
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "ortus"
 
 #: The only callee whose `phase=` argument is a log label rather than state.
 LOG_LABEL_CALLEES = frozenset({"_enforce_branch_discipline"})
+
+#: Callees whose `phase=` names a workflow stage for `ortus prompt list`,
+#: not journal state. Their literals must match the registry's declarations.
+PROMPT_REGISTRY_CALLEES = frozenset({"PromptInfo"})
+PROMPT_PHASES = frozenset(entry.phase for entry in PROMPT_REGISTRY)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +135,11 @@ def test_no_bare_phase_literals() -> None:
             if callee in LOG_LABEL_CALLEES:
                 assert leaf.value in LOG_LABELS, (
                     f"{rel}:{line}: undeclared log label {leaf.value!r}"
+                )
+                continue
+            if callee in PROMPT_REGISTRY_CALLEES:
+                assert leaf.value in PROMPT_PHASES, (
+                    f"{rel}:{line}: undeclared prompt phase {leaf.value!r}"
                 )
                 continue
             if not leaf.value:

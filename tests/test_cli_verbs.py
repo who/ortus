@@ -26,6 +26,7 @@ VERBS = [
     "check",
     "spec",
     "dashboard",
+    "prompt",
 ]
 
 
@@ -74,6 +75,7 @@ def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
         "unlock",
         "spec",
         "dashboard",
+        "prompt",
     ]
 
 
@@ -212,6 +214,93 @@ def test_human_emits_progress_lines(tmp_path: Path) -> None:
     stderr = _ANSI.sub("", result.stderr)
     assert re.search(r"^\[[\d\-: ]+\] target: ", stderr, re.M), result.stderr
     assert re.search(r"^\[[\d\-: ]+\] done \(", stderr, re.M), result.stderr
+
+
+# --- ortus prompt list/show (ortus-apv5.1) ----------------------------------
+
+
+def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep a developer's real ~/.ortus/prompts overrides out of the test."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+
+def test_prompt_list_reports_bundled_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["prompt", "list", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for name, phase in (
+        ("goal", "implementation"),
+        ("interview", "interview"),
+        ("plan", "planning"),
+    ):
+        line = next(
+            row for row in result.stdout.splitlines() if row.split()[0] == name
+        )
+        assert "bundled (default)" in line
+        assert phase in line
+
+
+def test_prompt_show_stdout_is_prompt_text_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pipe-clean: stdout carries exactly the resolved text, header on stderr."""
+    from ortus.core.prompts import resolve_prompt
+
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["prompt", "show", "goal", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    expected = resolve_prompt(
+        "goal-prompt", repo=repo, home=tmp_path / "home"
+    ).text
+    assert result.stdout == expected
+    assert "bundled (default)" in result.stderr
+
+
+def test_prompt_show_origin_prints_tier_and_path_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = runner.invoke(app, ["prompt", "show", "goal", str(repo), "--origin"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("bundled")
+    # Tier and location only — never the prompt body.
+    assert "One context window" not in result.stdout
+
+
+def test_prompt_show_unknown_name_exits_nonzero_listing_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolate_home(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["prompt", "show", "nope", str(tmp_path)])
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    for name in ("goal", "interview", "plan"):
+        assert name in result.stderr
+
+
+def test_prompt_show_three_layer_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repo override wins and --origin names its tier and path."""
+    _isolate_home(monkeypatch, tmp_path)
+    repo = tmp_path / "repo"
+    override = repo / ".ortus" / "prompts" / "goal-prompt.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("REPO-LEVEL-SENTINEL")
+    shown = runner.invoke(app, ["prompt", "show", "goal", str(repo)])
+    assert shown.exit_code == 0
+    assert shown.stdout == "REPO-LEVEL-SENTINEL"
+    origin = runner.invoke(app, ["prompt", "show", "goal", str(repo), "--origin"])
+    assert origin.exit_code == 0
+    assert origin.stdout.split() == ["repo", str(override)]
 
 
 def test_grind_dry_run_keeps_dry_run_output_on_stdout(tmp_path: Path) -> None:

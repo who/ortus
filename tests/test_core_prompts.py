@@ -7,8 +7,12 @@ from pathlib import Path
 import pytest
 
 from ortus.core.prompts import (
+    PROMPT_REGISTRY,
     READINESS_SPEC_PLACEHOLDER,
     PromptNotFound,
+    prompts_in_package,
+    registry_entry,
+    resolve_named_prompt,
     resolve_prompt,
     substitute,
 )
@@ -110,3 +114,36 @@ def test_repo_none_skips_repo_layer(tmp_path: Path) -> None:
     result = resolve_prompt("goal-prompt", repo=None, home=home)
     assert result.source == "user"
     assert result.text == "USER-WINS-WHEN-NO-REPO"
+
+
+# --- prompt registry gate (ortus-apv5.1) ------------------------------------
+
+
+def test_registry_reconciles_with_bundled_package(tmp_path: Path) -> None:
+    """Every bundled *.md has exactly one registry entry, and vice versa."""
+    stems = prompts_in_package()
+    assert sorted(entry.filename for entry in PROMPT_REGISTRY) == sorted(stems)
+    names = [entry.name for entry in PROMPT_REGISTRY]
+    assert len(set(names)) == len(names)
+    for entry in PROMPT_REGISTRY:
+        resolved = resolve_prompt(
+            entry.filename, repo=tmp_path, home=tmp_path / "home"
+        )
+        assert resolved.source == "bundled"
+        assert resolved.text.strip()
+
+
+def test_resolve_named_prompt_is_a_thin_alias(tmp_path: Path) -> None:
+    """`goal` resolves to the same prompt as the `goal-prompt` stem."""
+    home = tmp_path / "home"
+    named = resolve_named_prompt("goal", repo=tmp_path, home=home)
+    stem = resolve_prompt("goal-prompt", repo=tmp_path, home=home)
+    assert named == stem
+
+
+def test_registry_entry_unknown_name_lists_valid_names() -> None:
+    with pytest.raises(PromptNotFound) as exc:
+        registry_entry("no-such-prompt")
+    message = str(exc.value)
+    for entry in PROMPT_REGISTRY:
+        assert entry.name in message
