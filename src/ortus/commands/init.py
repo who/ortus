@@ -20,7 +20,11 @@ from ortus.core.agent_files import (
     render_block,
 )
 from ortus.core.codegraph import CodeGraphMode
-from ortus.core.config import DEFAULT_CODEGRAPH_MODE
+from ortus.core.config import (
+    DEFAULT_CODEGRAPH_MODE,
+    INIT_ONLY_BACKEND_MESSAGE,
+    read_recorded_facts,
+)
 from ortus.core.init_render import (
     BACKEND_TEMPLATES,
     FRAMEWORK_CHOICES,
@@ -284,6 +288,34 @@ def _summarize_backends(run_backend: str) -> None:
     output.success(f'pinned run backend "{run_backend}" in .ortusrc')
 
 
+def _recorded_facts(target: Path) -> dict[str, str]:
+    """Facts recorded in an existing project `.ortusrc`, or {} on a first init.
+
+    Omitted flags resolve to these instead of first-init detection, so a
+    forced re-init cannot silently flip a fact the repo already pinned (the
+    bd prefix most damagingly: every existing issue id carries it).
+    """
+    try:
+        facts = read_recorded_facts(target)
+    except OSError as exc:
+        output.error(f"could not read {target / '.ortusrc'}: {exc}")
+        raise typer.Exit(code=1)
+    except ValueError as exc:  # tomllib.TOMLDecodeError subclasses ValueError
+        output.error(
+            f"{target / '.ortusrc'} is not valid TOML: {exc}",
+            hint="repair the file (or delete it and pass explicit flags), then re-run ortus init",
+        )
+        raise typer.Exit(code=1)
+    for key, value in facts.items():
+        if not isinstance(value, str):
+            output.error(
+                f"{target / '.ortusrc'} records {key} = {value!r}, which is not a string",
+                hint=f"fix .ortusrc or pass an explicit --{key.replace('_', '-')}",
+            )
+            raise typer.Exit(code=1)
+    return facts
+
+
 def _resolve_choice(
     flag_name: str,
     cli_value: Optional[str],
@@ -321,10 +353,13 @@ def init(
         "--prefix",
         help="bd issue-id prefix (default: target directory basename).",
     ),
-    project_type: str = typer.Option(
-        "polyglot",
+    project_type: Optional[str] = typer.Option(
+        None,
         "--project-type",
-        help="Project type for templating (python|typescript|go|rust|polyglot).",
+        help=(
+            "Project type for templating (python|typescript|go|rust|polyglot). "
+            "Defaults to the value recorded in .ortusrc, else polyglot."
+        ),
     ),
     package_manager: Optional[str] = typer.Option(
         None,
@@ -341,12 +376,13 @@ def init(
         "--linter",
         help="Linter (choices depend on --project-type; per-language default applies if omitted).",
     ),
-    backend: str = typer.Option(
-        "all",
+    backend: Optional[str] = typer.Option(
+        None,
         "--backend",
         help=(
-            "Agent backend to configure (all|claude|codex|grok). The default "
-            "'all' provisions every backend and pins claude as the run backend."
+            "Agent backend to configure (all|claude|codex|grok). Defaults to "
+            "the run backend recorded in .ortusrc, else 'all', which provisions "
+            "every backend and pins claude as the run backend."
         ),
     ),
     codegraph: Optional[str] = typer.Option(
@@ -356,44 +392,113 @@ def init(
     ),
 ) -> None:
     """Bootstrap a new repo with bd, backend config, .ortusrc, and AGENTS.md."""
-    if project_type not in PROJECT_TYPES:
+    if project_type is not None and project_type not in PROJECT_TYPES:
         output.error(
             f"--project-type={project_type!r} is not recognized",
             hint=f"choices: {', '.join(PROJECT_TYPES)}",
         )
         raise typer.Exit(code=1)
-    provision_all = backend == "all"
-    if not provision_all and backend not in BACKENDS:
+    provision_all = backend is None or backend == "all"
+    if backend is not None and backend != "all" and backend not in BACKENDS:
         output.error(
             f"--backend={backend!r} is not recognized",
             hint=f"choices: all, {', '.join(BACKENDS)}",
         )
         raise typer.Exit(code=1)
-    # `all` is a provisioning breadth, never a run backend: `.ortusrc` always
-    # pins a concrete value, and resolve_backend() rejects the token outright.
-    run_backend = "claude" if provision_all else backend
+
+    target = (repo if repo is not None else Path.cwd()).resolve()
+    # Precedence per recorded key: explicit flag > recorded `.ortusrc` value >
+    # first-init detection default. A recorded value that fails validation is
+    # an error, never a silent fall-through to detection.
+    recorded = _recorded_facts(target)
+
+    resolved_project_type = project_type or recorded.get("project_type") or "polyglot"
+    if resolved_project_type not in PROJECT_TYPES:
+        output.error(
+            f".ortusrc records project_type = {resolved_project_type!r}, "
+            "which is not recognized",
+            hint=(
+                f"fix {target / '.ortusrc'} or pass --project-type; "
+                f"choices: {', '.join(PROJECT_TYPES)}"
+            ),
+        )
+        raise typer.Exit(code=1)
+
+    if backend is None and recorded.get("backend") is not None:
+        recorded_backend = recorded["backend"]
+        if recorded_backend == "all":
+            output.error(
+                f'.ortusrc records backend = "all" — {INIT_ONLY_BACKEND_MESSAGE}',
+                hint=f"fix {target / '.ortusrc'} or pass --backend",
+            )
+            raise typer.Exit(code=1)
+        if recorded_backend not in BACKENDS:
+            output.error(
+                f".ortusrc records backend = {recorded_backend!r}, "
+                "which is not recognized",
+                hint=(
+                    f"fix {target / '.ortusrc'} or pass --backend; "
+                    f"choices: {', '.join(BACKENDS)}"
+                ),
+            )
+            raise typer.Exit(code=1)
+        run_backend = recorded_backend
+    else:
+        # `all` is a provisioning breadth, never a run backend: `.ortusrc`
+        # always pins a concrete value, and resolve_backend() rejects the
+        # token outright.
+        run_backend = "claude" if provision_all else backend
 
     resolved_pm = _resolve_choice(
-        "--package-manager", package_manager, project_type,
+        "--package-manager", package_manager, resolved_project_type,
         PACKAGE_MANAGER_CHOICES, PACKAGE_MANAGER_DEFAULTS,
     )
     resolved_fw = _resolve_choice(
-        "--framework", framework, project_type,
+        "--framework", framework, resolved_project_type,
         FRAMEWORK_CHOICES, FRAMEWORK_DEFAULTS,
     )
     resolved_lint = _resolve_choice(
-        "--linter", linter, project_type,
+        "--linter", linter, resolved_project_type,
         LINTER_CHOICES, LINTER_DEFAULTS,
     )
-    resolved_codegraph = _resolve_choice(
-        "--codegraph", codegraph, project_type,
-        CODEGRAPH_CHOICES, CODEGRAPH_DEFAULTS,
-    )
+    if codegraph is None and recorded.get("codegraph") is not None:
+        resolved_codegraph = recorded["codegraph"]
+        if resolved_codegraph not in CODEGRAPH_MODES:
+            output.error(
+                f".ortusrc records codegraph = {resolved_codegraph!r}, "
+                "which is not recognized",
+                hint=(
+                    f"fix {target / '.ortusrc'} or pass --codegraph; "
+                    f"choices: {', '.join(CODEGRAPH_MODES)}"
+                ),
+            )
+            raise typer.Exit(code=1)
+    else:
+        resolved_codegraph = _resolve_choice(
+            "--codegraph", codegraph, resolved_project_type,
+            CODEGRAPH_CHOICES, CODEGRAPH_DEFAULTS,
+        )
+    resolved_prefix = prefix or recorded.get("prefix") or target.name
+
+    # A deliberate override of a recorded fact must be visible at the
+    # terminal, not only in `git diff`, and before rendering so the operator
+    # sees it even if a later step fails.
+    for key, resolved_value in (
+        ("prefix", resolved_prefix),
+        ("project_type", resolved_project_type),
+        ("backend", run_backend),
+        ("codegraph", resolved_codegraph),
+    ):
+        recorded_value = recorded.get(key)
+        if recorded_value is not None and recorded_value != resolved_value:
+            output.progress(
+                "init", f"re-detected {key}: {recorded_value} -> {resolved_value}"
+            )
+
     # Before the target directory is even created: a missing CLI under
     # `required` must fail while nothing has been written.
     _require_codegraph_cli(resolved_codegraph)
 
-    target = (repo if repo is not None else Path.cwd()).resolve()
     output.progress("init", f"target: {target}")
     target.mkdir(parents=True, exist_ok=True)
 
@@ -404,8 +509,6 @@ def init(
             hint="pass --force to re-render ortus-owned files (.claude/settings.json, .ortusrc, AGENTS.md, .gitignore)",
         )
         raise typer.Exit(code=1)
-
-    resolved_prefix = prefix or target.name
 
     if not already_initialized:
         output.progress("init", f"creating .beads/ workspace (prefix={resolved_prefix})")
@@ -452,13 +555,13 @@ def init(
 
     output.progress(
         "init",
-        f"rendering ortus-owned files (project_type={project_type}, "
+        f"rendering ortus-owned files (project_type={resolved_project_type}, "
         f"package_manager={resolved_pm}, framework={resolved_fw}, linter={resolved_lint}, "
         f"codegraph={resolved_codegraph})",
     )
     ctx = RenderContext(
         prefix=resolved_prefix,
-        project_type=project_type,
+        project_type=resolved_project_type,
         package_manager=resolved_pm,
         framework=resolved_fw,
         linter=resolved_lint,

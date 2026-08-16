@@ -117,6 +117,26 @@ def _load_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
+# The init facts `ortus init` records into a project `.ortusrc` and must
+# preserve on a forced re-init.
+RECORDED_INIT_KEYS: tuple[str, ...] = ("prefix", "project_type", "backend", "codegraph")
+
+
+def read_recorded_facts(repo: Path) -> dict[str, Any]:
+    """Raw recorded init facts from the project `.ortusrc`, without layering.
+
+    Deliberately not `load_config`: defaults and `~/.ortusrc` are preferences,
+    not project facts, and must never be re-recorded into the project file as
+    if the repo had pinned them. Missing file means an empty mapping; malformed
+    TOML propagates for the caller to translate into an operator-facing error.
+    """
+    path = repo / ".ortusrc"
+    if not path.is_file():
+        return {}
+    data = _load_toml(path)
+    return {key: data[key] for key in RECORDED_INIT_KEYS if key in data}
+
+
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
     """Recursively merge TOML tables while replacing scalar leaves."""
     for key, value in overlay.items():

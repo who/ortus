@@ -209,6 +209,127 @@ def test_invalid_codegraph_mode_rejected(tmp_path: Path) -> None:
     assert not (target / ".beads").exists()
 
 
+# --- forced re-init preserves recorded .ortusrc facts -----------------------
+
+
+def test_force_reinit_preserves_recorded_facts(tmp_path: Path) -> None:
+    """Omitted flags resolve to the recorded values, not detection defaults."""
+    target = tmp_path / "500"  # basename deliberately differs from the prefix
+    result = runner.invoke(
+        app,
+        [
+            "init", str(target),
+            "--prefix", "fh",
+            "--project-type", "python",
+            "--backend", "codex",
+            "--codegraph", "auto",
+        ],
+    )
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    after = _ortusrc(target)
+    assert after["prefix"] == "fh"
+    assert after["project_type"] == "python"
+    assert after["backend"] == "codex"
+    assert after["codegraph"] == "auto"
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "re-detected" not in combined
+
+
+def test_force_reinit_explicit_override_prints_change_lines(tmp_path: Path) -> None:
+    """Explicit flags still win, and each changed recorded fact gets a line."""
+    target = tmp_path / "override"
+    result = runner.invoke(
+        app,
+        ["init", str(target), "--prefix", "fh", "--project-type", "python",
+         "--backend", "codex"],
+    )
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    result = runner.invoke(
+        app,
+        ["init", str(target), "--force", "--prefix", "new",
+         "--project-type", "go", "--backend", "all"],
+    )
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "re-detected prefix: fh -> new" in combined
+    assert "re-detected project_type: python -> go" in combined
+    # an explicit `all` pins claude exactly as on a fresh init, but visibly
+    assert "re-detected backend: codex -> claude" in combined
+    after = _ortusrc(target)
+    assert after["prefix"] == "new"
+    assert after["project_type"] == "go"
+    assert after["backend"] == "claude"
+
+
+def test_force_reinit_explicit_flag_equal_to_recorded_is_silent(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "same"
+    assert runner.invoke(
+        app, ["init", str(target), "--prefix", "fh"]
+    ).exit_code == 0
+    result = runner.invoke(app, ["init", str(target), "--force", "--prefix", "fh"])
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "re-detected" not in combined
+
+
+def test_fresh_init_defaults_unchanged(tmp_path: Path) -> None:
+    """No `.ortusrc` means detection defaults exactly as before."""
+    target = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    rc = _ortusrc(target)
+    assert rc["prefix"] == "fresh"
+    assert rc["project_type"] == "polyglot"
+    assert rc["backend"] == "claude"
+    assert rc["codegraph"] == "required"
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "re-detected" not in combined
+
+
+def test_invalid_recorded_project_type_fails_with_hint(tmp_path: Path) -> None:
+    """A recorded value that fails validation errors instead of falling back."""
+    target = tmp_path / "badrec"
+    assert runner.invoke(app, ["init", str(target)]).exit_code == 0
+    rc_path = target / ".ortusrc"
+    rc_path.write_text(
+        rc_path.read_text().replace(
+            'project_type = "polyglot"', 'project_type = "cobol"'
+        )
+    )
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "cobol" in combined
+    assert "--project-type" in combined
+
+
+def test_recorded_backend_all_rejected(tmp_path: Path) -> None:
+    target = tmp_path / "allrec"
+    assert runner.invoke(app, ["init", str(target)]).exit_code == 0
+    rc_path = target / ".ortusrc"
+    rc_path.write_text(
+        rc_path.read_text().replace('backend = "claude"', 'backend = "all"')
+    )
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "init provisioning option" in combined
+
+
+def test_malformed_ortusrc_fails_with_repair_hint(tmp_path: Path) -> None:
+    target = tmp_path / "mangled"
+    assert runner.invoke(app, ["init", str(target)]).exit_code == 0
+    (target / ".ortusrc").write_text("prefix = \n")
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 1
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert "not valid TOML" in combined
+
+
 def test_render_context_carries_new_fields() -> None:
     ctx = RenderContext(
         prefix="x",
