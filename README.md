@@ -68,14 +68,14 @@ ortus grind . --backend codex
 ortus grind . --tasks 5
 ```
 
-**Note:** Ortus is a global CLI you install once and use everywhere. You don't clone this repository into your project — `ortus init` only adds a small set of per-project files (`.beads/`, `AGENTS.md`, `.ortusrc`, `.gitignore`, and the selected backend's config directory) to an existing directory. It is not a Python dependency.
+**Note:** Ortus is a global CLI you install once and use everywhere. You don't clone this repository into your project — `ortus init` only adds a small set of per-project files (`.beads/`, `.ortusrc`, `.gitignore`, managed blocks in `AGENTS.md` and `CLAUDE.md`, and the provisioned backends' config directories) to an existing directory. Host prose outside the Ortus markers in `AGENTS.md` and `CLAUDE.md` is preserved byte-for-byte, and the bundled runtime prompts are never materialized into the repo. It is not a Python dependency.
 
 ## The verbs
 
 | Verb | Purpose |
 |---|---|
-| `ortus init <repo>` | Bootstrap a fresh repo; `--backend claude|codex|grok` selects its default agent |
-| `ortus check <repo>` | Verify bd, selected agent, sandbox, and backend config; strictly read-only |
+| `ortus init <repo>` | Bootstrap a fresh repo; `--backend all|claude|codex|grok` — the default `all` is provisioning-only and pins a concrete run backend in `.ortusrc` |
+| `ortus check <repo>` | Verify bd, the run backend, sandbox, backend config, and managed agent files; WARN rows cover provisioned siblings; strictly read-only |
 | `ortus plan <repo> [<PRD>]` | Decompose a PRD into bd issues, or interview-then-PRD-then-decompose if no PRD path |
 | `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude, Codex, or Grok subprocess |
 | `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
@@ -111,7 +111,9 @@ Required: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. `ortus ini
 
 ## Agent backends
 
-Claude remains the default. Select Codex or Grok at project creation with `ortus init . --backend codex` or `--backend grok`, per run with `--backend`, or through `ORTUS_BACKEND`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default.
+Claude remains the default run backend. `ortus init` defaults to `--backend all`, which is provisioning-only: it writes every backend's config directory and pins `backend = "claude"` in `.ortusrc`. Pass a concrete `ortus init . --backend codex` or `--backend grok` to provision and pin that backend instead — the pinned value is always concrete, and `backend = "all"` is rejected at run time as an init provisioning option, not a run backend. Per run, override with `--backend` or `ORTUS_BACKEND`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default.
+
+Regardless of `--backend`, init writes managed blocks into `AGENTS.md` (`block=agents`) and `CLAUDE.md` (`block=pointer`), fenced by `<!-- BEGIN ortus ... -->` / `<!-- END ortus ... -->` markers. Re-running init is safe: host prose outside the markers is preserved byte-for-byte, a block written by a newer Ortus is left untouched, and `AGENTS.override.md` is never written. `ortus check` is two-tier: a missing, malformed, drifted, or gitignored agent-file block is an error the operator fixes with `ortus init --force`, while a sibling backend that is provisioned but not the run backend earns an informational row — "provisioned but not runnable" gaps render as WARN and never fail the check, because the exit code belongs to the run backend.
 
 Claude and Grok workers run a narrow `/goal` session (`claude -p '/goal …'` or `grok -p`; Grok is headless, not a TUI). The landed Q1 finding is EXPANDS, so Ortus wraps the Grok task in `/goal` the same way as Claude. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`.
 
@@ -153,7 +155,7 @@ Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 ```toml
 prefix = "myproj"       # bd issue-id prefix
 project_type = "python" # python | typescript | go | rust | polyglot
-backend = "claude"      # claude | codex | grok
+backend = "claude"      # claude | codex | grok — always concrete; "all" is init-only and invalid here
 codegraph = "required"  # off | auto | required (default: required)
 codegraph_refresh_blocking = false
 merge_gate = false      # wait for issue-branch checks before fast-forward
@@ -381,7 +383,7 @@ bd dolt push
 git push
 ```
 
-Commit only the paths you own — never `git add -A`. Work is not done until pushed. The generated `AGENTS.md` repeats this in every project.
+Commit only the paths you own — never `git add -A`. Work is not done until pushed. The generated `AGENTS.md` repeats this in every project, inside its managed Ortus block.
 
 ## Development
 

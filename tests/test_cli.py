@@ -49,6 +49,25 @@ def test_readme_documents_prompt_verbs() -> None:
         assert needle in section
 
 
+def test_readme_documents_init_managed_agent_files() -> None:
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "--backend all",
+        "CLAUDE.md",
+        "block=agents",
+        "block=pointer",
+        "AGENTS.override.md",
+        "provisioned but not runnable",
+        "preserved byte-for-byte",
+        "`ortus init --force`",
+    ):
+        assert needle in text
+    backends = text[text.index("## Agent backends") : text.index("## Why ortus")]
+    assert 'pins `backend = "claude"`' in backends
+    config = text[text.index("## Configuration") : text.index("## Runtime prompts")]
+    assert '"all" is init-only and invalid here' in config
+
+
 def test_readme_lists_grok_backend() -> None:
     text = README.read_text(encoding="utf-8")
     start = text.index("## Agent backends")
