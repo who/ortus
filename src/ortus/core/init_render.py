@@ -16,18 +16,19 @@ from typing import Any, Iterable
 from jinja2 import Environment, StrictUndefined
 
 from ortus import __version__ as ORTUS_VERSION
+from ortus.core.agent_files import BlockOutcome, apply_hash_block
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 
 
 TEMPLATE_PACKAGE = "ortus.templates"
 
-# `AGENTS.md` and `CLAUDE.md` are deliberately absent: they belong to the host
-# repo and are written as managed blocks by ortus.core.agent_files, never as
-# whole-file renders that would overwrite the repo's own instructions.
+# `AGENTS.md`, `CLAUDE.md`, and `.gitignore` are deliberately absent: they
+# belong to the host repo and are written as managed blocks — the markdown
+# files by ortus.core.agent_files, `.gitignore` by `merge_gitignore` below —
+# never as whole-file renders that would overwrite the repo's own content.
 BUNDLED_TEMPLATES: tuple[str, ...] = (
     ".claude/settings.json",
     ".ortusrc",
-    ".gitignore",
 )
 
 BACKEND_TEMPLATES: dict[str, str] = {
@@ -168,3 +169,38 @@ def list_bundled(backend: str = "claude") -> list[str]:
         BACKEND_TEMPLATES[backend] if name == ".claude/settings.json" else name
         for name in BUNDLED_TEMPLATES
     ]
+
+
+# `.gitignore` is the third host-owned file. Ortus owns only a section fenced
+# by hash-comment markers (gitignore files cannot carry the HTML comments the
+# markdown blocks use); every host line outside the fence survives re-init
+# byte-for-byte. Bump the schema when the section's meaning changes.
+GITIGNORE_BLOCK = "gitignore"
+GITIGNORE_SCHEMA = 1
+
+
+def render_gitignore_section(ctx: RenderContext) -> str:
+    """The ortus-owned `.gitignore` section, markers included."""
+    begin = (
+        f"# BEGIN ortus block={GITIGNORE_BLOCK} schema={GITIGNORE_SCHEMA} "
+        f"generated-by=ortus@{ctx.ortus_version}"
+    )
+    end = f"# END ortus block={GITIGNORE_BLOCK}"
+    body = render_template(".gitignore", ctx).strip()
+    return f"{begin}\n{body}\n{end}"
+
+
+def merge_gitignore(target: Path, ctx: RenderContext) -> BlockOutcome:
+    """Splice the ortus section into `target/.gitignore`.
+
+    Absent file: created holding just the section. Marked file: only the
+    fenced region is rewritten. Pre-marker file: the section is appended and
+    no existing line is deleted — init cannot tell a stale ortus render from
+    a host's own choice of the same pattern, so it never removes either.
+    """
+    return apply_hash_block(
+        target / ".gitignore",
+        GITIGNORE_BLOCK,
+        render_gitignore_section(ctx),
+        schema=GITIGNORE_SCHEMA,
+    )

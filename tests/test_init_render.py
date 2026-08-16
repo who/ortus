@@ -29,6 +29,7 @@ from ortus.core.init_render import (
     BUNDLED_TEMPLATES,
     RenderContext,
     list_bundled,
+    merge_gitignore,
     render_all,
     render_template,
 )
@@ -46,7 +47,8 @@ def test_every_bundled_template_ships_in_the_package() -> None:
     available = {p.name for p in pkg.iterdir() if p.is_file()}
     available |= {f"{p.name}/{c.name}" for p in pkg.iterdir() if p.is_dir() for c in p.iterdir()}
     # Every template name should map to a .jinja file in package data.
-    for name in (*BUNDLED_TEMPLATES, *BACKEND_TEMPLATES.values()):
+    # `.gitignore` left BUNDLED_TEMPLATES for the marker merge but still ships.
+    for name in (*BUNDLED_TEMPLATES, *BACKEND_TEMPLATES.values(), ".gitignore"):
         jinja_name = f"{name}.jinja"
         assert (
             jinja_name in available or jinja_name.replace("/", "/") in available
@@ -177,6 +179,91 @@ def test_rendered_gitignore_never_hides_the_managed_agent_files(tmp_path: Path) 
     )
     for name in ("AGENTS.md", "CLAUDE.md"):
         assert gitignore_match(tmp_path, name) is None
+
+
+# --- marker-managed .gitignore ----------------------------------------------
+#
+# `.gitignore` is host-owned like AGENTS.md: ortus owns only the section
+# between the hash-comment markers, and every host line outside them must
+# survive a re-init byte-for-byte.
+
+
+def test_merge_gitignore_creates_the_marked_file(tmp_path: Path) -> None:
+    ctx = RenderContext(prefix="acme")
+    assert merge_gitignore(tmp_path, ctx) is BlockOutcome.CREATED
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert text.startswith("# BEGIN ortus block=gitignore schema=1 generated-by=ortus@")
+    assert "# END ortus block=gitignore" in text
+    assert ".codegraph/" in text
+
+
+def test_merge_gitignore_is_a_no_op_when_current(tmp_path: Path) -> None:
+    ctx = RenderContext(prefix="acme")
+    merge_gitignore(tmp_path, ctx)
+    before = (tmp_path / ".gitignore").read_bytes()
+    assert merge_gitignore(tmp_path, ctx) is BlockOutcome.UNCHANGED
+    assert (tmp_path / ".gitignore").read_bytes() == before
+
+
+def test_merge_gitignore_preserves_host_lines_and_refreshes_section(
+    tmp_path: Path,
+) -> None:
+    ctx = RenderContext(prefix="acme")
+    merge_gitignore(tmp_path, ctx)
+    path = tmp_path / ".gitignore"
+    section = path.read_text(encoding="utf-8")
+    host_top = "# ML artifacts\nmodels/\n.pnpm-store/\n\n"
+    host_bottom = "\ntest-results/\nplaywright-report/\n"
+    stale = section.replace(".codegraph/", ".retired-entry/")
+    path.write_text(host_top + stale + host_bottom, encoding="utf-8")
+    assert merge_gitignore(tmp_path, ctx) is BlockOutcome.UPDATED
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith(host_top)
+    assert text.endswith(host_bottom)
+    assert ".retired-entry/" not in text
+    assert ".codegraph/" in text
+
+
+def test_merge_gitignore_appends_to_a_premarker_file(tmp_path: Path) -> None:
+    """A pre-marker `.gitignore` keeps every line and gains the section."""
+    path = tmp_path / ".gitignore"
+    host = "node_modules/\n*.tsbuildinfo\n"
+    path.write_text(host, encoding="utf-8")
+    assert merge_gitignore(tmp_path, RenderContext(prefix="acme")) is BlockOutcome.APPENDED
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith(host)
+    assert "# BEGIN ortus block=gitignore" in text
+    # markers are comments, so the host's own rules still apply
+    assert gitignore_match(tmp_path, "node_modules") is not None
+
+
+def test_merge_gitignore_fills_an_empty_file(tmp_path: Path) -> None:
+    path = tmp_path / ".gitignore"
+    path.write_text("", encoding="utf-8")
+    assert merge_gitignore(tmp_path, RenderContext(prefix="acme")) is BlockOutcome.CREATED
+    assert ".codegraph/" in path.read_text(encoding="utf-8")
+
+
+def test_merge_gitignore_leaves_a_newer_schema_untouched(tmp_path: Path) -> None:
+    path = tmp_path / ".gitignore"
+    newer = (
+        "# BEGIN ortus block=gitignore schema=99 generated-by=ortus@9.9.9\n"
+        "future/\n"
+        "# END ortus block=gitignore\n"
+    )
+    path.write_text(newer, encoding="utf-8")
+    assert merge_gitignore(tmp_path, RenderContext(prefix="acme")) is BlockOutcome.AHEAD
+    assert path.read_text(encoding="utf-8") == newer
+
+
+def test_merge_gitignore_refuses_a_dangling_begin_marker(tmp_path: Path) -> None:
+    path = tmp_path / ".gitignore"
+    mangled = "# BEGIN ortus block=gitignore schema=1\nrules/\n"
+    path.write_text(mangled, encoding="utf-8")
+    with pytest.raises(agent_files.AgentFileError):
+        merge_gitignore(tmp_path, RenderContext(prefix="acme"))
+    # never rewrite around a broken fence
+    assert path.read_text(encoding="utf-8") == mangled
 
 
 def test_codex_render_uses_codex_config_and_no_claude_dir(tmp_path: Path) -> None:

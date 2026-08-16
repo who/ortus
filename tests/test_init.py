@@ -286,6 +286,42 @@ def test_init_force_rerenders_templates(tmp_path: Path) -> None:
     assert "sandbox" in data, "settings.json should be re-rendered"
 
 
+def test_init_force_preserves_host_gitignore_lines(tmp_path: Path) -> None:
+    """Re-init only rewrites between the markers; host entries survive."""
+    target = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    gitignore = target / ".gitignore"
+    # bd init contributes its own entries above the ortus section, so the
+    # whole first-init file — bd lines included — counts as host content.
+    before = gitignore.read_text(encoding="utf-8")
+    assert "# BEGIN ortus block=gitignore" in before
+    host_top = "# ML artifacts\nmodels/\n.pnpm-store/\n\n"
+    host_bottom = "\ntest-results/\nplaywright-report/\n"
+    gitignore.write_text(host_top + before + host_bottom, encoding="utf-8")
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    text = gitignore.read_text(encoding="utf-8")
+    assert text == host_top + before + host_bottom
+    assert ".gitignore ortus section" in (result.stdout + result.stderr)
+
+
+def test_init_force_adopts_a_premarker_gitignore(tmp_path: Path) -> None:
+    """A `.gitignore` written before the markers existed loses nothing."""
+    target = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    gitignore = target / ".gitignore"
+    host = "# host rules\n.beads/*.flock\n*.tsbuildinfo\n"
+    gitignore.write_text(host, encoding="utf-8")
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    text = gitignore.read_text(encoding="utf-8")
+    assert text.startswith(host)
+    assert "# BEGIN ortus block=gitignore" in text
+    assert ".codegraph/" in text
+
+
 def test_prefix_is_respected(tmp_path: Path) -> None:
     """Acceptance #5: --prefix foo causes bd issues to carry foo- prefix."""
     target = tmp_path / "fresh"

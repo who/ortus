@@ -35,6 +35,7 @@ from ortus.core.init_render import (
     PACKAGE_MANAGER_DEFAULTS,
     PROJECT_TYPES,
     RenderContext,
+    merge_gitignore,
     render_all,
 )
 from ortus.core.readiness import (
@@ -549,8 +550,8 @@ def init(
     # config behind.
     _bootstrap_codegraph(target, resolved_codegraph)
 
-    # Read the repo's own ignore rules before the bundled .gitignore replaces
-    # them, so the refusal reflects what the operator wrote.
+    # Read the repo's own ignore rules before any rendering touches
+    # `.gitignore`, so the refusal reflects what the operator wrote.
     _require_tracked_agent_files(target)
 
     output.progress(
@@ -572,11 +573,28 @@ def init(
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
 
+    try:
+        gitignore_outcome = merge_gitignore(target, ctx)
+    except AgentFileError as exc:
+        output.error(
+            f".gitignore has a malformed ortus block: {exc}",
+            hint="repair the BEGIN/END markers by hand, then re-run ortus init",
+        )
+        raise typer.Exit(code=1)
+    if gitignore_outcome is BlockOutcome.AHEAD:
+        output.warn(".gitignore carries a section from a newer ortus; left untouched")
+    elif gitignore_outcome is BlockOutcome.UNCHANGED:
+        output.success(".gitignore ortus section already current")
+    else:
+        output.success(f"{gitignore_outcome.value} .gitignore ortus section")
+
     output.progress("init", "applying managed AGENTS.md and CLAUDE.md blocks")
     _write_agent_files(target, resolved_codegraph)
 
     if provision_all:
         _summarize_backends(run_backend)
 
-    output.progress("init", f"done ({len(written)} files, prefix={resolved_prefix})")
+    output.progress(
+        "init", f"done ({len(written) + 1} files, prefix={resolved_prefix})"
+    )
     output.success(f"ortus init complete: {target}")

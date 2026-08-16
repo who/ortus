@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from enum import Enum
 from importlib.resources import files
 from pathlib import Path
+from typing import Callable
 
 from ortus import __version__ as ORTUS_VERSION
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
@@ -111,6 +112,16 @@ _END_RE = re.compile(
     r"^[ \t]*<!--[ \t]*END ortus\b(?P<attrs>[^>]*?)-->[ \t]*$", re.MULTILINE
 )
 _ATTR_RE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*)=(\S+)")
+
+# Hash-comment twins of the markers above, for files that cannot carry HTML
+# comments (`.gitignore`). Same attribute grammar; `\r?` keeps a CRLF host
+# file parseable without normalizing any byte outside the markers.
+_HASH_BEGIN_RE = re.compile(
+    r"^[ \t]*#[ \t]*BEGIN ortus\b(?P<attrs>[^\r\n]*?)\r?$", re.MULTILINE
+)
+_HASH_END_RE = re.compile(
+    r"^[ \t]*#[ \t]*END ortus\b(?P<attrs>[^\r\n]*?)\r?$", re.MULTILINE
+)
 
 
 @dataclass(frozen=True)
@@ -212,9 +223,25 @@ def parse_blocks(text: str, *, path: Path | None = None) -> dict[str, ParsedBloc
     block ends is how host prose gets eaten.
     """
 
+    return _parse_blocks(text, _BEGIN_RE, _END_RE, path=path)
+
+
+def parse_hash_blocks(text: str, *, path: Path | None = None) -> dict[str, ParsedBlock]:
+    """`parse_blocks` for hash-comment fences (`# BEGIN ortus ...`)."""
+
+    return _parse_blocks(text, _HASH_BEGIN_RE, _HASH_END_RE, path=path)
+
+
+def _parse_blocks(
+    text: str,
+    begin_re: re.Pattern[str],
+    end_re: re.Pattern[str],
+    *,
+    path: Path | None,
+) -> dict[str, ParsedBlock]:
     markers = sorted(
-        [("begin", m) for m in _BEGIN_RE.finditer(text)]
-        + [("end", m) for m in _END_RE.finditer(text)],
+        [("begin", m) for m in begin_re.finditer(text)]
+        + [("end", m) for m in end_re.finditer(text)],
         key=lambda item: item[1].start(),
     )
     blocks: dict[str, ParsedBlock] = {}
@@ -310,12 +337,35 @@ def apply_block(path: Path, block: str, rendered: str) -> BlockOutcome:
     body over it would silently downgrade the repo's contract.
     """
 
+    return _apply_block(
+        path, block, rendered, parse=parse_blocks, schema=BLOCK_SCHEMAS[block]
+    )
+
+
+def apply_hash_block(path: Path, block: str, rendered: str, *, schema: int) -> BlockOutcome:
+    """`apply_block` for hash-comment fences.
+
+    `schema` is passed in because hash blocks live outside BLOCK_SCHEMAS —
+    that registry doubles as the drift gate over the markdown block templates.
+    """
+
+    return _apply_block(path, block, rendered, parse=parse_hash_blocks, schema=schema)
+
+
+def _apply_block(
+    path: Path,
+    block: str,
+    rendered: str,
+    *,
+    parse: Callable[..., dict[str, ParsedBlock]],
+    schema: int,
+) -> BlockOutcome:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(rendered + "\n", encoding="utf-8")
         return BlockOutcome.CREATED
     text = path.read_text(encoding="utf-8")
-    parsed = parse_blocks(text, path=path).get(block)
+    parsed = parse(text, path=path).get(block)
     if parsed is None:
         if text.strip():
             prefix = text if text.endswith("\n") else text + "\n"
@@ -325,7 +375,7 @@ def apply_block(path: Path, block: str, rendered: str) -> BlockOutcome:
             prefix = ""
         path.write_text(prefix + rendered + "\n", encoding="utf-8")
         return BlockOutcome.CREATED if not text.strip() else BlockOutcome.APPENDED
-    if parsed.schema > BLOCK_SCHEMAS[block]:
+    if parsed.schema > schema:
         return BlockOutcome.AHEAD
     if parsed.text == rendered:
         return BlockOutcome.UNCHANGED
