@@ -132,8 +132,9 @@ app(['grind', {str(repo)!r}, '--iterations', '1', '--idle-sleep', '0',
         f"  leaked lines: {leaked_err!r}\n"
         f"  full stderr: {proc.stderr!r}"
     )
-    assert 'claimed "leak test"' in proc.stderr, (
-        "the claim milestone (issue title + id) must reach the console\n"
+    squashed_err = " ".join(proc.stderr.split())
+    assert 'readiness-passing head is "leak test"' in squashed_err, (
+        "the selection milestone (issue title + id) must reach the console\n"
         f"driver stderr: {proc.stderr!r}"
     )
 

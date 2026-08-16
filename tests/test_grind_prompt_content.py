@@ -62,6 +62,26 @@ def test_worker_prompt_done_bar_is_close_and_sync() -> None:
         assert "worker instructions, not extra achievement criteria" in lowered
 
 
+def test_worker_prompt_excludes_human_label() -> None:
+    """AC-2 (ortus-ts3z): the goal loop's selection step tells the worker to
+    skip issues labeled human when claiming from `bd ready` — bd does not
+    exclude labels by default, so the prompt rule is the worker-side half of
+    the skip-time labeling gate."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    body = bundled_prompt_text("goal-prompt")
+    select_step = next(
+        line for line in body.splitlines() if line.startswith("2.")
+    )
+    assert "bd ready --json" in select_step
+    assert "labeled `human`" in select_step
+    # The exclusion precedes the claim command, so a worker reading in order
+    # filters before it claims.
+    assert select_step.index("labeled `human`") < select_step.index(
+        "--status=in_progress"
+    )
+
+
 def test_worker_prompt_one_issue_per_window() -> None:
     """AC-2: one issue per invocation; a second issue is forbidden."""
     body = _composed_implement_prompt()

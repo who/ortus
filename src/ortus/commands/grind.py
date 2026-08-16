@@ -667,9 +667,12 @@ def _flag_unready_for_human(
 ) -> None:
     """Label each unready leaf human and comment the readiness diagnostic.
 
-    Used only when the ready queue holds nothing implementable. A failed
-    label add still warns and continues so every remaining id is attempted;
-    grind never falls back to a repair worker from this path.
+    Runs at skip time, the moment the readiness guard rejects a leaf —
+    even when a sibling passes and gets selected — so the label (not the
+    goal prompt alone) keeps the worker's own `bd ready` from claiming a
+    spec-free issue. A failed label add still warns and continues so every
+    remaining id is attempted; grind never falls back to a repair worker
+    from this path.
     """
 
     for report in reports:
@@ -678,11 +681,12 @@ def _flag_unready_for_human(
             bd.add_label(report.issue_id, "human")
         except Exception as exc:
             write_log(
-                f"readiness: could not label {report.issue_id} human ({exc})"
+                f"readiness: could not label {report.issue_id} human ({exc}); "
+                "the worker may still claim it this iteration"
             )
             output.warn(
                 f"could not label {report.issue_id} human ({exc}); "
-                "leaving it open and stopping"
+                "it stays claimable this iteration"
             )
         try:
             bd.add_comment(
@@ -1161,6 +1165,13 @@ def grind(
                 # can claim from it. Must precede the `before` snapshot.
                 _rollover_exhausted_epics(bd, write_log)
                 before = _snapshot(bd)
+                # Closed ids are captured so post-iteration attribution can
+                # name a worker that claimed AND closed within one window —
+                # the in_progress diff is empty there and the snapshot's
+                # closed count alone cannot say which issue landed.
+                before_closed_ids: set[str] = (
+                    bd.closed_ids() if harness_select else set()
+                )
                 # Until a claim materializes a worker workspace, every phase
                 # operates on the primary repository (legacy --condition mode
                 # never leaves it).
@@ -1258,17 +1269,22 @@ def grind(
                         unready_titles[report.issue_id] = title
                         diagnostic = report.diagnostic()
                         write_log(
-                            f"readiness skip (left open for planning/human repair): "
+                            f"readiness skip (labeled human for repair): "
                             f"{diagnostic}"
                         )
+                        # Label at skip time, not only when nothing is
+                        # claimable: the worker selects from its own
+                        # `bd ready`, and only the label keeps a skipped
+                        # leaf out of that view (ortus-ts3z).
+                        _flag_unready_for_human(bd, [report], write_log)
                         key = (report.issue_id, report.summary())
                         if key in warned_unready:
                             return
                         warned_unready.add(key)
                         output.warn(
                             f"{_unready_skip_line(title, report)}. It stays "
-                            "open and unclaimed. Run ortus plan or edit the "
-                            "work spec; if grind labels it human, repair alone "
+                            "open, labeled human, and out of the queue. Run "
+                            "ortus plan or edit the work spec; repair alone "
                             "does not re-queue it — also run: bd label remove "
                             f"{report.issue_id} human."
                         )
@@ -1284,17 +1300,12 @@ def grind(
                             ready_packets, on_unready=report_unready
                         )
 
-                    # Nothing claimable, but the queue is NOT drained and the
-                    # only thing between the loop and real work is work specs that
-                    # fail readiness schema v1. Grind flags those leaves human
-                    # and takes the no-ready-issue exit. A queue that also
-                    # holds a ready task never reaches here; epics never reach
-                    # here either, because select_ready_issue skips them without
-                    # reporting them unready. A leftover in_progress resume
-                    # never populates ``unready``.
-                    if target_issue is None and unready:
-                        _flag_unready_for_human(bd, unready, write_log)
-
+                    # Every unready leaf was already labeled human at skip
+                    # time inside report_unready. Epics never populate
+                    # ``unready`` (select_ready_issue skips them without
+                    # reporting), and a leftover in_progress resume never
+                    # does either. What remains is the no-ready-issue exit
+                    # when nothing at all was claimable.
                     if target_issue is None:
                         # Queue is non-empty (not drained) but nothing is ready —
                         # everything left is blocked or human-flagged. We hold the
@@ -1331,7 +1342,8 @@ def grind(
                     # f2he.2: grind does not claim a fresh ready issue. The
                     # worker claims via goal-prompt. A leftover in_progress
                     # is already claimed; spawn a new process for it.
-                    if resume_issue_id is not None:
+                    resuming = resume_issue_id is not None
+                    if resuming:
                         write_log(
                             f"iter prep: continuing leftover claim {issue_id}"
                         )
@@ -1387,12 +1399,24 @@ def grind(
                         f"({resolved_backend})"
                     )
                     # output.progress escapes markup itself, so a bracketed
-                    # title survives the console without pre-escaping.
-                    output.progress(
-                        "grind",
-                        f'claimed "{target_issue.get("title") or "untitled"}" '
-                        f"({issue_id}) — implementing",
-                    )
+                    # title survives the console without pre-escaping. Grind
+                    # never claims here, so the console predicts rather than
+                    # asserts; the id the worker actually claimed is read
+                    # back from bd after the iteration (ortus-ts3z).
+                    iter_title = target_issue.get("title") or "untitled"
+                    if resuming:
+                        output.progress(
+                            "grind",
+                            f'continuing leftover claim "{iter_title}" '
+                            f"({issue_id})",
+                        )
+                    else:
+                        output.progress(
+                            "grind",
+                            "worker will claim from the ready queue — "
+                            f'readiness-passing head is "{iter_title}" '
+                            f"({issue_id})",
+                        )
                 else:
                     iteration_prompt = _legacy_prompt(condition, resolved_backend)
 
@@ -1535,12 +1559,36 @@ def grind(
                 # in_progress claim.
                 closed_delta = 1
                 if harness_select:
+                    # Attribution reads bd, not grind's prediction: the ids
+                    # that turned in_progress during the window are the
+                    # worker's actual claim. A claim closed within the same
+                    # window leaves that diff empty, so the closed-id delta
+                    # names it instead (ortus-ts3z).
+                    after_state = _snapshot(bd)
+                    claimed_ids = sorted(
+                        after_state.in_progress_ids - before.in_progress_ids
+                    )
+                    if not claimed_ids and after_state.closed > before.closed:
+                        claimed_ids = sorted(bd.closed_ids() - before_closed_ids)
+                    if claimed_ids:
+                        attribution = ", ".join(claimed_ids)
+                        write_log(
+                            f"iter {iters_run}: worker claimed {attribution} "
+                            "(read back from bd state)"
+                        )
+                        output.progress("grind", f"worker claimed {attribution}")
+                        judged_id = claimed_ids[0]
+                    else:
+                        write_log(
+                            f"iter {iters_run}: no worker claim observed in bd; "
+                            f"judging the readiness-passing head {issue_id}"
+                        )
+                        judged_id = issue_id
                     try:
-                        judged = bd.show(issue_id)
+                        judged = bd.show(judged_id)
                     except Exception:
                         judged = {}
                     judged_status = str(judged.get("status") or "open")
-                    judged_id = issue_id
                 else:
                     after_state = _snapshot(bd)
                     iter_delta = compute_delta(before, after_state)

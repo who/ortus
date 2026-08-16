@@ -184,6 +184,18 @@ def test_in_progress_ids_honors_exclude_labels(bd_workspace: Path) -> None:
     assert client.in_progress_ids(exclude_labels=("human",)) == {plain}
 
 
+def test_closed_ids_names_only_closed_issues(bd_workspace: Path) -> None:
+    """closed_ids returns exactly the closed set, so grind's attribution
+    diff can name a claim that closed within one worker window."""
+    client = BdClient(bd_workspace)
+    landed = client.create(title="landed", issue_type="task", priority=2)
+    still_open = client.create(title="still open", issue_type="task", priority=2)
+    client.close(landed)
+    ids = client.closed_ids()
+    assert landed in ids
+    assert still_open not in ids
+
+
 def test_status_tracks_the_lifecycle_and_is_empty_when_unreadable(
     bd_workspace: Path,
 ) -> None:

@@ -433,3 +433,22 @@ class BdClient:
         if not isinstance(data, list):
             return set()
         return {item["id"] for item in data if isinstance(item, dict) and "id" in item}
+
+    def closed_ids(self) -> set[str]:
+        """`bd list --status closed --limit 0 --json` → set of issue ids.
+
+        The grind orchestrator diffs this across a worker iteration to name
+        an issue the worker claimed and closed within one window — there the
+        in_progress diff is empty and the snapshot's closed count alone
+        cannot say which issue landed. ``--limit 0`` lifts bd's default list
+        cap so a long-lived repository's older closes can't push the fresh
+        one out of the diff.
+        """
+        args = ["list", "--status", "closed", "--limit", "0", "--json"]
+        try:
+            _, data = self._run(*args, parse_json=True)
+        except BdError:
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {item["id"] for item in data if isinstance(item, dict) and "id" in item}

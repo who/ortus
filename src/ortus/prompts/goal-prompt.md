@@ -7,7 +7,7 @@ Read `AGENTS.md` first. One context window, one issue, then exit. Do not pick a 
    - `git status --porcelain` — inherited dirty paths.
    Do not `bd show`, `bd show --long`, or `bd comments` in this step. After you pick an id in step 2, `bd show <id> --json` is the work spec and `bd comments <id> --json` is that ticket's thread.
 
-2. **Continue or select.** If any issue is `in_progress`, continue that id. If more than one is `in_progress`, flag human, comment PLAN-GAP, and stop. Else run `bd ready --json`. If empty, exit with no sentinel. Claim the first non-epic issue with `bd update <id> --status=in_progress`. Then `bd show <id> --json` — that packet is the work spec.
+2. **Continue or select.** If any issue is `in_progress`, continue that id. If more than one is `in_progress`, flag human, comment PLAN-GAP, and stop. Else run `bd ready --json`. If empty, exit with no sentinel. Skip issues labeled `human` — they await operator repair. Claim the first remaining non-epic issue with `bd update <id> --status=in_progress`. Then `bd show <id> --json` — that packet is the work spec.
 
 3. **Investigate and implement** only that issue. Use CodeGraph when the injected CodeGraph contract requires it. Run the issue's criterion-check commands; follow `docs/testing.md` only if that file exists. Fix failures. File leftover work as new beads; do not keep it on this id.
 

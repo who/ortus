@@ -364,10 +364,13 @@ def test_grind_unready_label_failure_warns_and_stops(
 
 
 @pytest.mark.slow
-def test_grind_ready_leaf_does_not_flag_unready(
+def test_grind_unready_flags_human_at_skip_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ready leaf is claimed; sibling unready leaves are not flagged this iteration."""
+    """AC-1 (ortus-ts3z): a readiness-failing leaf is labeled human with its
+    diagnostic comment the moment it is skipped, even when a sibling passes
+    readiness and gets selected — the worker's own `bd ready` must never
+    surface it as claimable."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     repo = _bd_repo(tmp_path, "readyplus")
@@ -389,11 +392,95 @@ def test_grind_ready_leaf_does_not_flag_unready(
     )
 
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert recorded.calls, "the ready leaf must be handed to a worker"
+    assert recorded.calls, "the ready leaf must still be handed to a worker"
     unready = _issue(repo, unready_id)
     assert unready["status"] == "open"
-    assert "human" not in (unready.get("labels") or [])
+    assert "human" in (unready.get("labels") or [])
+    comments = _comments_blob(repo, unready_id)
+    assert "missing, empty, or placeholder section" in comments
+    assert f"bd label remove {unready_id} human" in comments
     assert _issue(repo, ready_id)["id"] == ready_id
+
+
+@pytest.mark.slow
+def test_grind_reports_actual_worker_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 (ortus-ts3z): no pre-spawn `claimed` assertion; after the
+    iteration the console names the id the worker actually claimed, read
+    back from bd rather than predicted before the spawn."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "attrib")
+    issue_id = _create_ready_issue(repo, "attributed leaf", priority="1")
+
+    class _ClaimOnlyRunner:
+        extra_env: dict[str, str] = {}
+
+        def run(self, prompt: str, **kwargs: object) -> int:
+            subprocess.run(
+                ["bd", "update", issue_id, "--status=in_progress"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            return 0
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: _ClaimOnlyRunner())
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    assert f'claimed "attributed leaf" ({issue_id})' not in console
+    assert "— implementing" not in console
+    assert "worker will claim from the ready queue" in console
+    assert f"worker claimed {issue_id}" in console
+    log_text = _grind_log(repo)
+    assert f"worker claimed {issue_id} (read back from bd state)" in log_text
+
+
+@pytest.mark.slow
+def test_grind_reports_actual_worker_claim_when_closed_in_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 (ortus-ts3z): a claim closed within the same window leaves the
+    in_progress diff empty; attribution falls back to the closed-id delta."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "attrib-closed")
+    issue_id = _create_ready_issue(repo, "landed leaf", priority="1")
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+    )
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--tasks", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    console = _squashed_console(result)
+    assert f"worker claimed {issue_id}" in console
+    assert f"closed {issue_id}" in console
+    log_text = _grind_log(repo)
+    assert f"worker claimed {issue_id} (read back from bd state)" in log_text
 
 
 @pytest.mark.slow
