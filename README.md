@@ -83,6 +83,7 @@ ortus grind . --tasks 5
 | `ortus human <repo>` | Render `HUMAN-TODO.md` from bd issues flagged for a human decision |
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
 | `ortus spec` | Print the readiness schema issue-authoring contract |
+| `ortus prompt` | `list`, `show`, or `eject` the bundled runtime prompts (see Runtime prompts) |
 | `ortus unlock <repo>` | Clear a stuck grind flock; optionally revert in-progress claims |
 
 Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed version.
@@ -314,7 +315,36 @@ install the CLI and run `codegraph init`, or pin the previous behavior
 explicitly with `codegraph = "auto"` (or `codegraph = "off"`) in `.ortusrc`.
 Projects that already pin an explicit value are unaffected.
 
-Per-repo or user-wide prompt overrides live at `<repo>/.ortus/prompts/<name>.md` or `~/.ortus/prompts/<name>.md`; the bundled defaults under `src/ortus/prompts/` are the fallback.
+## Runtime prompts
+
+The prompts that drive agent phases (`goal`, `interview`, `plan`) ship inside the CLI. `ortus init` never copies them into your repo, and the generated `AGENTS.md` does not point at them — the `prompt` verb is the access and override surface:
+
+```bash
+ortus prompt list [<repo>]          # each prompt: name, winning source, phase, description
+ortus prompt show <name> [<repo>]   # resolved text on stdout; header on stderr
+ortus prompt show <name> --origin   # print only where the prompt resolves from
+ortus prompt eject <name> <repo>    # copy the bundled default to <repo>/.ortus/prompts/
+ortus prompt eject <name> --user    # ... or to ~/.ortus/prompts/
+```
+
+Resolution is first-hit-wins across three layers:
+
+| Layer | Path |
+|---|---|
+| repo override | `<repo>/.ortus/prompts/<name>.md` |
+| user override | `~/.ortus/prompts/<name>.md` |
+| bundled default | installed with the CLI |
+
+`show` keeps stdout pipe-clean, so `ortus prompt show goal` can feed another
+process directly. `eject` copies the bundled default — never a currently
+winning override — under a provenance stamp, requires an explicit destination
+(a repo argument or `--user`, no cwd default), and refuses to overwrite an
+existing override unless you pass `--force`. There is no `eject --all`; eject
+the one prompt you intend to own. `ortus check` reports overrides
+informationally — it warns when an override has no provenance stamp, when its
+stamp shows the bundled default has moved since the eject, or when a file in
+`.ortus/prompts/` is not a bundled prompt filename and is never loaded — but an
+override never fails the check.
 
 ## Glossary
 

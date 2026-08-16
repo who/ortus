@@ -31,6 +31,24 @@ def test_grind_help_lists_grok() -> None:
     assert "grok" in result.stdout
 
 
+def test_readme_documents_prompt_verbs() -> None:
+    text = README.read_text(encoding="utf-8")
+    verbs = text[text.index("## The verbs") : text.index("## Prerequisites")]
+    assert "ortus prompt" in verbs
+    section = text[text.index("## Runtime prompts") : text.index("## Glossary")]
+    for needle in (
+        "ortus prompt list",
+        "ortus prompt show",
+        "ortus prompt eject",
+        "--origin",
+        "--user",
+        "--force",
+        "`<repo>/.ortus/prompts/<name>.md`",
+        "`~/.ortus/prompts/<name>.md`",
+    ):
+        assert needle in section
+
+
 def test_readme_lists_grok_backend() -> None:
     text = README.read_text(encoding="utf-8")
     start = text.index("## Agent backends")
