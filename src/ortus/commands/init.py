@@ -11,6 +11,14 @@ import typer
 
 from ortus.core import output
 from ortus.core.agent import BACKENDS
+from ortus.core.agent_files import (
+    MANAGED_FILES,
+    AgentFileError,
+    BlockOutcome,
+    apply_block,
+    gitignore_match,
+    render_block,
+)
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 from ortus.core.init_render import (
@@ -69,16 +77,71 @@ def _bd_remember(repo: Path) -> None:
 
 
 def _remove_bd_claude_scaffold(repo: Path) -> None:
-    """Remove Claude-only files that ``bd init`` creates in a new non-Claude repo."""
+    """Remove the Claude *config dir* ``bd init`` creates in a non-Claude repo.
+
+    `CLAUDE.md` is pointedly left alone. It is repo instructions, not backend
+    configuration: Ortus writes its pointer block into it for every backend,
+    and a repo that has taught Claude something already keeps that prose even
+    when it grinds with Codex or Grok.
+    """
     settings = repo / ".claude" / "settings.json"
     if settings.is_file():
         settings.unlink()
     claude_dir = repo / ".claude"
     if claude_dir.is_dir() and not any(claude_dir.iterdir()):
         claude_dir.rmdir()
-    claude_md = repo / "CLAUDE.md"
-    if claude_md.is_file():
-        claude_md.unlink()
+
+
+def _require_tracked_agent_files(repo: Path) -> None:
+    """Refuse to manage an agent file the repo has told git to forget.
+
+    A gitignored `AGENTS.md` is a repo that treats agent instructions as
+    scratch. Ortus would then write a block every collaborator's clone lacks,
+    so the honest move is to fail while nothing has been written and let the
+    operator decide which of the two conventions wins.
+    """
+    for managed in MANAGED_FILES:
+        pattern = gitignore_match(repo, managed.filename)
+        if pattern is None:
+            continue
+        output.error(
+            f"{managed.filename} is gitignored by the pattern {pattern!r}",
+            hint=(
+                f"ortus manages {managed.filename} as tracked source; remove the "
+                "pattern (or negate it with "
+                f"'!{managed.filename}') and re-run"
+            ),
+        )
+        raise typer.Exit(code=1)
+
+
+def _write_agent_files(repo: Path, codegraph: str) -> None:
+    """Apply the managed block to `AGENTS.md` and `CLAUDE.md`.
+
+    Every backend gets both files: the block is about how work is tracked and
+    closed in this repo, which does not change because the agent driving it
+    does.
+    """
+    for managed in MANAGED_FILES:
+        path = repo / managed.filename
+        try:
+            outcome = apply_block(
+                path, managed.block, render_block(managed.block, codegraph=codegraph)
+            )
+        except AgentFileError as exc:
+            output.error(
+                f"{managed.filename} has a malformed ortus block: {exc}",
+                hint="repair the BEGIN/END markers by hand, then re-run ortus init",
+            )
+            raise typer.Exit(code=1)
+        if outcome is BlockOutcome.AHEAD:
+            output.warn(
+                f"{managed.filename} carries a block from a newer ortus; left untouched"
+            )
+        elif outcome is BlockOutcome.UNCHANGED:
+            output.success(f"{managed.filename} ortus block already current")
+        else:
+            output.success(f"{outcome.value} {managed.filename} ortus block")
 
 
 def _normalize_initial_branch(repo: Path, branch: str = "main") -> None:
@@ -340,6 +403,10 @@ def init(
     # config behind.
     _bootstrap_codegraph(target, resolved_codegraph)
 
+    # Read the repo's own ignore rules before the bundled .gitignore replaces
+    # them, so the refusal reflects what the operator wrote.
+    _require_tracked_agent_files(target)
+
     output.progress(
         "init",
         f"rendering ortus-owned files (project_type={project_type}, "
@@ -358,6 +425,9 @@ def init(
     written = render_all(target, ctx)
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
+
+    output.progress("init", "applying managed AGENTS.md and CLAUDE.md blocks")
+    _write_agent_files(target, resolved_codegraph)
 
     output.progress("init", f"done ({len(written)} files, prefix={resolved_prefix})")
     output.success(f"ortus init complete: {target}")

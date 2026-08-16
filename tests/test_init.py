@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ortus.cli import app
+from ortus.core.agent_files import BLOCK_SCHEMAS, MANAGED_FILES, read_block
 from ortus.core.readiness import READINESS_MEMORY_KEY
 
 pytestmark = pytest.mark.integration
@@ -374,6 +375,90 @@ def test_codegraph_index_failure_fails_init_before_rendering(
     assert result.exit_code == 1
     assert "codegraph init failed (exit 3)" in (result.stdout + result.stderr)
     assert not (target / ".ortusrc").exists()
+
+
+# --- managed AGENTS.md / CLAUDE.md blocks ----------------------------------
+
+
+def test_init_writes_both_managed_blocks(tmp_path: Path) -> None:
+    """AC-1: a fresh repo gets an agents block and a pointer block."""
+    target = tmp_path / "blocks"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for managed in MANAGED_FILES:
+        block = read_block(target / managed.filename, managed.block)
+        assert block is not None, managed.filename
+        assert block.schema == BLOCK_SCHEMAS[managed.block]
+    # `AGENTS.override.md` belongs to the repo; ortus never writes or reads it.
+    assert not (target / "AGENTS.override.md").exists()
+
+
+@pytest.mark.parametrize("backend", ["codex", "grok"])
+def test_init_keeps_claude_md_for_every_backend(tmp_path: Path, backend: str) -> None:
+    """The pointer file is repo instructions, not Claude backend configuration."""
+    target = tmp_path / f"md-{backend}"
+    result = runner.invoke(app, ["init", str(target), "--backend", backend])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert not (target / ".claude").exists()
+    assert read_block(target / "CLAUDE.md", "pointer") is not None
+
+
+def test_init_twice_leaves_the_agent_files_byte_identical(tmp_path: Path) -> None:
+    """AC-1: the second pass is a no-op, not a rewrite."""
+    target = tmp_path / "twice"
+    assert runner.invoke(app, ["init", str(target)]).exit_code == 0
+    before = {
+        managed.filename: (target / managed.filename).read_bytes()
+        for managed in MANAGED_FILES
+    }
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for name, content in before.items():
+        assert (target / name).read_bytes() == content, name
+    assert "already current" in (result.stdout + result.stderr)
+
+
+def test_init_preserves_host_prose_around_the_block(tmp_path: Path) -> None:
+    """AC-1: host bytes outside the markers survive byte-for-byte."""
+    target = tmp_path / "hosted"
+    target.mkdir()
+    host = "# House rules\n\nNever force-push main.\n"
+    (target / "AGENTS.md").write_text(host, encoding="utf-8")
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    text = (target / "AGENTS.md").read_text(encoding="utf-8")
+    assert text.startswith(host)
+    assert read_block(target / "AGENTS.md", "agents") is not None
+
+
+def test_init_refuses_a_gitignored_agent_file(tmp_path: Path) -> None:
+    """AC-2 counterpart: a repo that hides AGENTS.md gets a refusal, not a block."""
+    target = tmp_path / "ignored"
+    target.mkdir()
+    (target / ".gitignore").write_text("AGENTS.md\n", encoding="utf-8")
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 1
+    combined = result.stdout + result.stderr
+    assert "gitignored" in combined, combined
+    assert not (target / ".ortusrc").exists()
+
+
+def test_init_aborts_on_malformed_markers_without_touching_the_file(
+    tmp_path: Path,
+) -> None:
+    """An unbalanced marker is repaired by a human, never guessed at."""
+    target = tmp_path / "malformed"
+    target.mkdir()
+    broken = "<!-- BEGIN ortus block=agents schema=1 -->\nhalf a block\n"
+    (target / "AGENTS.md").write_text(broken, encoding="utf-8")
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 1
+    assert "malformed" in (result.stdout + result.stderr)
+    # `bd init` appends its own section to AGENTS.md, so the guarantee is that
+    # ortus left the broken region exactly as it found it.
+    text = (target / "AGENTS.md").read_text(encoding="utf-8")
+    assert text.startswith(broken)
+    assert "END ortus" not in text
 
 
 def test_ortusrc_round_trips_as_toml(tmp_path: Path) -> None:

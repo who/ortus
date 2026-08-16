@@ -1,22 +1,21 @@
-# AGENTS.md
+## Ortus session rules
 
-Session rules for AI agents working in this repo.
+Managed by Ortus {CLI_VERSION}. Edit outside the markers freely — `ortus init`
+rewrites only what sits between them, and `ortus check` reports drift.
 
-Project type: **{{ project_type }}**. Issue prefix: **{{ prefix }}**.
-Bootstrapped by ortus {{ ortus_version }} on {{ today }}.
-
-## Issue tracking with bd
+### Issue tracking with bd
 
 All work goes through bd. Find ready work, claim it, do it, close it:
 
-{% raw %}
 ```bash
 bd ready                              # see what has no blockers
-bd update <id> --status=in_progress   # claim
+{BD_CLAIM_COMMAND}   # claim
 # ... do the work ...
 bd close <id> --reason "..."          # close
 ```
-{% endraw %}
+
+One context window, one issue. Do not carry leftover work on a closed id; file
+it as a new bead instead.
 
 ### Issue authoring contract (readiness v1)
 
@@ -38,36 +37,36 @@ template text are rejected. When something is genuinely absent, write
 
 Run `ortus spec` for the authoritative heading list and shape rules. It prints
 the contract generated from the installed Ortus, so it cannot drift from what
-grind enforces; this file only points at it.
+grind enforces; this block only points at it.
 
-## Orchestrator (ortus grind)
+### Orchestrator (ortus grind)
 
-Drive the queue to zero via Ortus's subprocess-per-task loop. This project
-defaults to the **{{ backend }}** backend. Each iteration spawns a fresh agent
-with a NARROW per-task condition ("close one issue"); the outer loop trusts
-only observable bd state to decide success, orphan-claim, or no-change retry.
+Drive the queue to zero via Ortus's subprocess-per-task loop. Each iteration
+spawns a fresh agent with a narrow per-task condition ("close one issue"); the
+outer loop trusts only observable bd state to decide success, orphan-claim, or
+no-change retry.
 
-Claude workers use `claude -p "/goal ..."`. Codex workers use a plain
-`codex exec "..."` prompt; do not invoke `ortus grind`, `goal.sh`, or
-`ralph.sh` from inside a worker.
+Claude workers run `claude -p "/goal ..."`. Codex and Grok workers run a plain
+`exec` prompt, because those non-interactive surfaces do not expand slash
+commands. Never invoke `ortus grind` from inside a worker.
 
-{% raw %}
 ```bash
 ortus grind .                            # drain bd ready
 ortus grind . --tasks 1                  # exactly one task closed
 ortus grind . --orphan-policy revert     # revert claimed-but-unclosed
-ortus grind . --idle-sleep 0             # no idle backoff on no-change iters
 ortus grind . -c "<custom condition>"    # custom per-iteration task text
 ```
-{% endraw %}
 
-## Session-close protocol
+{CODEGRAPH_SECTION}
+
+### Session-close protocol
 
 Before saying "done", verify:
 
 1. `git status` — what changed
 2. `git add` the relevant files
 3. `git commit` with a clear message
-4. `git push` to the remote (if one is configured)
+4. `bd close <id> --reason "..."` — the issue, not just the code
+5. `git push` to the remote, when one is configured
 
-Work is not done until pushed.
+Work is not done until it is pushed.

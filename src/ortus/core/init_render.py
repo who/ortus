@@ -21,10 +21,12 @@ from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 
 TEMPLATE_PACKAGE = "ortus.templates"
 
+# `AGENTS.md` and `CLAUDE.md` are deliberately absent: they belong to the host
+# repo and are written as managed blocks by ortus.core.agent_files, never as
+# whole-file renders that would overwrite the repo's own instructions.
 BUNDLED_TEMPLATES: tuple[str, ...] = (
     ".claude/settings.json",
     ".ortusrc",
-    "AGENTS.md",
     ".gitignore",
 )
 

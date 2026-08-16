@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import check as check_mod
+from ortus.core.agent_files import MANAGED_FILES, render_block
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_text
 
 runner = CliRunner()
@@ -66,7 +67,22 @@ def _healthy_repo(tmp_path: Path) -> Path:
         json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}})
     )
     _healthy_codegraph(repo)
+    _healthy_agent_files(repo)
     return repo
+
+
+def _healthy_agent_files(repo: Path) -> None:
+    """Write the managed blocks exactly as `ortus init` would.
+
+    Every backend is checked for them, so a repo that is otherwise green needs
+    both files to stay green. The blocks render under the repo's resolved
+    CodeGraph policy, which the suite pins to `auto`.
+    """
+    mode = check_mod._repo_codegraph_mode(repo)
+    for managed in MANAGED_FILES:
+        (repo / managed.filename).write_text(
+            render_block(managed.block, codegraph=mode) + "\n", encoding="utf-8"
+        )
 
 
 def _healthy_codegraph(repo: Path) -> None:
@@ -209,6 +225,7 @@ def test_check_skips_the_verifier_probe_for_codex(
         'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
     )
     (repo / ".ortusrc").write_text('backend = "codex"\n')
+    _healthy_agent_files(repo)
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
 
@@ -475,6 +492,8 @@ def test_codegraph_off_passes(
     repo = _healthy_repo(tmp_path)
     (repo / ".codegraph").rmdir()
     (repo / ".ortusrc").write_text('codegraph = "off"\n')
+    # The blocks teach the pinned policy, so a policy change re-renders them.
+    _healthy_agent_files(repo)
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
     result = runner.invoke(app, ["check", str(repo)])
@@ -526,12 +545,109 @@ def test_codegraph_codex_registration_is_the_injected_capability(
         'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
     )
     (repo / ".ortusrc").write_text('backend = "codex"\n')
+    _healthy_agent_files(repo)
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     compact = "".join(result.stdout.split())
     assert "injectedperchildbyortus" in compact
+
+
+# --- managed AGENTS.md / CLAUDE.md blocks ----------------------------------
+
+
+def test_check_reports_the_managed_blocks_as_current(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = "".join(result.stdout.split())
+    assert "AGENTS.md" in compact
+    assert "CLAUDE.md" in compact
+    assert "block=agentsschema=1current" in compact
+
+
+@pytest.mark.parametrize("filename", ["AGENTS.md", "CLAUDE.md"])
+def test_check_fails_when_an_agent_file_has_no_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    """AC-2: host prose with no ortus block is a failure with a repair command."""
+    repo = _healthy_repo(tmp_path)
+    (repo / filename).write_text("# House rules\n", encoding="utf-8")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    compact = "".join(result.stdout.split())
+    assert "ortusinit--force" in compact
+    assert "FAIL" in result.stdout
+
+
+def test_check_fails_when_an_agent_file_is_gitignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a hidden AGENTS.md is a contract nobody else in the repo receives."""
+    repo = _healthy_repo(tmp_path)
+    (repo / ".gitignore").write_text("AGENTS.md\n", encoding="utf-8")
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    assert "gitignored" in "".join(result.stdout.split())
+
+
+def test_check_reports_same_schema_content_drift(tmp_path: Path) -> None:
+    """AC-2: an edited body at the current schema says to re-run init."""
+    repo = _healthy_repo(tmp_path)
+    edited = render_block("agents").replace(
+        "All work goes through bd.", "All work goes through vibes."
+    )
+    (repo / "AGENTS.md").write_text(edited + "\n", encoding="utf-8")
+    result = check_mod.check_agent_file(repo, MANAGED_FILES[0])
+    assert not result.ok
+    assert "content drift" in result.message
+    assert "ortus init --force" in result.message
+
+
+def test_check_leaves_a_newer_schema_alone_with_a_warning(tmp_path: Path) -> None:
+    """A block from a newer ortus is reported, never failed or rewritten."""
+    repo = _healthy_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(
+        "<!-- BEGIN ortus block=agents schema=99 generated-by=ortus@9.9.9 -->\n"
+        "from the future\n"
+        "<!-- END ortus block=agents -->\n",
+        encoding="utf-8",
+    )
+    result = check_mod.check_agent_file(repo, MANAGED_FILES[0])
+    assert result.ok
+    assert "warning" in result.message
+    assert "upgrade ortus" in result.message
+
+
+def test_check_reports_malformed_markers_with_a_line_number(tmp_path: Path) -> None:
+    repo = _healthy_repo(tmp_path)
+    (repo / "AGENTS.md").write_text(
+        "# House rules\n\n<!-- BEGIN ortus block=agents schema=1 -->\nbody\n",
+        encoding="utf-8",
+    )
+    result = check_mod.check_agent_file(repo, MANAGED_FILES[0])
+    assert not result.ok
+    assert "malformed markers" in result.message
+    assert "AGENTS.md:3" in result.message
+
+
+def test_check_agent_files_make_no_writes(tmp_path: Path) -> None:
+    """NFR-006: the strict block check reads; `ortus init` is what repairs."""
+    repo = _healthy_repo(tmp_path)
+    (repo / "CLAUDE.md").unlink()
+    before = _snapshot_mtimes(repo)
+    for managed in MANAGED_FILES:
+        check_mod.check_agent_file(repo, managed)
+    assert _snapshot_mtimes(repo) == before
 
 
 def _healthy_grok_repo(tmp_path: Path) -> Path:
@@ -547,6 +663,7 @@ def _healthy_grok_repo(tmp_path: Path) -> Path:
         "enabled = true\n"
     )
     (repo / ".ortusrc").write_text('backend = "grok"\n')
+    _healthy_agent_files(repo)
     return repo
 
 
@@ -647,6 +764,7 @@ def test_check_codex_uses_codex_binary_and_config(
         'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
     )
     (repo / ".ortusrc").write_text('backend = "codex"\n')
+    _healthy_agent_files(repo)
     seen: list[str] = []
 
     def which(binary: str) -> str:

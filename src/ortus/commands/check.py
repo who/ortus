@@ -18,6 +18,15 @@ import typer
 
 from ortus.core import output, sandbox
 from ortus.core.agent import BackendError, resolve_backend
+from ortus.core.agent_files import (
+    BLOCK_SCHEMAS,
+    MANAGED_FILES,
+    AgentFileError,
+    ManagedFile,
+    gitignore_match,
+    read_block,
+    render_block,
+)
 from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config
@@ -344,6 +353,65 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
     return CheckResult(name, True, f"{detail} — auto fallback: {joined}")
 
 
+def _repo_codegraph_mode(repo: Path) -> str:
+    """The pinned CodeGraph policy, or the default when `.ortusrc` cannot say.
+
+    The managed blocks render a CodeGraph paragraph from this value, so the
+    comparison below has to read it the same way `ortus init` wrote it.
+    """
+    try:
+        return str(load_config(repo=repo).get("codegraph", DEFAULT_CODEGRAPH_MODE))
+    except Exception:
+        return DEFAULT_CODEGRAPH_MODE
+
+
+def check_agent_file(repo: Path, managed: ManagedFile) -> CheckResult:
+    """One managed instruction file: present, well-formed, and current.
+
+    Strict for every backend. A missing or drifted block is a failure the
+    operator fixes with one command, and saying so is the whole point of the
+    check — the alternative is an agent session silently running against a
+    contract nobody refreshed.
+    """
+    name = managed.filename
+    ignored = gitignore_match(repo, name)
+    if ignored is not None:
+        return CheckResult(
+            name, False, f"gitignored by {ignored!r} — ortus manages it as tracked source"
+        )
+    path = repo / name
+    if not path.is_file():
+        return CheckResult(name, False, f"missing at {path} — run `ortus init --force`")
+    try:
+        block = read_block(path, managed.block)
+    except AgentFileError as exc:
+        return CheckResult(name, False, f"malformed markers — {exc}")
+    if block is None:
+        return CheckResult(
+            name,
+            False,
+            f"no `ortus block={managed.block}` markers — run `ortus init --force`",
+        )
+    bundled = BLOCK_SCHEMAS[managed.block]
+    if block.schema > bundled:
+        return CheckResult(
+            name,
+            True,
+            f"warning: block schema={block.schema} is newer than this ortus "
+            f"(schema={bundled}); left untouched — upgrade ortus",
+        )
+    rendered = render_block(managed.block, codegraph=_repo_codegraph_mode(repo))
+    if block.text != rendered:
+        drift = "schema" if block.schema < bundled else "content"
+        return CheckResult(
+            name,
+            False,
+            f"{drift} drift from bundled block={managed.block} schema={bundled} — "
+            "run `ortus init --force` to refresh",
+        )
+    return CheckResult(name, True, f"block={managed.block} schema={bundled} current")
+
+
 def _stale_plan_prompt(repo: Path) -> Optional[str]:
     """Name the winning plan-prompt override if it predates the placeholder.
 
@@ -417,6 +485,14 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         # Claude-only: the Codex verifier is not wrapped, so it has no
         # read-only posture to probe.
         repo_checks.append((check_verifier_execution, "verifier sandbox"))
+    repo_checks.extend(
+        [
+            # Bound early so each lambda keeps its own managed file rather than
+            # the last one the loop saw.
+            (lambda r, m=managed: check_agent_file(r, m), managed.filename)
+            for managed in MANAGED_FILES
+        ]
+    )
     repo_checks.extend(
         [
             (check_ortusrc, ".ortusrc"),

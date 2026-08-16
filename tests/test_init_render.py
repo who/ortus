@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from importlib.resources import files
@@ -9,15 +10,29 @@ from pathlib import Path
 
 import pytest
 
+from ortus.core import agent_files
+from ortus.core.agent_files import (
+    BD_CLAIM_COMMAND,
+    BLOCK_SCHEMAS,
+    BlockOutcome,
+    apply_block,
+    begin_marker,
+    block_template_source,
+    codegraph_section,
+    end_marker,
+    gitignore_match,
+    read_block,
+    render_block,
+)
 from ortus.core.init_render import (
     BACKEND_TEMPLATES,
     BUNDLED_TEMPLATES,
-    PROJECT_TYPES,
     RenderContext,
     list_bundled,
     render_all,
     render_template,
 )
+from ortus.core.prompts import resolve_prompt
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -25,8 +40,8 @@ else:
     import tomli as tomllib
 
 
-# Acceptance #1 — all 4 templates accessible via importlib.resources.
-def test_all_four_templates_ship_in_package() -> None:
+# Acceptance #1 — every bundled template is accessible via importlib.resources.
+def test_every_bundled_template_ships_in_the_package() -> None:
     pkg = files("ortus.templates")
     available = {p.name for p in pkg.iterdir() if p.is_file()}
     available |= {f"{p.name}/{c.name}" for p in pkg.iterdir() if p.is_dir() for c in p.iterdir()}
@@ -155,6 +170,15 @@ def test_rendered_gitignore_excludes_the_codegraph_index() -> None:
     assert ".codegraph/" in render_template(".gitignore", ctx)
 
 
+def test_rendered_gitignore_never_hides_the_managed_agent_files(tmp_path: Path) -> None:
+    """Ortus manages AGENTS.md and CLAUDE.md as tracked source, not scratch."""
+    (tmp_path / ".gitignore").write_text(
+        render_template(".gitignore", RenderContext(prefix="acme")), encoding="utf-8"
+    )
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        assert gitignore_match(tmp_path, name) is None
+
+
 def test_codex_render_uses_codex_config_and_no_claude_dir(tmp_path: Path) -> None:
     ctx = RenderContext(prefix="acme", project_type="python", backend="codex")
     written = render_all(tmp_path, ctx)
@@ -162,7 +186,9 @@ def test_codex_render_uses_codex_config_and_no_claude_dir(tmp_path: Path) -> Non
     assert (tmp_path / ".codex" / "config.toml").is_file()
     assert not (tmp_path / ".claude").exists()
     assert 'backend = "codex"' in (tmp_path / ".ortusrc").read_text()
-    assert "plain" in (tmp_path / "AGENTS.md").read_text()
+    # Instruction files are managed blocks, not whole-file renders, so
+    # render_all deliberately leaves them to apply_block.
+    assert not (tmp_path / "AGENTS.md").exists()
 
 
 def test_grok_render_uses_grok_config_and_no_claude_dir(tmp_path: Path) -> None:
@@ -179,16 +205,11 @@ def test_grok_render_uses_grok_config_and_no_claude_dir(tmp_path: Path) -> None:
     assert "sandbox_mode" not in data
 
 
-# Acceptance #4 — {% raw %} round-trips bash snippets.
-def test_raw_blocks_in_agents_md_preserve_bash_braces() -> None:
-    ctx = RenderContext(prefix="x", project_type="polyglot")
-    text = render_template("AGENTS.md", ctx)
-    # Inside {% raw %} blocks we keep {%-/-%}-style braces and `bd update <id>`
-    # placeholders unevaluated. If Jinja had eaten them, "<id>" would vanish.
-    assert "bd update <id>" in text
-    assert "{% " not in text  # the raw markers themselves are stripped
-    assert "{{ " not in text
-
+# --- managed AGENTS.md / CLAUDE.md blocks ----------------------------------
+#
+# The instruction files used to be whole-file Jinja renders. They are now the
+# host repo's files with one Ortus-owned block spliced in, so the assertions
+# that guarded the template's content moved onto the block it became.
 
 # ortus-xhrj.5 — the always-loaded instructions must state the readiness v1
 # authoring contract, or an agent following them faithfully still writes issues
@@ -197,39 +218,211 @@ def test_raw_blocks_in_agents_md_preserve_bash_braces() -> None:
 AUTHORING_CONTRACT_HEADING = "### Issue authoring contract (readiness v1)"
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "grok"])
-def test_agents_md_carries_authoring_contract_for_backend(backend: str) -> None:
-    ctx = RenderContext(prefix="p", project_type="polyglot", backend=backend)
-    text = render_template("AGENTS.md", ctx)
-    # Exactly once: `ortus init --force` re-renders the file, and a duplicated
+def test_agents_block_carries_the_authoring_contract() -> None:
+    text = render_block("agents")
+    # Exactly once: `ortus init --force` refreshes the block, and a duplicated
     # section would double the always-on context cost.
     assert text.count(AUTHORING_CONTRACT_HEADING) == 1
     # The three bd fields that carry the contract, plus the epic exemption.
     for field in ("`description`", "`design`", "`acceptance_criteria`"):
         assert field in text
     assert "Epics" in text
-    # The full contract stays generated; the template only names the printer.
+    # The full contract stays generated; the block only names the printer.
     assert "`ortus spec`" in text
 
 
-def test_agents_md_authoring_contract_sits_with_the_bd_guidance() -> None:
+def test_agents_block_authoring_contract_sits_with_the_bd_guidance() -> None:
     """Authoring fails when the issue is written, not when grind runs it."""
-    text = render_template("AGENTS.md", RenderContext(prefix="p"))
+    text = render_block("agents")
     assert (
-        text.index("## Issue tracking with bd")
+        text.index("### Issue tracking with bd")
         < text.index(AUTHORING_CONTRACT_HEADING)
-        < text.index("## Orchestrator (ortus grind)")
+        < text.index("### Orchestrator (ortus grind)")
     )
 
 
-@pytest.mark.parametrize("project_type", PROJECT_TYPES)
-@pytest.mark.parametrize("backend", ["claude", "codex", "grok"])
-def test_agents_md_renders_across_the_matrix(project_type: str, backend: str) -> None:
-    """StrictUndefined still satisfied for every rendered combination."""
-    ctx = RenderContext(prefix="p", project_type=project_type, backend=backend)
-    text = render_template("AGENTS.md", ctx)
-    assert AUTHORING_CONTRACT_HEADING in text
-    assert "{{" not in text and "{%" not in text
+def test_blocks_substitute_every_placeholder_and_keep_shell_braces() -> None:
+    for block in BLOCK_SCHEMAS:
+        text = render_block(block)
+        assert "{CLI_VERSION}" not in text
+        assert "{BD_CLAIM_COMMAND}" not in text
+        assert "{CODEGRAPH_SECTION}" not in text
+        assert BD_CLAIM_COMMAND in text
+        assert text.startswith(begin_marker(block))
+        assert text.endswith(end_marker(block))
+
+
+def test_block_render_rejects_an_unknown_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body variable nobody substitutes must never reach a consumer repo."""
+    monkeypatch.setattr(
+        agent_files, "_read_block_template", lambda block: "hello {NOPE}\n"
+    )
+    with pytest.raises(agent_files.AgentFileError) as excinfo:
+        render_block("agents")
+    assert "{NOPE}" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("mode", ["required", "auto", "off"])
+def test_blocks_render_the_repo_codegraph_policy(mode: str) -> None:
+    for block in BLOCK_SCHEMAS:
+        assert codegraph_section(mode) in render_block(block, codegraph=mode)
+
+
+def test_bd_claim_command_matches_the_bundled_goal_prompt(tmp_path: Path) -> None:
+    """One claim command, whether the agent reads AGENTS.md or runs /goal."""
+    resolved = resolve_prompt("goal-prompt", repo=tmp_path, home=tmp_path)
+    assert resolved.source == "bundled"
+    assert BD_CLAIM_COMMAND in resolved.text
+
+
+# Template-drift gate: the bundled body is hashed with its placeholders intact,
+# so editing what a block teaches without bumping its schema fails here. Bump
+# BLOCK_SCHEMAS[<block>] and re-pin the digest in the same commit.
+PINNED_BLOCK_TEMPLATES: dict[str, tuple[int, str]] = {
+    "agents": (1, "abede8bbcbac750f3e0ce8b3243fc2c66a73158b3b834d35a99c7ed44fe54768"),
+    "pointer": (1, "e20aa4135de14e37eb79a5c589277750c37cfafbd16c8a4d7378a99ac606601a"),
+}
+
+
+@pytest.mark.parametrize("block", sorted(BLOCK_SCHEMAS))
+def test_block_template_changes_require_a_schema_bump(block: str) -> None:
+    digest = hashlib.sha256(
+        block_template_source(block).encode("utf-8")
+    ).hexdigest()
+    assert (BLOCK_SCHEMAS[block], digest) == PINNED_BLOCK_TEMPLATES[block], (
+        f"the {block} block template changed; bump BLOCK_SCHEMAS[{block!r}] and "
+        f"re-pin PINNED_BLOCK_TEMPLATES[{block!r}] to {digest!r}"
+    )
+
+
+# --- managed-block parsing and writing --------------------------------------
+
+
+def test_apply_block_creates_a_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "AGENTS.md"
+    assert apply_block(path, "agents", render_block("agents")) is BlockOutcome.CREATED
+    assert read_block(path, "agents") is not None
+
+
+def test_apply_block_appends_and_preserves_host_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "AGENTS.md"
+    host = "# House rules\n\nNever force-push main.\n"
+    path.write_text(host, encoding="utf-8")
+    assert apply_block(path, "agents", render_block("agents")) is BlockOutcome.APPENDED
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith(host)
+    assert render_block("agents") in text
+
+
+def test_apply_block_is_a_no_op_when_the_block_is_current(tmp_path: Path) -> None:
+    path = tmp_path / "AGENTS.md"
+    path.write_text("# House rules\n", encoding="utf-8")
+    apply_block(path, "agents", render_block("agents"))
+    before = path.read_bytes()
+    assert (
+        apply_block(path, "agents", render_block("agents")) is BlockOutcome.UNCHANGED
+    )
+    assert path.read_bytes() == before
+
+
+def test_apply_block_replaces_a_stale_body_only(tmp_path: Path) -> None:
+    path = tmp_path / "AGENTS.md"
+    stale = render_block("agents", ortus_version="0.0.1", codegraph="off")
+    path.write_text(f"# House rules\n\n{stale}\n\ntrailing host prose\n", encoding="utf-8")
+    assert apply_block(path, "agents", render_block("agents")) is BlockOutcome.UPDATED
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("# House rules\n")
+    assert text.endswith("trailing host prose\n")
+    assert stale not in text
+    assert render_block("agents") in text
+
+
+def test_apply_block_leaves_a_newer_schema_untouched(tmp_path: Path) -> None:
+    """Never write backwards: an older Ortus must not downgrade the contract."""
+    path = tmp_path / "AGENTS.md"
+    future = (
+        "<!-- BEGIN ortus block=agents schema=99 generated-by=ortus@9.9.9 -->\n"
+        "from the future\n"
+        "<!-- END ortus block=agents -->\n"
+    )
+    path.write_text(future, encoding="utf-8")
+    assert apply_block(path, "agents", render_block("agents")) is BlockOutcome.AHEAD
+    assert path.read_text(encoding="utf-8") == future
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "<!-- BEGIN ortus block=agents schema=1 -->\nbody\n",
+            "has no END marker",
+        ),
+        (
+            "<!-- END ortus block=agents -->\n",
+            "with no BEGIN marker",
+        ),
+        (
+            "<!-- BEGIN ortus schema=1 -->\nbody\n<!-- END ortus block=agents -->\n",
+            "no block= attribute",
+        ),
+        (
+            "<!-- BEGIN ortus block=agents schema=one -->\nb\n<!-- END ortus block=agents -->\n",
+            "expected an integer",
+        ),
+        (
+            "<!-- BEGIN ortus block=agents schema=1 -->\n"
+            "<!-- BEGIN ortus block=pointer schema=1 -->\n"
+            "<!-- END ortus block=pointer -->\n",
+            "inside block=agents",
+        ),
+    ],
+)
+def test_parse_blocks_aborts_on_malformed_markers(
+    tmp_path: Path, text: str, expected: str
+) -> None:
+    path = tmp_path / "AGENTS.md"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(agent_files.AgentFileError) as excinfo:
+        read_block(path, "agents")
+    message = str(excinfo.value)
+    assert expected in message
+    # The operator's next move is to open the file, so the line number rides along.
+    assert f"{path}:" in message
+
+
+def test_apply_block_refuses_to_write_a_malformed_file(tmp_path: Path) -> None:
+    path = tmp_path / "AGENTS.md"
+    path.write_text("<!-- BEGIN ortus block=agents schema=1 -->\nbody\n", encoding="utf-8")
+    before = path.read_bytes()
+    with pytest.raises(agent_files.AgentFileError):
+        apply_block(path, "agents", render_block("agents"))
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("pattern", "ignored"),
+    [
+        ("AGENTS.md", True),
+        ("/AGENTS.md", True),
+        ("*.md", True),
+        ("**/*.md", True),
+        ("# AGENTS.md", False),
+        ("AGENTS.override.md", False),
+        ("docs/", False),
+    ],
+)
+def test_gitignore_match_reads_the_repo_ignore_rules(
+    tmp_path: Path, pattern: str, ignored: bool
+) -> None:
+    (tmp_path / ".gitignore").write_text(f"{pattern}\n", encoding="utf-8")
+    assert (gitignore_match(tmp_path, "AGENTS.md") is not None) is ignored
+
+
+def test_gitignore_match_honors_a_later_negation(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("*.md\n!AGENTS.md\n", encoding="utf-8")
+    assert gitignore_match(tmp_path, "AGENTS.md") is None
 
 
 # Acceptance #1 (broader) — render_all produces every file on disk.
