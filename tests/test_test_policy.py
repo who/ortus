@@ -18,7 +18,7 @@ from tests.conftest import BdWorkspace, ci_gate_command, ci_gate_flags
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PROMPT = REPO_ROOT / "src" / "ortus" / "prompts" / "grind-prompt.md"
+PROMPT = REPO_ROOT / "src" / "ortus" / "prompts" / "goal-prompt.md"
 TESTING_GUIDE = REPO_ROOT / "docs" / "testing.md"
 
 

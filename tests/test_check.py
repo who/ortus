@@ -345,12 +345,12 @@ def test_check_reports_prompt_overrides(
     repo = _healthy_repo(tmp_path)
     overrides = repo / ".ortus" / "prompts"
     overrides.mkdir(parents=True)
-    (overrides / "grind-prompt.md").write_text("custom")
+    (overrides / "goal-prompt.md").write_text("custom")
     _all_binaries_present(monkeypatch)
     _fake_sandbox_ok(monkeypatch)
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0
-    assert "grind-prompt.md" in result.stdout
+    assert "goal-prompt.md" in result.stdout
 
 
 def test_check_reports_stale_override_missing_the_placeholder(

@@ -1,126 +1,23 @@
-"""Structural regression guard for src/ortus/prompts/grind-prompt.md (ortus-ylv1).
+"""Regression guard for the composed grind worker prompt.
 
-The grind-prompt is loaded by `src/ortus/core/prompts.py` (FR-025) and
-drives every `ortus grind` iteration. Its content was historically the
-bash-era `ortus/prompts/ralph-prompt.md`, ported to Python with the
-/goal evaluator adaptations (no `<promise>COMPLETE|EMPTY</promise>`
-sentinels, queue exhaustion judged by outer `bd ready` poll).
-
-This file enforces:
-
-  1. The structural markers shared with ralph-prompt.md still exist in
-     grind-prompt.md (no silent drift / accidental section deletion).
-  2. The /goal adaptation invariant holds: grind-prompt.md must NOT
-     instruct the model to emit `<promise>COMPLETE</promise>` or
-     `<promise>EMPTY</promise>` (the legacy shell-parser sentinels).
-     `<promise>BLOCKED</promise>` is allowed as a transcript marker
-     (FR-017).
-  3. ralph-prompt.md carries a "superseded by grind-prompt.md" preamble
-     so future editors don't drift the two apart.
-
-These markers are intentionally coarse — they check that sections still
-exist, not their exact wording, so prose tweaks remain free.
+`ortus grind` composes each worker's prompt from `_GOAL_POINTER` /
+`_IMPLEMENTATION_INSTRUCTION`, the work-issue condition, the CodeGraph
+phase contract, and the stored prior lessons; the loop body the pointer
+names lives on disk in `src/ortus/prompts/goal-prompt.md`. This file
+pins the composed surfaces — the pointer shape, the commit-message
+rules every writer-facing contract states, and lesson selection and
+rendering. (The bundled `grind-prompt.md` these tests once guarded was
+never injected and has been deleted.)
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GRIND_PROMPT = REPO_ROOT / "src" / "ortus" / "prompts" / "grind-prompt.md"
 RALPH_PROMPT = REPO_ROOT / "ortus" / "prompts" / "ralph-prompt.md"
-
-
-def _content() -> str:
-    return GRIND_PROMPT.read_text(encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# (1) Structural markers — ported sections must still be present
-# ---------------------------------------------------------------------------
-
-
-REQUIRED_MARKERS = [
-    # Per-task loop body steps
-    "**Orient**",
-    "**Select**",
-    "**Claim**",
-    "**Investigate**",
-    "**Implement**",
-    "**Verify**",
-    # Subagent strategy + scheduler rules
-    "Subagent Strategy",
-    "Main context = scheduler only",
-    "Subagents = disposable memory",
-    # Issue Plan JSON schema
-    "has_enough_info",
-    "implementation_steps",
-    "verification_steps",
-    "closure_reason",
-    # Completion comment format
-    "**Changes**:",
-    "**Verification**:",
-    "**CodeGraph v1**",
-    # CodeGraph integration
-    "codegraph_available",
-    # Important rules
-    "One task per invocation",
-    # Steering
-    "Downstream",
-    "tests/lints/builds",
-    # BLOCKED transcript marker (kept even after the /goal adaptation)
-    "<promise>BLOCKED</promise>",
-]
-
-
-@pytest.mark.parametrize("marker", REQUIRED_MARKERS)
-def test_grind_prompt_contains_marker(marker: str) -> None:
-    """Each ported section's structural marker must still be present.
-
-    If you intentionally removed a section, delete its marker from this
-    list AND update the bd issue history. Otherwise this is a regression.
-    """
-    body = _content()
-    assert marker in body, (
-        f"grind-prompt.md is missing structural marker {marker!r}; "
-        f"either it was accidentally removed or the list is stale "
-        f"(see ortus-ylv1)."
-    )
-
-
-# ---------------------------------------------------------------------------
-# (2) /goal adaptation invariant — no shell-parser sentinels to emit
-# ---------------------------------------------------------------------------
-
-
-# Match the EMIT instruction shape, not bare occurrences inside a code fence
-# describing what NOT to do. We allow the literal sentinel string to appear
-# in prose ("do not output `<promise>COMPLETE</promise>`") but not in a
-# context that instructs the model to emit it.
-_FORBIDDEN_EMIT_RE = re.compile(
-    r"(?:output|emit|print|return)\s+`?<promise>(COMPLETE|EMPTY)</promise>`?",
-    re.IGNORECASE,
-)
-
-
-def test_grind_prompt_does_not_instruct_complete_or_empty_emit() -> None:
-    """The /goal evaluator owns termination; do not re-introduce shell sentinels."""
-    body = _content()
-    matches = _FORBIDDEN_EMIT_RE.findall(body)
-    assert not matches, (
-        "grind-prompt.md re-introduces a shell-parser sentinel emit instruction; "
-        f"saw {matches!r}. The outer `bd ready` poll handles queue exhaustion "
-        "and the /goal evaluator handles per-task completion (ortus-ylv1)."
-    )
-
-
-def test_grind_prompt_keeps_blocked_as_transcript_marker() -> None:
-    """`<promise>BLOCKED</promise>` is retained per FR-017 (claimed-but-stuck signal)."""
-    body = _content()
-    assert "<promise>BLOCKED</promise>" in body
 
 
 def _composed_implement_prompt(backend: str = "claude") -> str:
@@ -187,153 +84,11 @@ def test_worker_prompt_drops_harness_inject_and_compact() -> None:
 
 
 def test_ralph_prompt_marked_superseded() -> None:
-    """The legacy bash prompt must carry a 'superseded by grind-prompt.md' note.
-
-    Stops future editors from accidentally drifting ralph-prompt.md away
-    from grind-prompt.md while both files coexist (until Phase 5 sunset
-    deletes the bash sources).
-    """
+    """The legacy bash prompt, while it existed, had to carry a superseded note."""
     if not RALPH_PROMPT.exists():
         pytest.skip("ralph-prompt.md already removed (Phase 5 sunset complete)")
     body = RALPH_PROMPT.read_text(encoding="utf-8")
     assert "SUPERSEDED" in body or "superseded" in body.lower(), body[:400]
-    assert "grind-prompt.md" in body
-
-
-# ---------------------------------------------------------------------------
-# (5) completion-comment quality — the bullets are the commit body (ortus-q3je)
-# ---------------------------------------------------------------------------
-
-
-def test_grind_prompt_states_the_changes_bullets_become_the_commit_body() -> None:
-    """AC-6: the format spec must hold the bullets to commit-worthy prose.
-
-    Finalization commits the latest `**Changes**` block verbatim, so the
-    quality ceiling of every commit message is set here. Guidance that only
-    asked for concision produced bullets no reader could use six months later.
-    """
-    body = _content()
-    assert "the fallback commit body" in body
-    assert "six months" in body
-    assert "names the file or component" in body
-    # The worker's own commit message is primary now; the block remains the
-    # tracker's record and the body of every deterministically assembled
-    # commit.
-    assert "writes its own commit message" in body
-
-
-def test_grind_prompt_requires_a_refreshed_changes_block_after_a_correction() -> None:
-    """AC-6: bullets authored before a review describe code that has changed."""
-    body = _content()
-    assert "refreshed `**Changes**` and `**Claims v1**` blocks" in body
-    assert "final shipped state" in body
-
-
-def test_grind_prompt_keeps_the_sdlc_out_of_source_comments() -> None:
-    """AC-7: code comments explain the code, not the pipeline that produced it."""
-    body = _content()
-    assert "Comments explain code, not the Ortus SDLC" in body
-    assert "belongs in beads" in body
-
-
-# ---------------------------------------------------------------------------
-# (6) bounded background waits — a wedged check costs one bounded wait, not
-#     the whole worker timeout (ortus-xjdf)
-# ---------------------------------------------------------------------------
-
-
-def test_background_wait_is_bounded() -> None:
-    """AC-1/AC-5: polling caps its attempts; no unbounded wait is described.
-
-    A worker observed 2026-08-10 polled an empty output file for twenty
-    minutes because its job's pipeline never closed; nothing bounded the wait
-    except the ninety-minute worker timeout, which exists to protect finished
-    work, not to diagnose wedged checks.
-    """
-    body = _content()
-    assert "maximum number of polling attempts" in body
-    assert "never wait in an unbounded loop" in body
-    # The observed anti-pattern must not be demonstrated anywhere in the
-    # prompt (AC-5's rg check, asserted here so it cannot quietly return).
-    assert "until [ -s" not in body
-
-
-def test_polled_output_is_redirected_not_piped() -> None:
-    """AC-2: a pipeline through a filter cannot report progress."""
-    body = _content()
-    assert "Redirect output to a file" in body
-    assert "never pipe through a filter" in body
-    assert "emits nothing until its input reaches end of file" in body
-    # Decision 5: the command's own `timeout` kills what it launched, but
-    # surviving children can hold the pipe open — it does not end the wait.
-    assert "Do not rely on the command's own `timeout`" in body
-
-
-def test_silent_job_is_a_failure() -> None:
-    """AC-3: no output at the bound is a failure to report, not more waiting."""
-    body = _content()
-    assert "failure to report, not a reason to keep waiting" in body
-    # Launching a second job to wait on was part of the observed stall; the
-    # bound survives across repeated jobs in one session.
-    assert "never resets the bound" in body
-
-
-def test_abandoned_wait_names_the_command() -> None:
-    """AC-4: an abandoned wait must say what it was waiting for."""
-    body = _content()
-    assert "Name the command when you abandon a wait" in body
-    assert "how many times you polled" in body
-
-
-def test_unfinished_check_is_not_failed_work() -> None:
-    """AC-6: a check that outlived its bound is unfinished, not wrong work."""
-    body = _content()
-    assert "Distinguish an unfinished check from wrong work" in body
-    assert "report it as unfinished rather than as failed work" in body
-    assert "normal completion, not a wedge" in body
-    # Giving up on a check never means giving up the candidate.
-    assert "leave the owned paths intact" in body
-
-
-# ---------------------------------------------------------------------------
-# (6b) the bound covers harness-tracked task waits too — a running status
-#      with an empty output file past the bound is a failure (ortus-v20y)
-# ---------------------------------------------------------------------------
-
-
-def test_status_is_not_progress() -> None:
-    """AC-1: a `running` status never extends the bound; produced bytes do.
-
-    A worker observed 2026-08-12 blocked on `TaskOutput` for ~40 minutes
-    while the task's output file stayed empty — each timeout's "still
-    running" answer read as progress and reset its judgment, defeating the
-    attempt bound the ortus-xjdf section prescribes for pipe waits.
-    """
-    body = _content()
-    assert "A `running` status does not extend the bound" in body
-    assert "status words are not progress, bytes are" in body
-
-
-def test_foreground_retry_before_blocker() -> None:
-    """AC-2: one foreground re-run of the same command precedes a blocker
-    report; a second silent run IS the blocker, reported with the command
-    named."""
-    body = _content()
-    assert (
-        "re-run the same checks in the foreground once before reporting a blocker"
-        in body
-    )
-    assert "If that single foreground run also produces nothing" in body
-
-
-def test_blocking_waits_count_as_attempts() -> None:
-    """AC-3: the attempt bound is shared across wait mechanisms for the same
-    job — blocking on `TaskOutput` spends an attempt like a file poll does."""
-    body = _content()
-    assert "blocking waits count against the same attempt bound" in body
-    assert "`TaskOutput`" in body
-    # Recovery never reaches for a tracked task this worker did not start.
-    assert "Never kill a tracked task you did not start" in body
 
 
 # ---------------------------------------------------------------------------
@@ -356,24 +111,6 @@ def test_work_issue_forbids_worktree_add() -> None:
     # — which is how the leaked registrations happened. Both tiers are named.
     assert "git archive" in body
     assert "git clone --shared" in body
-
-
-def test_implementation_names_git_archive() -> None:
-    """AC-2: the worker contract forbids the worktree and names both tiers.
-
-    Naming only the archive would send every agent that needs a runnable tree
-    straight back to `git worktree add`: this repository's version derives
-    from vcs metadata, so an archive extraction cannot even install.
-    """
-    body = _content()
-    assert "Never run `git worktree add`" in body
-    assert "git archive" in body
-    assert "git clone --shared" in body
-    # An agent needing only part of a tree is not pushed into copying all of it.
-    assert "pathspec" in body.lower()
-    # The tier split is stated, not left for the agent to rediscover at a
-    # failed build.
-    assert "archive extraction cannot even install" in body
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +380,7 @@ def test_oversized_lessons_are_dropped_from_the_claude_condition() -> None:
 
 # ---------------------------------------------------------------------------
 # (10) lesson proposals — a worker may propose, but pending never reaches a
-# worker and the contract states the qualifying rules (ortus-axns)
+# worker (ortus-axns)
 # ---------------------------------------------------------------------------
 
 
@@ -667,12 +404,3 @@ def test_pending_proposals_are_not_injected() -> None:
     assert _lessons_text(
         {LESSON_PROPOSAL_PREFIX + "only-pending": "not yet curated (2026-08-12)"}
     ) == ""
-
-
-def test_proposal_contract_states_the_rules() -> None:
-    """The grind-prompt no longer tells workers to propose lessons for a
-    missing review step, and it does not name `ortus curate`."""
-    body = _content()
-    assert "### Lesson proposal (optional)" not in body
-    assert "**Lesson proposal v1**" not in body
-    assert "ortus curate" not in body

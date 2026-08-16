@@ -54,7 +54,7 @@ def resolve_prompt(
     """Resolve <name>-prompt.md across the three layers.
 
     Args:
-        name: prompt basename without the .md extension (e.g., "grind-prompt").
+        name: prompt basename without the .md extension (e.g., "plan-prompt").
         repo: per-repo override root. When None, the repo layer is skipped.
         home: user-wide override root (defaults to Path.home()).
 
