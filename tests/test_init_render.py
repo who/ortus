@@ -68,7 +68,7 @@ def test_rendered_settings_json_validates_and_has_excluded_commands() -> None:
     ctx = RenderContext(prefix="myproj", project_type="python")
     text = render_template(".claude/settings.json", ctx)
     data = json.loads(text)
-    assert data["sandbox"]["excludedCommands"] == ["bd", "bd *"]
+    assert data["sandbox"]["excludedCommands"] == ["bd", "bd *", "ortus", "ortus *"]
 
 
 # Regression (ortus-5gja) — allowedDomains must include the package registries

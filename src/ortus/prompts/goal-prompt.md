@@ -9,7 +9,7 @@ Read `AGENTS.md` first. One context window, one issue, then exit. Do not pick a 
 
 2. **Continue or select.** If any issue is `in_progress`, continue that id. If more than one is `in_progress`, flag human, comment PLAN-GAP, and stop. Else run `bd ready --json`. If empty, exit with no sentinel. Claim the first non-epic issue with `bd update <id> --status=in_progress`. Then `bd show <id> --json` — that packet is the work spec.
 
-3. **Investigate and implement** only that issue. Use CodeGraph when the injected CodeGraph contract requires it. Run the issue's criterion checks and `docs/testing.md`; the bounded hermetic default is `uv run pytest -m fast -n auto --test-timeout=30`. Never run `network` or `live_provider` by default. Fix failures. File leftover work as new beads; do not keep it on this id.
+3. **Investigate and implement** only that issue. Use CodeGraph when the injected CodeGraph contract requires it. Run the issue's criterion-check commands; follow `docs/testing.md` only if that file exists. Fix failures. File leftover work as new beads; do not keep it on this id.
 
 4. **Session-close** that id per `AGENTS.md`: completion comment, commit, `bd close`, `git pull --rebase --autostash`, `bd dolt push`, `git push`. Do not wait for an outer process to commit or close.
 

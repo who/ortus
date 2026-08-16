@@ -478,9 +478,9 @@ _CLAUDE_GOAL_CONDITION_LIMIT = 4_000
 # done bar — not the inlined goal-prompt.md body.
 _GOAL_POINTER = (
     "One window, one issue. Continue leftover in_progress, else run "
-    "bd ready and claim the first non-epic. Read AGENTS.md. Follow "
-    "`.ortus/prompts/goal-prompt.md` or `src/ortus/prompts/goal-prompt.md` "
-    "if either exists. Session-close that id per AGENTS.md. "
+    "bd ready and claim the first non-epic. Read AGENTS.md. Run "
+    "`ortus prompt show goal` and follow that one-issue loop. "
+    "Session-close that id per AGENTS.md. "
     "Achieved when that issue is closed and HEAD is in sync with origin. "
     "The issue's criterion-check commands already ran during implement — "
     "they are the whole verification. Do not run pytest or the repo test "
@@ -548,8 +548,8 @@ def _compose_work_prompt(
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
-    The /goal condition is ``_GOAL_POINTER`` (worker reads ``goal-prompt.md``
-    from disk). Grind does not inject a claimed id. ``template`` and
+    The /goal condition is ``_GOAL_POINTER`` (worker fetches the loop body
+    via ``ortus prompt show goal``). Grind does not inject a claimed id. ``template`` and
     ``issue`` remain on the signature so existing callers keep compiling;
     neither is substituted into the prompt.
 

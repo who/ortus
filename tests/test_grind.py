@@ -545,7 +545,8 @@ def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     prompt = result.stdout.split("--- per-iteration prompt ---", 1)[1]
     assert "bd ready" in prompt
     assert "AGENTS.md" in prompt
-    # Pointer names goal-prompt.md; Codex must not wrap with the slash command.
+    # Pointer names the prompt verb; Codex must not wrap with the slash command.
+    assert "ortus prompt show goal" in prompt
     assert not prompt.lstrip().startswith("/goal")
 
 

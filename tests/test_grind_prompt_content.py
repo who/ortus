@@ -2,8 +2,8 @@
 
 `ortus grind` composes each worker's prompt from `_GOAL_POINTER` /
 `_IMPLEMENTATION_INSTRUCTION`, the work-issue condition, the CodeGraph
-phase contract, and the stored prior lessons; the loop body the pointer
-names lives on disk in `src/ortus/prompts/goal-prompt.md`. This file
+phase contract, and the stored prior lessons; the loop body is fetched
+through the prompt subsystem (`ortus prompt show goal`). This file
 pins the composed surfaces — the pointer shape, the commit-message
 rules every writer-facing contract states, and lesson selection and
 rendering. (The bundled `grind-prompt.md` these tests once guarded was
@@ -34,7 +34,12 @@ def _composed_implement_prompt(backend: str = "claude") -> str:
 def test_worker_prompt_is_goal_loop() -> None:
     """AC-1: composed implement prompt is a pointer, not the inlined loop."""
     body = _composed_implement_prompt()
-    assert "goal-prompt.md" in body
+    assert "ortus prompt show goal" in body
+    # The loop is fetched through the prompt subsystem, never hunted for on
+    # disk: Ortus source paths do not exist in consumer repos.
+    assert "src/ortus/prompts" not in body
+    assert ".ortus/prompts" not in body
+    assert "if either exists" not in body
     assert "in_progress" in body
     assert "bd ready" in body
     assert "AGENTS.md" in body

@@ -175,7 +175,7 @@ def check_claude_settings(repo: Path) -> CheckResult:
     except (OSError, json.JSONDecodeError) as exc:
         return CheckResult(".claude/settings.json", False, f"unparseable: {exc}")
     excluded = data.get("sandbox", {}).get("excludedCommands") or []
-    missing = [c for c in ("bd", "bd *") if c not in excluded]
+    missing = [c for c in ("bd", "bd *", "ortus", "ortus *") if c not in excluded]
     if missing:
         return CheckResult(
             ".claude/settings.json",

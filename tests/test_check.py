@@ -64,7 +64,9 @@ def _healthy_repo(tmp_path: Path) -> Path:
     settings = repo / ".claude" / "settings.json"
     settings.parent.mkdir()
     settings.write_text(
-        json.dumps({"sandbox": {"excludedCommands": ["bd", "bd *"]}})
+        json.dumps(
+            {"sandbox": {"excludedCommands": ["bd", "bd *", "ortus", "ortus *"]}}
+        )
     )
     _healthy_codegraph(repo)
     _healthy_agent_files(repo)
@@ -157,7 +159,9 @@ def test_check_fails_on_disabled_hooks(
         json.dumps(
             {
                 "disableAllHooks": True,
-                "sandbox": {"excludedCommands": ["bd", "bd *"]},
+                "sandbox": {
+                    "excludedCommands": ["bd", "bd *", "ortus", "ortus *"]
+                },
             }
         )
     )
