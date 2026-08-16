@@ -823,7 +823,10 @@ def grind(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="claude, codex, or grok; overrides ORTUS_BACKEND and .ortusrc.",
+        help=(
+            "claude, codex, or grok; overrides ORTUS_BACKEND and .ortusrc "
+            "('all' is an init provisioning option, not a run backend)."
+        ),
     ),
     codegraph: Optional[CodeGraphMode] = typer.Option(
         None,

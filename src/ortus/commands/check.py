@@ -17,7 +17,7 @@ from typing import Callable, Optional
 import typer
 
 from ortus.core import output, sandbox
-from ortus.core.agent import BackendError, resolve_backend
+from ortus.core.agent import BACKENDS, BackendError, resolve_backend
 from ortus.core.agent_files import (
     BLOCK_SCHEMAS,
     MANAGED_FILES,
@@ -31,6 +31,7 @@ from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
+from ortus.core.init_render import BACKEND_TEMPLATES
 from ortus.core.prompts import (
     READINESS_SPEC_PLACEHOLDER,
     PromptNotFound,
@@ -49,6 +50,9 @@ class CheckResult:
     name: str
     ok: bool
     message: str
+    # "strict" rows drive the exit code; "info" rows render as WARN when not
+    # ok and never fail the check (provisioned-but-not-run backends).
+    level: str = "strict"
 
 
 def _binary_check(name: str, *, version_flag: str = "--version") -> CheckResult:
@@ -450,6 +454,37 @@ def check_prompt_overrides(repo: Path) -> CheckResult:
     return CheckResult(".ortus/prompts/", True, message)
 
 
+def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
+    """Informational row for a provisioned backend that is not the run backend.
+
+    `ortus init --backend all` writes every backend's config dir, so a repo
+    routinely carries config for backends it never runs. Discovery is the
+    config dir on disk, not an `.ortusrc` key. Gaps here are WARN rows with a
+    remediation, never failures: the exit code belongs to the run backend.
+    """
+    name = f"{backend} (provisioned)"
+    config_rel = BACKEND_TEMPLATES[backend]
+    gaps: list[str] = []
+    if not (repo / config_rel).is_file():
+        gaps.append(f"{config_rel} missing — run `ortus init --force`")
+    if shutil.which(backend) is None:
+        gaps.append(f"{backend} CLI not on PATH — install it")
+    if backend == "claude" and not _claude_mcp_registered(repo):
+        gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
+    elif backend == "grok" and not _grok_mcp_registered(repo):
+        gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
+    # codex: CodeGraph is injected per child, so CLI + index (the strict
+    # codegraph row) are its whole registration story.
+    if not gaps:
+        return CheckResult(name, True, "provisioned and runnable", level="info")
+    return CheckResult(
+        name,
+        False,
+        "provisioned but not runnable: " + "; ".join(gaps),
+        level="info",
+    )
+
+
 def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     results: list[CheckResult] = []
     if backend == "claude":
@@ -503,6 +538,13 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     for fn, label in repo_checks:
         output.progress("check", f"{label} ...")
         results.append(fn(repo))
+    for other in BACKENDS:
+        if other == backend:
+            continue
+        if not (repo / BACKEND_TEMPLATES[other]).parent.is_dir():
+            continue
+        output.progress("check", f"{other} (provisioned) ...")
+        results.append(check_provisioned_backend(repo, other))
     return results
 
 
@@ -526,17 +568,20 @@ def check(
     output.progress("check", f"target: {target}")
     output.progress("check", f"backend: {resolved_backend}")
     results = _run_all(target, resolved_backend)
-    output.table(
-        ["", "Check", "Status", "Details"],
-        [
-            ("[green]✓[/green]" if r.ok else "[red]✗[/red]", r.name, "PASS" if r.ok else "FAIL", r.message)
-            for r in results
-        ],
-    )
-    failed = sum(1 for r in results if not r.ok)
-    output.progress(
-        "check",
-        f"done ({len(results) - failed}/{len(results)} passed)",
-    )
+
+    def _row(r: CheckResult) -> tuple[str, str, str, str]:
+        if r.ok:
+            return ("[green]✓[/green]", r.name, "PASS", r.message)
+        if r.level == "info":
+            return ("[yellow]![/yellow]", r.name, "WARN", r.message)
+        return ("[red]✗[/red]", r.name, "FAIL", r.message)
+
+    output.table(["", "Check", "Status", "Details"], [_row(r) for r in results])
+    failed = sum(1 for r in results if not r.ok and r.level != "info")
+    warned = sum(1 for r in results if not r.ok and r.level == "info")
+    summary = f"done ({len(results) - failed - warned}/{len(results)} passed"
+    if warned:
+        summary += f", {warned} warning{'s' if warned != 1 else ''}"
+    output.progress("check", summary + ")")
     if failed:
         raise typer.Exit(code=1)

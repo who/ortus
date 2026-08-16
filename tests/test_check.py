@@ -238,6 +238,43 @@ def test_check_skips_the_verifier_probe_for_codex(
     assert "verifier sandbox" not in result.stdout
 
 
+def test_provisioned_backend_rows_are_informational(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sibling backend's gaps surface as info-level rows with a remediation."""
+    repo = _healthy_repo(tmp_path)
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
+    monkeypatch.setattr(check_mod.shutil, "which", lambda binary: None)
+    row = check_mod.check_provisioned_backend(repo, "codex")
+    assert row.level == "info"
+    assert not row.ok
+    assert "codex CLI not on PATH" in row.message
+    assert "install" in row.message
+
+    monkeypatch.setattr(check_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    row = check_mod.check_provisioned_backend(repo, "codex")
+    assert row.ok
+    assert row.level == "info"
+    assert "runnable" in row.message
+
+
+def test_check_exit_code_ignores_provisioned_backend_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WARN rows for sibling backends never fail the run backend's check."""
+    repo = _healthy_repo(tmp_path)
+    # Provisioned dir whose config file is gone: a gap, but not the run
+    # backend's problem — check reports it and still exits 0.
+    (repo / ".grok").mkdir()
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+    assert "FAIL" not in result.stdout
+
+
 def _snapshot_mtimes(root: Path) -> dict[str, tuple[float, int]]:
     snap: dict[str, tuple[float, int]] = {}
     for dirpath, _, files in os.walk(root):

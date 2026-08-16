@@ -526,6 +526,16 @@ def test_grok_dry_run_resolves_backend_and_goal_wrap(tmp_path: Path) -> None:
     assert prompt.lstrip().startswith("/goal ")
 
 
+def test_backend_all_is_rejected_as_init_only(tmp_path: Path) -> None:
+    """`--backend all` is an init breadth, never a grind run backend."""
+    repo = _fixture_repo(tmp_path)
+    result = runner.invoke(app, ["grind", str(repo), "--backend", "all", "--dry-run"])
+    assert result.exit_code == 1
+    # collapse the console's line wrapping before matching the phrase
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "init provisioning option" in combined
+
+
 def test_codex_dry_run_uses_plain_prompt(tmp_path: Path) -> None:
     repo = _fixture_repo(tmp_path)
     (repo / ".ortusrc").write_text('backend = "codex"\n')

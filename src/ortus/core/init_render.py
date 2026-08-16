@@ -131,12 +131,27 @@ def render_template(name: str, ctx: RenderContext) -> str:
     return template.render(**ctx.as_dict())
 
 
-def render_all(target: Path, ctx: RenderContext) -> list[Path]:
-    """Render every bundled template into `target`. Returns list of written paths."""
+def render_all(
+    target: Path,
+    ctx: RenderContext,
+    backends: tuple[str, ...] | None = None,
+) -> list[Path]:
+    """Render every bundled template into `target`. Returns list of written paths.
+
+    `backends` widens the backend-config slot to several backends at once
+    (`ortus init --backend all`); the shared files still render from `ctx`,
+    whose `backend` is the concrete run backend `.ortusrc` pins.
+    """
     written: list[Path] = []
-    names = tuple(
-        BACKEND_TEMPLATES[ctx.backend] if name == ".claude/settings.json" else name
+    selected = backends if backends is not None else (ctx.backend,)
+    names: tuple[str, ...] = tuple(
+        rendered
         for name in BUNDLED_TEMPLATES
+        for rendered in (
+            tuple(BACKEND_TEMPLATES[b] for b in selected)
+            if name == ".claude/settings.json"
+            else (name,)
+        )
     )
     for name in names:
         rendered = render_template(name, ctx)

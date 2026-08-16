@@ -40,6 +40,14 @@ DEFAULT_CODEGRAPH_MODE = "required"
 # Seconds. Used when `.ortusrc` omits `merge_gate_timeout`.
 DEFAULT_MERGE_GATE_TIMEOUT = 1800
 
+# `ortus init --backend all` provisions every backend but always pins one
+# concrete run backend; `all` must therefore never survive into a resolved
+# run configuration, whatever layer tries to smuggle it in.
+INIT_ONLY_BACKEND_MESSAGE = (
+    "backend must be claude, codex, or grok; "
+    "'all' is an init provisioning option, not a run backend"
+)
+
 DEFAULTS: dict[str, Any] = {
     "owner": None,
     "prefix": None,
@@ -118,6 +126,11 @@ def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
             base[key] = value
 
 
+def _validate_backend(values: dict[str, Any]) -> None:
+    if values.get("backend") == "all":
+        raise ProfileError(INIT_ONLY_BACKEND_MESSAGE)
+
+
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -180,5 +193,6 @@ def load_config(
             _merge(cfg.values, data)
             cfg.layers.append(LoadedLayer("project", project_path, data))
 
+    _validate_backend(cfg.values)
     _validate_profiles(cfg.values)
     return cfg

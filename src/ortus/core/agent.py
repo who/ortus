@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from ortus.core.claude import ClaudeRunner, _spawn_logged
-from ortus.core.config import load_config
+from ortus.core.config import INIT_ONLY_BACKEND_MESSAGE, load_config
 from ortus.core.codegraph import CodeGraphCapability
 from ortus.core.profiles import AgentProfile, Phase as Phase
 
@@ -260,6 +260,8 @@ def resolve_backend(
     """Resolve flag > environment > project/user config > Claude default."""
     configured = load_config(repo=repo, home=home).get("backend", "claude")
     name = requested or os.environ.get("ORTUS_BACKEND") or configured
+    if name == "all":
+        raise BackendError(INIT_ONLY_BACKEND_MESSAGE)
     if name not in BACKENDS:
         raise BackendError(
             f"unknown backend {name!r}; expected one of: {', '.join(BACKENDS)}"

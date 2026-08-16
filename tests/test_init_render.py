@@ -435,6 +435,22 @@ def test_render_all_writes_every_template(tmp_path: Path) -> None:
         assert p.read_text(encoding="utf-8").strip(), f"{p} rendered empty"
 
 
+def test_render_all_backends_writes_every_config_and_pins_ctx_backend(
+    tmp_path: Path,
+) -> None:
+    """`backends=` widens the backend slot while `.ortusrc` pins ctx.backend."""
+    ctx = RenderContext(prefix="acme", project_type="python", backend="claude")
+    written = render_all(tmp_path, ctx, backends=("claude", "codex", "grok"))
+    assert (tmp_path / ".claude" / "settings.json").is_file()
+    assert (tmp_path / ".codex" / "config.toml").is_file()
+    assert (tmp_path / ".grok" / "config.toml").is_file()
+    ortusrc = (tmp_path / ".ortusrc").read_text()
+    assert 'backend = "claude"' in ortusrc
+    assert 'backend = "all"' not in ortusrc
+    # three backend configs replace the single slot; shared files unchanged
+    assert len(written) == len(BUNDLED_TEMPLATES) + 2
+
+
 def test_render_substitutes_today_when_blank(tmp_path: Path) -> None:
     """today defaults to today's ISO date when not provided."""
     ctx = RenderContext(prefix="d", project_type="polyglot")

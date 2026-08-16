@@ -22,6 +22,7 @@ from ortus.core.agent_files import (
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 from ortus.core.init_render import (
+    BACKEND_TEMPLATES,
     FRAMEWORK_CHOICES,
     FRAMEWORK_DEFAULTS,
     LINTER_CHOICES,
@@ -181,6 +182,11 @@ def _codegraph_cli() -> str | None:
     return shutil.which("codegraph")
 
 
+def _backend_cli(name: str) -> str | None:
+    """Locate a backend CLI (claude/codex/grok); the seam init tests replace."""
+    return shutil.which(name)
+
+
 def _codegraph_index(repo: Path, *, timeout: int = CODEGRAPH_INIT_TIMEOUT) -> None:
     """Run `codegraph init` inside `repo`; the seam init tests replace.
 
@@ -248,6 +254,36 @@ def _bootstrap_codegraph(repo: Path, mode: str) -> None:
     output.warn(f"{problem}; continuing under --codegraph=auto")
 
 
+def _summarize_backends(run_backend: str) -> None:
+    """Per-backend summary for `--backend all`; nonzero if the run backend can't run.
+
+    Static provision (the config files) has already succeeded by the time this
+    runs, so all that is left to judge is the CLI-dependent tier. A missing
+    sibling CLI is a recorded skip — its config sits on disk waiting for the
+    install, and `ortus check` reports it — but the pinned run backend without
+    its CLI means every grind would abort at launch, which is a failed init.
+    """
+    for b in BACKENDS:
+        cli = _backend_cli(b)
+        config_path = BACKEND_TEMPLATES[b]
+        if cli is not None:
+            output.success(f"{b}: {config_path} written; CLI at {cli}")
+        elif b == run_backend:
+            output.error(
+                f"{b}: {config_path} written, but the {b} CLI is not on PATH "
+                f"and {b} is the pinned run backend",
+                hint=f"install the {b} CLI, then verify with `ortus check`",
+            )
+            raise typer.Exit(code=1)
+        else:
+            output.warn(
+                f"{b}: {config_path} written; {b} CLI not on PATH — provisioned "
+                "but not runnable; skipped CLI-dependent setup (verify with "
+                "`ortus check` after installing)"
+            )
+    output.success(f'pinned run backend "{run_backend}" in .ortusrc')
+
+
 def _resolve_choice(
     flag_name: str,
     cli_value: Optional[str],
@@ -306,9 +342,12 @@ def init(
         help="Linter (choices depend on --project-type; per-language default applies if omitted).",
     ),
     backend: str = typer.Option(
-        "claude",
+        "all",
         "--backend",
-        help="Agent backend to configure (claude|codex|grok). Claude remains the default.",
+        help=(
+            "Agent backend to configure (all|claude|codex|grok). The default "
+            "'all' provisions every backend and pins claude as the run backend."
+        ),
     ),
     codegraph: Optional[str] = typer.Option(
         None,
@@ -323,12 +362,16 @@ def init(
             hint=f"choices: {', '.join(PROJECT_TYPES)}",
         )
         raise typer.Exit(code=1)
-    if backend not in BACKENDS:
+    provision_all = backend == "all"
+    if not provision_all and backend not in BACKENDS:
         output.error(
             f"--backend={backend!r} is not recognized",
-            hint=f"choices: {', '.join(BACKENDS)}",
+            hint=f"choices: all, {', '.join(BACKENDS)}",
         )
         raise typer.Exit(code=1)
+    # `all` is a provisioning breadth, never a run backend: `.ortusrc` always
+    # pins a concrete value, and resolve_backend() rejects the token outright.
+    run_backend = "claude" if provision_all else backend
 
     resolved_pm = _resolve_choice(
         "--package-manager", package_manager, project_type,
@@ -420,14 +463,17 @@ def init(
         framework=resolved_fw,
         linter=resolved_lint,
         codegraph=resolved_codegraph,
-        backend=backend,
+        backend=run_backend,
     )
-    written = render_all(target, ctx)
+    written = render_all(target, ctx, backends=BACKENDS if provision_all else None)
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
 
     output.progress("init", "applying managed AGENTS.md and CLAUDE.md blocks")
     _write_agent_files(target, resolved_codegraph)
+
+    if provision_all:
+        _summarize_backends(run_backend)
 
     output.progress("init", f"done ({len(written)} files, prefix={resolved_prefix})")
     output.success(f"ortus init complete: {target}")

@@ -17,7 +17,7 @@ from ortus.core.agent import (
     wrap_grok_prompt,
 )
 from ortus.core.claude import ClaudeRunner, _readonly_wrapper
-from ortus.core.profiles import Phase, validate_profile_values
+from ortus.core.profiles import Phase, ProfileError, validate_profile_values
 
 
 def test_readonly_verifier_postures_are_technically_enforced(
@@ -58,6 +58,33 @@ def test_grok_is_a_legal_backend(tmp_path: Path) -> None:
     assert not isinstance(runner, ClaudeRunner)
     with pytest.raises(BackendError, match="unknown backend"):
         resolve_backend("other", repo=tmp_path, home=home)
+
+
+def test_all_is_rejected_as_a_run_backend(tmp_path: Path) -> None:
+    """`all` provisions at init time; it must never resolve as a run backend."""
+    home = tmp_path / "home"
+    with pytest.raises(BackendError, match="init provisioning option"):
+        resolve_backend("all", repo=tmp_path, home=home)
+
+
+def test_ortusrc_backend_all_is_rejected(tmp_path: Path) -> None:
+    """Config validation refuses the token before any verb can act on it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".ortusrc").write_text('backend = "all"\n')
+    with pytest.raises(ProfileError, match="init provisioning option"):
+        resolve_backend(None, repo=repo, home=home)
+
+
+def test_ortus_backend_env_all_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("ORTUS_BACKEND", "all")
+    with pytest.raises(BackendError, match="init provisioning option"):
+        resolve_backend(None, repo=tmp_path, home=home)
 
 
 def test_grok_implement_argv() -> None:

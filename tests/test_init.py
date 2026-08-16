@@ -47,6 +47,20 @@ def _fake_codegraph(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _fake_backend_clis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend every backend CLI is installed.
+
+    The default `--backend all` summarizes CLI availability per backend and
+    fails when the pinned run backend's CLI is absent, so an unfaked lookup
+    would make these tests answer for the host's installs. Tests about a
+    missing CLI re-patch `_backend_cli` themselves.
+    """
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "_backend_cli", lambda name: f"/usr/bin/{name}")
+
+
 def test_init_on_empty_dir_creates_all_artifacts(tmp_path: Path) -> None:
     """Acceptance #1: fresh dir → .beads/, settings.json, .ortusrc, AGENTS.md, .gitignore."""
     target = tmp_path / "fresh"
@@ -100,6 +114,60 @@ def test_init_grok_creates_only_grok_config(tmp_path: Path) -> None:
     assert "codegraph" in data.get("mcp_servers", {})
     assert "sandbox" not in data
     assert "sandbox_mode" not in data
+
+
+def test_init_default_all_provisions_every_backend(tmp_path: Path) -> None:
+    """`--backend all` (the default) writes all three config dirs and pins claude."""
+    target = tmp_path / "everything"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (target / ".claude" / "settings.json").is_file()
+    assert (target / ".codex" / "config.toml").is_file()
+    assert (target / ".grok" / "config.toml").is_file()
+    ortusrc = (target / ".ortusrc").read_text()
+    assert 'backend = "claude"' in ortusrc
+    assert 'backend = "all"' not in ortusrc
+
+
+def test_init_all_with_grok_cli_absent_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: a missing sibling CLI is a recorded skip, not an init failure."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod,
+        "_backend_cli",
+        lambda name: None if name == "grok" else f"/usr/bin/{name}",
+    )
+    target = tmp_path / "nogrok"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (target / ".claude" / "settings.json").is_file()
+    assert (target / ".codex" / "config.toml").is_file()
+    ortusrc = (target / ".ortusrc").read_text()
+    assert 'backend = "all"' not in ortusrc
+    assert 'backend = "claude"' in ortusrc
+    combined = result.stdout + result.stderr
+    assert "grok CLI not on PATH" in combined
+    assert "ortus check" in combined
+
+
+def test_init_all_with_claude_cli_absent_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned run backend without its CLI is a failed init, not a warning."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod,
+        "_backend_cli",
+        lambda name: None if name == "claude" else f"/usr/bin/{name}",
+    )
+    target = tmp_path / "noclaude"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 1
+    assert "pinned run backend" in (result.stdout + result.stderr)
 
 
 def test_settings_json_has_bd_excluded_and_hooks(tmp_path: Path) -> None:
@@ -321,9 +389,10 @@ def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
     target = tmp_path / "closedstdin"
     t0 = time.monotonic()
     proc = subprocess.run(
-        # `--codegraph off` keeps this about stdin: the monkeypatched bootstrap
-        # seam does not reach a real subprocess, and indexing is not on trial.
-        ["ortus", "init", str(target), "--codegraph", "off"],
+        # `--codegraph off` and a concrete backend keep this about stdin: the
+        # monkeypatched seams do not reach a real subprocess, and neither
+        # indexing nor the host's installed backend CLIs are on trial.
+        ["ortus", "init", str(target), "--codegraph", "off", "--backend", "claude"],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,

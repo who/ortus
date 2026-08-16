@@ -139,7 +139,10 @@ def plan(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="claude, codex, or grok; defaults from .ortusrc.",
+        help=(
+            "claude, codex, or grok; defaults from .ortusrc "
+            "('all' is an init provisioning option, not a run backend)."
+        ),
     ),
     model: Optional[str] = typer.Option(
         None, "--model", help="Override the planning profile model for this run."
