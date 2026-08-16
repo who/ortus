@@ -282,6 +282,7 @@ def test_grind_unready_flags_human(
     assert issue_id in comments
     assert "missing, empty, or placeholder section" in comments
     assert "grind will not repair this packet" in comments
+    assert f"bd label remove {issue_id} human" in comments
 
 
 @pytest.mark.slow
@@ -314,6 +315,7 @@ def test_grind_unready_flags_all_then_stops(
         assert "human" in (shown.get("labels") or [])
         comments = _comments_blob(repo, issue_id)
         assert "missing, empty, or placeholder section" in comments
+        assert f"bd label remove {issue_id} human" in comments
     assert "no ready issue to claim (queue blocked or human-only)" in _grind_log(repo)
 
 
@@ -352,6 +354,12 @@ def test_grind_unready_label_failure_warns_and_stops(
     combined = result.stdout + result.stderr
     assert "could not label" in combined
     assert "automatically" not in combined
+    # The follow-up keeps the removal command even when labeling failed;
+    # removing an absent label is harmless and the warn already said the
+    # add was refused.
+    assert re.sub(r"\s+", "", f"bd label remove {issue_id} human") in re.sub(
+        r"\s+", "", _plain(combined)
+    )
     assert "readiness repair pass" not in _grind_log(repo)
 
 
@@ -465,6 +473,7 @@ def test_grind_queue_blocked_exit_uses_summary(
         in squashed
     )
     assert re.sub(r"\s+", "", f"follow-up: bd update {issue_id}") in squashed
+    assert re.sub(r"\s+", "", f"bd label remove {issue_id} human") in squashed
     # The enumeration's clauses stay off the console but in the log.
     assert re.sub(r"\s+", "", "description/behavioral context:") not in squashed
     assert "description/behavioral context: missing" in _grind_log(repo)

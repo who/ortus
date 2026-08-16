@@ -688,7 +688,9 @@ def _flag_unready_for_human(
             bd.add_comment(
                 report.issue_id,
                 "readiness schema v1 failed; grind will not repair this "
-                f"packet.\n\n{diagnostic}",
+                "packet. The human label keeps this issue out of grind's "
+                "queue; after repairing the spec, run: bd label remove "
+                f"{report.issue_id} human.\n\n{diagnostic}",
             )
         except Exception as exc:
             write_log(
@@ -1266,7 +1268,9 @@ def grind(
                         output.warn(
                             f"{_unready_skip_line(title, report)}. It stays "
                             "open and unclaimed. Run ortus plan or edit the "
-                            "work spec."
+                            "work spec; if grind labels it human, repair alone "
+                            "does not re-queue it — also run: bd label remove "
+                            f"{report.issue_id} human."
                         )
 
                     if resume_issue_id is not None:
@@ -1305,7 +1309,9 @@ def grind(
                             follow_up = (
                                 f"follow-up: bd update {report.issue_id} "
                                 "--description/--design/--acceptance to readiness "
-                                f"schema v1, then re-run: ortus grind {target}"
+                                f"schema v1, then: bd label remove "
+                                f"{report.issue_id} human, then re-run: "
+                                f"ortus grind {target}"
                             )
                             write_log(diagnostic)
                             write_log(follow_up)
