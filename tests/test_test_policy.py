@@ -185,11 +185,18 @@ def test_testing_guide_documents_flag_parity() -> None:
     assert "GIT_CONFIG_GLOBAL" in guide
 
 
-def test_worker_guidance_uses_bounded_hermetic_default() -> None:
+def test_worker_guidance_defers_to_criterion_checks() -> None:
+    """The bundled prompt ships no pytest guide of its own (ortus-apv5.3).
+
+    Worker verification comes from each issue's criterion-check commands, and
+    docs/testing.md is consumer-repo material the prompt defers to only when
+    that file exists. The negative guards keep the deleted Ortus-specific
+    pytest gate from creeping back into the bundled prompt.
+    """
     prompt = PROMPT.read_text(encoding="utf-8")
-    command = "uv run pytest -m fast -n auto --test-timeout=30"
-    assert command in prompt
-    assert "Never run `network` or `live_provider` by default" in prompt
+    assert "criterion-check commands" in prompt
+    assert "only if that file exists" in prompt
+    assert "uv run pytest -m fast -n auto --test-timeout=30" not in prompt
     assert "full local `uv run pytest`" not in prompt
 
 
