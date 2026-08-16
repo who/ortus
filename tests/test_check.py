@@ -34,15 +34,19 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 # --- fixture helpers -------------------------------------------------------
 
 
-def _fake_bd_run(*, readiness_memory: bool):
+def _fake_bd_run(*, readiness_memory: bool, memory_text: str | None = None):
     """Stand in for subprocess.run for every binary `check` shells out to.
 
     `bd memories --json` answers with a memory map; everything else answers
-    with a version line, which is all `_binary_check` reads.
+    with a version line, which is all `_binary_check` reads. `memory_text`
+    stores an operator-edited body under the readiness key in place of the
+    canonical pointer.
     """
     memories: dict[str, object] = {"schema_version": 1}
     if readiness_memory:
-        memories[READINESS_MEMORY_KEY] = readiness_memory_text()
+        memories[READINESS_MEMORY_KEY] = (
+            readiness_memory_text() if memory_text is None else memory_text
+        )
 
     class _CP:
         def __init__(self, stdout: str) -> None:
@@ -56,6 +60,15 @@ def _fake_bd_run(*, readiness_memory: bool):
         return _CP("fake 1.0.0\n")
 
     return _run
+
+
+def _compact(stdout: str) -> str:
+    """Squash check's table for substring asserts.
+
+    The table wraps long cells, so whitespace goes; a wrap inside a cell also
+    threads border characters through the value, so those go too.
+    """
+    return "".join(ch for ch in stdout if not ch.isspace() and ch not in "│┃")
 
 
 def _healthy_repo(tmp_path: Path) -> Path:
@@ -100,13 +113,20 @@ def _healthy_codegraph(repo: Path) -> None:
 
 
 def _all_binaries_present(
-    monkeypatch: pytest.MonkeyPatch, *, readiness_memory: bool = True
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    readiness_memory: bool = True,
+    memory_text: str | None = None,
 ) -> None:
     """Pretend bd, claude, jq are on PATH and return a version string."""
     import subprocess as _sp
 
     monkeypatch.setattr(check_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    monkeypatch.setattr(_sp, "run", _fake_bd_run(readiness_memory=readiness_memory))
+    monkeypatch.setattr(
+        _sp,
+        "run",
+        _fake_bd_run(readiness_memory=readiness_memory, memory_text=memory_text),
+    )
 
 
 def _fake_sandbox_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -498,10 +518,45 @@ def test_check_reports_missing_readiness_memory(
     _fake_sandbox_ok(monkeypatch)
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 1
-    # The table wraps long cells, so compare with whitespace removed.
-    compact = "".join(result.stdout.split())
+    compact = _compact(result.stdout)
     assert "bdremember" in compact
     assert f"--key{READINESS_MEMORY_KEY}" in compact
+
+
+def test_check_reports_stale_readiness_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a body edited to drop `ortus spec` fails and names the refresh.
+
+    The substring is the whole gate — an operator who rewrote the sentence
+    while keeping `ortus spec` must stay green, so only its absence fails.
+    """
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(
+        monkeypatch, memory_text="Author issues with the usual ortus headings."
+    )
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    compact = _compact(result.stdout)
+    assert "stale" in compact
+    assert "bdremember" in compact
+    assert f"--key{READINESS_MEMORY_KEY}" in compact
+
+
+def test_check_accepts_edited_memory_that_keeps_the_verb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: an operator rewrite that still says `ortus spec` passes."""
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(
+        monkeypatch, memory_text="House rule: run ortus spec before authoring."
+    )
+    _fake_sandbox_ok(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = "".join(result.stdout.split())
+    assert f"key={READINESS_MEMORY_KEY}" in compact
 
 
 def test_check_readiness_memory_is_read_only(

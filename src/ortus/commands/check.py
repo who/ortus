@@ -132,7 +132,10 @@ def check_readiness_memory(repo: Path) -> CheckResult:
     Repos initialized before the pointer existed have no such memory, so the
     failure message carries the exact command that adds it — this check never
     writes it itself (NFR-006). `--readonly` and `--sandbox` keep the query
-    from taking bd's write or auto-sync paths.
+    from taking bd's write or auto-sync paths. A present key whose body no
+    longer names `ortus spec` also fails: check, not init, is the enforcer
+    that the pointer still points at the verb, since an operator edit that
+    drops the verb leaves later sessions authoring headings from memory.
     """
     name = "bd readiness memory"
     if not (repo / ".beads").is_dir():
@@ -159,11 +162,19 @@ def check_readiness_memory(repo: Path) -> CheckResult:
         memories = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         return CheckResult(name, False, f"bd memories --json unparseable: {exc}")
-    if READINESS_MEMORY_KEY in memories:
-        return CheckResult(name, True, f"key={READINESS_MEMORY_KEY}")
-    return CheckResult(
-        name, False, f"missing — add it with: {readiness_memory_command()}"
-    )
+    if READINESS_MEMORY_KEY not in memories:
+        return CheckResult(
+            name, False, f"missing — add it with: {readiness_memory_command()}"
+        )
+    body = memories[READINESS_MEMORY_KEY]
+    if not isinstance(body, str) or "ortus spec" not in body:
+        return CheckResult(
+            name,
+            False,
+            "stale — the stored text no longer says `ortus spec`; "
+            f"refresh it with: {readiness_memory_command()}",
+        )
+    return CheckResult(name, True, f"key={READINESS_MEMORY_KEY}")
 
 
 def check_claude_settings(repo: Path) -> CheckResult:

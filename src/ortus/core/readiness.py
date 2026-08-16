@@ -672,13 +672,17 @@ def readiness_memory_text() -> str:
 
     Deliberately a pointer rather than the contract itself: memories are
     reloaded in every session and after every compaction, so the body names
-    the verb that prints the sections instead of restating them.
+    the verb that prints the sections instead of restating them. The wording
+    is an always-use instruction because harnesses without a prime hook
+    (Codex, Grok) meet this text only via `bd prime`, and a session that has
+    seen an older schema would otherwise author headings from memory.
     """
     return (
-        f"Ortus readiness schema {READINESS_SCHEMA_VERSION}: every non-epic bd "
-        "issue must carry the required headings in its description, design and "
-        "acceptance criteria, or `ortus grind` skips it as unready. Run "
-        "`ortus spec` for the full contract."
+        f"Ortus readiness schema {READINESS_SCHEMA_VERSION}: whenever you "
+        "author or repair a non-epic bd issue, always run `ortus spec` first "
+        "and follow its output exactly. Never invent headings or copy them "
+        "from memory of an earlier schema — `ortus grind` skips any issue "
+        "that does not satisfy the installed contract as unready."
     )
 
 

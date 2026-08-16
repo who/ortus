@@ -190,6 +190,25 @@ def test_settings_json_has_bd_excluded_and_hooks(tmp_path: Path) -> None:
     )
 
 
+def test_codex_and_grok_configs_carry_no_prime_hook(tmp_path: Path) -> None:
+    """Codex and Grok reach the readiness memory without a host hook.
+
+    Codex 0.144.x hooks must be explicitly trusted before they run, and the
+    official `.grok/config.toml` accepts only [mcp_servers], [plugins], and
+    [permission] — neither host runs an untrusted SessionStart command. Their
+    prime path is the managed AGENTS.md block (`bd prime`, then `ortus spec`),
+    so a hook stanza in either config would be dead configuration; this test
+    pins that neither template grows one that the host would silently ignore.
+    """
+    target = tmp_path / "fresh"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for config in (".codex/config.toml", ".grok/config.toml"):
+        text = (target / config).read_text()
+        assert "prime" not in text, config
+        assert "hook" not in text.lower(), config
+
+
 def _bd_memories(repo: Path) -> dict:
     proc = subprocess.run(
         ["bd", "memories", "--json"],
