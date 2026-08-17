@@ -82,6 +82,50 @@ def test_worker_prompt_excludes_human_label() -> None:
     )
 
 
+def test_worker_prompt_forbids_pending_background_verification() -> None:
+    """AC-1 (ortus-mpbw): the goal loop forbids ending the turn while
+    verification the worker started is still running — a worker that launches
+    checks in the background and exits kills them with its subprocess and
+    wedges the claim."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    body = bundled_prompt_text("goal-prompt")
+    implement_step = next(
+        line for line in body.splitlines() if line.startswith("3.")
+    )
+    assert "must finish before your turn ends" in implement_step
+    assert (
+        "never end the turn with verification still running in the background"
+        in implement_step
+    )
+    # The exit step restates the bar where the worker decides to stop: nothing
+    # it launched may outlive the turn.
+    exit_step = next(line for line in body.splitlines() if line.startswith("5."))
+    assert "after every check you started has finished" in exit_step
+    assert "still be running when you stop" in exit_step
+
+
+def test_worker_prompt_plan_gap_for_unrunnable_checks() -> None:
+    """AC-2 (ortus-mpbw): a criterion check that cannot complete within the
+    worker window is routed to PLAN-GAP + flag human instead of being started
+    — the spec gets repaired rather than killing successive workers."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    body = bundled_prompt_text("goal-prompt")
+    implement_step = next(
+        line for line in body.splitlines() if line.startswith("3.")
+    )
+    assert "cannot complete within this window" in implement_step
+    assert "work-spec defect" in implement_step
+    assert "do not start it" in implement_step
+    assert "PLAN-GAP" in implement_step
+    assert "flag human" in implement_step
+    # The routing reuses the flag-human convention already present in the
+    # selection step; no new sentinel is invented.
+    select_step = next(line for line in body.splitlines() if line.startswith("2."))
+    assert "flag human" in select_step
+
+
 def test_worker_prompt_one_issue_per_window() -> None:
     """AC-2: one issue per invocation; a second issue is forbidden."""
     body = _composed_implement_prompt()
