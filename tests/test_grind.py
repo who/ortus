@@ -2322,6 +2322,43 @@ def test_failed_lesson_read_degrades_on_bd_error(tmp_path: Path) -> None:
     assert "\n" not in lines[0]
 
 
+def test_grind_logs_dropped_lessons() -> None:
+    """AC-2 (ortus-ch7u): when the lessons section is dropped to keep the
+    Claude /goal condition under the cap, the run log names the omitted
+    memory keys; a section that fits, or an empty one, logs nothing."""
+    lessons = (
+        ("ci-policy-owner-decision-2026-08-16-github", "x" * 2_000),
+        ("scheduler-holds-startup-code", "y" * 2_000),
+    )
+    lessons_text = grind_mod._lessons_section(lessons)
+    prompt = grind_mod._compose_work_prompt(
+        "",
+        {"id": "repo-1"},
+        "claude",
+        phase_instruction=grind_mod._IMPLEMENTATION_INSTRUCTION,
+        lessons_text=lessons_text,
+    )
+    assert "Prior lessons" not in prompt
+    lines: list[str] = []
+    grind_mod._log_dropped_lessons(lessons, lessons_text, prompt, lines.append)
+    assert len(lines) == 1
+    assert lines[0].startswith("lessons:")
+    assert "ci-policy-owner-decision-2026-08-16-github" in lines[0]
+    assert "scheduler-holds-startup-code" in lines[0]
+    assert "\n" not in lines[0]
+
+    fits = (("scheduler-holds-startup-code", "restart it after editing"),)
+    fits_text = grind_mod._lessons_section(fits)
+    fits_prompt = grind_mod._compose_work_prompt(
+        "", {"id": "repo-1"}, "claude", lessons_text=fits_text
+    )
+    assert fits_text in fits_prompt
+    quiet: list[str] = []
+    grind_mod._log_dropped_lessons(fits, fits_text, fits_prompt, quiet.append)
+    grind_mod._log_dropped_lessons((), "", fits_prompt, quiet.append)
+    assert quiet == []
+
+
 # ---------------------------------------------------------------------------
 # Machine verification wiring (ortus-l2u9.3)
 # ---------------------------------------------------------------------------

@@ -513,16 +513,18 @@ def _lessons_section(lessons: tuple[tuple[str, str], ...]) -> str:
     return _LESSONS_HEADER + "".join(f"\n- {key}: {body}" for key, body in lessons)
 
 
-def _lessons_contract(bd: BdClient, write_log: Callable[[str], None]) -> str:
-    """The prior-lessons section of a worker's phase contract.
+def _selected_lessons(
+    bd: BdClient, write_log: Callable[[str], None]
+) -> tuple[tuple[str, str], ...]:
+    """The bounded lessons a worker's phase contract carries, as (key, body).
 
-    A repository with no stored lessons injects nothing, and a failed tracker
-    read degrades to the same empty section with a log line: a worker without
-    memory is today's behavior and must remain viable. The readiness memory
-    is excluded — bd already injects it into every session via priming.
+    A repository with no stored lessons selects nothing, and a failed tracker
+    read degrades to the same empty selection with a log line: a worker
+    without memory is today's behavior and must remain viable. The readiness
+    memory is excluded — bd already injects it into every session via priming.
     """
     try:
-        lessons = bd.lessons(
+        return bd.lessons(
             exclude_keys=frozenset({READINESS_MEMORY_KEY}),
             limit=_LESSONS_MAX_COUNT,
             max_chars=_LESSON_MAX_CHARS,
@@ -533,8 +535,36 @@ def _lessons_contract(bd: BdClient, write_log: Callable[[str], None]) -> str:
             "lessons: tracker read failed; worker starts without stored "
             f"lessons ({first_line})"
         )
-        return ""
-    return _lessons_section(lessons)
+        return ()
+
+
+def _lessons_contract(bd: BdClient, write_log: Callable[[str], None]) -> str:
+    """The prior-lessons section of a worker's phase contract, or ''."""
+    return _lessons_section(_selected_lessons(bd, write_log))
+
+
+def _log_dropped_lessons(
+    lessons: tuple[tuple[str, str], ...],
+    lessons_text: str,
+    prompt: str,
+    write_log: Callable[[str], None],
+) -> None:
+    """Name the lessons a composed prompt left out.
+
+    Composition stays pure: :func:`_compose_work_prompt` drops the lessons
+    section when it would push the Claude ``/goal`` condition past the cap.
+    The caller detects that by looking for the section in the composed
+    prompt and logs the omitted keys, so an owner decision that never reached
+    a worker is visible in the run log instead of silently absent.
+    """
+    if not lessons_text or lessons_text in prompt:
+        return
+    keys = ", ".join(key for key, _ in lessons)
+    write_log(
+        "lessons: dropped from the worker prompt — the section would push the "
+        f"Claude /goal condition past {_CLAUDE_GOAL_CONDITION_LIMIT} characters; "
+        f"omitted keys: {keys}"
+    )
 
 
 def _compose_work_prompt(
@@ -1519,6 +1549,8 @@ def grind(
                     if callable(configure_codegraph):
                         configure_codegraph(implementation_probe.capability)
                     implementation_instruction = _IMPLEMENTATION_INSTRUCTION
+                    iteration_lessons = _selected_lessons(bd, write_log)
+                    iteration_lessons_text = _lessons_section(iteration_lessons)
                     try:
                         iteration_prompt = _compose_work_prompt(
                             work_template,
@@ -1528,12 +1560,18 @@ def grind(
                             phase_contract_text=phase_contract(
                                 CodeGraphPhase.IMPLEMENTATION, implementation_probe
                             ),
-                            lessons_text=_lessons_contract(bd, write_log),
+                            lessons_text=iteration_lessons_text,
                         )
                     except BackendError as exc:
                         write_log(f"iter prep: HALT — {exc}")
                         output.error(str(exc))
                         raise typer.Exit(code=1)
+                    _log_dropped_lessons(
+                        iteration_lessons,
+                        iteration_lessons_text,
+                        iteration_prompt,
+                        write_log,
+                    )
                     write_log(
                         f"iter {iters_run + 1}: goal-prompt ready for {issue_id} "
                         f"({resolved_backend})"

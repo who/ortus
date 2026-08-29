@@ -447,6 +447,70 @@ def test_oversized_lessons_are_dropped_from_the_claude_condition() -> None:
     assert prompt == _composed_worker_prompt("claude", "")
 
 
+def test_policy_lessons_selected_first() -> None:
+    """AC-1 (ortus-ch7u): a memory keyed with a `policy` or `decision`
+    hyphen-delimited token is selected ahead of lexically-earlier keys, so an
+    owner decision reaches a worker even in a store larger than the budget.
+    Within the priority tier, order stays lexical."""
+    from ortus.commands.grind import _LESSON_MAX_CHARS, _LESSONS_MAX_COUNT
+    from ortus.core.bd import is_priority_lesson, select_lessons
+
+    store = {f"aaa-lesson-{i}": f"ordinary lesson {i}" for i in range(6)}
+    store["zzz-ci-policy-owner-decision-2026-08-16-github"] = (
+        "heavy simulations are skipped under CI"
+    )
+    store["yyy-scope-decision-2026-08-01"] = "the dashboard stays read-only"
+    selected = select_lessons(
+        store, limit=_LESSONS_MAX_COUNT, max_chars=_LESSON_MAX_CHARS
+    )
+    keys = [key for key, _ in selected]
+    assert keys[:2] == [
+        "yyy-scope-decision-2026-08-01",
+        "zzz-ci-policy-owner-decision-2026-08-16-github",
+    ]
+    assert keys[2] == "aaa-lesson-0"
+    # The composed section carries the owner decision.
+    assert "heavy simulations are skipped under CI" in _lessons_text(store)
+    # The marker is the token, not a substring: `policy` inside a longer
+    # token does not qualify.
+    assert is_priority_lesson("ci-policy-2026")
+    assert not is_priority_lesson("policyholder-notes")
+    assert not is_priority_lesson("decisions-log")
+
+
+def test_select_lessons_without_policy_keys_stays_lexical() -> None:
+    """AC-4 (ortus-ch7u): a store without policy-token keys selects in pure
+    lexical order, bounded by the same limit, exactly as before."""
+    from ortus.commands.grind import _LESSON_MAX_CHARS, _LESSONS_MAX_COUNT
+    from ortus.core.bd import select_lessons
+
+    store = {f"key-{i}": f"lesson body {i}" for i in reversed(range(6))}
+    selected = select_lessons(
+        store, limit=_LESSONS_MAX_COUNT, max_chars=_LESSON_MAX_CHARS
+    )
+    assert [key for key, _ in selected] == sorted(store)[:_LESSONS_MAX_COUNT]
+
+
+def test_worker_prompt_checks_memories_before_authoring() -> None:
+    """AC-3 (ortus-ch7u): the goal loop's implement step directs the worker
+    to run `bd memories` before filing or re-scoping a bead, and binds
+    owner-decision memories on the new bead's Non-goals and Resolved
+    decisions — so a worker cannot file a bead whose non-goal contradicts a
+    recorded owner policy."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    body = bundled_prompt_text("goal-prompt")
+    implement_step = next(
+        line for line in body.splitlines() if line.startswith("3.")
+    )
+    assert "bd memories <keyword>" in implement_step
+    assert "before filing or re-scoping" in implement_step.lower()
+    assert "owner-decision memories" in implement_step
+    assert "binding" in implement_step
+    assert "Non-goals" in implement_step
+    assert "Resolved decisions" in implement_step
+
+
 # ---------------------------------------------------------------------------
 # (10) lesson proposals — a worker may propose, but pending never reaches a
 # worker (ortus-axns)

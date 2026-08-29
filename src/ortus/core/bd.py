@@ -32,6 +32,19 @@ class BdError(RuntimeError):
 # cannot compose into a worker's contract.
 LESSON_PROPOSAL_PREFIX = "proposal:"
 
+# Owner policy and decisions outrank ordinary lessons: a memory whose key
+# carries one of these as a hyphen-delimited token (the field convention,
+# e.g. `ci-policy-owner-decision-2026-08-16-github`) is selected before the
+# lexical fill, so a bounded selection over a large store still reaches a
+# worker with the owner's decisions in hand. No new metadata: the key is the
+# marker, and a false positive such as `decision-log` only reorders.
+LESSON_PRIORITY_TOKENS = frozenset({"policy", "decision"})
+
+
+def is_priority_lesson(key: str) -> bool:
+    """True when the memory key carries a policy or decision token."""
+    return not LESSON_PRIORITY_TOKENS.isdisjoint(key.split("-"))
+
 
 def _clip_lesson(text: str, max_chars: int) -> str:
     """Collapse a lesson body to one line and truncate on a word boundary.
@@ -59,11 +72,14 @@ def select_lessons(
 ) -> tuple[tuple[str, str], ...]:
     """Deterministic bounded selection over a raw memory mapping.
 
-    Keys sort lexically so two selections over the same store always compose
-    the same contract; each body is clipped by :func:`_clip_lesson`.
+    Two tiers: keys that :func:`is_priority_lesson` recognises come first,
+    then every other key fills the remaining budget. Within a tier keys sort
+    lexically so two selections over the same store always compose the same
+    contract; a store without policy-token keys selects in pure lexical
+    order. Each body is clipped by :func:`_clip_lesson`.
     """
     selected: list[tuple[str, str]] = []
-    for key in sorted(memories):
+    for key in sorted(memories, key=lambda k: (not is_priority_lesson(k), k)):
         if key in exclude_keys or key.startswith(LESSON_PROPOSAL_PREFIX):
             continue
         body = _clip_lesson(memories[key], max_chars)
