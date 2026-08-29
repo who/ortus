@@ -6,9 +6,12 @@ from copy import deepcopy
 import pytest
 
 from ortus.core.readiness import (
+    _COMMAND_RUNNERS,
     _REQUIRED_SECTIONS,
     RequiredSection,
+    extract_check_command,
     failed_reports,
+    looks_like_command,
     spec_markdown,
     validate_issue,
     validate_issues,
@@ -265,6 +268,35 @@ def test_spec_markdown_records_the_epic_exemption() -> None:
     # validate_issue() exempts epics; authors pad them needlessly if the
     # rendered contract stays silent about it.
     assert "epic" in spec_markdown().lower()
+
+
+def test_spec_lists_every_command_runner() -> None:
+    """AC-1: the taught allowlist is rendered from the enforcing set, so a
+    planner in any ecosystem sees exactly the tokens the validator accepts."""
+    shape_rules = spec_markdown().split("### Shape rules")[1]
+    runner_bullet = next(
+        line for line in shape_rules.splitlines() if "recognised runner" in line
+    )
+    listed = re.findall(r"`([^`]+)`", runner_bullet.split("using one of:")[1])
+    assert listed == sorted(_COMMAND_RUNNERS)
+    assert len(runner_bullet.splitlines()) == 1  # one rule, one bullet
+
+
+def test_spec_shows_non_python_check_example() -> None:
+    """AC-2: the Criterion-checks rule shows a non-Python command the
+    validator accepts today, beside the pytest one."""
+    shape_rules = spec_markdown().split("### Shape rules")[1]
+    checks_rule = next(
+        line for line in shape_rules.splitlines() if "`## Criterion checks`" in line
+    )
+    assert "`cargo test --test demo`" in checks_rule
+    assert "`uv run pytest tests/test_demo.py::test_x -q`" in checks_rule
+    assert looks_like_command("cargo test --test demo")
+    # The shape a planner actually writes on a criterion line extracts cleanly.
+    assert extract_check_command("- AC-1: Run `cargo test --test demo`.", "AC-1") == (
+        "cargo test --test demo",
+        None,
+    )
 
 
 def test_rendered_spec_round_trip_passes_validation() -> None:

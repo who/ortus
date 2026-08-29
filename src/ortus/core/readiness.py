@@ -929,6 +929,16 @@ def _unbounded_example(command: str) -> str:
     return f"`{command}`"
 
 
+def _runner_list() -> str:
+    """The runner allowlist as sorted backticked tokens, rendered from the set.
+
+    Rendered rather than typed so the taught list can never drift from the
+    set ``looks_like_command`` enforces; adding a runner updates the spec.
+    """
+
+    return ", ".join(f"`{token}`" for token in sorted(_COMMAND_RUNNERS))
+
+
 def _shape_rules() -> tuple[str, ...]:
     """Rules that a present section must satisfy, keyed to the enforcing regex."""
 
@@ -947,7 +957,8 @@ def _shape_rules() -> tuple[str, ...]:
         f"`## {_section('criterion_mapped_checks').heading}` — optional. When "
         "present, repeats every criterion identifier exactly once, each with "
         "one runnable command (backticks optional) "
-        f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}). "
+        f"({_example(_CODE_SPAN, '`uv run pytest tests/test_demo.py::test_x -q`')}, "
+        f"{_example(_CODE_SPAN, '`cargo test --test demo`')}). "
         "A command-looking span wins among several; extra spans that are not "
         "commands (version pins, paths) are ignored. Two command-looking "
         "spans on one criterion are ambiguous and fail readiness.",
@@ -959,6 +970,10 @@ def _shape_rules() -> tuple[str, ...]:
         f"{_example(_TEST_INVOCATION, 'cargo test --test demo')}, "
         f"{_example(_TEST_INVOCATION, 'go test ./pkg')}, "
         f"{_example(_TEST_INVOCATION, 'make test')}).",
+        "Runnable means the first token, after an optional `Run`, `Execute`, "
+        "`Check`, `Verify`, or `Invoke` lead-in, is a recognised runner. Write "
+        "commands the way the repository's own tooling spells them, using one "
+        f"of: {_runner_list()}.",
         "Shell constructs are not commands: a loop or conditional (`for i in "
         "1 2 3; do …; done`, `if …; then …; fi`) has no runner token and "
         "fails readiness as `no runnable command`. Wrap it in `bash -c '…'` "
