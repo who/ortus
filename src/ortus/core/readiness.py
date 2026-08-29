@@ -323,7 +323,9 @@ def _first_token(text: str) -> str:
 
 def _normalize_command(text: str) -> str:
     cleaned = _COMMAND_LEAD_IN.sub("", text.strip()).strip()
-    return cleaned.rstrip(".").strip()
+    # Drop one sentence-ending period; a run of dots is command text
+    # (``go test ./...``), never punctuation.
+    return re.sub(r"(?<!\.)\.$", "", cleaned).strip()
 
 
 def looks_like_command(text: str) -> bool:
@@ -331,6 +333,293 @@ def looks_like_command(text: str) -> bool:
 
     token = _first_token(_normalize_command(text))
     return token.rsplit("/", 1)[-1] in _COMMAND_RUNNERS
+
+
+#: Wrappers that precede the real command: ``uv run``, ``poetry run``,
+#: ``python -m``, ``env``. Value is the set of wrapper flags that consume the
+#: next token, so ``uv run --with pytest-xdist pytest`` still finds ``pytest``.
+_WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "uv": frozenset(
+        {
+            "--with",
+            "--with-editable",
+            "--with-requirements",
+            "--python",
+            "-p",
+            "--group",
+            "--only-group",
+            "--extra",
+            "--project",
+            "--directory",
+            "--package",
+            "--env-file",
+            "--index",
+            "--config-file",
+        }
+    ),
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "env": frozenset({"-u", "-C", "-S"}),
+}
+#: pytest options that take a separate value, so the value is not mistaken
+#: for a path. Unknown options are assumed boolean, which reads the token
+#: after them as a path: a false negative, never a false positive.
+_PYTEST_VALUE_FLAGS = frozenset(
+    {
+        "-n",
+        "--numprocesses",
+        "--dist",
+        "-p",
+        "-o",
+        "--override-ini",
+        "-W",
+        "-c",
+        "--rootdir",
+        "--confcutdir",
+        "--basetemp",
+        "--tb",
+        "--timeout",
+        "--test-timeout",
+        "--durations",
+        "--durations-min",
+        "--maxfail",
+        "--deselect",
+        "--ignore",
+        "--ignore-glob",
+        "--junitxml",
+        "--junit-xml",
+        "--log-level",
+        "--log-file",
+        "--capture",
+        "--import-mode",
+        "--cov",
+        "--cov-report",
+        "--color",
+        "-r",
+        "--maxprocesses",
+        "--randomly-seed",
+    }
+)
+#: pytest options that narrow the selection: a marker or keyword filter
+#: bounds a run as well as a path does (`-m fast` is the documented gate).
+_PYTEST_NARROWING_FLAGS = frozenset({"-k", "--keyword", "-m", "--markexpr"})
+#: Package-manager options before the script name that take a value.
+_PACKAGE_MANAGER_VALUE_FLAGS = frozenset(
+    {
+        "--filter",
+        "-F",
+        "-C",
+        "--dir",
+        "--prefix",
+        "--cwd",
+        "--workspace",
+        "--scope",
+        "--reporter",
+        "--loglevel",
+    }
+)
+_PACKAGE_MANAGER_TEST_SCRIPTS = frozenset({"test", "t", "tst"})
+#: cargo options whose presence scopes the run to one target or package.
+_CARGO_NARROWING_FLAGS = frozenset(
+    {"-p", "--package", "--test", "--bin", "--example", "--lib", "--doc", "--bench"}
+)
+_CARGO_VALUE_FLAGS = frozenset(
+    {
+        "-p",
+        "--package",
+        "--test",
+        "--bin",
+        "--example",
+        "--bench",
+        "--features",
+        "-F",
+        "-j",
+        "--jobs",
+        "--target",
+        "--target-dir",
+        "--manifest-path",
+        "--profile",
+        "--color",
+        "--config",
+        "-Z",
+        "--exclude",
+        "--message-format",
+    }
+)
+_GO_VALUE_FLAGS = frozenset(
+    {
+        "-run",
+        "-bench",
+        "-count",
+        "-timeout",
+        "-p",
+        "-parallel",
+        "-cpu",
+        "-tags",
+        "-o",
+        "-coverprofile",
+        "-covermode",
+        "-coverpkg",
+        "-ldflags",
+        "-gcflags",
+        "-exec",
+        "-fuzz",
+        "-skip",
+        "-list",
+    }
+)
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_UNBOUNDED_SUITE = (
+    "unbounded suite command; bound it to specific files/tests or move the "
+    "full run to a human-run criterion"
+)
+
+
+def _is_flag(token: str) -> bool:
+    return token.startswith("-") and token != "-"
+
+
+def _strip_wrappers(tokens: list[str]) -> list[str]:
+    """Drop leading environment assignments and ``uv run``-style wrappers."""
+
+    while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    while tokens:
+        head = tokens[0].rsplit("/", 1)[-1]
+        if head == "env":
+            rest = _skip_flags(tokens[1:], _WRAPPER_VALUE_FLAGS["env"])
+            while rest and _ENV_ASSIGNMENT.match(rest[0]):
+                rest = rest[1:]
+            tokens = rest
+        elif head in ("uv", "poetry") and len(tokens) > 1 and tokens[1] == "run":
+            tokens = _skip_flags(tokens[2:], _WRAPPER_VALUE_FLAGS[head])
+        elif (
+            head in ("python", "python3")
+            and len(tokens) > 2
+            and tokens[1] == "-m"
+        ):
+            tokens = tokens[2:]
+        else:
+            break
+    return tokens
+
+
+def _skip_flags(tokens: list[str], value_flags: frozenset[str]) -> list[str]:
+    """Return ``tokens`` after any leading options, consuming option values."""
+
+    index = 0
+    while index < len(tokens) and _is_flag(tokens[index]):
+        if tokens[index] in value_flags and "=" not in tokens[index]:
+            index += 2
+        else:
+            index += 1
+    return tokens[index:]
+
+
+def _pytest_is_unbounded(args: list[str]) -> bool:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return not any(not _is_flag(item) for item in args[index + 1 :])
+        if token.split("=", 1)[0] in _PYTEST_NARROWING_FLAGS:
+            return False
+        if _is_flag(token):
+            if token in _PYTEST_VALUE_FLAGS and "=" not in token:
+                index += 2
+            else:
+                index += 1
+            continue
+        return False
+    return True
+
+
+def _package_manager_is_unbounded(manager: str, args: list[str]) -> bool:
+    rest = _skip_flags(args, _PACKAGE_MANAGER_VALUE_FLAGS)
+    if manager == "yarn" and len(rest) > 2 and rest[0] == "workspace":
+        rest = rest[2:]
+    if rest and rest[0] == "run":
+        rest = rest[1:]
+    if not rest or rest[0] not in _PACKAGE_MANAGER_TEST_SCRIPTS:
+        return False
+    for token in rest[1:]:
+        if token == "--":
+            continue
+        # ``--testPathPattern=foo`` is a narrowing flag in disguise; a plain
+        # boolean flag (``--silent``) narrows nothing.
+        if not _is_flag(token) or "=" in token:
+            return False
+    return True
+
+
+def _go_is_unbounded(args: list[str]) -> bool:
+    if not args or args[0] != "test":
+        return False
+    index = 1
+    packages: list[str] = []
+    while index < len(args):
+        token = args[index]
+        if token.split("=", 1)[0] in ("-run", "-skip", "-fuzz", "-list"):
+            return False
+        if _is_flag(token):
+            if token in _GO_VALUE_FLAGS and "=" not in token:
+                index += 2
+            else:
+                index += 1
+            continue
+        packages.append(token)
+        index += 1
+    return any(package.endswith("...") for package in packages)
+
+
+def _cargo_is_unbounded(args: list[str]) -> bool:
+    if not args or args[0] != "test":
+        return False
+    index = 1
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return not any(not _is_flag(item) for item in args[index + 1 :])
+        if token.split("=", 1)[0] in _CARGO_NARROWING_FLAGS:
+            return False
+        if _is_flag(token):
+            if token in _CARGO_VALUE_FLAGS and "=" not in token:
+                index += 2
+            else:
+                index += 1
+            continue
+        return False
+    return True
+
+
+def _is_unbounded_suite(command: str) -> bool:
+    """True when `command` runs a recognised test runner over its whole suite.
+
+    Static, not executed: bare ``pytest`` with no path, ``-k`` or ``-m``;
+    ``pnpm``/``npm``/``yarn`` ``test`` with no file argument; ``go test ./...``
+    without ``-run``; ``cargo test`` with no filter or target. Anything the
+    grammar cannot classify — an unknown runner, ``bash -c``, ``make`` — is
+    accepted: a false negative costs one wedged window, a false positive
+    blocks a queue.
+    """
+
+    try:
+        tokens = shlex.split(_normalize_command(command))
+    except ValueError:
+        return False
+    tokens = _strip_wrappers(tokens)
+    if not tokens:
+        return False
+    runner = tokens[0].rsplit("/", 1)[-1]
+    args = tokens[1:]
+    if runner == "pytest":
+        return _pytest_is_unbounded(args)
+    if runner in ("pnpm", "npm", "yarn"):
+        return _package_manager_is_unbounded(runner, args)
+    if runner == "go":
+        return _go_is_unbounded(args)
+    if runner == "cargo":
+        return _cargo_is_unbounded(args)
+    return False
 
 
 def _check_line_body(line: str, criterion_id: str) -> str:
@@ -571,18 +860,30 @@ def validate_issue(issue: dict[str, Any]) -> ReadinessReport:
                     else "must map every AC-N exactly once by identifier and include exact commands or checks",
                 )
             )
+        else:
+            # A whole-suite command validates as a command but cannot finish
+            # inside a worker window (ortus-l55d); the scope is part of
+            # readiness, and the escape hatch is a human-run criterion.
+            for check in parsed_checks:
+                if _is_unbounded_suite(check.command):
+                    failures.append(
+                        _shape_failure(
+                            fail_code, f"{check.criterion_id}: {_UNBOUNDED_SUITE}"
+                        )
+                    )
 
     tests = values.get("targeted_tests", "")
-    if (
-        _has_section_content(tests)
-        and not targeted_test_command(tests)
-    ):
-        failures.append(
-            _shape_failure(
-                "targeted_tests",
-                "must include a targeted test command (backticks optional)",
+    if _has_section_content(tests):
+        test_command = targeted_test_command(tests)
+        if not test_command:
+            failures.append(
+                _shape_failure(
+                    "targeted_tests",
+                    "must include a targeted test command (backticks optional)",
+                )
             )
-        )
+        elif _is_unbounded_suite(test_command):
+            failures.append(_shape_failure("targeted_tests", _UNBOUNDED_SUITE))
 
     # A section can fail both presence and shape; collapse duplicate codes to
     # keep repair prompts and grind diagnostics bounded and actionable.
@@ -600,6 +901,14 @@ def _example(pattern: re.Pattern[str], example: str) -> str:
     if not pattern.search(example):
         raise ValueError(f"spec example {example!r} violates {pattern.pattern!r}")
     return example
+
+
+def _unbounded_example(command: str) -> str:
+    """A backticked whole-suite command, proven against the detector it teaches."""
+
+    if not _is_unbounded_suite(command):
+        raise ValueError(f"spec example {command!r} is not an unbounded suite")
+    return f"`{command}`"
 
 
 def _shape_rules() -> tuple[str, ...]:
@@ -628,6 +937,17 @@ def _shape_rules() -> tuple[str, ...]:
         "`None — <why>`, or include at least one test invocation (backticks "
         "optional) "
         f"({_example(_TEST_INVOCATION, 'uv run pytest tests/test_demo.py -q')}).",
+        "Every command in `## "
+        f"{_section('criterion_mapped_checks').heading}` and `## "
+        f"{_section('targeted_tests').heading}` must be bounded so it finishes "
+        "inside one worker window: a recognised test runner invoked over its "
+        f"whole suite ({_unbounded_example('uv run pytest -q')}, "
+        f"{_unbounded_example('pnpm --filter pkg test')}, "
+        f"{_unbounded_example('go test ./...')}, "
+        f"{_unbounded_example('cargo test')}) fails readiness. Bound it to "
+        "specific files or tests (a path, `-k`, `-m`, or file arguments "
+        "after `--`) or move the full run to a human-run criterion. "
+        "Commands the grammar cannot classify (`bash -c`, `make`) are accepted.",
     )
 
 
