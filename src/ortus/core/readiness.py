@@ -250,8 +250,19 @@ _CRITERION_KIND = re.compile(
 )
 _ORDERED_STEP = re.compile(r"^\s*\d+[.)]\s+\S+", re.MULTILINE)
 _CODE_SPAN = re.compile(r"`[^`\n]+`")
+# A test invocation is the pytest family or a recognised runner followed by
+# a test-ish invocation: a ``test`` subcommand (``pnpm --filter pkg test``,
+# ``npm run test``, ``cargo test``, ``go test``, ``make test``) or a
+# ``vitest``/``jest`` binary. Recognition is token-based over the normalized
+# command; the runner allowlist in ``looks_like_command`` still gates the lead
+# token, and scope bounding is ``_is_unbounded_suite``'s job.
 _TEST_INVOCATION = re.compile(
-    r"(?:pytest|unittest|python\s+-m\s+pytest)\b", re.IGNORECASE
+    r"\b(?:pytest|unittest|python\s+-m\s+pytest"
+    r"|vitest|jest"
+    r"|(?:npm|pnpm|yarn)\b(?:\s+\S+)*?\s+(?:run\s+)?test"
+    r"|cargo\s+test|go\s+test|make\s+test"
+    r")\b",
+    re.IGNORECASE,
 )
 _COMMAND_LEAD_IN = re.compile(
     r"^(?:run|execute|check|verify|invoke)\b[:\s]*", re.IGNORECASE
@@ -936,7 +947,15 @@ def _shape_rules() -> tuple[str, ...]:
         f"`## {_section('targeted_tests').heading}` — optional. Omit it, write "
         "`None — <why>`, or include at least one test invocation (backticks "
         "optional) "
-        f"({_example(_TEST_INVOCATION, 'uv run pytest tests/test_demo.py -q')}).",
+        f"({_example(_TEST_INVOCATION, 'uv run pytest tests/test_demo.py -q')}, "
+        f"{_example(_TEST_INVOCATION, 'pnpm --filter pkg test -- test/demo.spec.ts')}, "
+        f"{_example(_TEST_INVOCATION, 'cargo test --test demo')}, "
+        f"{_example(_TEST_INVOCATION, 'go test ./pkg')}, "
+        f"{_example(_TEST_INVOCATION, 'make test')}).",
+        "Shell constructs are not commands: a loop or conditional (`for i in "
+        "1 2 3; do …; done`, `if …; then …; fi`) has no runner token and "
+        "fails readiness as `no runnable command`. Wrap it in `bash -c '…'` "
+        "so the command starts with a recognised runner.",
         "Every command in `## "
         f"{_section('criterion_mapped_checks').heading}` and `## "
         f"{_section('targeted_tests').heading}` must be bounded so it finishes "
