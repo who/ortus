@@ -6,6 +6,8 @@ import pytest
 
 from ortus.core.readiness import (
     _is_unbounded_suite,
+    extract_check_command,
+    looks_like_command,
     spec_markdown,
     targeted_test_command,
     validate_issue,
@@ -234,11 +236,8 @@ def test_runner_gate_still_applies_to_widened_forms() -> None:
     assert {f.code for f in report.failures} == {"targeted_tests"}
 
 
-@pytest.mark.xfail(
-    reason="npx joins the runner allowlist in ortus-tnj5", strict=False
-)
 def test_npx_vitest_is_a_test_invocation_once_npx_is_a_runner() -> None:
-    """Composes with ortus-tnj5: the runner gate and the test match both apply."""
+    """Composes with ortus-sju4: the runner gate and the test match both apply."""
     assert (
         targeted_test_command("Run `npx vitest run tests/x.test.ts`.")
         == "npx vitest run tests/x.test.ts"
@@ -253,3 +252,56 @@ def test_spec_documents_bash_c_rule() -> None:
     assert "`no runnable command`" in spec
     assert "cargo test --test demo" in spec
     assert "pnpm --filter pkg test -- test/demo.spec.ts" in spec
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "npx vitest run tests/x.test.ts",
+        "grep -q foo README.md",
+        'Run grep -E "Recommended scope" docs/security/key-scope.md.',
+        "./node_modules/.bin/jest tests/x.test.ts",
+    ],
+)
+def test_npx_and_grep_are_runners(command: str) -> None:
+    """AC-1: `npx` and `grep` lead a runnable command, like `npm` and `rg`."""
+    assert looks_like_command(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "vitest run tests/x.test.ts",
+        "jest tests/x.test.ts",
+        "tsc --noEmit",
+        "eslint src/",
+        "prettier --check src/",
+        "npx prettier --check .",
+    ],
+)
+def test_node_toolchain_binaries_are_runners(command: str) -> None:
+    """AC-2: bare Node test/typecheck/lint/format binaries are runners."""
+    assert looks_like_command(command), command
+
+
+def test_npx_vitest_check_line_yields_command() -> None:
+    """AC-3: the planner's Node spelling extracts as a command with no error."""
+    line = '- AC-1: Run `npx vitest run tests/x.test.ts -t "createImport"`.'
+    assert extract_check_command(line, "AC-1") == (
+        'npx vitest run tests/x.test.ts -t "createImport"',
+        None,
+    )
+    line = '- AC-2: Run `grep -E "Recommended scope" docs/security/key-scope.md`.'
+    assert extract_check_command(line, "AC-2") == (
+        'grep -E "Recommended scope" docs/security/key-scope.md',
+        None,
+    )
+
+
+def test_prose_only_criterion_still_has_no_runnable_command() -> None:
+    """AC-4: a line with no runner token is still prose, not a command."""
+    assert extract_check_command("- AC-1: Confirm the import succeeds.", "AC-1") == (
+        None,
+        "no runnable command",
+    )
+    assert not looks_like_command("Confirm the import succeeds.")
