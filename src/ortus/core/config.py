@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
 from ortus.core.profiles import (
     AgentProfile,
     Phase,
@@ -68,6 +69,11 @@ DEFAULTS: dict[str, Any] = {
     # typical hermetic matrix; the workflow itself has no shorter job
     # timeout to inherit.
     "merge_gate_timeout": DEFAULT_MERGE_GATE_TIMEOUT,
+    # Branch `grind` pins the working tree to and re-asserts each iteration.
+    # "main" fits a fresh `ortus init`; a repo whose default branch is named
+    # something else (e.g. "master") pins it here instead of passing
+    # --integration-branch on every invocation.
+    "integration_branch": DEFAULT_INTEGRATION_BRANCH,
 }
 
 

@@ -84,6 +84,20 @@ def test_merge_gate_project_pin_wins(tmp_path: Path) -> None:
     assert cfg.get("merge_gate_timeout") == 90
 
 
+def test_integration_branch_defaults_to_main(tmp_path: Path) -> None:
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert cfg.get("integration_branch") == "main"
+
+
+def test_integration_branch_project_pin_wins(tmp_path: Path) -> None:
+    """A repo whose default branch isn't 'main' pins it once in .ortusrc."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_toml(repo / ".ortusrc", 'integration_branch = "master"\n')
+    cfg = load_config(repo=repo, home=tmp_path / "home")
+    assert cfg.get("integration_branch") == "master"
+
+
 def test_codegraph_explicit_pin_still_wins(tmp_path: Path) -> None:
     """A project that pins a value is unaffected by the default flip."""
     repo = tmp_path / "repo"

@@ -703,6 +703,76 @@ def _flag_unready_for_human(
         write_log(f"readiness: flagged {report.issue_id} human")
 
 
+#: Marker-comment prefix that persists a claim's consecutive no-close window
+#: count in bd. Grind sessions are separate processes, so bd comments are the
+#: only cross-process store; the format must stay stable across versions
+#: because old markers are re-read by newer grinds.
+_NO_CLOSE_MARKER_PREFIX = "ortus-grind: no-close window "
+
+#: Consecutive resumed windows a leftover claim may end still in_progress with
+#: no new commits on the integration branch before grind hands it to the human
+#: queue instead of resuming it again. The field case (fh-aqi) burned exactly
+#: two workers before a human stepped in.
+_WEDGED_WINDOW_THRESHOLD = 2
+
+
+def _no_close_window_count(bd: BdClient, issue_id: str) -> int:
+    """The claim's recorded consecutive no-close window count.
+
+    Read from the newest `ortus-grind: no-close window <n>` marker comment
+    on the issue. Parsed leniently: no marker, an unreadable comment list,
+    or an unparseable count (an older version's marker with the same
+    prefix) all read as zero — a fresh budget, never a spurious escalation.
+    """
+    try:
+        existing = bd.comments(issue_id)
+    except Exception:
+        return 0
+    count = 0
+    for comment in existing:
+        if not isinstance(comment, dict):
+            continue
+        for key in ("body", "text", "comment", "content"):
+            body = str(comment.get(key) or "")
+            marker = body.find(_NO_CLOSE_MARKER_PREFIX)
+            if marker == -1:
+                continue
+            tail = body[marker + len(_NO_CLOSE_MARKER_PREFIX) :].split()
+            try:
+                count = int(tail[0]) if tail else 0
+            except ValueError:
+                count = 0
+            break
+    return count
+
+
+def _record_no_close_window(
+    bd: BdClient, issue_id: str, count: int, write_log: Callable[[str], None]
+) -> None:
+    """Persist the claim's consecutive no-close window count as a marker comment.
+
+    A failed write warns and moves on — a bd hiccup must not strand a healthy
+    claim; the next window simply re-reads the previous count.
+    """
+    try:
+        bd.add_comment(issue_id, f"{_NO_CLOSE_MARKER_PREFIX}{count}")
+    except Exception as exc:
+        write_log(
+            f"wedged-claim counter: could not record no-close window {count} "
+            f"on {issue_id} ({exc}); the previous count stands"
+        )
+
+
+def _announce_wedged_escalation(escalated: tuple[str, int]) -> None:
+    """Session-end hint naming the escalation instead of 'run grind again'."""
+    issue_id, windows = escalated
+    output.progress(
+        "grind",
+        f"escalated {issue_id} to the human queue after {windows} no-close "
+        f"windows; repair the spec, then: bd label remove {issue_id} human",
+    )
+
+
 def _log_writer(log_path: Path) -> Callable[[str], None]:
     """Tee-style logger: write a timestamped line to log_path; terminal stays quiet."""
 
@@ -789,14 +859,15 @@ def grind(
             "recovery. 0 disables the watchdog (workers may then hang indefinitely)."
         ),
     ),
-    integration_branch: str = typer.Option(
-        DEFAULT_INTEGRATION_BRANCH,
+    integration_branch: Optional[str] = typer.Option(
+        None,
         "--integration-branch",
         help=(
             "Branch grind pins the working tree to. A closed issue's commit must "
             "land on origin/<branch> to be deployable; grind re-asserts this branch "
             "each iteration and halts loudly if a worker strands work on a side "
-            "branch instead of silently leaving origin stale."
+            "branch instead of silently leaving origin stale. Defaults to "
+            "integration_branch in .ortusrc, else 'main'."
         ),
     ),
     fast: bool = typer.Option(
@@ -846,6 +917,9 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
+        integration_branch = integration_branch or config.get(
+            "integration_branch", DEFAULT_INTEGRATION_BRANCH
+        )
         merge_gate, merge_gate_timeout = _resolve_merge_gate(config)
         implement_profile = config.resolve_profile(
             resolved_backend,
@@ -1124,9 +1198,67 @@ def grind(
                     output.warn(skip_note)
                     resume_issue_id = None
 
+            # Wedged-claim escalation (ortus-v8x8): a leftover claim that has
+            # already burned the threshold of consecutive resumed windows —
+            # each ending still in_progress with no new commits on the
+            # integration branch — goes to the human queue instead of another
+            # worker. The label (the same convention the readiness gate uses)
+            # keeps it out of every snapshot; the claim itself stays
+            # in_progress so the worker-tree context is preserved for the
+            # operator.
+            resume_no_close_count = 0
+            escalated_claim: tuple[str, int] | None = None
+            if resume_issue_id is not None:
+                resume_no_close_count = _no_close_window_count(bd, resume_issue_id)
+                if resume_no_close_count >= _WEDGED_WINDOW_THRESHOLD:
+                    escalation = (
+                        f"wedged claim: {resume_issue_id} burned "
+                        f"{resume_no_close_count} consecutive worker windows "
+                        "that ended still in_progress with no new commits on "
+                        f"{integration_branch}; escalating to the human queue "
+                        "instead of resuming"
+                    )
+                    write_log(f"startup: {escalation}")
+                    output.warn(escalation)
+                    try:
+                        bd.add_label(resume_issue_id, "human")
+                    except Exception as exc:
+                        write_log(
+                            f"wedged claim: could not label {resume_issue_id} "
+                            f"human ({exc}); it stays resumable next window"
+                        )
+                        output.warn(
+                            f"could not label {resume_issue_id} human ({exc}); "
+                            "it stays resumable next window"
+                        )
+                    try:
+                        bd.add_comment(
+                            resume_issue_id,
+                            f"wedged claim escalated: {resume_no_close_count} "
+                            "consecutive worker windows ended with this claim "
+                            "still in_progress and no new commits on "
+                            f"{integration_branch}. The human label keeps this "
+                            "issue out of grind's queue; after repairing the "
+                            "spec, run: bd label remove "
+                            f"{resume_issue_id} human.",
+                        )
+                    except Exception as exc:
+                        write_log(
+                            f"wedged claim: could not comment on "
+                            f"{resume_issue_id} ({exc})"
+                        )
+                    escalated_claim = (resume_issue_id, resume_no_close_count)
+                    resume_issue_id = None
+                    # Re-snapshot so queue_drained and the loop's first
+                    # `before` see post-escalation state (the human label
+                    # trims the claim from the excluded counts).
+                    initial_snapshot = _snapshot(bd)
+
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
                 output.progress("grind", "queue already drained; nothing to do.")
+                if escalated_claim is not None:
+                    _announce_wedged_escalation(escalated_claim)
                 return
 
             # Phase 3 — cache env vars (relocate ~/.cache into project-local).
@@ -1157,6 +1289,12 @@ def grind(
             # id plus summary text so a work spec that re-fails differently warns
             # again. The log keeps every occurrence.
             warned_unready: set[tuple[str, str]] = set()
+            # Wedged-claim tracking for the (single) resumed window: the claim
+            # id and the integration-branch tip at spawn, so the post-window
+            # judgment can tell "progressing" (HEAD advanced) from "wedged".
+            resuming = False
+            resumed_claim_id = ""
+            resumed_tip = ""
 
             while True:
                 # Milestone rollover: an epic whose children are all closed
@@ -1344,6 +1482,8 @@ def grind(
                     # is already claimed; spawn a new process for it.
                     resuming = resume_issue_id is not None
                     if resuming:
+                        resumed_claim_id = issue_id
+                        resumed_tip = git.branch_tip(integration_branch)
                         write_log(
                             f"iter prep: continuing leftover claim {issue_id}"
                         )
@@ -1619,6 +1759,35 @@ def grind(
                         )
                         break
                 elif judged_status == "in_progress":
+                    # Wedged-claim counter (ortus-v8x8): a RESUMED window that
+                    # ends with the claim still in_progress either advanced
+                    # the integration branch (progressing — reset) or didn't
+                    # (wedged — count it, so the next resume can escalate at
+                    # the threshold). Fresh claims are outside the counter;
+                    # their first no-close window becomes next session's
+                    # resume.
+                    if resuming and judged_id == resumed_claim_id:
+                        head_now = git.branch_tip(integration_branch)
+                        if head_now and head_now != resumed_tip:
+                            if resume_no_close_count:
+                                _record_no_close_window(
+                                    bd, judged_id, 0, write_log
+                                )
+                            write_log(
+                                f"iter {iters_run}: resumed window advanced "
+                                f"{integration_branch}; no-close counter reset"
+                            )
+                        else:
+                            burned = resume_no_close_count + 1
+                            _record_no_close_window(
+                                bd, judged_id, burned, write_log
+                            )
+                            write_log(
+                                f"iter {iters_run}: resumed window ended with "
+                                "no close and no new commits on "
+                                f"{integration_branch} (no-close window "
+                                f"{burned} of {_WEDGED_WINDOW_THRESHOLD})"
+                            )
                     write_log(
                         f"iter {iters_run}: left {judged_id} in_progress "
                         "for the next window"
@@ -1663,6 +1832,8 @@ def grind(
                 f"done — {tasks_completed} landed this session, "
                 f"{leftover} in_progress, {final_snapshot.open} open",
             )
+            if escalated_claim is not None:
+                _announce_wedged_escalation(escalated_claim)
             if leftover:
                 output.progress(
                     "grind",

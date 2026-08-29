@@ -524,6 +524,163 @@ def test_grind_leftover_in_progress_is_not_unready_target(
     assert "readiness repair pass" not in _grind_log(repo)
 
 
+def _claim_with_no_close_marker(
+    repo: Path, title: str, *, windows: int | None
+) -> str:
+    """A leftover in_progress claim, optionally carrying a no-close marker."""
+    issue_id = _create_ready_issue(repo, title, priority="1")
+    subprocess.run(
+        ["bd", "update", issue_id, "--status=in_progress"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    if windows is not None:
+        subprocess.run(
+            ["bd", "comments", "add", issue_id, f"ortus-grind: no-close window {windows}"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+    return issue_id
+
+
+class _AdvanceHeadRunner:
+    """Commits on the integration branch but leaves the claim in_progress."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, host: Path) -> None:
+        self.host = host
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        self.calls.append({"prompt": prompt, **kwargs})
+        (self.host / "progress.txt").write_text("partial\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.host, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "partial progress"],
+            cwd=self.host,
+            check=True,
+        )
+        return 0
+
+
+@pytest.mark.slow
+def test_wedged_claim_escalates_to_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (ortus-v8x8): a claim resumed at the no-close threshold is labeled
+    human with an escalation comment and never gets another worker."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "wedged-escalate")
+    issue_id = _claim_with_no_close_marker(
+        repo, "wedged leaf", windows=grind_mod._WEDGED_WINDOW_THRESHOLD
+    )
+    recorded = _RecordingRunner()
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert not recorded.calls, "an escalated wedged claim must not spawn a worker"
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress"
+    assert "human" in (shown.get("labels") or [])
+    blob = _comments_blob(repo, issue_id)
+    assert "wedged claim escalated" in blob
+    assert f"{grind_mod._WEDGED_WINDOW_THRESHOLD} consecutive worker windows" in blob
+    assert f"bd label remove {issue_id} human" in blob
+    assert "escalating to the human queue" in _grind_log(repo)
+
+
+@pytest.mark.slow
+def test_no_close_counter_resets_on_head_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2 (ortus-v8x8): a resumed window that advances the integration
+    branch resets the counter, and the claim resumes normally afterward."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "wedged-reset")
+    issue_id = _claim_with_no_close_marker(repo, "progressing leaf", windows=1)
+    advancing = _AdvanceHeadRunner(repo)
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: advancing)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert advancing.calls, "a below-threshold claim must resume"
+    assert "no-close counter reset" in _grind_log(repo)
+    assert "ortus-grind: no-close window 0" in _comments_blob(repo, issue_id)
+
+    recorded = _RecordingRunner()
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    rerun = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert rerun.exit_code == 0, rerun.stdout + rerun.stderr
+    assert recorded.calls, "a reset counter must let the claim resume again"
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress"
+    assert "human" not in (shown.get("labels") or [])
+
+
+@pytest.mark.slow
+def test_leftover_claim_resumes_below_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 (ortus-v8x8): a single leftover claim below the threshold still
+    spawns a worker; the burned window is recorded for the next resume."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "wedged-below")
+    issue_id = _claim_with_no_close_marker(repo, "quiet leaf", windows=None)
+    recorded = _RecordingRunner()
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: recorded)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert recorded.calls, "a below-threshold leftover claim must spawn a worker"
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress"
+    assert "human" not in (shown.get("labels") or [])
+    assert "ortus-grind: no-close window 1" in _comments_blob(repo, issue_id)
+
+
 @pytest.mark.slow
 def test_grind_queue_blocked_exit_uses_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -578,6 +735,35 @@ def test_grind_dry_run_prints_resolved_flags_and_exits(
     assert "/goal" in result.stdout
     assert "corrections:" not in result.stdout
     assert "--max-corrections" not in result.stdout
+
+
+def test_grind_dry_run_integration_branch_defaults_to_main(tmp_path: Path) -> None:
+    repo = _fixture_repo(tmp_path)
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0
+    assert "integration:    main" in _plain(result.stdout)
+
+
+def test_grind_dry_run_integration_branch_reads_ortusrc(tmp_path: Path) -> None:
+    """A repo whose default branch isn't 'main' pins it once in .ortusrc
+    instead of passing --integration-branch on every invocation."""
+    repo = _fixture_repo(tmp_path)
+    (repo / ".ortusrc").write_text('integration_branch = "master"\n')
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert result.exit_code == 0
+    assert "integration:    master" in _plain(result.stdout)
+
+
+def test_grind_dry_run_integration_branch_flag_overrides_ortusrc(
+    tmp_path: Path,
+) -> None:
+    repo = _fixture_repo(tmp_path)
+    (repo / ".ortusrc").write_text('integration_branch = "master"\n')
+    result = runner.invoke(
+        app, ["grind", str(repo), "--integration-branch", "trunk", "--dry-run"]
+    )
+    assert result.exit_code == 0
+    assert "integration:    trunk" in _plain(result.stdout)
 
 
 def test_grind_help_lists_grok() -> None:
