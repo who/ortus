@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-BackendName = Literal["claude", "codex", "grok"]
+BackendName = Literal["claude", "codex", "grok", "local"]
+
+#: The backend names as every "expected ..." message spells them.
+BACKEND_NAMES_PROSE = "claude, codex, grok, or local"
 
 
 class Phase(str, Enum):
@@ -22,6 +25,10 @@ SUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     "claude": frozenset({"low", "medium", "high", "max"}),
     "codex": frozenset({"low", "medium", "high", "xhigh"}),
     "grok": frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"}),
+    # A separate set that happens to equal codex's: the value is forwarded
+    # verbatim as codex `model_reasoning_effort`, and codex 0.147.0 lists
+    # minimal|low|medium|high|xhigh. `none` would be an unknown value there.
+    "local": frozenset({"low", "medium", "high", "xhigh"}),
 }
 
 
@@ -56,7 +63,7 @@ def validate_profile_values(
     """Validate untyped configuration and return an immutable profile."""
     if backend not in SUPPORTED_EFFORTS:
         raise ProfileError(
-            f"invalid profile backend {backend!r}; expected claude, codex, or grok"
+            f"invalid profile backend {backend!r}; expected {BACKEND_NAMES_PROSE}"
         )
     if model is not None and (
         not isinstance(model, str)

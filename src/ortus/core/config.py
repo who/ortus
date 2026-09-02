@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
+from ortus.core.local_backend import parse_local_table
 from ortus.core.profiles import (
+    BACKEND_NAMES_PROSE,
     AgentProfile,
     Phase,
     ProfileError,
@@ -45,7 +47,7 @@ DEFAULT_MERGE_GATE_TIMEOUT = 1800
 # concrete run backend; `all` must therefore never survive into a resolved
 # run configuration, whatever layer tries to smuggle it in.
 INIT_ONLY_BACKEND_MESSAGE = (
-    "backend must be claude, codex, or grok; "
+    f"backend must be {BACKEND_NAMES_PROSE}; "
     "'all' is an init provisioning option, not a run backend"
 )
 
@@ -143,6 +145,22 @@ def read_recorded_facts(repo: Path) -> dict[str, Any]:
     return {key: data[key] for key in RECORDED_INIT_KEYS if key in data}
 
 
+def read_recorded_local(repo: Path) -> dict[str, Any]:
+    """Raw `[local]` table from the project `.ortusrc`, without layering.
+
+    Same rationale as `read_recorded_facts`: the served model is a project
+    fact a forced re-init must preserve, never something to re-record from
+    `~/.ortusrc`. A missing file, a missing table, or a `local` key that is
+    not a table all mean an empty mapping; `load_config` is where the last
+    of those becomes an error.
+    """
+    path = repo / ".ortusrc"
+    if not path.is_file():
+        return {}
+    table = _load_toml(path).get("local")
+    return dict(table) if isinstance(table, dict) else {}
+
+
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
     """Recursively merge TOML tables while replacing scalar leaves."""
     for key, value in overlay.items():
@@ -164,7 +182,7 @@ def _validate_profiles(values: dict[str, Any]) -> None:
     for backend, phases in profiles.items():
         if backend not in SUPPORTED_EFFORTS:
             raise ProfileError(
-                f"invalid profile backend {backend!r}; expected claude, codex, or grok"
+                f"invalid profile backend {backend!r}; expected {BACKEND_NAMES_PROSE}"
             )
         if not isinstance(phases, dict):
             raise ProfileError(f"invalid profiles.{backend}: expected a TOML table")
@@ -194,6 +212,18 @@ def _validate_profiles(values: dict[str, Any]) -> None:
             )
 
 
+def _validate_local(values: dict[str, Any]) -> None:
+    """Reject a malformed `[local]` table, or a missing one under `backend = "local"`.
+
+    A config without the table is left alone: `local` is opt-in, and every
+    existing `.ortusrc` must load exactly as it did before the table existed.
+    """
+    table = values.get("local")
+    if table is None and values.get("backend") != "local":
+        return
+    parse_local_table(table)
+
+
 def load_config(
     *,
     repo: Path | None = None,
@@ -221,4 +251,5 @@ def load_config(
 
     _validate_backend(cfg.values)
     _validate_profiles(cfg.values)
+    _validate_local(cfg.values)
     return cfg

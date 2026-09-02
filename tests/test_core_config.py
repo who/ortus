@@ -11,6 +11,12 @@ from ortus.core.config import (
     DEFAULT_MERGE_GATE_TIMEOUT,
     DEFAULTS,
     load_config,
+    read_recorded_local,
+)
+from ortus.core.local_backend import (
+    DEFAULT_LOCAL_BASE_URL,
+    LocalConfig,
+    load_local_config,
 )
 from ortus.core.profiles import Phase, ProfileError
 
@@ -189,6 +195,7 @@ def test_finalize_phase_profile_is_named_in_the_error_for_an_unknown_phase(
         ('[profiles.other.plan]\nmodel = "x"\n', "profile backend"),
         ('[profiles.claude.plan]\nmodel = ""\n', "invalid model"),
         ('[profiles.codex.verify]\nreasoning_effort = "max"\n', "reasoning_effort"),
+        ('[profiles.local.plan]\nreasoning_effort = "none"\n', "reasoning_effort"),
     ],
 )
 def test_invalid_profile_configuration_is_actionable(
@@ -197,3 +204,130 @@ def test_invalid_profile_configuration_is_actionable(
     _write_toml(tmp_path / ".ortusrc", toml)
     with pytest.raises(ProfileError, match=message):
         load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+# --- [local] table -----------------------------------------------------------
+
+
+def test_local_table_loads_into_local_config(tmp_path: Path) -> None:
+    _write_toml(tmp_path / ".ortusrc", '[local]\nmodel = "qwen3:4b"\n')
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert load_local_config(cfg) == LocalConfig(
+        base_url=DEFAULT_LOCAL_BASE_URL, model="qwen3:4b", api_key_env=None
+    )
+
+
+def test_local_table_missing_model_names_local_model(tmp_path: Path) -> None:
+    _write_toml(
+        tmp_path / ".ortusrc", '[local]\nbase_url = "http://127.0.0.1:11434/v1"\n'
+    )
+    with pytest.raises(ProfileError, match="local.model"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_local_backend_without_table_names_local_model(tmp_path: Path) -> None:
+    _write_toml(tmp_path / ".ortusrc", 'backend = "local"\n')
+    with pytest.raises(ProfileError, match="local.model"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_local_backend_with_valid_table_loads(tmp_path: Path) -> None:
+    _write_toml(tmp_path / ".ortusrc", 'backend = "local"\n\n[local]\nmodel = "m"\n')
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert cfg.get("backend") == "local"
+    assert load_local_config(cfg).model == "m"
+
+
+def test_local_unknown_key_rejected_names_expected_keys(tmp_path: Path) -> None:
+    _write_toml(tmp_path / ".ortusrc", '[local]\nmodel = "m"\nwire_api = "chat"\n')
+    with pytest.raises(
+        ProfileError, match="wire_api.*expected base_url, model, or api_key_env"
+    ):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+@pytest.mark.parametrize(
+    "toml, key",
+    [
+        ('[local]\nmodel = ""\n', "local.model"),
+        ('[local]\nmodel = "a b"\n', "local.model"),
+        ('[local]\nmodel = "m"\nbase_url = "127.0.0.1:8080/v1"\n', "local.base_url"),
+        ('[local]\nmodel = "m"\napi_key_env = "not a name"\n', "local.api_key_env"),
+        ('local = "http://127.0.0.1:8080/v1"\n', "expected a TOML table"),
+    ],
+)
+def test_invalid_local_table_is_actionable(tmp_path: Path, toml: str, key: str) -> None:
+    _write_toml(tmp_path / ".ortusrc", toml)
+    with pytest.raises(ProfileError, match=key):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_local_table_merges_across_layers(tmp_path: Path) -> None:
+    """User pins the server; the project pins the model it needs."""
+    home = tmp_path / "home"
+    _write_toml(
+        home / ".ortusrc",
+        '[local]\nbase_url = "http://gpu-box:8080/v1/"\nmodel = "user-model"\n',
+    )
+    repo = tmp_path / "repo"
+    _write_toml(repo / ".ortusrc", '[local]\nmodel = "project-model"\n')
+    local = load_local_config(load_config(repo=repo, home=home))
+    assert local.model == "project-model"
+    assert local.base_url == "http://gpu-box:8080/v1"
+
+
+def test_local_api_key_env_is_stored_as_a_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-never-read-here")
+    _write_toml(
+        tmp_path / ".ortusrc", '[local]\nmodel = "m"\napi_key_env = "OPENAI_API_KEY"\n'
+    )
+    local = load_local_config(load_config(repo=tmp_path, home=tmp_path / "home"))
+    assert local.api_key_env == "OPENAI_API_KEY"
+    assert "sk-never-read-here" not in repr(local)
+
+
+def test_profiles_local_accepts_codex_efforts(tmp_path: Path) -> None:
+    _write_toml(
+        tmp_path / ".ortusrc", '[profiles.local.implement]\nreasoning_effort = "xhigh"\n'
+    )
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert cfg.resolve_profile("local", Phase.IMPLEMENT).reasoning_effort == "xhigh"
+    _write_toml(
+        tmp_path / ".ortusrc", '[profiles.local.implement]\nreasoning_effort = "none"\n'
+    )
+    with pytest.raises(
+        ProfileError, match="reasoning_effort for profiles.local.implement"
+    ):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_backend_all_message_names_local(tmp_path: Path) -> None:
+    _write_toml(tmp_path / ".ortusrc", 'backend = "all"\n')
+    with pytest.raises(ProfileError, match="claude, codex, grok, or local"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_unknown_profile_backend_message_names_local(tmp_path: Path) -> None:
+    _write_toml(tmp_path / ".ortusrc", '[profiles.other.plan]\nmodel = "x"\n')
+    with pytest.raises(ProfileError, match="claude, codex, grok, or local"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_read_recorded_local_reads_the_project_file_only(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert read_recorded_local(repo) == {}
+    _write_toml(repo / ".ortusrc", 'backend = "local"\n')
+    assert read_recorded_local(repo) == {}
+    _write_toml(
+        repo / ".ortusrc",
+        '[local]\nmodel = "project-model"\nbase_url = "http://h:1/v1"\n',
+    )
+    assert read_recorded_local(repo) == {
+        "model": "project-model",
+        "base_url": "http://h:1/v1",
+    }
+    _write_toml(repo / ".ortusrc", 'local = "not a table"\n')
+    assert read_recorded_local(repo) == {}
