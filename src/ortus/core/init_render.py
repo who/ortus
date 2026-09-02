@@ -18,6 +18,7 @@ from jinja2 import Environment, StrictUndefined
 from ortus import __version__ as ORTUS_VERSION
 from ortus.core.agent_files import BlockOutcome, apply_hash_block
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
+from ortus.core.local_backend import DEFAULT_LOCAL_BASE_URL
 
 
 TEMPLATE_PACKAGE = "ortus.templates"
@@ -35,6 +36,11 @@ BACKEND_TEMPLATES: dict[str, str] = {
     "claude": ".claude/settings.json",
     "codex": ".codex/config.toml",
     "grok": ".grok/config.toml",
+    # `local` is the Codex CLI at an operator-served model: the same project
+    # config, with the provider overrides passed at launch, so it shares
+    # codex's template rather than owning a copy. Its own provisioning is the
+    # `[local]` table `.ortusrc` renders.
+    "local": ".codex/config.toml",
 }
 
 
@@ -98,6 +104,12 @@ class RenderContext:
     codegraph: str = DEFAULT_CODEGRAPH_MODE
     ortus_version: str = ORTUS_VERSION
     today: str = ""  # filled in if blank
+    # The `[local]` table `.ortusrc` renders active under `backend == "local"`
+    # and as a commented reference block otherwise. `local_model` is None until
+    # an init pins one; the template shows a placeholder in its place.
+    local_base_url: str = DEFAULT_LOCAL_BASE_URL
+    local_model: str | None = None
+    local_api_key_env: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +122,9 @@ class RenderContext:
             "codegraph": self.codegraph,
             "ortus_version": self.ortus_version,
             "today": self.today or _dt.date.today().isoformat(),
+            "local_base_url": self.local_base_url,
+            "local_model": self.local_model,
+            "local_api_key_env": self.local_api_key_env,
         }
 
 
@@ -145,13 +160,18 @@ def render_all(
     """
     written: list[Path] = []
     selected = backends if backends is not None else (ctx.backend,)
+    # `codex` and `local` share a template, so widening to every backend would
+    # name `.codex/config.toml` twice; the ordered de-duplication renders each
+    # file once while keeping the slot order the backends were given in.
     names: tuple[str, ...] = tuple(
-        rendered
-        for name in BUNDLED_TEMPLATES
-        for rendered in (
-            tuple(BACKEND_TEMPLATES[b] for b in selected)
-            if name == ".claude/settings.json"
-            else (name,)
+        dict.fromkeys(
+            rendered
+            for name in BUNDLED_TEMPLATES
+            for rendered in (
+                tuple(BACKEND_TEMPLATES[b] for b in selected)
+                if name == ".claude/settings.json"
+                else (name,)
+            )
         )
     )
     for name in names:

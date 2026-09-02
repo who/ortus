@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -16,7 +17,13 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.core.agent_files import BLOCK_SCHEMAS, MANAGED_FILES, read_block
+from ortus.core.local_backend import DEFAULT_LOCAL_BASE_URL, LocalServerError
 from ortus.core.readiness import READINESS_MEMORY_KEY
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover
+    import tomli as tomllib
 
 pytestmark = pytest.mark.integration
 runner = CliRunner()
@@ -59,6 +66,22 @@ def _fake_backend_clis(monkeypatch: pytest.MonkeyPatch) -> None:
     import ortus.commands.init as init_mod
 
     monkeypatch.setattr(init_mod, "_backend_cli", lambda name: f"/usr/bin/{name}")
+
+
+@pytest.fixture(autouse=True)
+def _fake_local_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `--backend local` inits off the network.
+
+    A pinned local backend gets one reachability probe after rendering. The
+    default fake answers "down", the shape a fresh bootstrap usually meets;
+    tests about a served model re-patch `probe_models` themselves.
+    """
+    import ortus.commands.init as init_mod
+
+    def down(config, **kwargs):
+        raise LocalServerError("unreachable", "connection refused", "start it")
+
+    monkeypatch.setattr(init_mod, "probe_models", down)
 
 
 def test_init_on_empty_dir_creates_all_artifacts(tmp_path: Path) -> None:
@@ -617,3 +640,136 @@ def test_ortusrc_round_trips_as_toml(tmp_path: Path) -> None:
     data = tomllib.loads((target / ".ortusrc").read_text())
     assert data["prefix"] == "abc"
     assert data["project_type"] == "go"
+
+
+# --- the local backend -------------------------------------------------------
+#
+# `local` is the Codex CLI at an operator-served model, so its provisioning is
+# codex's config plus a `[local]` table in `.ortusrc`; every other backend gets
+# the same table as a commented reference block.
+
+
+def test_init_local_writes_codex_config_and_local_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--backend local` shares codex's config and pins an active [local] table."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "probe_models", lambda config, **kwargs: ("m1",))
+    target = tmp_path / "local"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert (target / ".codex" / "config.toml").is_file()
+    assert not (target / ".claude").exists()
+    assert not (target / ".grok").exists()
+    data = tomllib.loads((target / ".ortusrc").read_text())
+    assert data["backend"] == "local"
+    assert data["local"] == {"model": "m1", "base_url": DEFAULT_LOCAL_BASE_URL}
+    assert "local server reachable" in result.stdout + result.stderr
+
+
+def test_init_local_warns_when_the_server_is_down(tmp_path: Path) -> None:
+    """A server that is down at bootstrap is a warning with the serving command."""
+    target = tmp_path / "down"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "local server not reachable at http://127.0.0.1:8080/v1" in combined
+    assert "start it with: llama-server" in combined
+    assert tomllib.loads((target / ".ortusrc").read_text())["local"]["model"] == "m1"
+
+
+def test_init_local_requires_local_model(tmp_path: Path) -> None:
+    """A first local init without a model fails naming the flag, before writing."""
+    target = tmp_path / "nomodel"
+    result = runner.invoke(app, ["init", str(target), "--backend", "local"])
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "--backend local needs --local-model" in combined
+    assert not target.exists()
+
+
+def test_init_all_renders_commented_local_block(tmp_path: Path) -> None:
+    """`--backend all` keeps claude pinned and leaves [local] as a reference."""
+    target = tmp_path / "everything"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    for rel in (".claude/settings.json", ".codex/config.toml", ".grok/config.toml"):
+        assert (target / rel).is_file(), rel
+    text = (target / ".ortusrc").read_text()
+    data = tomllib.loads(text)
+    assert data["backend"] == "claude"
+    assert "local" not in data
+    assert "# [local]" in text
+    assert "--jinja" in text
+    # Rich wraps stderr at 80 columns under CliRunner; normalise before matching.
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "[local] left commented in .ortusrc" in combined
+    assert "then ortus check --backend local" in combined
+
+
+def test_init_force_preserves_local_table(tmp_path: Path) -> None:
+    """Omitted local flags resolve to the recorded [local] table."""
+    target = tmp_path / "keep"
+    result = runner.invoke(
+        app,
+        [
+            "init", str(target),
+            "--backend", "local",
+            "--local-model", "m1",
+            "--local-base-url", "http://127.0.0.1:11434/v1",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = tomllib.loads((target / ".ortusrc").read_text())
+    assert data["backend"] == "local"
+    assert data["local"] == {"model": "m1", "base_url": "http://127.0.0.1:11434/v1"}
+    assert "re-detected" not in result.stdout + result.stderr
+
+
+def test_init_force_local_model_override_prints_change_line(tmp_path: Path) -> None:
+    """An explicit --local-model over a recorded one is a visible change."""
+    target = tmp_path / "swap"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    result = runner.invoke(app, ["init", str(target), "--force", "--local-model", "m2"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "re-detected local.model: m1 -> m2" in result.stdout + result.stderr
+    assert tomllib.loads((target / ".ortusrc").read_text())["local"]["model"] == "m2"
+
+
+def test_init_codex_notes_and_ignores_local_model(tmp_path: Path) -> None:
+    """The local flags mean nothing to another backend, and say so."""
+    target = tmp_path / "codex"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "codex", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "--local-model applies only to --backend local" in (
+        result.stdout + result.stderr
+    )
+    assert "local" not in tomllib.loads((target / ".ortusrc").read_text())
+
+
+def test_init_force_rejects_an_invalid_recorded_local_table(tmp_path: Path) -> None:
+    """A recorded table that breaks the config rules is an error, never re-rendered."""
+    target = tmp_path / "broken"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    ortusrc = target / ".ortusrc"
+    broken = ortusrc.read_text().replace('model = "m1"', 'model = "has space"')
+    ortusrc.write_text(broken)
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 1
+    assert "invalid local.model" in result.stdout + result.stderr
+    assert ortusrc.read_text() == broken

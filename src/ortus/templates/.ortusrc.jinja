@@ -30,3 +30,25 @@ codegraph = "{{ codegraph }}"
 # the integration branch. Off by default — a timeout is a blocker, never a pass.
 # merge_gate = false
 # merge_gate_timeout = 1800
+
+{% if backend == "local" -%}
+# The model `ortus grind` drives through the Codex CLI. `model` must be an id
+# that GET {base_url}/models reports; `api_key_env` names an environment
+# variable, never the key itself. This table stays last in the file: TOML
+# keeps every key below a [table] header inside that table.
+[local]
+base_url = "{{ local_base_url }}"
+model = "{{ local_model }}"
+{% if local_api_key_env -%}
+api_key_env = "{{ local_api_key_env }}"
+{% endif -%}
+{% else -%}
+# Optional local-model backend: the Codex CLI at an OpenAI-compatible server.
+# Pin it with `ortus init --backend local --local-model <id>`, then verify with
+# `ortus check --backend local`. Reference serving command:
+#   llama-server -hf <repo>:<quant> --alias <model> --jinja --ctx-size 32768
+# [local]
+# base_url = "{{ local_base_url }}"
+# model = "{{ local_model or '<id as GET {base_url}/models reports it>' }}"
+# api_key_env = "..."
+{% endif -%}

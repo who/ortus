@@ -35,6 +35,7 @@ from ortus.core.init_render import (
     render_all,
     render_template,
 )
+from ortus.core.local_backend import DEFAULT_LOCAL_BASE_URL
 from ortus.core.prompts import resolve_prompt
 
 if sys.version_info >= (3, 11):
@@ -166,6 +167,41 @@ def test_rendered_ortusrc_validates_as_toml() -> None:
 def test_rendered_ortusrc_pins_the_selected_codegraph_mode() -> None:
     ctx = RenderContext(prefix="acme", project_type="go", codegraph="off")
     assert tomllib.loads(render_template(".ortusrc", ctx))["codegraph"] == "off"
+
+
+def test_rendered_ortusrc_local_table_validates() -> None:
+    """`backend == "local"` renders an active [local] table the loader accepts."""
+    ctx = RenderContext(prefix="acme", backend="local", local_model="m1")
+    parsed = tomllib.loads(render_template(".ortusrc", ctx))
+    assert parsed["backend"] == "local"
+    assert parsed["local"] == {"base_url": DEFAULT_LOCAL_BASE_URL, "model": "m1"}
+    keyed = RenderContext(
+        prefix="acme",
+        backend="local",
+        local_model="m1",
+        local_base_url="http://127.0.0.1:11434/v1",
+        local_api_key_env="LLAMA_API_KEY",
+    )
+    assert tomllib.loads(render_template(".ortusrc", keyed))["local"] == {
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "m1",
+        "api_key_env": "LLAMA_API_KEY",
+    }
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "grok"])
+def test_rendered_ortusrc_keeps_local_commented_for_other_backends(
+    backend: str,
+) -> None:
+    """Other backends get the reference block only: valid TOML, no active table."""
+    text = render_template(".ortusrc", RenderContext(prefix="acme", backend=backend))
+    assert "local" not in tomllib.loads(text)
+    assert "# [local]" in text
+    assert "--jinja" in text
+
+
+def test_list_bundled_local_uses_codex_config() -> None:
+    assert list_bundled("local") == [".codex/config.toml", ".ortusrc"]
 
 
 def test_rendered_gitignore_excludes_the_codegraph_index() -> None:
@@ -611,6 +647,16 @@ def test_render_all_backends_writes_every_config_and_pins_ctx_backend(
     assert 'backend = "claude"' in ortusrc
     assert 'backend = "all"' not in ortusrc
     # three backend configs replace the single slot; shared files unchanged
+    assert len(written) == len(BUNDLED_TEMPLATES) + 2
+
+
+def test_render_all_does_not_duplicate_codex_config(tmp_path: Path) -> None:
+    """`codex` and `local` share a template; widening to both writes it once."""
+    ctx = RenderContext(prefix="acme", project_type="python", backend="claude")
+    written = render_all(tmp_path, ctx, backends=("claude", "codex", "grok", "local"))
+    assert written.count(tmp_path / ".codex" / "config.toml") == 1
+    assert len(written) == len(set(written))
+    # three distinct backend configs replace the single slot, as before
     assert len(written) == len(BUNDLED_TEMPLATES) + 2
 
 

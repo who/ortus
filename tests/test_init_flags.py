@@ -359,3 +359,14 @@ def test_help_advertises_new_flags() -> None:
     assert "claude|codex|grok" in out
     # the help text should defer per-language detail rather than enumerate it
     assert "depend on --project-type" in out
+
+
+def test_help_advertises_local_flags() -> None:
+    result = runner.invoke(
+        app, ["init", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
+    )
+    assert result.exit_code == 0
+    out = result.stdout
+    assert "--local-model" in out
+    assert "--local-base-url" in out
+    assert "claude|codex|grok|local" in out

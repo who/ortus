@@ -5,12 +5,13 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
+from rich.markup import escape as escape_markup
 
 from ortus.core import output
-from ortus.core.agent import BACKENDS
+from ortus.core.agent import BACKEND_BINARIES, BACKENDS
 from ortus.core.agent_files import (
     MANAGED_FILES,
     AgentFileError,
@@ -26,6 +27,7 @@ from ortus.core.config import (
     DEFAULT_CODEGRAPH_MODE,
     INIT_ONLY_BACKEND_MESSAGE,
     read_recorded_facts,
+    read_recorded_local,
 )
 from ortus.core.init_render import (
     BACKEND_TEMPLATES,
@@ -40,6 +42,15 @@ from ortus.core.init_render import (
     merge_gitignore,
     render_all,
 )
+from ortus.core.local_backend import (
+    DEFAULT_LOCAL_BASE_URL,
+    LocalConfig,
+    LocalServerError,
+    parse_local_table,
+    probe_models,
+    serving_hint,
+)
+from ortus.core.profiles import ProfileError
 from ortus.core.readiness import (
     READINESS_MEMORY_KEY,
     readiness_memory_command,
@@ -197,18 +208,29 @@ def _codegraph_cli() -> str | None:
     return shutil.which("codegraph")
 
 
-#: The backends `ortus init` can provision: those with a config template. A
-#: backend that is legal to run but has no template yet (local, until its own
-#: init leaf lands) is neither written nor summarised, so `--backend all`
-#: keeps producing exactly the config directories it did before.
+#: The backends `ortus init` can provision: those with a config template.
+#: `local` shares codex's, so `--backend all` still produces exactly the config
+#: directories it did before and adds only the commented `[local]` reference
+#: block to `.ortusrc`.
 PROVISIONABLE_BACKENDS: tuple[str, ...] = tuple(
     b for b in BACKENDS if b in BACKEND_TEMPLATES
+)
+#: Seconds the post-render reachability probe waits for a pinned local server.
+#: Short because it runs on every local init and is informational only;
+#: `ortus check --backend local` owns the full probe set.
+LOCAL_PROBE_TIMEOUT = 3.0
+LOCAL_MODEL_REQUIRED_MESSAGE = (
+    "--backend local needs --local-model <id as GET {base_url}/models reports it>"
 )
 
 
 def _backend_cli(name: str) -> str | None:
-    """Locate a backend CLI (claude/codex/grok); the seam init tests replace."""
-    return shutil.which(name)
+    """Locate a backend's executable; the seam init tests replace.
+
+    Resolved through `BACKEND_BINARIES`, so `local` looks for `codex`: it is
+    the Codex CLI pointed at an operator-served model, not a binary of its own.
+    """
+    return shutil.which(BACKEND_BINARIES[name])
 
 
 def _codegraph_index(repo: Path, *, timeout: int = CODEGRAPH_INIT_TIMEOUT) -> None:
@@ -288,8 +310,20 @@ def _summarize_backends(run_backend: str) -> None:
     its CLI means every grind would abort at launch, which is a failed init.
     """
     for b in PROVISIONABLE_BACKENDS:
-        cli = _backend_cli(b)
         config_path = BACKEND_TEMPLATES[b]
+        if b == "local" and b != run_backend:
+            # Provisioned but unpinned: `.ortusrc` carries only the commented
+            # reference block, so no CLI state can make this a failed init.
+            # Escaped because Rich would otherwise read `[local]` as markup.
+            output.warn(
+                escape_markup(
+                    f"{b}: {config_path} written; [local] left commented in "
+                    ".ortusrc — pin it with ortus init --backend local "
+                    "--local-model <id>, then ortus check --backend local"
+                )
+            )
+            continue
+        cli = _backend_cli(b)
         if cli is not None:
             output.success(f"{b}: {config_path} written; CLI at {cli}")
         elif b == run_backend:
@@ -334,6 +368,125 @@ def _recorded_facts(target: Path) -> dict[str, str]:
             )
             raise typer.Exit(code=1)
     return facts
+
+
+def _recorded_local(target: Path) -> dict[str, Any]:
+    """The `[local]` table an existing project `.ortusrc` records, or {}.
+
+    Read apart from the init facts because the served model is not a top-level
+    key: `RECORDED_INIT_KEYS` stays as it is, and a forced re-init preserves
+    the table through this read instead.
+    """
+    try:
+        return read_recorded_local(target)
+    except OSError as exc:
+        output.error(f"could not read {target / '.ortusrc'}: {exc}")
+        raise typer.Exit(code=1)
+    except ValueError as exc:  # tomllib.TOMLDecodeError subclasses ValueError
+        output.error(
+            f"{target / '.ortusrc'} is not valid TOML: {exc}",
+            hint="repair the file (or delete it and pass explicit flags), then re-run ortus init",
+        )
+        raise typer.Exit(code=1)
+
+
+def _resolve_local_table(
+    target: Path,
+    run_backend: str,
+    recorded: dict[str, Any],
+    model_flag: Optional[str],
+    base_url_flag: Optional[str],
+) -> tuple[dict[str, Any], LocalConfig | None]:
+    """The `[local]` values to render, plus the validated table when it is pinned.
+
+    Precedence per key: explicit flag, then the recorded table, then (for
+    `base_url` only) the default. Under `--backend local` a missing model fails
+    here, before anything is written, and a table that breaks the config rules
+    fails with the config's own message rather than being re-rendered from
+    defaults. Under any other backend the flags are noted and ignored, but a
+    recorded table is still validated: a re-init must never carry a broken
+    table forward in silence.
+    """
+    table = dict(recorded)
+    if model_flag is not None:
+        table["model"] = model_flag
+    if base_url_flag is not None:
+        table["base_url"] = base_url_flag
+    # The config's messages name `[local]`, which Rich would read as markup.
+    repair_hint = escape_markup(
+        f"fix the [local] table in {target / '.ortusrc'}, or pass "
+        "--local-model / --local-base-url"
+    )
+    if run_backend != "local":
+        given = [
+            flag
+            for flag, value in (
+                ("--local-model", model_flag),
+                ("--local-base-url", base_url_flag),
+            )
+            if value is not None
+        ]
+        if given:
+            output.progress(
+                "init", f"{' and '.join(given)} applies only to --backend local"
+            )
+        if recorded:
+            try:
+                parse_local_table(recorded)
+            except ProfileError as exc:
+                output.error(escape_markup(str(exc)), hint=repair_hint)
+                raise typer.Exit(code=1)
+        return table, None
+    if "model" not in table:
+        base_url = table.get("base_url", DEFAULT_LOCAL_BASE_URL)
+        output.error(
+            LOCAL_MODEL_REQUIRED_MESSAGE,
+            hint=f"list the served ids with: curl {base_url}/models",
+        )
+        raise typer.Exit(code=1)
+    table.setdefault("base_url", DEFAULT_LOCAL_BASE_URL)
+    try:
+        local = parse_local_table(table)
+    except ProfileError as exc:
+        output.error(escape_markup(str(exc)), hint=repair_hint)
+        raise typer.Exit(code=1)
+    # Render what validation normalised (a trailing slash on base_url is
+    # dropped) so the recorded file and the loaded config agree byte for byte.
+    rendered = {
+        "base_url": local.base_url,
+        "model": local.model,
+        "api_key_env": local.api_key_env,
+    }
+    return rendered, local
+
+
+def _probe_local_server(local: LocalConfig) -> None:
+    """Say whether the pinned server answers; never fail init over it.
+
+    The server may legitimately be down at bootstrap, so the verdict is a
+    line, not an exit code.
+    """
+    output.progress(
+        "init",
+        f"probing the local server at {local.base_url} "
+        f"(timeout {LOCAL_PROBE_TIMEOUT:g}s)",
+    )
+    try:
+        probe_models(local, timeout=LOCAL_PROBE_TIMEOUT)
+    except LocalServerError as exc:
+        if exc.kind == "unreachable":
+            first_line = serving_hint(local).splitlines()[0]
+            output.warn(
+                f"local server not reachable at {local.base_url}: {exc}; "
+                f"start it with: {first_line}"
+            )
+        else:
+            output.warn(
+                f"local server at {local.base_url} answered, but {exc}; "
+                f"{exc.remediation}"
+            )
+        return
+    output.success(f"local server reachable: {local.display}")
 
 
 def _resolve_choice(
@@ -400,15 +553,32 @@ def init(
         None,
         "--backend",
         help=(
-            "Agent backend to configure (all|claude|codex|grok). Defaults to "
-            "the run backend recorded in .ortusrc, else 'all', which provisions "
-            "every backend and pins claude as the run backend."
+            "Agent backend to configure (all|claude|codex|grok|local). Defaults "
+            "to the run backend recorded in .ortusrc, else 'all', which "
+            "provisions every backend and pins claude as the run backend."
         ),
     ),
     codegraph: Optional[str] = typer.Option(
         None,
         "--codegraph",
         help="CodeGraph policy to bootstrap and pin (off|auto|required); defaults to required.",
+    ),
+    local_model: Optional[str] = typer.Option(
+        None,
+        "--local-model",
+        help=(
+            "Model id for --backend local, as GET {base_url}/models reports it. "
+            "Defaults to the local table recorded in .ortusrc; required on a "
+            "first local init."
+        ),
+    ),
+    local_base_url: Optional[str] = typer.Option(
+        None,
+        "--local-base-url",
+        help=(
+            "OpenAI-compatible base URL for --backend local. Defaults to the "
+            f"recorded local value, else {DEFAULT_LOCAL_BASE_URL}."
+        ),
     ),
 ) -> None:
     """Bootstrap a new repo with bd, backend config, .ortusrc, and AGENTS.md."""
@@ -503,17 +673,33 @@ def init(
             CODEGRAPH_CHOICES, CODEGRAPH_DEFAULTS,
         )
     resolved_prefix = prefix or recorded.get("prefix") or target.name
+    recorded_local = _recorded_local(target)
+    local_table, local = _resolve_local_table(
+        target, run_backend, recorded_local, local_model, local_base_url
+    )
 
     # A deliberate override of a recorded fact must be visible at the
     # terminal, not only in `git diff`, and before rendering so the operator
     # sees it even if a later step fails.
-    for key, resolved_value in (
+    facts: list[tuple[str, str]] = [
         ("prefix", resolved_prefix),
         ("project_type", resolved_project_type),
         ("backend", run_backend),
         ("codegraph", resolved_codegraph),
-    ):
-        recorded_value = recorded.get(key)
+    ]
+    recorded_view: dict[str, Any] = dict(recorded)
+    if local is not None:
+        facts += [("local.model", local.model), ("local.base_url", local.base_url)]
+        for key in ("model", "base_url"):
+            if key in recorded_local:
+                recorded_view[f"local.{key}"] = recorded_local[key]
+        # Validation drops a trailing slash; the record's spelling is no change.
+        if "local.base_url" in recorded_view:
+            recorded_view["local.base_url"] = str(
+                recorded_view["local.base_url"]
+            ).rstrip("/")
+    for key, resolved_value in facts:
+        recorded_value = recorded_view.get(key)
         if recorded_value is not None and recorded_value != resolved_value:
             output.progress(
                 "init", f"re-detected {key}: {recorded_value} -> {resolved_value}"
@@ -546,7 +732,7 @@ def init(
             raise typer.Exit(code=1)
         output.success(f"bd workspace initialized (prefix={resolved_prefix})")
         _normalize_initial_branch(target)
-        if backend in {"codex", "grok"}:
+        if backend in {"codex", "grok", "local"}:
             # bd currently installs its Claude integration unconditionally.
             # These files were created moments ago by this init operation, so
             # remove them before rendering the selected backend's config.
@@ -591,6 +777,9 @@ def init(
         linter=resolved_lint,
         codegraph=resolved_codegraph,
         backend=run_backend,
+        local_base_url=local_table.get("base_url", DEFAULT_LOCAL_BASE_URL),
+        local_model=local_table.get("model"),
+        local_api_key_env=local_table.get("api_key_env"),
     )
     written = render_all(
         target, ctx, backends=PROVISIONABLE_BACKENDS if provision_all else None
@@ -615,6 +804,9 @@ def init(
 
     output.progress("init", "applying managed AGENTS.md and CLAUDE.md blocks")
     _write_agent_files(target, resolved_codegraph)
+
+    if local is not None:
+        _probe_local_server(local)
 
     if provision_all:
         _summarize_backends(run_backend)
