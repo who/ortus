@@ -20,8 +20,8 @@ from ortus.core.prompts import resolve_prompt
 from ortus.core.repo import resolve_repo
 
 
-def _make_runner(backend: str = "claude") -> ClaudeRunner:
-    return make_runner(backend)  # type: ignore[arg-type]
+def _make_runner(backend: str = "claude", *, repo: Path | None = None) -> ClaudeRunner:
+    return make_runner(backend, repo=repo)  # type: ignore[arg-type]
 
 
 def _pick_feature(client: BdClient) -> Optional[str]:
@@ -86,7 +86,9 @@ def interview(
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     runner = (
-        _make_runner() if resolved_backend == "claude" else _make_runner(resolved_backend)
+        _make_runner()
+        if resolved_backend == "claude"
+        else _make_runner(resolved_backend, repo=target)
     )
     output.info(
         f"interview starting for {chosen} via {resolved_backend}; "

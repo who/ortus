@@ -52,6 +52,28 @@ def test_codex_probe_produces_the_child_registration(
     assert probe.capability.args == ("serve", "--mcp")
 
 
+def test_probe_local_takes_codex_capability_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
+    )
+    local = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="local")
+    codex = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="codex")
+    assert local == codex
+    assert local.available
+    assert local.capability is not None
+    assert local.capability.command == "/bin/codegraph"
+    assert local.capability.args == ("serve", "--mcp")
+    # Same absence as codex when the CLI is missing: no capability, no fallback.
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: None)
+    missing = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="local")
+    assert not missing.available and missing.capability is None
+    assert missing.reason == "codegraph CLI is not on PATH"
+
+
 def test_grok_probe_is_cli_and_index_not_injected_capability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

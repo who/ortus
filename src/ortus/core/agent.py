@@ -8,6 +8,11 @@ Grok Build expands ``/goal`` on ``grok -p`` (memory ``grok-backend-q1`` =
 EXPANDS), so that backend uses the same wrap as Claude.  GrokRunner is a
 sibling of ClaudeRunner, not a subclass: Grok's sandbox and approval flags
 are not Claude's.
+
+The local backend is the Codex CLI aimed at a model the operator serves
+themselves.  LocalRunner therefore *is* a CodexRunner: the same argv, followed
+by trusted ``-c`` overrides that register an ``ortus_local`` model provider
+from the ``[local]`` table of ``.ortusrc``.  The model is data in config.
 """
 
 from __future__ import annotations
@@ -22,10 +27,25 @@ from typing import Literal, cast
 from ortus.core.claude import ClaudeRunner, _spawn_logged
 from ortus.core.config import INIT_ONLY_BACKEND_MESSAGE, load_config
 from ortus.core.codegraph import CodeGraphCapability
-from ortus.core.profiles import AgentProfile, Phase as Phase
+from ortus.core.local_backend import (
+    LOCAL_PROVIDER_ID,
+    LOCAL_WIRE_API,
+    LocalConfig,
+    load_local_config,
+)
+from ortus.core.profiles import AgentProfile, Phase as Phase, ProfileError
 
-Backend = Literal["claude", "codex", "grok"]
-BACKENDS: tuple[Backend, ...] = ("claude", "codex", "grok")
+Backend = Literal["claude", "codex", "grok", "local"]
+BACKENDS: tuple[Backend, ...] = ("claude", "codex", "grok", "local")
+#: The executable each backend launches. ``local`` drives the Codex CLI at an
+#: operator-served model, so readiness probes look for ``codex``, not for a
+#: binary called ``local``.
+BACKEND_BINARIES: dict[Backend, str] = {
+    "claude": "claude",
+    "codex": "codex",
+    "grok": "grok",
+    "local": "codex",
+}
 
 # Isolated probe 2026-08-13: grok -p '/goal …' is consumed by the host goal
 # driver. wrap_grok_prompt still accepts q1= so a VERBATIM re-probe can flip
@@ -130,6 +150,71 @@ class CodexRunner(ClaudeRunner):
         """
 
         return None
+
+
+class LocalRunner(CodexRunner):
+    """Codex argv plus an ``ortus_local`` provider aimed at an operator-served model.
+
+    A subclass, unlike GrokRunner: the argv *is* the codex argv followed by
+    trusted ``-c`` provider overrides, so there is no foreign flag surface to
+    keep apart. The overrides carry a URL, a provider id, a wire API, and at
+    most the *name* of an environment variable. Codex reads that variable at
+    launch, so no key material ever enters argv, ``extra_env``, or a log.
+    """
+
+    def __init__(
+        self,
+        local: LocalConfig,
+        codex_binary: str = "codex",
+        *,
+        extra_env: dict[str, str] | None = None,
+        codegraph: CodeGraphCapability | None = None,
+        sandbox_mode: str = "workspace-write",
+    ) -> None:
+        super().__init__(
+            codex_binary,
+            extra_env=extra_env,
+            codegraph=codegraph,
+            sandbox_mode=sandbox_mode,
+        )
+        self.local = local
+
+    def build_argv(
+        self,
+        prompt: str,
+        *,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+        readonly: bool = False,
+        resume: str | None = None,
+    ) -> list[str]:
+        argv = super().build_argv(
+            prompt, fast=fast, profile=profile, readonly=readonly, resume=resume
+        )
+        provider = f"model_providers.{LOCAL_PROVIDER_ID}"
+        # Values render through json.dumps exactly like the CodeGraph block, so
+        # each is a TOML string. Codex 0.147.0 connects to a provider with no
+        # credential source as-is, so no requires_openai_auth pair is needed.
+        argv.extend(
+            [
+                "-c",
+                f"{provider}.name=" + json.dumps(LOCAL_PROVIDER_ID),
+                "-c",
+                f"{provider}.base_url=" + json.dumps(self.local.base_url),
+                "-c",
+                f"{provider}.wire_api=" + json.dumps(LOCAL_WIRE_API),
+            ]
+        )
+        if self.local.api_key_env is not None:
+            argv.extend(
+                ["-c", f"{provider}.env_key=" + json.dumps(self.local.api_key_env)]
+            )
+        argv.extend(["-c", "model_provider=" + json.dumps(LOCAL_PROVIDER_ID)])
+        if profile is None or profile.model is None:
+            # A profile model already rode in on the superclass argv and wins;
+            # otherwise the configured model is the only `-m`.
+            argv.extend(["-m", self.local.model])
+        return argv
 
 
 @dataclass
@@ -269,16 +354,36 @@ def resolve_backend(
     return cast(Backend, name)
 
 
-def make_runner(backend: Backend) -> ClaudeRunner | GrokRunner:
+def make_runner(
+    backend: Backend, *, repo: Path | None = None
+) -> ClaudeRunner | GrokRunner:
+    """Construct the runner for ``backend``.
+
+    ``repo`` matters only to ``local``, whose provider overrides come from the
+    ``[local]`` table of that repository's layered config; the other backends
+    ignore it. A missing or malformed table surfaces as ``BackendError`` with
+    the config error's own text, so every existing ``except BackendError``
+    site reports it unchanged.
+    """
     if backend == "codex":
         return CodexRunner()
     if backend == "grok":
         return GrokRunner()
+    if backend == "local":
+        try:
+            local = load_local_config(load_config(repo=repo))
+        except ProfileError as exc:
+            raise BackendError(str(exc)) from exc
+        return LocalRunner(local)
     return ClaudeRunner()
 
 
 def compose_worker_prompt(backend: Backend, task: str) -> str:
-    """Wrap a logical worker task for the selected execution surface."""
+    """Wrap a logical worker task for the selected execution surface.
+
+    ``local`` is ``codex exec`` under another provider, so it takes the plain
+    Codex prompt: a literal ``/goal`` would reach the model verbatim.
+    """
     if backend == "claude":
         return f"/goal {task}"
     if backend == "grok":

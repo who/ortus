@@ -197,6 +197,15 @@ def _codegraph_cli() -> str | None:
     return shutil.which("codegraph")
 
 
+#: The backends `ortus init` can provision: those with a config template. A
+#: backend that is legal to run but has no template yet (local, until its own
+#: init leaf lands) is neither written nor summarised, so `--backend all`
+#: keeps producing exactly the config directories it did before.
+PROVISIONABLE_BACKENDS: tuple[str, ...] = tuple(
+    b for b in BACKENDS if b in BACKEND_TEMPLATES
+)
+
+
 def _backend_cli(name: str) -> str | None:
     """Locate a backend CLI (claude/codex/grok); the seam init tests replace."""
     return shutil.which(name)
@@ -278,7 +287,7 @@ def _summarize_backends(run_backend: str) -> None:
     install, and `ortus check` reports it — but the pinned run backend without
     its CLI means every grind would abort at launch, which is a failed init.
     """
-    for b in BACKENDS:
+    for b in PROVISIONABLE_BACKENDS:
         cli = _backend_cli(b)
         config_path = BACKEND_TEMPLATES[b]
         if cli is not None:
@@ -410,10 +419,14 @@ def init(
         )
         raise typer.Exit(code=1)
     provision_all = backend is None or backend == "all"
-    if backend is not None and backend != "all" and backend not in BACKENDS:
+    if (
+        backend is not None
+        and backend != "all"
+        and backend not in PROVISIONABLE_BACKENDS
+    ):
         output.error(
             f"--backend={backend!r} is not recognized",
-            hint=f"choices: all, {', '.join(BACKENDS)}",
+            hint=f"choices: all, {', '.join(PROVISIONABLE_BACKENDS)}",
         )
         raise typer.Exit(code=1)
 
@@ -443,13 +456,13 @@ def init(
                 hint=f"fix {target / '.ortusrc'} or pass --backend",
             )
             raise typer.Exit(code=1)
-        if recorded_backend not in BACKENDS:
+        if recorded_backend not in PROVISIONABLE_BACKENDS:
             output.error(
                 f".ortusrc records backend = {recorded_backend!r}, "
                 "which is not recognized",
                 hint=(
                     f"fix {target / '.ortusrc'} or pass --backend; "
-                    f"choices: {', '.join(BACKENDS)}"
+                    f"choices: {', '.join(PROVISIONABLE_BACKENDS)}"
                 ),
             )
             raise typer.Exit(code=1)
@@ -579,7 +592,9 @@ def init(
         codegraph=resolved_codegraph,
         backend=run_backend,
     )
-    written = render_all(target, ctx, backends=BACKENDS if provision_all else None)
+    written = render_all(
+        target, ctx, backends=PROVISIONABLE_BACKENDS if provision_all else None
+    )
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
 

@@ -145,10 +145,11 @@ class CodeGraphAdapter:
         index = (repo / ".codegraph").is_dir()
         cli_path = shutil.which("codegraph")
         cli = cli_path is not None
-        if backend == "codex":
+        if backend in ("codex", "local"):
             # Codex receives the exact registration represented by
             # ``capability`` on every fresh process, avoiding reliance on
-            # project trust or mutable user configuration.
+            # project trust or mutable user configuration. ``local`` is the
+            # Codex CLI at an operator-served model, so it takes the same path.
             capability = (
                 CodeGraphCapability(cli_path)
                 if index and cli_path is not None

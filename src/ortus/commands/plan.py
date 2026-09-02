@@ -39,9 +39,9 @@ from ortus.core.readiness import (
 from ortus.core.repo import resolve_repo
 
 
-def _make_runner(backend: str = "claude") -> ClaudeRunner:
+def _make_runner(backend: str = "claude", *, repo: Path | None = None) -> ClaudeRunner:
     """Indirection so tests can swap in a fake backend binary."""
-    return make_runner(backend)  # type: ignore[arg-type]
+    return make_runner(backend, repo=repo)  # type: ignore[arg-type]
 
 
 def _make_codegraph() -> CodeGraphAdapter:
@@ -76,7 +76,9 @@ def _decompose_prd(
     # PRD path; substitute it before handing to claude. Last, so a PRD path
     # containing a dollar sign is never itself read as a placeholder.
     expanded = prompt.replace("$prd_path", str(prd.resolve())) + contract
-    runner = _make_runner() if backend == "claude" else _make_runner(backend)
+    runner = (
+        _make_runner() if backend == "claude" else _make_runner(backend, repo=repo)
+    )
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)
@@ -96,7 +98,9 @@ def _expand_idea(
     # Use the grind prompt's interview entry-point indirectly; for now we
     # just hand claude a freeform "interview the user about their idea"
     # instruction. Phase 3 idzn.1 fleshes out the full interview prompt.
-    runner = _make_runner() if backend == "claude" else _make_runner(backend)
+    runner = (
+        _make_runner() if backend == "claude" else _make_runner(backend, repo=repo)
+    )
     configure = getattr(runner, "configure_codegraph", None)
     if callable(configure):
         configure(capability)

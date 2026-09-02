@@ -11,12 +11,14 @@ from ortus.core.agent import (
     BackendError,
     CodexRunner,
     GrokRunner,
+    LocalRunner,
     compose_worker_prompt,
     make_runner,
     resolve_backend,
     wrap_grok_prompt,
 )
 from ortus.core.claude import ClaudeRunner, _readonly_wrapper
+from ortus.core.local_backend import LocalConfig
 from ortus.core.profiles import Phase, ProfileError, validate_profile_values
 
 
@@ -39,6 +41,12 @@ def test_readonly_verifier_postures_are_technically_enforced(
     assert grok_argv[grok_argv.index("--sandbox") + 1] == "read-only"
     assert GrokRunner()._readonly_argv(grok_argv, tmp_path) == grok_argv
     assert grok_argv[0] != "bwrap" and "bwrap" not in grok_argv
+
+    local = LocalRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    local_argv = local.build_argv("verify", readonly=True)
+    assert local_argv[local_argv.index("--sandbox") + 1] == "read-only"
+    assert local._readonly_argv(local_argv, tmp_path) == local_argv
+    assert "bwrap" not in local_argv
 
 
 def test_resolve_backend_grok_from_ortusrc(tmp_path: Path) -> None:
@@ -172,7 +180,7 @@ def test_grok_codegraph_is_store_only() -> None:
 
 def test_runner_run_accepts_resume_kwarg() -> None:
     """f2he.5 AC-3: runners still accept resume=; grind just must not pass it."""
-    for cls in (ClaudeRunner, GrokRunner, CodexRunner):
+    for cls in (ClaudeRunner, GrokRunner, CodexRunner, LocalRunner):
         assert "resume" in inspect.signature(cls.run).parameters
 
 

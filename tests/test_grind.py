@@ -1597,7 +1597,7 @@ def test_codex_rejects_implementation_worker_that_closes_issue(
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(
-        grind_mod, "_make_runner", lambda backend="claude": ClosingCodex()
+        grind_mod, "_make_runner", lambda backend="claude", repo=None: ClosingCodex()
     )
     result = runner.invoke(
         app,
@@ -1696,7 +1696,7 @@ def test_grok_grind_skips_claude_hook_precheck(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     seen: list[object] = []
 
-    def _capture(backend: str = "claude") -> ClaudeRunner:
+    def _capture(backend: str = "claude", repo: Path | None = None) -> ClaudeRunner:
         seen.append(backend)
         raise AssertionError(f"stop after runner pick: {backend}")
 

@@ -636,7 +636,8 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         else:
             results.extend(outcome)
     for other in BACKENDS:
-        if other == backend:
+        if other == backend or other not in BACKEND_TEMPLATES:
+            # No template means nothing could have been provisioned.
             continue
         if not (repo / BACKEND_TEMPLATES[other]).parent.is_dir():
             continue

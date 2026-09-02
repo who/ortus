@@ -101,9 +101,9 @@ _TRACKER_EXPORT_PATHS = frozenset(
 )
 
 
-def _make_runner(backend: str = "claude") -> ClaudeRunner:
+def _make_runner(backend: str = "claude", *, repo: Path | None = None) -> ClaudeRunner:
     """Indirection so tests can swap in a fake backend runner."""
-    return make_runner(backend)  # type: ignore[arg-type]
+    return make_runner(backend, repo=repo)  # type: ignore[arg-type]
 
 
 def _make_bd(repo: Path) -> BdClient:
@@ -1295,12 +1295,13 @@ def grind(
             cache.ensure_cache_dirs(target)
             cache_env = cache.env_overrides(target)
             # Preserve the zero-argument seam used by existing Claude test and
-            # plugin overrides. Any non-Claude backend (codex, grok) is passed
-            # through so make_runner can return the matching sibling type.
+            # plugin overrides. Any non-Claude backend (codex, grok, local) is
+            # passed through with the repo so make_runner can return the
+            # matching sibling type and, for local, read the [local] table.
             runner = (
                 _make_runner()
                 if resolved_backend == "claude"
-                else _make_runner(resolved_backend)
+                else _make_runner(resolved_backend, repo=target)
             )
             configure_codegraph = getattr(runner, "configure_codegraph", None)
             if callable(configure_codegraph):
