@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import check as check_mod
 from ortus.core.agent_files import MANAGED_FILES, render_block
+from ortus.core.local_backend import LocalConfig, LocalServerError, serving_hint
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_text
 
 runner = CliRunner()
@@ -1005,3 +1006,320 @@ def test_check_codex_uses_codex_binary_and_config(
     assert "claude" not in seen
     assert ".codex/config.toml" in result.stdout
     assert "hooks" not in result.stdout
+
+
+# --- local backend rows ----------------------------------------------------
+
+
+_LOCAL_TABLE = '[local]\nbase_url = "http://127.0.0.1:8080/v1"\nmodel = "qwen3:4b"\n'
+_LOCAL_CONFIG = LocalConfig(base_url="http://127.0.0.1:8080/v1", model="qwen3:4b")
+
+
+def _local_repo(
+    tmp_path: Path, *, ortusrc: str = 'backend = "local"\n' + _LOCAL_TABLE
+) -> Path:
+    """A codex-provisioned repo whose `.ortusrc` is whatever the test needs."""
+    repo = tmp_path / "local-project"
+    (repo / ".beads").mkdir(parents=True)
+    (repo / ".codegraph").mkdir()
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text(
+        'sandbox_mode = "workspace-write"\napproval_policy = "never"\n'
+    )
+    (repo / ".ortusrc").write_text(ortusrc)
+    _healthy_agent_files(repo)
+    return repo
+
+
+def _patch_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    models: object = ("qwen3:4b",),
+    tools: object = None,
+    context: object = 32768,
+) -> list[str]:
+    """Replace the three probe seams in `check.py`; returns the call order.
+
+    Each outcome is returned from its fake probe, or raised when it is an
+    exception, so one helper covers the green path and every verdict.
+    """
+    calls: list[str] = []
+
+    def _seam(name: str, outcome: object):
+        def _probe(config, **kwargs):
+            calls.append(name)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        return _probe
+
+    monkeypatch.setattr(check_mod, "probe_models", _seam("models", models))
+    monkeypatch.setattr(check_mod, "probe_tool_calling", _seam("tools", tools))
+    monkeypatch.setattr(check_mod, "probe_context_size", _seam("context", context))
+    return calls
+
+
+def _never_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if any local probe touches the (absent) server."""
+
+    def _boom(config, **kwargs):
+        raise AssertionError("no local probe may run here")
+
+    for seam in ("probe_models", "probe_tool_calling", "probe_context_size"):
+        monkeypatch.setattr(check_mod, seam, _boom)
+
+
+def test_check_help_lists_local_backend() -> None:
+    """AC-1: `local` is a backend the verb admits to knowing."""
+    result = runner.invoke(
+        app, ["check", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
+    )
+    assert result.exit_code == 0
+    assert "claude|codex|grok|local" in result.stdout
+
+
+def test_check_local_all_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: four local rows follow `.codex/config.toml`; the verb exits 0."""
+    repo = _local_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    calls = _patch_probes(monkeypatch)
+    results = check_mod._run_all(repo, "local")
+    names = [r.name for r in results]
+    start = names.index(".codex/config.toml") + 1
+    assert tuple(names[start : start + 4]) == check_mod.LOCAL_ROW_NAMES
+    assert all(r.ok for r in results), [(r.name, r.message) for r in results if not r.ok]
+    assert calls == ["models", "tools", "context"]
+    rows = {r.name: r for r in results}
+    assert rows["[local]"].message == (
+        "base_url=http://127.0.0.1:8080/v1 model=qwen3:4b key=none"
+    )
+    assert rows["local endpoint"].message == "reachable; model qwen3:4b served"
+    assert rows["local tools"].message == "function call returned"
+    assert rows["local context"].message == "n_ctx=32768"
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "FAIL" not in result.stdout
+    assert "localendpoint" in _compact(result.stdout)
+
+
+def test_check_local_server_down_fails_with_serving_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a refused connection names the serving command and exits 1."""
+    repo = _local_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    down = LocalServerError(
+        "unreachable",
+        "local server unreachable at http://127.0.0.1:8080/v1: Connection refused",
+        serving_hint(_LOCAL_CONFIG),
+    )
+    calls = _patch_probes(monkeypatch, models=down)
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    endpoint = rows["local endpoint"]
+    assert not endpoint.ok
+    assert "Connection refused" in endpoint.message
+    assert "llama-server" in endpoint.message
+    assert "--jinja" in endpoint.message
+    assert not rows["local tools"].ok
+    assert rows["local tools"].message == "skipped: endpoint failed"
+    assert not rows["local context"].ok
+    assert rows["local context"].message == "skipped: endpoint failed"
+    assert rows["local context"].level == "info"
+    assert calls == ["models"]
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    assert "FAIL" in result.stdout
+
+
+def test_check_local_wrong_model_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: the served ids are in the row, so the fix is a copy-paste."""
+    repo = _local_repo(tmp_path)
+    missing = LocalServerError(
+        "model-missing",
+        "model 'qwen3:4b' is not served; served: gemma4:26b, qwen3-coder:30b",
+        "set local.model to a served id or load the model",
+    )
+    calls = _patch_probes(monkeypatch, models=missing)
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    assert not rows["local endpoint"].ok
+    assert "gemma4:26b, qwen3-coder:30b" in rows["local endpoint"].message
+    assert "set local.model" in rows["local endpoint"].message
+    assert calls == ["models"]
+
+
+def test_check_local_tools_unsupported_names_jinja(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: a server that narrates instead of calling is a `--jinja` FAIL."""
+    repo = _local_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    narrated = LocalServerError(
+        "tools-unsupported",
+        "server answered without calling the tool",
+        "restart llama-server with --jinja (and a tool-capable chat template)",
+    )
+    calls = _patch_probes(monkeypatch, tools=narrated)
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    assert rows["local endpoint"].ok
+    assert not rows["local tools"].ok
+    assert "--jinja" in rows["local tools"].message
+    # A tools failure is not an outage: the context row still reports.
+    assert rows["local context"].ok
+    assert calls == ["models", "tools", "context"]
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    assert "FAIL" in result.stdout
+
+
+def test_check_local_small_context_warns_not_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5: a window under the recommendation is a WARN row and exit 0."""
+    repo = _local_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _patch_probes(monkeypatch, context=8192)
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    context = rows["local context"]
+    assert not context.ok
+    assert context.level == "info"
+    assert "n_ctx=8192" in context.message
+    assert "--ctx-size 32768" in context.message
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+    assert "FAIL" not in result.stdout
+
+
+def test_check_local_context_not_exposed_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ollama has no `/props`: an unknown window is a PASS, not a guess."""
+    repo = _local_repo(tmp_path)
+    _patch_probes(monkeypatch, context=None)
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    assert rows["local context"].ok
+    assert rows["local context"].level == "info"
+    assert "not exposed" in rows["local context"].message
+
+
+def test_check_local_invalid_config_skips_server_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6: a bad table fails the first row and probes nothing."""
+    repo = _local_repo(
+        tmp_path,
+        ortusrc='[local]\nbase_url = "127.0.0.1:8080/v1"\nmodel = "qwen3:4b"\n',
+    )
+    _never_probe(monkeypatch)
+    rows = check_mod.check_local_rows(repo)
+    assert [r.name for r in rows] == list(check_mod.LOCAL_ROW_NAMES)
+    assert not rows[0].ok
+    assert "local.base_url" in rows[0].message
+    for row in rows[1:]:
+        assert not row.ok
+        assert row.message == "skipped: [local] config invalid"
+    assert rows[1].level == "strict"
+    assert rows[3].level == "info"
+
+
+def test_check_local_missing_api_key_env_fails_config_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A named key variable that is not exported fails the config row by name.
+
+    The value, once exported, is never printed: the row shows the variable
+    name and the probes read it only into a request header.
+    """
+    repo = _local_repo(
+        tmp_path, ortusrc=_LOCAL_TABLE + 'api_key_env = "ORTUS_TEST_LOCAL_KEY"\n'
+    )
+    monkeypatch.delenv("ORTUS_TEST_LOCAL_KEY", raising=False)
+    _patch_probes(monkeypatch)
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    assert not rows["[local]"].ok
+    assert "api_key_env=ORTUS_TEST_LOCAL_KEY is not set" in rows["[local]"].message
+    # The probes still run: the server may not demand the key at all.
+    assert rows["local endpoint"].ok
+
+    monkeypatch.setenv("ORTUS_TEST_LOCAL_KEY", "hunter2-never-printed")
+    rows = {r.name: r for r in check_mod.check_local_rows(repo)}
+    assert rows["[local]"].ok
+    assert "key=ORTUS_TEST_LOCAL_KEY" in rows["[local]"].message
+    assert "hunter2" not in " ".join(r.message for r in rows.values())
+
+
+def test_check_local_provisioned_row_never_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-7: a codex run backend reports `[local]` as provisioned, offline."""
+    repo = _local_repo(tmp_path, ortusrc='backend = "codex"\n' + _LOCAL_TABLE)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _never_probe(monkeypatch)
+    row = check_mod.check_provisioned_backend(repo, "local")
+    assert row.ok
+    assert row.level == "info"
+    assert "not probed" in row.message
+    assert "ortus check --backend local" in row.message
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = _compact(result.stdout)
+    assert "local(provisioned)" in compact
+    assert "localendpoint" not in compact
+
+
+def test_check_local_provisioned_row_names_the_gaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The offline row still catches a missing codex config or a bad table."""
+    repo = _local_repo(
+        tmp_path, ortusrc='backend = "codex"\n[local]\nmodel = "two words"\n'
+    )
+    (repo / ".codex" / "config.toml").unlink()
+    monkeypatch.setattr(check_mod.shutil, "which", lambda binary: None)
+    _never_probe(monkeypatch)
+    row = check_mod.check_provisioned_backend(repo, "local")
+    assert not row.ok
+    assert row.level == "info"
+    assert ".codex/config.toml missing" in row.message
+    assert "codex CLI not on PATH" in row.message
+    assert "local.model" in row.message
+    assert "ortus init --backend local" in row.message
+
+
+def test_check_codex_table_has_no_local_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard: a codex repo without a `[local]` table renders exactly as before."""
+    repo = _local_repo(tmp_path, ortusrc='backend = "codex"\n')
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _never_probe(monkeypatch)
+    results = check_mod._run_all(repo, "codex")
+    assert not any("local" in r.name for r in results)
+
+
+def test_codegraph_local_uses_injected_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: local is the Codex CLI, so CodeGraph is injected per child too."""
+    repo = _local_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _patch_probes(monkeypatch)
+    local = check_mod.check_codegraph(repo, "local")
+    assert local.ok, local.message
+    assert local.message == check_mod.check_codegraph(repo, "codex").message
+    assert "injected per child by ortus" in local.message
+    result = runner.invoke(app, ["check", str(repo), "--backend", "local"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "injectedperchildbyortus" in _compact(result.stdout)

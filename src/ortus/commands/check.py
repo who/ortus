@@ -7,6 +7,7 @@ collects results, renders a rich table, and exits 0 if all pass else 1.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from typing import Callable, Optional
 import typer
 
 from ortus.core import output, sandbox
-from ortus.core.agent import BACKENDS, BackendError, resolve_backend
+from ortus.core.agent import BACKEND_BINARIES, BACKENDS, BackendError, resolve_backend
 from ortus.core.agent_files import (
     BLOCK_SCHEMAS,
     MANAGED_FILES,
@@ -31,9 +32,19 @@ from ortus.core.agent_files import (
 )
 from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import CodeGraphMode
-from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config
+from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config, read_recorded_local
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.init_render import BACKEND_TEMPLATES
+from ortus.core.local_backend import (
+    MIN_RECOMMENDED_CONTEXT,
+    LocalServerError,
+    load_local_config,
+    parse_local_table,
+    probe_context_size,
+    probe_models,
+    probe_tool_calling,
+)
+from ortus.core.profiles import ProfileError
 from ortus.core.prompts import (
     PROMPT_REGISTRY,
     READINESS_SPEC_PLACEHOLDER,
@@ -231,6 +242,98 @@ def check_grok_settings(repo: Path) -> CheckResult:
     return CheckResult(".grok/config.toml", True, str(settings))
 
 
+#: The `[local]` rows in table order: config, endpoint, tool calling, context.
+LOCAL_ROW_NAMES: tuple[str, ...] = (
+    "[local]",
+    "local endpoint",
+    "local tools",
+    "local context",
+)
+
+
+def _local_failure(exc: LocalServerError) -> str:
+    """A probe verdict plus the first line of its remediation, for one cell."""
+    return f"{exc} — {exc.remediation.splitlines()[0]}"
+
+
+def check_local_rows(repo: Path) -> list[CheckResult]:
+    """The four `[local]` rows: config, endpoint, tool calling, context size.
+
+    The rows short-circuit: an invalid table skips every probe, and an
+    endpoint that is down or serving the wrong model skips the tool and
+    context probes rather than reporting three flavours of one outage. The
+    context row is informational — a small window degrades a worker, it does
+    not stop the run. Nothing here prints a key: the `[local]` row shows the
+    variable's name, and the probes read its value only into a header.
+    """
+    config_name, endpoint_name, tools_name, context_name = LOCAL_ROW_NAMES
+    try:
+        local = load_local_config(load_config(repo=repo))
+    except ProfileError as exc:
+        skipped = "skipped: [local] config invalid"
+        return [
+            CheckResult(config_name, False, str(exc)),
+            CheckResult(endpoint_name, False, skipped),
+            CheckResult(tools_name, False, skipped),
+            CheckResult(context_name, False, skipped, level="info"),
+        ]
+    if local.api_key_env is not None and not os.environ.get(local.api_key_env):
+        config_row = CheckResult(
+            config_name,
+            False,
+            f"api_key_env={local.api_key_env} is not set in the environment — "
+            "export it or drop the key",
+        )
+    else:
+        config_row = CheckResult(
+            config_name,
+            True,
+            f"base_url={local.base_url} model={local.model} "
+            f"key={local.api_key_env or 'none'}",
+        )
+    try:
+        probe_models(local)
+    except LocalServerError as exc:
+        skipped = "skipped: endpoint failed"
+        return [
+            config_row,
+            CheckResult(endpoint_name, False, _local_failure(exc)),
+            CheckResult(tools_name, False, skipped),
+            CheckResult(context_name, False, skipped, level="info"),
+        ]
+    endpoint_row = CheckResult(
+        endpoint_name, True, f"reachable; model {local.model} served"
+    )
+    # One real completion request; a model that is not resident yet loads
+    # here, so this is the row that legitimately takes a while.
+    output.progress("check", "local tools ... (a cold model can take a minute)")
+    try:
+        probe_tool_calling(local)
+    except LocalServerError as exc:
+        tools_row = CheckResult(tools_name, False, _local_failure(exc))
+    else:
+        tools_row = CheckResult(tools_name, True, "function call returned")
+    n_ctx = probe_context_size(local)
+    if n_ctx is None:
+        context_row = CheckResult(
+            context_name,
+            True,
+            "context size not exposed by this server",
+            level="info",
+        )
+    elif n_ctx < MIN_RECOMMENDED_CONTEXT:
+        context_row = CheckResult(
+            context_name,
+            False,
+            f"n_ctx={n_ctx} below the recommended {MIN_RECOMMENDED_CONTEXT} — "
+            f"restart with --ctx-size {MIN_RECOMMENDED_CONTEXT}",
+            level="info",
+        )
+    else:
+        context_row = CheckResult(context_name, True, f"n_ctx={n_ctx}", level="info")
+    return [config_row, endpoint_row, tools_row, context_row]
+
+
 def check_hooks(repo: Path) -> CheckResult:
     try:
         check_hooks_enabled(repo)
@@ -337,8 +440,9 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
     index = (repo / ".codegraph").is_dir()
     # Codex never reads a user MCP config: `CodeGraphAdapter.probe()` builds a
     # CodeGraphCapability and Ortus injects it into every fresh child, so its
-    # registration is satisfied exactly when the CLI and index are.
-    if backend == "codex":
+    # registration is satisfied exactly when the CLI and index are. `local`
+    # is the same CLI at another provider and gets the same injection.
+    if backend in ("codex", "local"):
         registered = cli.ok and index
         registration = "injected per child by ortus" if registered else "needs CLI + index"
     elif backend == "grok":
@@ -547,35 +651,81 @@ def check_prompt_overrides(repo: Path) -> CheckResult:
     return CheckResult(".ortus/prompts/", True, message)
 
 
+LOCAL_PROVISION_HINT = "run `ortus init --backend local --local-model <id>`"
+
+
+def _provisioned_config(backend: str) -> str:
+    """The project file whose presence proves `backend` was provisioned.
+
+    `local` is the Codex CLI pointed at another provider, so it shares
+    codex's `.codex/config.toml` rather than owning a template of its own.
+    """
+    return BACKEND_TEMPLATES["codex" if backend == "local" else backend]
+
+
+def backend_provisioned(repo: Path, backend: str) -> bool:
+    """Whether `repo` carries provisioning for `backend`.
+
+    Discovery is the config dir on disk, not an `.ortusrc` key: `ortus init
+    --backend all` writes every backend's directory and pins only one run
+    backend. `local` has no directory of its own — its provisioning is the
+    `[local]` table in the project `.ortusrc`.
+    """
+    if backend == "local":
+        return bool(read_recorded_local(repo))
+    if backend not in BACKEND_TEMPLATES:
+        # No template means nothing could have been provisioned.
+        return False
+    return (repo / BACKEND_TEMPLATES[backend]).parent.is_dir()
+
+
 def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
     """Informational row for a provisioned backend that is not the run backend.
 
-    `ortus init --backend all` writes every backend's config dir, so a repo
-    routinely carries config for backends it never runs. Discovery is the
-    config dir on disk, not an `.ortusrc` key. Gaps here are WARN rows with a
-    remediation, never failures: the exit code belongs to the run backend.
+    Gaps here are WARN rows with a remediation, never failures: the exit code
+    belongs to the run backend. For `local` the row is deliberately offline —
+    it validates the `[local]` table and the codex prerequisites and says
+    where the endpoint probes live, because checking one backend must never
+    wait on another backend's server.
     """
     name = f"{backend} (provisioned)"
-    config_rel = BACKEND_TEMPLATES[backend]
+    config_rel = _provisioned_config(backend)
+    binary = BACKEND_BINARIES[backend]
     gaps: list[str] = []
     if not (repo / config_rel).is_file():
         gaps.append(f"{config_rel} missing — run `ortus init --force`")
-    if shutil.which(backend) is None:
-        gaps.append(f"{backend} CLI not on PATH — install it")
+    if shutil.which(binary) is None:
+        gaps.append(f"{binary} CLI not on PATH — install it")
     if backend == "claude" and not _claude_mcp_registered(repo):
         gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
     elif backend == "grok" and not _grok_mcp_registered(repo):
         gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
+    elif backend == "local":
+        table = read_recorded_local(repo)
+        if not table:
+            gaps.append(f"[local] table missing — {LOCAL_PROVISION_HINT}")
+        else:
+            try:
+                parse_local_table(table)
+            except ProfileError as exc:
+                gaps.append(f"[local] table invalid: {exc} — {LOCAL_PROVISION_HINT}")
     # codex: CodeGraph is injected per child, so CLI + index (the strict
     # codegraph row) are its whole registration story.
-    if not gaps:
-        return CheckResult(name, True, "provisioned and runnable", level="info")
-    return CheckResult(
-        name,
-        False,
-        "provisioned but not runnable: " + "; ".join(gaps),
-        level="info",
-    )
+    if gaps:
+        return CheckResult(
+            name,
+            False,
+            "provisioned but not runnable: " + "; ".join(gaps),
+            level="info",
+        )
+    if backend == "local":
+        return CheckResult(
+            name,
+            True,
+            "provisioned; endpoint not probed — run `ortus check --backend local`",
+            level="info",
+        )
+    return CheckResult(name, True, "provisioned and runnable", level="info")
 
 
 def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
@@ -592,6 +742,12 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         backend_binary = check_grok
         settings_check = check_grok_settings
         settings_label = ".grok/config.toml"
+    elif backend == "local":
+        # The Codex CLI at an operator-served model: same binary, same
+        # project config, plus the `[local]` rows that follow it.
+        backend_binary = check_codex
+        settings_check = check_codex_settings
+        settings_label = ".codex/config.toml"
     else:
         raise ValueError(f"unsupported check backend {backend!r}")
     checks: list[Callable[..., CheckResult]] = [
@@ -608,6 +764,8 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         (check_readiness_memory, "bd readiness memory"),
         (settings_check, settings_label),
     ]
+    if backend == "local":
+        repo_checks.append((check_local_rows, "[local]"))
     if backend == "claude":
         repo_checks.append((check_hooks, "hooks"))
         # Claude-only: the Codex verifier is not wrapped, so it has no
@@ -636,10 +794,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         else:
             results.extend(outcome)
     for other in BACKENDS:
-        if other == backend or other not in BACKEND_TEMPLATES:
-            # No template means nothing could have been provisioned.
-            continue
-        if not (repo / BACKEND_TEMPLATES[other]).parent.is_dir():
+        if other == backend or not backend_provisioned(repo, other):
             continue
         output.progress("check", f"{other} (provisioned) ...")
         results.append(check_provisioned_backend(repo, other))
@@ -653,7 +808,10 @@ def check(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Agent backend to verify (claude|codex|grok); defaults from .ortusrc.",
+        help=(
+            "Agent backend to verify (claude|codex|grok|local); "
+            "defaults from .ortusrc."
+        ),
     ),
 ) -> None:
     """Verify bd/claude/sandbox prereqs and hook-disable state."""
