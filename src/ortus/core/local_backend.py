@@ -17,7 +17,12 @@ contract is `POST {base_url}/responses`.
 
 from __future__ import annotations
 
+import http.client
+import json
+import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -135,3 +140,319 @@ def load_local_config(cfg: Config) -> LocalConfig:
     so the rules run again and a missing table gets the same message either way.
     """
     return parse_local_table(cfg.get("local"))
+
+
+# --- probes -----------------------------------------------------------------
+#
+# Four questions `ortus check` and the grind preflight share: is the server
+# up, does it serve the configured model, does it call tools, and how big is
+# its window. Each is one request over stdlib urllib, and each failure names
+# the exact serving command so a mis-served model is caught here rather than
+# as a hung worker.
+
+#: The verdicts a probe can hand back, each with its own remediation.
+PROBE_KINDS: tuple[str, ...] = (
+    "unreachable",
+    "model-missing",
+    "tools-unsupported",
+    "auth-demanded",
+)
+#: The function the tool-calling probe asks the model to call.
+PROBE_TOOL_NAME = "ortus_ping"
+#: Words in an error body from `/responses` that mean the server understood
+#: the request and rejected the tool part of it.
+_TOOL_REJECTION_WORDS = ("tool", "template", "jinja")
+_TOOL_REJECTION_STATUSES = frozenset({400, 404, 422, 500})
+_EXCERPT_CHARS = 200
+_TOOLS_REMEDIATION = (
+    "restart llama-server with --jinja (and a tool-capable chat template)"
+)
+
+
+class LocalServerError(RuntimeError):
+    """A probe verdict the operator has to act on.
+
+    `kind` names the failure for check rows and the preflight; `remediation`
+    is the text to print under the message, usually the serving command.
+    Neither carries key material: probes read the API key at call time and
+    put it in a request header only.
+    """
+
+    def __init__(self, kind: str, message: str, remediation: str) -> None:
+        if kind not in PROBE_KINDS:
+            raise ValueError(
+                f"unknown probe kind {kind!r}; expected one of {PROBE_KINDS}"
+            )
+        super().__init__(message)
+        self.kind = kind
+        self.remediation = remediation
+
+
+class _Unreachable(Exception):
+    """A transport failure inside `_request_json`; the probes add the verdict."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def serving_hint(config: LocalConfig) -> str:
+    """The reference serving commands for `config`, one line per server.
+
+    `<repo>:<quant>` stays a placeholder because which weights to serve is
+    the operator's choice; the alias, the port, `--jinja`, and the context
+    size are what the probes and the worker depend on.
+    """
+    parts = urlsplit(config.base_url)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return (
+        f"llama-server -hf <repo>:<quant> --alias {config.model} --jinja "
+        f"--ctx-size {MIN_RECOMMENDED_CONTEXT} --flash-attn on "
+        f"--host 127.0.0.1 --port {port}\n"
+        f"ollama serve && ollama pull {config.model}  "
+        '(Ollama: set local.base_url = "http://127.0.0.1:11434/v1")'
+    )
+
+
+def probe_models(config: LocalConfig, *, timeout: float = 5.0) -> tuple[str, ...]:
+    """The ids `GET {base_url}/models` serves, once `config.model` is among them.
+
+    Raises `unreachable` when the server does not answer with a JSON body,
+    `auth-demanded` when it wants a key, and `model-missing` when it answers
+    but the configured model is not in the list.
+    """
+    try:
+        status, payload = _request_json(
+            "GET",
+            f"{config.base_url}/models",
+            headers=_auth_headers(config),
+            timeout=timeout,
+        )
+    except _Unreachable as exc:
+        raise _unreachable(config, exc.reason) from None
+    if status in (401, 403):
+        raise _auth_demanded(config, status)
+    if not 200 <= status < 300:
+        raise _unreachable(config, f"HTTP {status} from /models: {_excerpt(payload)}")
+    served = _served_ids(payload)
+    if config.model not in served:
+        raise LocalServerError(
+            "model-missing",
+            f"model {config.model!r} is not served; served: {', '.join(served) or 'none'}",
+            "set local.model to a served id or load the model",
+        )
+    return served
+
+
+def probe_tool_calling(config: LocalConfig, *, timeout: float = 120.0) -> None:
+    """Ask `POST {base_url}/responses` to call one tool and check that it did.
+
+    This is the endpoint and the tool shape codex uses, so a server that
+    narrates here instead of calling would hang a worker later. The default
+    timeout leaves room for a cold model load.
+    """
+    body = {
+        "model": config.model,
+        "input": f"Call the {PROBE_TOOL_NAME} tool once.",
+        "tools": [
+            {
+                "type": "function",
+                "name": PROBE_TOOL_NAME,
+                "description": "Readiness probe.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ],
+        "tool_choice": "required",
+        "max_output_tokens": 64,
+        "stream": False,
+    }
+    try:
+        status, payload = _request_json(
+            "POST",
+            f"{config.base_url}/responses",
+            body=body,
+            headers=_auth_headers(config),
+            timeout=timeout,
+        )
+    except _Unreachable as exc:
+        raise _unreachable(config, exc.reason) from None
+    if status in (401, 403):
+        raise _auth_demanded(config, status)
+    if status in _TOOL_REJECTION_STATUSES and _mentions_tools(payload):
+        raise LocalServerError(
+            "tools-unsupported",
+            f"server rejected the tool call (HTTP {status}): {_excerpt(payload)}",
+            _TOOLS_REMEDIATION,
+        )
+    if not 200 <= status < 300:
+        raise _unreachable(
+            config, f"HTTP {status} from /responses: {_excerpt(payload)}"
+        )
+    if not _called_probe_tool(payload):
+        raise LocalServerError(
+            "tools-unsupported",
+            "server answered without calling the tool",
+            _TOOLS_REMEDIATION,
+        )
+
+
+def probe_context_size(config: LocalConfig, *, timeout: float = 5.0) -> int | None:
+    """`n_ctx` from llama-server's `GET /props`, or None when it is not exposed.
+
+    Ollama and vLLM have no `/props`, and a server that is down is
+    `probe_models`'s verdict rather than this one, so nothing here raises.
+    """
+    try:
+        status, payload = _request_json(
+            "GET",
+            f"{config.origin}/props",
+            headers=_auth_headers(config),
+            timeout=timeout,
+        )
+    except _Unreachable:
+        return None
+    if not 200 <= status < 300 or not isinstance(payload, dict):
+        return None
+    settings = payload.get("default_generation_settings")
+    if not isinstance(settings, dict):
+        return None
+    return _as_int(settings.get("n_ctx"))
+
+
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float,
+) -> tuple[int, Any]:
+    """One HTTP round trip, returned as `(status, payload)`.
+
+    A 2xx answer must be JSON and comes back decoded; any other status comes
+    back with its body as text so the caller can classify it. A refused
+    connection, a timeout, or a 2xx body that is not JSON raises
+    `_Unreachable` with a reason that never quotes the request headers.
+    """
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json", **(headers or {})},
+    )
+    # A fresh opener reads the proxy environment on every call rather than
+    # once per process, so a `no_proxy` exported for the local server applies
+    # to the next probe.
+    opener = urllib.request.build_opener()
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            status = response.status
+            text = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        raise _Unreachable(str(exc.reason)) from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise _Unreachable(str(exc) or type(exc).__name__) from exc
+    try:
+        return status, json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _Unreachable("unparseable JSON") from exc
+
+
+def _auth_headers(config: LocalConfig) -> dict[str, str]:
+    """`Authorization` for the configured key, read from the environment now.
+
+    No header when `api_key_env` is unset or the variable is absent or empty;
+    check reports an absent variable on its own row.
+    """
+    if config.api_key_env is None:
+        return {}
+    value = os.environ.get(config.api_key_env)
+    if not value:
+        return {}
+    return {"Authorization": f"Bearer {value}"}
+
+
+def _unreachable(config: LocalConfig, reason: str) -> LocalServerError:
+    return LocalServerError(
+        "unreachable",
+        f"local server unreachable at {config.base_url}: {reason}",
+        serving_hint(config),
+    )
+
+
+def _auth_demanded(config: LocalConfig, status: int) -> LocalServerError:
+    if config.api_key_env is None:
+        remediation = (
+            "set local.api_key_env to the name of an environment variable "
+            "holding the server's API key, then export that variable"
+        )
+    else:
+        remediation = (
+            f"export {config.api_key_env} (local.api_key_env) with the server's API key"
+        )
+    return LocalServerError(
+        "auth-demanded",
+        f"local server at {config.base_url} demands authentication (HTTP {status})",
+        remediation,
+    )
+
+
+def _served_ids(payload: Any) -> tuple[str, ...]:
+    """`data[*].id` from a `/models` body; any other shape serves nothing."""
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return ()
+    return tuple(
+        str(entry["id"])
+        for entry in entries
+        if isinstance(entry, dict) and "id" in entry
+    )
+
+
+def _called_probe_tool(payload: Any) -> bool:
+    """Whether a `/responses` body carries a call to `PROBE_TOOL_NAME`."""
+    output = payload.get("output") if isinstance(payload, dict) else None
+    if not isinstance(output, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("name") == PROBE_TOOL_NAME
+        for item in output
+    )
+
+
+def _mentions_tools(text: Any) -> bool:
+    lowered = str(text).lower()
+    return any(word in lowered for word in _TOOL_REJECTION_WORDS)
+
+
+def _excerpt(text: Any) -> str:
+    """The start of a response body on one line, for an error message."""
+    flat = " ".join(str(text).split())
+    if len(flat) > _EXCERPT_CHARS:
+        return flat[:_EXCERPT_CHARS] + "..."
+    return flat or "<empty body>"
+
+
+def _as_int(value: Any) -> int | None:
+    """`n_ctx` as an int; llama-server has sent it as both a number and a string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
