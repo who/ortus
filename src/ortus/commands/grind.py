@@ -643,6 +643,66 @@ def _done_bar_met(
     return None
 
 
+def _flagged_claims(bd: BdClient) -> set[str]:
+    """In-progress ids that carry an excluded label, each confirmed by name.
+
+    The difference between every in_progress id and the ids that survive
+    ``EXCLUDED_LABELS`` nominates candidates. Each is then confirmed against
+    its own labels, because ``in_progress_ids`` answers a failed query with an
+    empty set, and a failure on the excluding query alone would otherwise make
+    every live claim look flagged. A tracker error on the confirmation
+    propagates, so the caller treats the poll as unanswered.
+    """
+
+    every = bd.in_progress_ids()
+    if not every:
+        return set()
+    unflagged = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+    flagged: set[str] = set()
+    for issue_id in every - unflagged:
+        labels = bd.show(issue_id).get("labels") or []
+        if any(label in EXCLUDED_LABELS for label in labels):
+            flagged.add(issue_id)
+    return flagged
+
+
+def _reap_reason(
+    bd: BdClient,
+    git: GitClient,
+    *,
+    baseline_closed: int | None,
+    flagged_at_start: frozenset[str] | None,
+    integration_branch: str,
+) -> str | None:
+    """Why the running worker should be reaped now, or None to let it run.
+
+    Two facts end a window from the harness side, and both describe a worker
+    with nothing left to do. The done bar: it closed and pushed, so whatever
+    it is still saying is the /goal Stop hook holding it. A flagged claim: it
+    took the PLAN-GAP exit — commented, labelled its issue human, and tried
+    to stop — and the same hook holds it, because the condition it answers to
+    reads "closed and in sync" and a flagged issue is neither. Only a claim
+    that was unflagged when the window began counts; a leftover flagged claim
+    was excluded at startup and is not this worker's. A check whose baseline
+    could not be read is skipped, and a tracker or git error during the poll
+    is an unanswered poll, never a reap.
+    """
+
+    if baseline_closed is not None:
+        label = _done_bar_met(bd, git, baseline_closed, integration_branch)
+        if label:
+            return f"done bar met ({label}, in sync)"
+    if flagged_at_start is None:
+        return None
+    try:
+        flagged = _flagged_claims(bd) - flagged_at_start
+    except Exception:
+        return None
+    if flagged:
+        return f"claim flagged human ({', '.join(sorted(flagged))})"
+    return None
+
+
 def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
     """Return a zero-turn Claude goal-condition rejection from a log slice."""
     try:
@@ -1678,31 +1738,39 @@ def grind(
                             "grind",
                             "implementation CodeGraph handshake fallback active",
                         )
+                    # Claude and grok both answer to a /goal Stop hook that
+                    # re-prompts them until the issue is closed and in sync.
+                    # A worker that closed and pushed, or that flagged its
+                    # claim human and tried to stop, therefore keeps
+                    # answering until the watchdog fires. The harness reaps
+                    # it instead, within one poll, and the log names the
+                    # reason rather than a timeout. Codex runs its own turn
+                    # loop and exits by itself; its termination stays as is.
                     reap_when = None
-                    if resolved_backend == "grok":
+                    if resolved_backend in ("claude", "grok"):
                         try:
                             baseline_closed = bd.count_by_status("closed")
                         except Exception:
                             baseline_closed = None
-                        if baseline_closed is not None:
+                        try:
+                            flagged_at_start = frozenset(_flagged_claims(bd))
+                        except Exception:
+                            flagged_at_start = None
 
-                            def _reap_on_done_bar() -> bool:
-                                label = _done_bar_met(
-                                    bd,
-                                    git,
-                                    baseline_closed,
-                                    integration_branch,
-                                )
-                                if not label:
-                                    return False
-                                write_log(
-                                    f"iter {iters_run}: done bar met "
-                                    f"({label}, in sync); "
-                                    "reaping grok /goal review"
-                                )
-                                return True
+                        def _reap_worker() -> bool:
+                            reason = _reap_reason(
+                                bd,
+                                git,
+                                baseline_closed=baseline_closed,
+                                flagged_at_start=flagged_at_start,
+                                integration_branch=integration_branch,
+                            )
+                            if reason is None:
+                                return False
+                            write_log(f"iter {iters_run}: {reason}; reaping worker")
+                            return True
 
-                            reap_when = _reap_on_done_bar
+                        reap_when = _reap_worker
                     rc = runner.run(
                         iteration_prompt,
                         repo=worker_repo,
