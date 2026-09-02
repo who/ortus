@@ -90,6 +90,11 @@ from ortus.core.grind_loop import (
     read_work_issue_condition,
     select_ready_issue,
 )
+from ortus.core.local_backend import (
+    LocalServerError,
+    load_local_config,
+    probe_models,
+)
 from ortus.core.repo import resolve_repo
 
 
@@ -931,7 +936,7 @@ def grind(
         None,
         "--backend",
         help=(
-            "claude, codex, or grok; overrides ORTUS_BACKEND and .ortusrc "
+            "claude, codex, grok, or local; overrides ORTUS_BACKEND and .ortusrc "
             "('all' is an init provisioning option, not a run backend)."
         ),
     ),
@@ -947,6 +952,12 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
+        # Only the local backend has a server to reach. The table's rules
+        # run here so a missing [local] fails with one message whether the
+        # backend came from the flag, the environment, or .ortusrc.
+        local_config = (
+            load_local_config(config) if resolved_backend == "local" else None
+        )
         integration_branch = integration_branch or config.get(
             "integration_branch", DEFAULT_INTEGRATION_BRANCH
         )
@@ -1029,6 +1040,8 @@ def grind(
         output.info(f"fast:           {fast}")
         output.info(f"docker:         {docker}")
         output.info(f"backend:        {resolved_backend}")
+        if local_config is not None:
+            output.info(f"local:          {local_config.display}")
         output.info(f"implement:      {implement_profile.display_name}")
         output.info(f"verify:         {verify_profile.display_name}")
         output.info(f"finalize:       {finalize_profile.display_name}")
@@ -1072,6 +1085,19 @@ def grind(
     except sandbox.SandboxUnavailable as exc:
         output.error(str(exc).splitlines()[0])
         raise typer.Exit(code=1)
+
+    # Phase 0b — local server preflight. One cheap /models request before the
+    # flock and before any bd read, so a dead endpoint or a mis-served model
+    # leaves the tracker untouched and no claim is burned on a worker that
+    # could only hang on it. The server is operator-managed: no retry loop,
+    # and no tool-calling probe here (ortus check owns the expensive one).
+    if local_config is not None:
+        try:
+            probe_models(local_config)
+        except LocalServerError as exc:
+            output.error(f"local backend: {exc}", hint=exc.remediation)
+            raise typer.Exit(code=1)
+        output.progress("grind", f"local server reachable: {local_config.display}")
 
     # Phase 1 — hook precheck (must run BEFORE any claude spawn).
     if resolved_backend == "claude":
