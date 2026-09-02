@@ -1103,6 +1103,11 @@ def test_check_local_all_green(
     result = runner.invoke(app, ["check", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "FAIL" not in result.stdout
+    # The `[local]` row name prints literally and the status glyph keeps its
+    # styling instead of arriving as escaped markup.
+    assert "[local]" in result.stdout
+    assert "✓" in result.stdout
+    assert "[green]" not in result.stdout
     assert "localendpoint" in _compact(result.stdout)
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import typer
+from rich.text import Text
 
 from ortus.core import output, sandbox
 from ortus.core.agent import BACKEND_BINARIES, BACKENDS, BackendError, resolve_backend
@@ -825,12 +826,15 @@ def check(
     output.progress("check", f"backend: {resolved_backend}")
     results = _run_all(target, resolved_backend)
 
-    def _row(r: CheckResult) -> tuple[str, str, str, str]:
+    def _row(r: CheckResult) -> tuple[Text, str, str, str]:
+        # The glyph is a styled renderable rather than markup: `output.table`
+        # escapes string cells so a `[local]` row name or detail prints
+        # literally, and a markup string would be escaped with the rest.
         if r.ok:
-            return ("[green]✓[/green]", r.name, "PASS", r.message)
+            return (Text("✓", style="green"), r.name, "PASS", r.message)
         if r.level == "info":
-            return ("[yellow]![/yellow]", r.name, "WARN", r.message)
-        return ("[red]✗[/red]", r.name, "FAIL", r.message)
+            return (Text("!", style="yellow"), r.name, "WARN", r.message)
+        return (Text("✗", style="red"), r.name, "FAIL", r.message)
 
     output.table(["", "Check", "Status", "Details"], [_row(r) for r in results])
     failed = sum(1 for r in results if not r.ok and r.level != "info")

@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import typer
-from rich.markup import escape as escape_markup
 
 from ortus.core import cache, hooks, output, sandbox
 from ortus.core.agent import (
@@ -732,26 +731,17 @@ def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
     return None
 
 
-def _console_safe(text: str) -> str:
-    """Text a Rich console renders verbatim.
-
-    A blocker now quotes git's own output, which may contain brackets — a hook
-    printing `[ERROR] refused` would otherwise be read as markup and silently
-    dropped from the very line that exists to explain the failure. The run log
-    keeps the unescaped text.
-    """
-
-    return escape_markup(text)
-
-
 def _unready_skip_line(title: str, report: ReadinessReport) -> str:
     """Console-altitude skip line: title first, id in parentheses, one clause.
 
     The full section-by-section enumeration keeps serving the log; the
-    console gets the summary a colleague would say aloud.
+    console gets the summary a colleague would say aloud. The title is passed
+    as plain text: `output.warn` and `output.error` escape it themselves, so a
+    bracketed title prints literally rather than being read as markup, and
+    escaping it here as well would leave a stray backslash on the line.
     """
 
-    label = _console_safe(title) if title.strip() else report.issue_id
+    label = title if title.strip() else report.issue_id
     return f'skipped "{label}" ({report.issue_id}) — {report.summary()}'
 
 

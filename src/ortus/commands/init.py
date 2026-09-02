@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
-from rich.markup import escape as escape_markup
 
 from ortus.core import output
 from ortus.core.agent import BACKEND_BINARIES, BACKENDS
@@ -314,13 +313,10 @@ def _summarize_backends(run_backend: str) -> None:
         if b == "local" and b != run_backend:
             # Provisioned but unpinned: `.ortusrc` carries only the commented
             # reference block, so no CLI state can make this a failed init.
-            # Escaped because Rich would otherwise read `[local]` as markup.
             output.warn(
-                escape_markup(
-                    f"{b}: {config_path} written; [local] left commented in "
-                    ".ortusrc — pin it with ortus init --backend local "
-                    "--local-model <id>, then ortus check --backend local"
-                )
+                f"{b}: {config_path} written; [local] left commented in "
+                ".ortusrc — pin it with ortus init --backend local "
+                "--local-model <id>, then ortus check --backend local"
             )
             continue
         cli = _backend_cli(b)
@@ -412,8 +408,7 @@ def _resolve_local_table(
         table["model"] = model_flag
     if base_url_flag is not None:
         table["base_url"] = base_url_flag
-    # The config's messages name `[local]`, which Rich would read as markup.
-    repair_hint = escape_markup(
+    repair_hint = (
         f"fix the [local] table in {target / '.ortusrc'}, or pass "
         "--local-model / --local-base-url"
     )
@@ -434,7 +429,7 @@ def _resolve_local_table(
             try:
                 parse_local_table(recorded)
             except ProfileError as exc:
-                output.error(escape_markup(str(exc)), hint=repair_hint)
+                output.error(str(exc), hint=repair_hint)
                 raise typer.Exit(code=1)
         return table, None
     if "model" not in table:
@@ -448,7 +443,7 @@ def _resolve_local_table(
     try:
         local = parse_local_table(table)
     except ProfileError as exc:
-        output.error(escape_markup(str(exc)), hint=repair_hint)
+        output.error(str(exc), hint=repair_hint)
         raise typer.Exit(code=1)
     # Render what validation normalised (a trailing slash on base_url is
     # dropped) so the recorded file and the loaded config agree byte for byte.
