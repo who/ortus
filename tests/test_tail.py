@@ -834,3 +834,67 @@ def test_raw_lines_one_is_still_the_last_raw_line(tmp_path: Path) -> None:
     out = buf.getvalue()
     assert '{"type": "usage", "input_tokens": 9}' in out
     assert "hidden by raw cap" not in out
+
+
+# --- ortus-d333.8: a local log is a codex log ------------------------------
+
+
+_CODEX_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "codex-exec-events.jsonl"
+)
+_CODEX_GOLDEN = Path(__file__).resolve().parent / "fixtures" / "codex-tail-golden.txt"
+
+
+def _tail_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> tuple[str, bool]:
+    """Run `ortus tail --backend <backend>` once over the codex fixture.
+
+    The verb follows forever, so the module's `_follow` is bounded to one
+    iteration and pointed at a buffer. Returns the render and whether the
+    verb asked for the codex decoder.
+    """
+    from ortus.commands import tail as tail_module
+
+    repo = tmp_path / f"repo-{backend}"
+    (repo / ".beads").mkdir(parents=True)
+    logs = repo / "logs"
+    logs.mkdir()
+    (logs / "grind-served.log").write_text(
+        _CODEX_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    buf = io.StringIO()
+    asked: dict[str, bool] = {}
+
+    def bounded(logs_dir: Path, **kwargs: object) -> None:
+        asked["codex"] = bool(kwargs["codex"])
+        kwargs.update(iterations=1, out=buf)
+        _follow(logs_dir, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tail_module, "_follow", bounded)
+    monkeypatch.setenv("NO_COLOR", "1")
+    result = runner.invoke(
+        app, ["tail", str(repo), "--backend", backend, "-v", "--lines", "0"]
+    )
+    assert result.exit_code == 0, result.output
+    return buf.getvalue(), asked["codex"]
+
+
+def test_local_backend_uses_codex_decoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ortus-d333.8 AC-1: --backend local renders a codex log as --backend codex does."""
+    local, local_asked_codex = _tail_backend(tmp_path, monkeypatch, "local")
+    codex, codex_asked_codex = _tail_backend(tmp_path, monkeypatch, "codex")
+    assert local_asked_codex is True
+    assert codex_asked_codex is True
+    assert local == codex
+    assert _CODEX_GOLDEN.read_text(encoding="utf-8") in local
+
+
+def test_claude_backend_still_takes_the_claude_decoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Widening the codex switch to local must not pull claude along."""
+    _, asked_codex = _tail_backend(tmp_path, monkeypatch, "claude")
+    assert asked_codex is False

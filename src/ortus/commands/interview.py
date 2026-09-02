@@ -49,7 +49,7 @@ def interview(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="claude, codex, or grok; defaults from .ortusrc.",
+        help="claude, codex, grok, or local; defaults from .ortusrc.",
     ),
 ) -> None:
     """Run an interactive interview to draft a PRD for an open feature."""

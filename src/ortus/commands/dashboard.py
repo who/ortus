@@ -610,10 +610,21 @@ def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) ->
     return ""
 
 
-def backend_conflict(named: str, log: str) -> str:
-    """PLAN-GAP line when the start line and event types disagree; else empty."""
+#: The event backend each named backend produces when it differs from the
+#: name. A `local` run is `codex exec` at an operator-served model, so its
+#: events are codex events; the other backends write their own.
+_EVENT_BACKEND_ALIASES = {"local": "codex"}
 
-    if named and log and named != log:
+
+def backend_conflict(named: str, log: str) -> str:
+    """PLAN-GAP line when the start line and event types disagree; else empty.
+
+    A start line naming `local` agrees with codex events. Against any other
+    event backend the line still names `local`, since that is what the
+    operator wrote in `.ortusrc` and what the log says.
+    """
+
+    if named and log and _EVENT_BACKEND_ALIASES.get(named, named) != log:
         return (
             f"PLAN-GAP: named backend={named} disagrees with event backend={log}"
         )

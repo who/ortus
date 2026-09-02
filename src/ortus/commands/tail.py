@@ -1152,7 +1152,7 @@ def tail(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Log backend (claude|codex); defaults from .ortusrc.",
+        help="Log backend (claude|codex|grok|local); defaults from .ortusrc.",
     ),
     lines: int = typer.Option(
         DEFAULT_ATTACH_LINES,
@@ -1204,6 +1204,8 @@ def tail(
         show_tools=tools,
         show_system=system,
         assistant_only=assistant,
-        codex=resolved_backend == "codex",
+        # A local run is `codex exec` at an operator-served model, so its
+        # log is a codex log and takes the same decoder.
+        codex=resolved_backend in ("codex", "local"),
         lines=lines,
     )

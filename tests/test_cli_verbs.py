@@ -427,3 +427,26 @@ def test_grind_dry_run_keeps_dry_run_output_on_stdout(tmp_path: Path) -> None:
     # Dry-run output is the verb's RESULT, not progress — keep it on stdout.
     assert "repo:" in result.stdout
     assert "/goal" in result.stdout
+
+
+def _flat_help(*argv: str) -> str:
+    """One-line help text: ANSI and panel borders stripped, whitespace collapsed."""
+    result = runner.invoke(app, [*argv, "--help"])
+    assert result.exit_code == 0, result.output
+    text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout or result.output)
+    text = re.sub(r"[│╭╮╰╯─]", " ", text)
+    return " ".join(text.split())
+
+
+@pytest.mark.parametrize(
+    ("verb", "phrase"),
+    [
+        ("init", "Bootstrap a fresh repo for Claude, Codex, Grok, or a local model."),
+        ("plan", "claude, codex, grok, or local; defaults from .ortusrc"),
+        ("interview", "claude, codex, grok, or local; defaults from .ortusrc."),
+        ("tail", "Log backend (claude|codex|grok|local); defaults from .ortusrc."),
+    ],
+)
+def test_help_texts_name_local_backend(verb: str, phrase: str) -> None:
+    """ortus-d333.8 AC-3: init, plan, interview, and tail help each name local."""
+    assert phrase in _flat_help(verb)
