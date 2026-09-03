@@ -18,12 +18,18 @@ from ortus.core.config import Config
 from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
     LOCAL_PROVIDER_ID,
+    LOCAL_TABLE_BACKENDS,
     LOCAL_WIRE_API,
     MIN_RECOMMENDED_CONTEXT,
+    OPENCODE_CONFIG_FILE,
+    OPENCODE_PROVIDER_ID,
+    OPENCODE_PROVIDER_NPM,
+    OPENCODE_SCHEMA_URL,
     PROBE_TOOL_NAME,
     LocalConfig,
     LocalServerError,
     load_local_config,
+    opencode_provider_block,
     parse_local_table,
     probe_context_size,
     probe_models,
@@ -38,6 +44,11 @@ def test_constants_pin_the_serving_contract() -> None:
     assert LOCAL_PROVIDER_ID == "ortus_local"
     assert LOCAL_WIRE_API == "responses"
     assert MIN_RECOMMENDED_CONTEXT == 32768
+    assert OPENCODE_PROVIDER_ID == "ortuslocal"
+    assert OPENCODE_PROVIDER_NPM == "@ai-sdk/openai-compatible"
+    assert OPENCODE_CONFIG_FILE == "opencode.json"
+    assert OPENCODE_SCHEMA_URL == "https://opencode.ai/config.json"
+    assert LOCAL_TABLE_BACKENDS == ("local", "opencode")
 
 
 def test_origin_strips_v1() -> None:
@@ -115,6 +126,51 @@ def test_local_efforts_are_the_codex_set_but_not_the_same_object() -> None:
     assert SUPPORTED_EFFORTS["local"] == SUPPORTED_EFFORTS["codex"]
     assert SUPPORTED_EFFORTS["local"] is not SUPPORTED_EFFORTS["codex"]
     assert "none" not in SUPPORTED_EFFORTS["local"]
+
+
+# --- the opencode provider block --------------------------------------------
+#
+# `opencode.json` registers the served model as `provider.ortuslocal`; the
+# block is the exact shape the opencode 1.18.27 spike drove a keyless
+# llama-server with, so these pin it field for field.
+
+
+def test_opencode_provider_block_names_the_base_url_and_model() -> None:
+    """Keyless: the spike's shape, with no auth option at all."""
+    local = LocalConfig("http://127.0.0.1:8080/v1", "org/model:Q4_K_M")
+    block = opencode_provider_block(local)
+    assert block == {
+        "npm": OPENCODE_PROVIDER_NPM,
+        "name": "Ortus local model",
+        "options": {"baseURL": "http://127.0.0.1:8080/v1"},
+        "models": {"org/model:Q4_K_M": {}},
+    }
+    # The block is what opencode.json carries, so it must round-trip as JSON.
+    assert json.loads(json.dumps(block)) == block
+
+
+def test_opencode_provider_block_keys_by_env_reference_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`api_key_env` becomes opencode's `{env:NAME}` reference; the value never lands."""
+    monkeypatch.setenv("LLAMA_API_KEY", "sk-secret-value")
+    local = LocalConfig(
+        "http://127.0.0.1:8080/v1", "m", api_key_env="LLAMA_API_KEY"
+    )
+    block = opencode_provider_block(local)
+    assert block["options"] == {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "{env:LLAMA_API_KEY}",
+    }
+    assert "sk-secret-value" not in json.dumps(block)
+
+
+def test_opencode_provider_block_uses_the_normalised_base_url() -> None:
+    """The table rules run first, so a trailing slash never reaches baseURL."""
+    local = parse_local_table({"base_url": "http://gpu-box:11434/v1/", "model": "m"})
+    assert opencode_provider_block(local)["options"]["baseURL"] == (
+        "http://gpu-box:11434/v1"
+    )
 
 
 # --- probes: a canned OpenAI-compatible server on 127.0.0.1 -----------------

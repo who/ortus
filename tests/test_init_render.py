@@ -29,13 +29,22 @@ from ortus.core.agent_files import (
 from ortus.core.init_render import (
     BACKEND_TEMPLATES,
     BUNDLED_TEMPLATES,
+    MERGED_CONFIGS,
     RenderContext,
     list_bundled,
     merge_gitignore,
+    merge_opencode_config,
+    read_opencode_config,
     render_all,
     render_template,
 )
-from ortus.core.local_backend import DEFAULT_LOCAL_BASE_URL
+from ortus.core.local_backend import (
+    DEFAULT_LOCAL_BASE_URL,
+    OPENCODE_PROVIDER_ID,
+    OPENCODE_SCHEMA_URL,
+    LocalConfig,
+    opencode_provider_block,
+)
 from ortus.core.prompts import resolve_prompt
 
 if sys.version_info >= (3, 11):
@@ -53,6 +62,10 @@ def test_every_bundled_template_ships_in_the_package() -> None:
     # `.gitignore` left BUNDLED_TEMPLATES for the marker merge but still ships.
     for name in (*BUNDLED_TEMPLATES, *BACKEND_TEMPLATES.values(), ".gitignore"):
         jinja_name = f"{name}.jinja"
+        if name in MERGED_CONFIGS:
+            # Built by a keyed merge, never rendered: no template to ship.
+            assert jinja_name not in available, f"{jinja_name} must not ship"
+            continue
         assert (
             jinja_name in available or jinja_name.replace("/", "/") in available
         ), f"{jinja_name} not in package data: {available}"
@@ -169,15 +182,16 @@ def test_rendered_ortusrc_pins_the_selected_codegraph_mode() -> None:
     assert tomllib.loads(render_template(".ortusrc", ctx))["codegraph"] == "off"
 
 
-def test_rendered_ortusrc_local_table_validates() -> None:
-    """`backend == "local"` renders an active [local] table the loader accepts."""
-    ctx = RenderContext(prefix="acme", backend="local", local_model="m1")
+@pytest.mark.parametrize("backend", ["local", "opencode"])
+def test_rendered_ortusrc_local_table_validates(backend: str) -> None:
+    """Either operator-served backend renders an active [local] table the loader accepts."""
+    ctx = RenderContext(prefix="acme", backend=backend, local_model="m1")
     parsed = tomllib.loads(render_template(".ortusrc", ctx))
-    assert parsed["backend"] == "local"
+    assert parsed["backend"] == backend
     assert parsed["local"] == {"base_url": DEFAULT_LOCAL_BASE_URL, "model": "m1"}
     keyed = RenderContext(
         prefix="acme",
-        backend="local",
+        backend=backend,
         local_model="m1",
         local_base_url="http://127.0.0.1:11434/v1",
         local_api_key_env="LLAMA_API_KEY",
@@ -202,6 +216,13 @@ def test_rendered_ortusrc_keeps_local_commented_for_other_backends(
 
 def test_list_bundled_local_uses_codex_config() -> None:
     assert list_bundled("local") == [".codex/config.toml", ".ortusrc"]
+
+
+def test_list_bundled_opencode_ships_no_config_template() -> None:
+    """opencode.json is merged, never rendered, so only the shared file is listed."""
+    assert BACKEND_TEMPLATES["opencode"] == "opencode.json"
+    assert "opencode.json" in MERGED_CONFIGS
+    assert list_bundled("opencode") == [".ortusrc"]
 
 
 def test_rendered_gitignore_excludes_the_codegraph_index() -> None:
@@ -660,6 +681,21 @@ def test_render_all_does_not_duplicate_codex_config(tmp_path: Path) -> None:
     assert len(written) == len(BUNDLED_TEMPLATES) + 2
 
 
+def test_render_all_leaves_opencode_json_to_the_merge(tmp_path: Path) -> None:
+    """Widening to opencode renders nothing extra: its file is a keyed merge."""
+    ctx = RenderContext(prefix="acme", project_type="python", backend="opencode")
+    written = render_all(tmp_path, ctx)
+    assert written == [tmp_path / ".ortusrc"]
+    assert not (tmp_path / "opencode.json").exists()
+    assert not (tmp_path / ".claude").exists()
+    everything = render_all(
+        tmp_path, ctx, backends=("claude", "codex", "grok", "local", "opencode")
+    )
+    assert tmp_path / "opencode.json" not in everything
+    assert not (tmp_path / "opencode.json").exists()
+    assert len(everything) == len(BUNDLED_TEMPLATES) + 2
+
+
 def test_render_substitutes_today_when_blank(tmp_path: Path) -> None:
     """today defaults to today's ISO date when not provided."""
     ctx = RenderContext(prefix="d", project_type="polyglot")
@@ -683,3 +719,109 @@ def test_render_missing_variable_raises() -> None:
     env = Environment(undefined=StrictUndefined)
     with pytest.raises(UndefinedError):
         env.from_string("{{ nope }}").render()
+
+
+# --- opencode.json keyed merge -----------------------------------------------
+#
+# The fourth host-owned file. JSON has no comment syntax for a marker fence,
+# so Ortus owns one key — `provider.ortuslocal` — and touches nothing else.
+
+
+def _served() -> LocalConfig:
+    return LocalConfig("http://127.0.0.1:8080/v1", "m1")
+
+
+def test_merge_opencode_config_creates_the_file(tmp_path: Path) -> None:
+    outcome = merge_opencode_config(tmp_path, _served())
+    assert outcome is agent_files.BlockOutcome.CREATED
+    data = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    assert data == {
+        "$schema": OPENCODE_SCHEMA_URL,
+        "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+    }
+
+
+def test_merge_opencode_config_is_a_no_op_when_current(tmp_path: Path) -> None:
+    merge_opencode_config(tmp_path, _served())
+    path = tmp_path / "opencode.json"
+    hand_formatted = path.read_text(encoding="utf-8").replace("  ", "\t")
+    path.write_text(hand_formatted, encoding="utf-8")
+    outcome = merge_opencode_config(tmp_path, _served())
+    assert outcome is agent_files.BlockOutcome.UNCHANGED
+    # never re-indented for no change
+    assert path.read_text(encoding="utf-8") == hand_formatted
+
+
+def test_merge_opencode_config_preserves_host_keys_and_replaces_the_provider(
+    tmp_path: Path,
+) -> None:
+    host = {
+        "theme": "dark",
+        "provider": {
+            "mine": {"npm": "@ai-sdk/anthropic", "models": {"x": {}}},
+            OPENCODE_PROVIDER_ID: {"stale": True},
+        },
+        "mcp": {
+            "codegraph": {
+                "type": "local",
+                "command": ["codegraph", "serve", "--mcp"],
+                "enabled": True,
+            }
+        },
+    }
+    path = tmp_path / "opencode.json"
+    path.write_text(json.dumps(host, indent=4) + "\n", encoding="utf-8")
+    outcome = merge_opencode_config(tmp_path, _served())
+    assert outcome is agent_files.BlockOutcome.UPDATED
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark"
+    assert data["mcp"] == host["mcp"]
+    assert data["provider"]["mine"] == host["provider"]["mine"]
+    assert data["provider"][OPENCODE_PROVIDER_ID] == opencode_provider_block(_served())
+    # Host key order survives, and no schema is imposed on the operator's file.
+    assert list(data) == ["theme", "provider", "mcp"]
+    assert list(data["provider"]) == ["mine", OPENCODE_PROVIDER_ID]
+    assert "$schema" not in data
+
+
+def test_merge_opencode_config_adds_the_provider_table_when_absent(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "opencode.json"
+    path.write_text('{"theme": "dark"}\n', encoding="utf-8")
+    outcome = merge_opencode_config(tmp_path, _served())
+    assert outcome is agent_files.BlockOutcome.UPDATED
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "theme": "dark",
+        "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+    }
+
+
+def test_merge_opencode_config_fills_an_empty_file(tmp_path: Path) -> None:
+    path = tmp_path / "opencode.json"
+    path.write_text("\n", encoding="utf-8")
+    assert read_opencode_config(tmp_path) is None
+    outcome = merge_opencode_config(tmp_path, _served())
+    assert outcome is agent_files.BlockOutcome.CREATED
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["$schema"] == OPENCODE_SCHEMA_URL
+
+
+@pytest.mark.parametrize(
+    "text, problem",
+    [
+        ("{ not json", "not valid JSON"),
+        ("[]", "not a JSON object"),
+        ('{"provider": []}', '"provider" is not a JSON object'),
+    ],
+)
+def test_merge_opencode_config_refuses_a_malformed_file(
+    tmp_path: Path, text: str, problem: str
+) -> None:
+    """A file the merge cannot read is named and left exactly as it was."""
+    path = tmp_path / "opencode.json"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match=problem) as excinfo:
+        merge_opencode_config(tmp_path, _served())
+    assert "opencode.json" in str(excinfo.value)
+    assert path.read_text(encoding="utf-8") == text

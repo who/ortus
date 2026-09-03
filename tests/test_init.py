@@ -773,3 +773,141 @@ def test_init_force_rejects_an_invalid_recorded_local_table(tmp_path: Path) -> N
     assert result.exit_code == 1
     assert "invalid local.model" in result.stdout + result.stderr
     assert ortusrc.read_text() == broken
+
+
+# --- the opencode backend ----------------------------------------------------
+#
+# `opencode` reads the same `[local]` table as `local` and adds one project
+# file of its own: `opencode.json`, which init merges by key so an operator's
+# own providers, MCP servers, and settings in that file survive a re-init.
+
+
+def test_init_opencode_writes_and_preserves_opencode_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--backend opencode` registers the served model without clobbering the file."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "probe_models", lambda config, **kwargs: ("m1",))
+    target = tmp_path / "opencode"
+    target.mkdir()
+    host = {
+        "theme": "dark",
+        "provider": {"mine": {"npm": "@ai-sdk/anthropic", "models": {"x": {}}}},
+        "mcp": {
+            "codegraph": {
+                "type": "local",
+                "command": ["codegraph", "serve", "--mcp"],
+                "enabled": True,
+            }
+        },
+    }
+    config = target / "opencode.json"
+    config.write_text(json.dumps(host, indent=2) + "\n")
+    result = runner.invoke(
+        app,
+        [
+            "init", str(target),
+            "--backend", "opencode",
+            "--local-model", "m1",
+            "--local-base-url", "http://127.0.0.1:11434/v1/",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads(config.read_text())
+    assert data["theme"] == "dark"
+    assert data["mcp"] == host["mcp"]
+    assert data["provider"]["mine"] == host["provider"]["mine"]
+    assert data["provider"]["ortuslocal"] == {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Ortus local model",
+        "options": {"baseURL": "http://127.0.0.1:11434/v1"},
+        "models": {"m1": {}},
+    }
+    assert not (target / ".claude").exists()
+    ortusrc = tomllib.loads((target / ".ortusrc").read_text())
+    assert ortusrc["backend"] == "opencode"
+    assert ortusrc["local"] == {"model": "m1", "base_url": "http://127.0.0.1:11434/v1"}
+    combined = " ".join((result.stdout + result.stderr).split())
+    # bd init scaffolds a `.codex/` of its own, so the filesystem cannot say
+    # which backend ortus rendered; its own `wrote` lines can.
+    assert "wrote .ortusrc" in combined
+    assert "wrote .codex/config.toml" not in combined
+    assert "wrote .grok/config.toml" not in combined
+    assert "wrote .claude/settings.json" not in combined
+    assert "updated opencode.json provider ortuslocal" in combined
+    assert "local server reachable" in combined
+
+    # A forced re-init with a new model rewrites only the Ortus provider.
+    result = runner.invoke(app, ["init", str(target), "--force", "--local-model", "m2"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads(config.read_text())
+    assert data["provider"]["ortuslocal"]["models"] == {"m2": {}}
+    assert data["provider"]["mine"] == host["provider"]["mine"]
+    assert data["theme"] == "dark"
+
+    # A re-init with nothing new leaves the bytes alone.
+    before = config.read_bytes()
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert config.read_bytes() == before
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "opencode.json provider ortuslocal already current" in combined
+
+
+def test_init_opencode_creates_opencode_json_with_the_schema(tmp_path: Path) -> None:
+    """A fresh dir gets a file holding the schema reference and the one provider."""
+    target = tmp_path / "fresh"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "opencode", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads((target / "opencode.json").read_text())
+    assert data["$schema"] == "https://opencode.ai/config.json"
+    assert list(data["provider"]) == ["ortuslocal"]
+    assert data["provider"]["ortuslocal"]["options"] == {
+        "baseURL": DEFAULT_LOCAL_BASE_URL
+    }
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "created opencode.json provider ortuslocal" in combined
+    # The default fake server is down: still a warning, never a failed init.
+    assert "local server not reachable" in combined
+
+
+def test_init_opencode_requires_local_model(tmp_path: Path) -> None:
+    target = tmp_path / "nomodel"
+    result = runner.invoke(app, ["init", str(target), "--backend", "opencode"])
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "--backend opencode needs --local-model" in combined
+    assert not target.exists()
+
+
+def test_init_opencode_refuses_a_malformed_opencode_json(tmp_path: Path) -> None:
+    """A file the merge cannot read fails before bd init or any render."""
+    target = tmp_path / "broken"
+    target.mkdir()
+    config = target / "opencode.json"
+    config.write_text("{ not json\n")
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "opencode", "--local-model", "m1"]
+    )
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "is not valid JSON" in combined
+    assert "repair opencode.json by hand" in combined
+    assert config.read_text() == "{ not json\n"
+    assert not (target / ".beads").exists()
+    assert not (target / ".ortusrc").exists()
+
+
+def test_init_all_leaves_opencode_json_to_a_pinned_init(tmp_path: Path) -> None:
+    """`--backend all` has no model to register, so it says how to pin one."""
+    target = tmp_path / "everything"
+    result = runner.invoke(app, ["init", str(target)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert not (target / "opencode.json").exists()
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "opencode: opencode.json not written" in combined
+    assert "ortus init --backend opencode --local-model <id>" in combined
+    assert "then ortus check --backend opencode" in combined

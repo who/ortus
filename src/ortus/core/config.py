@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
-from ortus.core.local_backend import parse_local_table
+from ortus.core.local_backend import LOCAL_TABLE_BACKENDS, parse_local_table
 from ortus.core.profiles import (
     BACKEND_NAMES_PROSE,
     AgentProfile,
@@ -213,13 +213,14 @@ def _validate_profiles(values: dict[str, Any]) -> None:
 
 
 def _validate_local(values: dict[str, Any]) -> None:
-    """Reject a malformed `[local]` table, or a missing one under `backend = "local"`.
+    """Reject a malformed `[local]` table, or a missing one under a backend that needs it.
 
-    A config without the table is left alone: `local` is opt-in, and every
-    existing `.ortusrc` must load exactly as it did before the table existed.
+    Both `local` and `opencode` pin the served model there. A config without
+    the table is otherwise left alone: the table is opt-in, and every existing
+    `.ortusrc` must load exactly as it did before the table existed.
     """
     table = values.get("local")
-    if table is None and values.get("backend") != "local":
+    if table is None and values.get("backend") not in LOCAL_TABLE_BACKENDS:
         return
     parse_local_table(table)
 

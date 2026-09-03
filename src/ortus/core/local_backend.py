@@ -1,8 +1,9 @@
 """The `[local]` table: an operator-served OpenAI-compatible model.
 
 `local` is the Ortus backend for a model the operator serves themselves
-(llama-server first; Ollama and vLLM through the same seam). The Codex CLI is
-the harness and reaches the server through a custom model provider, so
+(llama-server first; Ollama and vLLM through the same seam), driven through
+the Codex CLI; `opencode` drives the same served model through opencode.
+Either harness reaches the server through a custom model provider, so
 everything Ortus has to know about the model is data in `.ortusrc`:
 
     [local]
@@ -12,7 +13,9 @@ everything Ortus has to know about the model is data in `.ortusrc`:
 
 The wire API is not configuration. Codex 0.147.0 speaks only the Responses
 API to a custom provider, so `LOCAL_WIRE_API` is a constant and the serving
-contract is `POST {base_url}/responses`.
+contract is `POST {base_url}/responses`. opencode speaks chat completions to
+the provider `opencode.json` registers; `opencode_provider_block` is that
+entry, built from the same table.
 """
 
 from __future__ import annotations
@@ -44,6 +47,14 @@ LOCAL_WIRE_API = "responses"
 #: an OpenAI-compatible chat-completions provider that opencode.json
 #: registers under this id.
 OPENCODE_PROVIDER_ID = "ortuslocal"
+#: The provider package that entry loads for an OpenAI-compatible server, the
+#: project file it lives in, and the schema that file declares.
+OPENCODE_PROVIDER_NPM = "@ai-sdk/openai-compatible"
+OPENCODE_CONFIG_FILE = "opencode.json"
+OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
+#: The backends that read the `[local]` table: the Codex CLI and opencode at
+#: the same operator-served model.
+LOCAL_TABLE_BACKENDS: tuple[str, ...] = ("local", "opencode")
 #: Tokens. A worker prompt plus CodeGraph tool output does not fit a smaller
 #: window; the context probe warns below this.
 MIN_RECOMMENDED_CONTEXT = 32768
@@ -54,8 +65,8 @@ LOCAL_KEYS: tuple[str, ...] = ("base_url", "model", "api_key_env")
 #: One message for both ways of having no model: a table without the key, and
 #: `backend = "local"` pinned without a table at all.
 MISSING_MODEL_MESSAGE = (
-    "missing local.model: backend local needs a [local] table in .ortusrc "
-    'with model = "<id as GET {base_url}/models reports it>"'
+    "missing local.model: the local and opencode backends need a [local] "
+    'table in .ortusrc with model = "<id as GET {base_url}/models reports it>"'
 )
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -66,8 +77,10 @@ _URL_SCHEMES = ("http://", "https://")
 class LocalConfig:
     """Immutable, validated `[local]` table.
 
-    `api_key_env` is the name of an environment variable. Codex reads its
-    value at launch; Ortus never does, so nothing here can carry a secret.
+    `api_key_env` is the name of an environment variable. The harness reads
+    its value at launch (codex from its environment, opencode through the
+    `{env:NAME}` reference in `opencode.json`); Ortus never does, so nothing
+    here can carry a secret.
     """
 
     base_url: str
@@ -85,6 +98,26 @@ class LocalConfig:
     def display(self) -> str:
         """A credential-free description for operator logs and check rows."""
         return f"local ({urlsplit(self.base_url).netloc}) model={self.model}"
+
+
+def opencode_provider_block(config: LocalConfig) -> dict[str, Any]:
+    """The `provider.<OPENCODE_PROVIDER_ID>` entry of `opencode.json` for `config`.
+
+    The shape opencode 1.18.27 accepted for a keyless llama-server: the
+    OpenAI-compatible provider package, `baseURL` as the only option, and the
+    served id as the one model, so `-m <OPENCODE_PROVIDER_ID>/<model>`
+    resolves. A key rides as opencode's own `{env:NAME}` reference, which it
+    substitutes when it starts; the value never enters the file.
+    """
+    options: dict[str, Any] = {"baseURL": config.base_url}
+    if config.api_key_env is not None:
+        options["apiKey"] = f"{{env:{config.api_key_env}}}"
+    return {
+        "npm": OPENCODE_PROVIDER_NPM,
+        "name": "Ortus local model",
+        "options": options,
+        "models": {config.model: {}},
+    }
 
 
 def parse_local_table(table: Any) -> LocalConfig:

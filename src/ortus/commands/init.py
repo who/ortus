@@ -39,10 +39,15 @@ from ortus.core.init_render import (
     PROJECT_TYPES,
     RenderContext,
     merge_gitignore,
+    merge_opencode_config,
+    read_opencode_config,
     render_all,
 )
 from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
+    LOCAL_TABLE_BACKENDS,
+    OPENCODE_CONFIG_FILE,
+    OPENCODE_PROVIDER_ID,
     LocalConfig,
     LocalServerError,
     parse_local_table,
@@ -207,10 +212,11 @@ def _codegraph_cli() -> str | None:
     return shutil.which("codegraph")
 
 
-#: The backends `ortus init` can provision: those with a config template.
+#: The backends `ortus init` can provision: those with a project config file.
 #: `local` shares codex's, so `--backend all` still produces exactly the config
 #: directories it did before and adds only the commented `[local]` reference
-#: block to `.ortusrc`.
+#: block to `.ortusrc`. `opencode`'s file needs the served model, so `all`
+#: leaves it to a pinned `--backend opencode` init.
 PROVISIONABLE_BACKENDS: tuple[str, ...] = tuple(
     b for b in BACKENDS if b in BACKEND_TEMPLATES
 )
@@ -218,8 +224,9 @@ PROVISIONABLE_BACKENDS: tuple[str, ...] = tuple(
 #: Short because it runs on every local init and is informational only;
 #: `ortus check --backend local` owns the full probe set.
 LOCAL_PROBE_TIMEOUT = 3.0
+#: `%s` is the operator-served backend named on the command line.
 LOCAL_MODEL_REQUIRED_MESSAGE = (
-    "--backend local needs --local-model <id as GET {base_url}/models reports it>"
+    "--backend %s needs --local-model <id as GET {base_url}/models reports it>"
 )
 
 
@@ -310,13 +317,19 @@ def _summarize_backends(run_backend: str) -> None:
     """
     for b in PROVISIONABLE_BACKENDS:
         config_path = BACKEND_TEMPLATES[b]
-        if b == "local" and b != run_backend:
+        if b in LOCAL_TABLE_BACKENDS and b != run_backend:
             # Provisioned but unpinned: `.ortusrc` carries only the commented
             # reference block, so no CLI state can make this a failed init.
+            # opencode's own file cannot be written without the model.
+            state = (
+                f"{config_path} written"
+                if b == "local"
+                else f"{config_path} not written (it needs the served model)"
+            )
             output.warn(
-                f"{b}: {config_path} written; [local] left commented in "
-                ".ortusrc — pin it with ortus init --backend local "
-                "--local-model <id>, then ortus check --backend local"
+                f"{b}: {state}; [local] left commented in "
+                f".ortusrc — pin it with ortus init --backend {b} "
+                f"--local-model <id>, then ortus check --backend {b}"
             )
             continue
         cli = _backend_cli(b)
@@ -396,8 +409,9 @@ def _resolve_local_table(
     """The `[local]` values to render, plus the validated table when it is pinned.
 
     Precedence per key: explicit flag, then the recorded table, then (for
-    `base_url` only) the default. Under `--backend local` a missing model fails
-    here, before anything is written, and a table that breaks the config rules
+    `base_url` only) the default. Under `--backend local` or `--backend
+    opencode` a missing model fails here, before anything is written, and a
+    table that breaks the config rules
     fails with the config's own message rather than being re-rendered from
     defaults. Under any other backend the flags are noted and ignored, but a
     recorded table is still validated: a re-init must never carry a broken
@@ -412,7 +426,7 @@ def _resolve_local_table(
         f"fix the [local] table in {target / '.ortusrc'}, or pass "
         "--local-model / --local-base-url"
     )
-    if run_backend != "local":
+    if run_backend not in LOCAL_TABLE_BACKENDS:
         given = [
             flag
             for flag, value in (
@@ -423,7 +437,8 @@ def _resolve_local_table(
         ]
         if given:
             output.progress(
-                "init", f"{' and '.join(given)} applies only to --backend local"
+                "init",
+                f"{' and '.join(given)} applies only to --backend local or opencode",
             )
         if recorded:
             try:
@@ -435,7 +450,7 @@ def _resolve_local_table(
     if "model" not in table:
         base_url = table.get("base_url", DEFAULT_LOCAL_BASE_URL)
         output.error(
-            LOCAL_MODEL_REQUIRED_MESSAGE,
+            LOCAL_MODEL_REQUIRED_MESSAGE % run_backend,
             hint=f"list the served ids with: curl {base_url}/models",
         )
         raise typer.Exit(code=1)
@@ -482,6 +497,42 @@ def _probe_local_server(local: LocalConfig) -> None:
             )
         return
     output.success(f"local server reachable: {local.display}")
+
+
+OPENCODE_REPAIR_HINT = (
+    f"repair {OPENCODE_CONFIG_FILE} by hand (or delete it), then re-run ortus init"
+)
+
+
+def _require_mergeable_opencode_config(target: Path) -> None:
+    """Refuse, before anything is written, an `opencode.json` the merge cannot take."""
+    try:
+        read_opencode_config(target)
+    except ValueError as exc:
+        output.error(str(exc), hint=OPENCODE_REPAIR_HINT)
+        raise typer.Exit(code=1)
+
+
+def _write_opencode_config(target: Path, local: LocalConfig) -> bool:
+    """Merge the served model into `opencode.json`; True when the file changed.
+
+    A keyed merge rather than a render: the operator's own providers and MCP
+    servers in that file are theirs to keep across a re-init.
+    """
+    try:
+        outcome = merge_opencode_config(target, local)
+    except ValueError as exc:
+        output.error(str(exc), hint=OPENCODE_REPAIR_HINT)
+        raise typer.Exit(code=1)
+    if outcome is BlockOutcome.UNCHANGED:
+        output.success(
+            f"{OPENCODE_CONFIG_FILE} provider {OPENCODE_PROVIDER_ID} already current"
+        )
+        return False
+    output.success(
+        f"{outcome.value} {OPENCODE_CONFIG_FILE} provider {OPENCODE_PROVIDER_ID}"
+    )
+    return True
 
 
 def _resolve_choice(
@@ -548,7 +599,7 @@ def init(
         None,
         "--backend",
         help=(
-            "Agent backend to configure (all|claude|codex|grok|local). Defaults "
+            "Agent backend to configure (all|claude|codex|grok|local|opencode). Defaults "
             "to the run backend recorded in .ortusrc, else 'all', which "
             "provisions every backend and pins claude as the run backend."
         ),
@@ -562,7 +613,8 @@ def init(
         None,
         "--local-model",
         help=(
-            "Model id for --backend local, as GET {base_url}/models reports it. "
+            "Model id for --backend local or opencode, as GET {base_url}/models "
+            "reports it. "
             "Defaults to the local table recorded in .ortusrc; required on a "
             "first local init."
         ),
@@ -571,7 +623,7 @@ def init(
         None,
         "--local-base-url",
         help=(
-            "OpenAI-compatible base URL for --backend local. Defaults to the "
+            "OpenAI-compatible base URL for --backend local or opencode. Defaults to the "
             f"recorded local value, else {DEFAULT_LOCAL_BASE_URL}."
         ),
     ),
@@ -701,8 +753,11 @@ def init(
             )
 
     # Before the target directory is even created: a missing CLI under
-    # `required` must fail while nothing has been written.
+    # `required` must fail while nothing has been written, and so must an
+    # `opencode.json` the merge could only clobber.
     _require_codegraph_cli(resolved_codegraph)
+    if local is not None and run_backend == "opencode":
+        _require_mergeable_opencode_config(target)
 
     output.progress("init", f"target: {target}")
     target.mkdir(parents=True, exist_ok=True)
@@ -727,7 +782,7 @@ def init(
             raise typer.Exit(code=1)
         output.success(f"bd workspace initialized (prefix={resolved_prefix})")
         _normalize_initial_branch(target)
-        if backend in {"codex", "grok", "local"}:
+        if backend in {"codex", "grok", "local", "opencode"}:
             # bd currently installs its Claude integration unconditionally.
             # These files were created moments ago by this init operation, so
             # remove them before rendering the selected backend's config.
@@ -781,6 +836,9 @@ def init(
     )
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
+    if local is not None and run_backend == "opencode":
+        if _write_opencode_config(target, local):
+            written.append(target / OPENCODE_CONFIG_FILE)
 
     try:
         gitignore_outcome = merge_gitignore(target, ctx)

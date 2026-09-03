@@ -8,6 +8,7 @@ survive both editable and wheel installs.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -18,7 +19,14 @@ from jinja2 import Environment, StrictUndefined
 from ortus import __version__ as ORTUS_VERSION
 from ortus.core.agent_files import BlockOutcome, apply_hash_block
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE
-from ortus.core.local_backend import DEFAULT_LOCAL_BASE_URL
+from ortus.core.local_backend import (
+    DEFAULT_LOCAL_BASE_URL,
+    OPENCODE_CONFIG_FILE,
+    OPENCODE_PROVIDER_ID,
+    OPENCODE_SCHEMA_URL,
+    LocalConfig,
+    opencode_provider_block,
+)
 
 
 TEMPLATE_PACKAGE = "ortus.templates"
@@ -41,7 +49,15 @@ BACKEND_TEMPLATES: dict[str, str] = {
     # codex's template rather than owning a copy. Its own provisioning is the
     # `[local]` table `.ortusrc` renders.
     "local": ".codex/config.toml",
+    # `opencode` reads the same `[local]` table and registers the served model
+    # in its own project file. That file is host-owned JSON with no room for
+    # comment markers, so it is a keyed merge (`merge_opencode_config`) that
+    # `render_all` skips, never a whole-file render.
+    "opencode": OPENCODE_CONFIG_FILE,
 }
+
+#: Backend config files init merges by key instead of rendering whole.
+MERGED_CONFIGS: frozenset[str] = frozenset({OPENCODE_CONFIG_FILE})
 
 
 # Per-project-type choices for the three stack flags.
@@ -162,7 +178,8 @@ def render_all(
     selected = backends if backends is not None else (ctx.backend,)
     # `codex` and `local` share a template, so widening to every backend would
     # name `.codex/config.toml` twice; the ordered de-duplication renders each
-    # file once while keeping the slot order the backends were given in.
+    # file once while keeping the slot order the backends were given in. A
+    # merged config has no template and is left to its merge.
     names: tuple[str, ...] = tuple(
         dict.fromkeys(
             rendered
@@ -172,6 +189,7 @@ def render_all(
                 if name == ".claude/settings.json"
                 else (name,)
             )
+            if rendered not in MERGED_CONFIGS
         )
     )
     for name in names:
@@ -184,11 +202,16 @@ def render_all(
 
 
 def list_bundled(backend: str = "claude") -> list[str]:
-    """Used by tests + ortus check to enumerate what ships in the package."""
-    return [
+    """Used by tests + ortus check to enumerate what ships in the package.
+
+    A backend whose config is merged rather than rendered ships no template
+    for it, so only the shared files are listed.
+    """
+    names = [
         BACKEND_TEMPLATES[backend] if name == ".claude/settings.json" else name
         for name in BUNDLED_TEMPLATES
     ]
+    return [name for name in names if name not in MERGED_CONFIGS]
 
 
 # `.gitignore` is the third host-owned file. Ortus owns only a section fenced
@@ -224,3 +247,60 @@ def merge_gitignore(target: Path, ctx: RenderContext) -> BlockOutcome:
         render_gitignore_section(ctx),
         schema=GITIGNORE_SCHEMA,
     )
+
+
+# `opencode.json` is the fourth host-owned file. JSON carries no comments, so
+# the marker fence the other three use cannot fence a region of it; Ortus owns
+# exactly one key instead — `provider.<OPENCODE_PROVIDER_ID>` — and a merge
+# rewrites that key only. Every other key the operator wrote (their own
+# providers, `mcp` servers, a theme) survives in its original order.
+
+
+def read_opencode_config(target: Path) -> dict[str, Any] | None:
+    """The parsed `target/opencode.json`, or None when absent or empty.
+
+    Raises `ValueError` naming the file when it is not a JSON object or its
+    `provider` key is not one: init refuses such a file rather than guessing
+    at what the operator meant, and it does so before writing anything.
+    """
+    path = target / OPENCODE_CONFIG_FILE
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    providers = data.get("provider")
+    if providers is not None and not isinstance(providers, dict):
+        raise ValueError(f'{path}: "provider" is not a JSON object')
+    return data
+
+
+def merge_opencode_config(target: Path, local: LocalConfig) -> BlockOutcome:
+    """Register `local` as the Ortus provider in `target/opencode.json`.
+
+    Absent (or empty) file: created with the schema reference and the one
+    provider. Existing file: the Ortus provider entry replaced and nothing
+    else touched, and nothing written at all when the entry is already
+    current, so a hand-formatted file is not re-indented for no change.
+    """
+    data = read_opencode_config(target)
+    if data is None:
+        outcome = BlockOutcome.CREATED
+        data = {"$schema": OPENCODE_SCHEMA_URL}
+    else:
+        outcome = BlockOutcome.UPDATED
+    providers = data.setdefault("provider", {})
+    block = opencode_provider_block(local)
+    if providers.get(OPENCODE_PROVIDER_ID) == block:
+        return BlockOutcome.UNCHANGED
+    providers[OPENCODE_PROVIDER_ID] = block
+    (target / OPENCODE_CONFIG_FILE).write_text(
+        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+    )
+    return outcome

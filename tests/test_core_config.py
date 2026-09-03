@@ -231,6 +231,22 @@ def test_local_backend_without_table_names_local_model(tmp_path: Path) -> None:
         load_config(repo=tmp_path, home=tmp_path / "home")
 
 
+def test_opencode_backend_without_table_names_local_model(tmp_path: Path) -> None:
+    """opencode pins its model in the same table, so the same gap is the same error."""
+    _write_toml(tmp_path / ".ortusrc", 'backend = "opencode"\n')
+    with pytest.raises(ProfileError, match="local.model"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_opencode_backend_with_valid_table_loads(tmp_path: Path) -> None:
+    _write_toml(
+        tmp_path / ".ortusrc", 'backend = "opencode"\n\n[local]\nmodel = "m"\n'
+    )
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert cfg.get("backend") == "opencode"
+    assert load_local_config(cfg).model == "m"
+
+
 def test_local_backend_with_valid_table_loads(tmp_path: Path) -> None:
     _write_toml(tmp_path / ".ortusrc", 'backend = "local"\n\n[local]\nmodel = "m"\n')
     cfg = load_config(repo=tmp_path, home=tmp_path / "home")

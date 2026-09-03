@@ -1328,3 +1328,11 @@ def test_codegraph_local_uses_injected_capability(
     result = runner.invoke(app, ["check", str(repo), "--backend", "local"])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "injectedperchildbyortus" in _compact(result.stdout)
+
+
+def test_backend_provisioned_opencode_is_the_file_itself(tmp_path: Path) -> None:
+    """opencode.json sits at the repo root, so its parent dir proves nothing."""
+    repo = _healthy_repo(tmp_path)
+    assert not check_mod.backend_provisioned(repo, "opencode")
+    (repo / "opencode.json").write_text('{"provider": {}}\n')
+    assert check_mod.backend_provisioned(repo, "opencode")

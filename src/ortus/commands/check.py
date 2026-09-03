@@ -35,7 +35,7 @@ from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config, read_recorded_local
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
-from ortus.core.init_render import BACKEND_TEMPLATES
+from ortus.core.init_render import BACKEND_TEMPLATES, MERGED_CONFIGS
 from ortus.core.local_backend import (
     MIN_RECOMMENDED_CONTEXT,
     LocalServerError,
@@ -670,14 +670,18 @@ def backend_provisioned(repo: Path, backend: str) -> bool:
     Discovery is the config dir on disk, not an `.ortusrc` key: `ortus init
     --backend all` writes every backend's directory and pins only one run
     backend. `local` has no directory of its own — its provisioning is the
-    `[local]` table in the project `.ortusrc`.
+    `[local]` table in the project `.ortusrc` — and a merged config such as
+    opencode's sits at the repo root, so the file itself is the proof.
     """
     if backend == "local":
         return bool(read_recorded_local(repo))
     if backend not in BACKEND_TEMPLATES:
         # No template means nothing could have been provisioned.
         return False
-    return (repo / BACKEND_TEMPLATES[backend]).parent.is_dir()
+    config = repo / BACKEND_TEMPLATES[backend]
+    if BACKEND_TEMPLATES[backend] in MERGED_CONFIGS:
+        return config.is_file()
+    return config.parent.is_dir()
 
 
 def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:

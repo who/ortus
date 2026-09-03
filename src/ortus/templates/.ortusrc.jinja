@@ -31,11 +31,13 @@ codegraph = "{{ codegraph }}"
 # merge_gate = false
 # merge_gate_timeout = 1800
 
-{% if backend == "local" -%}
-# The model `ortus grind` drives through the Codex CLI. `model` must be an id
-# that GET {base_url}/models reports; `api_key_env` names an environment
-# variable, never the key itself. This table stays last in the file: TOML
-# keeps every key below a [table] header inside that table.
+{% if backend in ["local", "opencode"] -%}
+# The operator-served model `ortus grind` drives: through the Codex CLI under
+# backend = "local", through opencode (whose provider block is opencode.json)
+# under backend = "opencode". `model` must be an id that GET {base_url}/models
+# reports; `api_key_env` names an environment variable, never the key itself.
+# This table stays last in the file: TOML keeps every key below a [table]
+# header inside that table.
 [local]
 base_url = "{{ local_base_url }}"
 model = "{{ local_model }}"
@@ -43,9 +45,10 @@ model = "{{ local_model }}"
 api_key_env = "{{ local_api_key_env }}"
 {% endif -%}
 {% else -%}
-# Optional local-model backend: the Codex CLI at an OpenAI-compatible server.
-# Pin it with `ortus init --backend local --local-model <id>`, then verify with
-# `ortus check --backend local`. Reference serving command:
+# Optional operator-served model at an OpenAI-compatible server, driven by the
+# Codex CLI (backend local) or by opencode (backend opencode). Pin it with
+# `ortus init --backend local --local-model <id>` (or --backend opencode), then
+# verify with `ortus check --backend local`. Reference serving command:
 #   llama-server -hf <repo>:<quant> --alias <model> --jinja --ctx-size 32768
 # [local]
 # base_url = "{{ local_base_url }}"
