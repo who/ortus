@@ -162,10 +162,13 @@ class LocalRunner(CodexRunner):
     most the *name* of an environment variable. Codex reads that variable at
     launch, so no key material ever enters argv, ``extra_env``, or a log.
 
-    With CodeGraph configured the worker talks to a loopback MCP shim rather
-    than the server, because the servers this backend targets drop codex's
-    namespace-shaped MCP tools on the floor. The shim lives exactly as long
-    as the child, and the provider ``base_url`` override names its port.
+    The worker always talks to a loopback shim rather than the server. The
+    shim flattens codex's namespace-shaped MCP tools, which the servers this
+    backend targets drop on the floor, and it demotes the ``developer`` role
+    codex opens every turn with, which llama-server's chat template rejects
+    before the model runs, so the shim is needed whether or not CodeGraph is
+    configured. It lives exactly as long as the child, and the provider
+    ``base_url`` override names its port.
     """
 
     def __init__(
@@ -191,8 +194,8 @@ class LocalRunner(CodexRunner):
     def provider_base_url(self) -> str:
         """Where the provider override points: the shim while one is running.
 
-        Outside ``run``, and whenever CodeGraph is not configured, that is the
-        configured server itself.
+        Outside ``run`` that is the configured server itself, which is what
+        ``ortus check`` and the probes read.
         """
         return self.local.base_url if self.shim is None else self.shim.base_url
 
@@ -211,11 +214,12 @@ class LocalRunner(CodexRunner):
         reap_poll: float = 2.0,
         on_poll: Callable[[], None] | None = None,
     ) -> int:
-        """Spawn codex, through the MCP shim when CodeGraph is configured.
+        """Spawn codex through the loopback shim, for every local worker.
 
         The shim starts before the argv is built so the provider override can
         name its port, and stops in ``finally`` however the child ends (exit,
         reap, timeout, interrupt), so no listener or thread outlives a worker.
+        A shim that cannot bind raises here, before codex is spawned.
         """
         launch = dict(
             repo=repo,
@@ -229,8 +233,6 @@ class LocalRunner(CodexRunner):
             reap_poll=reap_poll,
             on_poll=on_poll,
         )
-        if self.codegraph is None:
-            return super().run(prompt, **launch)
         self.shim = start_shim(self.local.base_url, api_key_env=self.local.api_key_env)
         try:
             return super().run(prompt, **launch)

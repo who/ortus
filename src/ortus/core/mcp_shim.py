@@ -13,8 +13,8 @@ it flattens each namespace entry into plain functions carrying that joined
 name; on the response leg it splits a returned flat name back into the
 ``namespace`` plus ``name`` pair codex routes on, for streaming SSE and plain
 JSON bodies alike. Everything else, on both legs, passes through untouched.
-It starts only when the local backend launches a worker with CodeGraph
-configured, and it stops when that worker exits.
+It starts whenever the local backend launches a worker, with or without
+CodeGraph, and it stops when that worker exits.
 
 The request leg also normalizes two shapes llama-server cannot execute.
 codex opens every turn with a ``developer`` message in ``input[]`` after

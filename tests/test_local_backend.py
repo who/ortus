@@ -141,24 +141,32 @@ def test_local_worker_round_trips_through_the_shim(
         socket.create_connection(("127.0.0.1", port), timeout=1)
 
 
-def test_local_worker_without_codegraph_talks_to_the_server_directly(
-    upstream: Upstream, tmp_path: Path
+def test_local_worker_without_codegraph_still_goes_through_the_shim(
+    upstream: Upstream, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No CodeGraph, same shim: the role demotion is not an MCP feature."""
+    monkeypatch.setenv("LLAMA_API_KEY", "sk-live-secret")
     upstream.answer_stream(call_item())
     local = LocalConfig(upstream.base_url, "m", api_key_env="LLAMA_API_KEY")
     runner = LocalRunner(local, _fake_codex(tmp_path))
     log = tmp_path / "worker.jsonl"
     assert runner.run("work", repo=tmp_path, log_path=log) == 0
     launch, reply = _records(log)
-    assert _override(launch["argv"], "base_url") == upstream.base_url
-    assert _override(launch["argv"], "env_key") == "LLAMA_API_KEY"
-    # No shim in the path: the namespace entry reaches the server as sent,
-    # and the flat name comes back as the server wrote it.
-    assert upstream.last.body["tools"][0]["type"] == "namespace"
-    assert "authorization" not in upstream.last.headers
+    argv = launch["argv"]
+    base_url = _override(argv, "base_url")
+    assert base_url != upstream.base_url
+    assert base_url.startswith("http://127.0.0.1:")
+    assert base_url.endswith("/v1")
+    assert _override(argv, "env_key") is None
+    assert "sk-live-secret" not in " ".join(argv)
+    # The shim is in the path: flat tools and the key reach the server, and
+    # the child sees the restored call, exactly as with CodeGraph.
+    sent = upstream.last
+    assert [tool["name"] for tool in sent.body["tools"]] == [FLAT]
+    assert sent.headers["authorization"] == "Bearer sk-live-secret"
     item = _done_item(reply)
-    assert item["name"] == FLAT
-    assert "namespace" not in item
+    assert item["namespace"] == NAMESPACE
+    assert item["name"] == TOOL
     assert runner.shim is None
     assert _shim_threads() == []
 
