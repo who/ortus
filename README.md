@@ -4,7 +4,7 @@
 
 *Ortus* (Latin: "rising, origin, birth") — the point from which something springs into being.
 
-Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, Codex, or Grok, one fresh subprocess per task. Inspired by the Ralph Loop concept: fresh window per task, drive the queue to zero, no context drift.
+Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, Codex, Grok, or a model you serve yourself, one fresh subprocess per task. Inspired by the Ralph Loop concept: fresh window per task, drive the queue to zero, no context drift.
 
 ## Install
 
@@ -74,10 +74,10 @@ ortus grind . --tasks 5
 
 | Verb | Purpose |
 |---|---|
-| `ortus init <repo>` | Bootstrap a fresh repo; `--backend all|claude|codex|grok` — the default `all` is provisioning-only and pins a concrete run backend in `.ortusrc` |
+| `ortus init <repo>` | Bootstrap a fresh repo; `--backend all|claude|codex|grok|local` — the default `all` is provisioning-only and pins a concrete run backend in `.ortusrc` |
 | `ortus check <repo>` | Verify bd, the run backend, sandbox, backend config, and managed agent files; WARN rows cover provisioned siblings; strictly read-only |
 | `ortus plan <repo> [<PRD>]` | Decompose a PRD into bd issues, or interview-then-PRD-then-decompose if no PRD path |
-| `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude, Codex, or Grok subprocess |
+| `ortus grind <repo>` | Drive the bd queue, one task per fresh Claude, Codex, Grok, or local-model subprocess |
 | `ortus interview <repo> [<feature-id>]` | Interactive PRD-building interview for an open feature |
 | `ortus tail <repo>` | Follow `logs/grind-*.log` with stream-json filtering |
 | `ortus human <repo>` | Render `HUMAN-TODO.md` from bd issues flagged for a human decision |
@@ -104,6 +104,7 @@ Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed ver
 | **uv** | install + run ortus | [docs.astral.sh/uv](https://docs.astral.sh/uv/getting-started/installation/) |
 | **bd** (beads) v1.0.0+ | issue tracking (Dolt-backed) | `brew install beads` or [GH release](https://github.com/gastownhall/beads/releases) |
 | **claude**, **codex**, or **grok** | agent running inside `ortus grind`; Claude is the default | [Claude Code](https://github.com/anthropics/claude-code) / [Codex CLI](https://github.com/openai/codex) / Grok Build |
+| **local** | any OpenAI-compatible server exposing /v1/models and /v1/responses, driven through the Codex CLI | [llama.cpp llama-server](https://github.com/ggml-org/llama.cpp) / [Ollama](https://ollama.com) |
 | **jq** | bd JSON post-processing | `brew install jq` / `apt install jq` |
 | **bwrap** (Linux) or **sandbox-exec** (Mac) | OS-level sandbox for `ortus grind` | `apt install bubblewrap` / built into macOS |
 
@@ -111,11 +112,13 @@ Required: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. `ortus ini
 
 ## Agent backends
 
-Claude remains the default run backend. `ortus init` defaults to `--backend all`, which is provisioning-only: it writes every backend's config directory and pins `backend = "claude"` in `.ortusrc`. Pass a concrete `ortus init . --backend codex` or `--backend grok` to provision and pin that backend instead — the pinned value is always concrete, and `backend = "all"` is rejected at run time as an init provisioning option, not a run backend. Per run, override with `--backend` or `ORTUS_BACKEND`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default.
+Claude remains the default run backend. `ortus init` defaults to `--backend all`, which is provisioning-only: it writes every backend's config directory and pins `backend = "claude"` in `.ortusrc`. Pass a concrete `ortus init . --backend codex`, `--backend grok`, or `--backend local --local-model <id>` to provision and pin that backend instead — the pinned value is always concrete, and `backend = "all"` is rejected at run time as an init provisioning option, not a run backend. Per run, override with `--backend` or `ORTUS_BACKEND`. Precedence is command-line flag, environment, `.ortusrc`, then the Claude default. `local` has no config directory of its own: it shares Codex's, and its provisioning is the `[local]` table in `.ortusrc`, which `--backend all` writes as a commented reference block.
 
 Regardless of `--backend`, init writes managed blocks into `AGENTS.md` (`block=agents`) and `CLAUDE.md` (`block=pointer`), fenced by `<!-- BEGIN ortus ... -->` / `<!-- END ortus ... -->` markers. Re-running init is safe: host prose outside the markers is preserved byte-for-byte, a block written by a newer Ortus is left untouched, and `AGENTS.override.md` is never written. `ortus check` is two-tier: a missing, malformed, drifted, or gitignored agent-file block is an error the operator fixes with `ortus init --force`, while a sibling backend that is provisioned but not the run backend earns an informational row — "provisioned but not runnable" gaps render as WARN and never fail the check, because the exit code belongs to the run backend.
 
 Claude and Grok workers run a narrow `/goal` session (`claude -p '/goal …'` or `grok -p`; Grok is headless, not a TUI). The landed Q1 finding is EXPANDS, so Ortus wraps the Grok task in `/goal` the same way as Claude. Codex workers run the same logical single-issue task as a **plain** `codex exec '…'` prompt. Codex slash commands belong to its interactive UI; Ortus does not pass a literal `/goal` to `codex exec`.
+
+`local` is Codex pointed at a server you run. The worker is the same plain `codex exec` task with an `ortus_local` provider override passed at launch, so nothing about the loop changes when the model does. The wire API is the OpenAI Responses API, because codex-cli 0.147.0 supports no other for a custom provider, and the server has to speak it (see Serving a local model below). A local log is a codex log, so `ortus tail` and `ortus dashboard` read it as one. The model is configuration: swapping models touches only the `[local]` table in `.ortusrc` and the serving command, never the prompts or the code. With CodeGraph on, the worker talks to a loopback shim Ortus runs for exactly as long as the worker; it flattens codex's namespace-shaped MCP tool declarations into the plain function tools these servers understand, and `base_url` stays the only address you configure.
 
 The worker implements the issue, runs its acceptance checks, and session-closes: it commits the paths it owns, `bd close`s the issue, `bd dolt push`es, and `git push`es. `ortus grind` selects the work, launches one fresh process, and trusts only observable bd and git state — it reaps the worker once a new issue is closed and HEAD is in sync with origin.
 
@@ -141,12 +144,69 @@ grind continues that id. `--orphan-policy=escalate` still labels it `human`
 and leaves the tree untouched. `revert` is remapped to warn so it cannot
 bounce the claim back to `open`.
 
+### Serving a local model
+
+`local` needs a server that speaks the OpenAI Responses API: `GET /v1/models`
+must list the model and `POST /v1/responses` must execute function calls.
+llama.cpp's `llama-server` and Ollama both do. The reference command, the same
+one `ortus check --backend local` prints as the remediation when a probe fails:
+
+```bash
+llama-server -hf 0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF:Q4_K_M --alias qwen3-27b-heretic --jinja --ctx-size 32768 --flash-attn on --host 127.0.0.1 --port 8080
+```
+
+Add `--cache-type-k q8_0 --cache-type-v q8_0` to halve the memory the 32k
+KV cache takes. `--jinja` is required for tool calling: without it the model
+narrates the call as text instead of making it, the `local tools` row fails,
+and a worker would hang at its first CodeGraph call. The context size is a
+floor, not a suggestion: a worker prompt plus CodeGraph tool output does not
+fit a smaller window, and `ortus check` warns when the server reports less
+than 32768.
+
+The Ollama equivalent:
+
+```bash
+ollama serve
+ollama pull <tag>
+```
+
+with `base_url = "http://127.0.0.1:11434/v1"` in `[local]`. Ollama exposes no
+`/props`, so the context row reports the size as not exposed rather than a
+number; set the context on the Ollama side.
+
+`model` must be the id `GET /v1/models` reports: for llama-server that is the
+model path or the `--alias` (`qwen3-27b-heretic` above); for Ollama it is the
+tag. Then pin and verify:
+
+```bash
+ortus init . --backend local --local-model qwen3-27b-heretic   # --local-base-url for another port or Ollama
+ortus check . --backend local
+```
+
+`ortus check --backend local` prints four rows. `[local]` validates the table
+and, when `api_key_env` is set, that the variable is exported; the row shows
+the variable's name and never its value. `local endpoint` requests
+`/v1/models` and fails if the server is down, demands a key, or does not list
+`model`. `local tools` sends one real `/v1/responses` request carrying a
+function tool and fails if the server rejects tools or the model answers
+without calling it; this is the row that loads a cold model, so it can take a
+minute. `local context` reads `n_ctx` from llama-server's `/props` and is
+informational: it warns below 32768 and never fails the check. `ortus grind`
+repeats the endpoint probe at startup, before it launches a worker, so a
+server that has gone away fails fast with the same remediation.
+
+**Wall clock.** Local decode is slower than a hosted model, and a worker runs
+the work spec's checks inside its window. Raise `--worker-timeout` above the
+5400s default for a large model, for example
+`ortus grind . --backend local --worker-timeout 10800`; the default is
+unchanged for the other backends.
+
 ## Why ortus
 
 - **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No per-repo vendor copies to chase.
 - **`bd ready` IS the queue.** No README task lists, no TodoWrite scratchpads. The queue is data.
 - **The scheduler is the loop.** Backend output is advisory; observable bd state decides whether an iteration succeeded, orphaned a claim, or made no change.
-- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; Codex workers retain `workspace-write`, Claude uses its generated sandbox policy, and Grok uses its native `--sandbox workspace` (not wrapped in bwrap).
+- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; Codex and local workers retain `workspace-write`, Claude uses its generated sandbox policy, and Grok uses its native `--sandbox workspace` (not wrapped in bwrap).
 
 ## Configuration
 
@@ -155,7 +215,7 @@ Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 ```toml
 prefix = "myproj"       # bd issue-id prefix
 project_type = "python" # python | typescript | go | rust | polyglot
-backend = "claude"      # claude | codex | grok — always concrete; "all" is init-only and invalid here
+backend = "claude"      # claude | codex | grok | local — always concrete; "all" is init-only and invalid here
 codegraph = "required"  # off | auto | required (default: required)
 codegraph_refresh_blocking = false
 merge_gate = false      # wait for issue-branch checks before fast-forward
@@ -178,6 +238,16 @@ model = "haiku"
 [profiles.codex.implement]
 model = "gpt-5.2-codex"
 reasoning_effort = "high"
+
+[profiles.local.implement]
+reasoning_effort = "medium"  # the served model is [local].model; a model here overrides it
+
+# Read only under backend = "local". Last in the file: TOML keeps every key
+# below a [table] header inside that table.
+[local]
+base_url = "http://127.0.0.1:8080/v1"  # llama-server default; Ollama serves http://127.0.0.1:11434/v1
+model = "qwen3-27b-heretic"            # the id GET {base_url}/models reports: llama-server --alias or path, Ollama tag
+# api_key_env = "LLAMA_API_KEY"        # the NAME of a variable holding a bearer key, never the key itself
 ```
 
 Profiles are independent for `plan`, `implement`, `verify`, and `finalize`, and
@@ -188,7 +258,8 @@ to `haiku` and any failure falls back to the deterministic commit body. Resoluti
 project table, then the matching user table, then the provider default. Nested
 tables merge field by field, so a project can override only `model` while
 inheriting `reasoning_effort` from `~/.ortusrc`. Omitted fields add no backend
-CLI flags. `ortus plan` accepts `--model` and `--reasoning-effort`; `ortus grind`
+CLI flags. Under `local` the served model comes from `[local].model`, and a
+profile `model` overrides it for that phase only. `ortus plan` accepts `--model` and `--reasoning-effort`; `ortus grind`
 accepts `--implement-model`, `--implement-reasoning-effort`, `--verify-model`,
 and `--verify-reasoning-effort`. The compatibility `--fast` flag applies only
 to Claude implementation workers and never to verification.
@@ -288,7 +359,7 @@ hatch for a repository CodeGraph cannot index.
 gitignores `.codegraph/` (the index is local, machine-specific, and often
 large). Because it is gitignored, a fresh clone has no index: run
 `codegraph init` once, which `ortus check` names as the remediation. Register
-the CodeGraph MCP server for the selected Claude, Codex, or Grok backend. Planning
+the CodeGraph MCP server for the selected Claude, Codex, Grok, or local backend. Planning
 validates work specs,
 implementation confirms references and runs impact analysis, the parent refreshes
 the index after owned-path edits, and a fresh verifier independently checks changed
