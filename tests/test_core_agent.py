@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -243,6 +245,56 @@ def test_local_argv_never_contains_key_material(
     # No api_key_env, no env_key pair at all.
     bare = LocalRunner(LocalConfig("http://127.0.0.1:8080/v1", "m")).build_argv("work")
     assert not any(value.startswith("model_providers.ortus_local.env_key") for value in bare)
+
+
+def _provider_override(argv: list[str], key: str) -> str | None:
+    prefix = f"model_providers.ortus_local.{key}="
+    for value in argv:
+        if value.startswith(prefix):
+            return json.loads(value[len(prefix) :])
+    return None
+
+
+def test_local_runner_base_url_targets_shim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With CodeGraph the override names the shim; without it, the server."""
+    local = LocalConfig("http://127.0.0.1:8080/v1", "m", api_key_env="LLAMA_API_KEY")
+    launches: list[tuple[list[str], str | None, bool]] = []
+
+    def fake_spawn(argv: list[str], **kwargs: object) -> int:
+        shim = runner.shim
+        listening = False
+        if shim is not None:
+            with socket.create_connection(("127.0.0.1", shim.port), timeout=1):
+                listening = True
+        shim_url = None if shim is None else shim.base_url
+        launches.append((list(argv), shim_url, listening))
+        return 0
+
+    monkeypatch.setattr("ortus.core.claude._spawn_logged", fake_spawn)
+    runner = LocalRunner(local, codegraph=CodeGraphCapability("codegraph"))
+    assert runner.provider_base_url == local.base_url
+    assert runner.run("work", repo=tmp_path, log_path=tmp_path / "log") == 0
+    argv, shim_url, listening = launches[0]
+    base_url = _provider_override(argv, "base_url")
+    assert base_url == shim_url
+    assert base_url != local.base_url
+    assert base_url.startswith("http://127.0.0.1:")
+    assert base_url.endswith("/v1")
+    assert listening
+    # The key rides the shim's upstream leg, never the codex argv.
+    assert _provider_override(argv, "env_key") is None
+    assert runner.shim is None
+    assert runner.provider_base_url == local.base_url
+
+    runner = LocalRunner(local)
+    assert runner.run("work", repo=tmp_path, log_path=tmp_path / "log") == 0
+    argv, shim_url, _ = launches[1]
+    assert shim_url is None
+    assert _provider_override(argv, "base_url") == local.base_url
+    assert _provider_override(argv, "env_key") == "LLAMA_API_KEY"
+    assert runner.shim is None
 
 
 def test_compose_worker_prompt_local_matches_codex() -> None:

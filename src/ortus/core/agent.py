@@ -33,6 +33,7 @@ from ortus.core.local_backend import (
     LocalConfig,
     load_local_config,
 )
+from ortus.core.mcp_shim import McpShim, start_shim
 from ortus.core.profiles import AgentProfile, Phase as Phase, ProfileError
 
 Backend = Literal["claude", "codex", "grok", "local"]
@@ -160,6 +161,11 @@ class LocalRunner(CodexRunner):
     keep apart. The overrides carry a URL, a provider id, a wire API, and at
     most the *name* of an environment variable. Codex reads that variable at
     launch, so no key material ever enters argv, ``extra_env``, or a log.
+
+    With CodeGraph configured the worker talks to a loopback MCP shim rather
+    than the server, because the servers this backend targets drop codex's
+    namespace-shaped MCP tools on the floor. The shim lives exactly as long
+    as the child, and the provider ``base_url`` override names its port.
     """
 
     def __init__(
@@ -178,6 +184,60 @@ class LocalRunner(CodexRunner):
             sandbox_mode=sandbox_mode,
         )
         self.local = local
+        #: The shim serving the child that ``run`` is currently supervising.
+        self.shim: McpShim | None = None
+
+    @property
+    def provider_base_url(self) -> str:
+        """Where the provider override points: the shim while one is running.
+
+        Outside ``run``, and whenever CodeGraph is not configured, that is the
+        configured server itself.
+        """
+        return self.local.base_url if self.shim is None else self.shim.base_url
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+        timeout: float | None = None,
+        readonly: bool = False,
+        resume: str | None = None,
+        reap_when: Callable[[], bool] | None = None,
+        reap_poll: float = 2.0,
+        on_poll: Callable[[], None] | None = None,
+    ) -> int:
+        """Spawn codex, through the MCP shim when CodeGraph is configured.
+
+        The shim starts before the argv is built so the provider override can
+        name its port, and stops in ``finally`` however the child ends (exit,
+        reap, timeout, interrupt), so no listener or thread outlives a worker.
+        """
+        launch = dict(
+            repo=repo,
+            log_path=log_path,
+            fast=fast,
+            profile=profile,
+            timeout=timeout,
+            readonly=readonly,
+            resume=resume,
+            reap_when=reap_when,
+            reap_poll=reap_poll,
+            on_poll=on_poll,
+        )
+        if self.codegraph is None:
+            return super().run(prompt, **launch)
+        self.shim = start_shim(self.local.base_url, api_key_env=self.local.api_key_env)
+        try:
+            return super().run(prompt, **launch)
+        finally:
+            shim, self.shim = self.shim, None
+            if shim is not None:
+                shim.close()
 
     def build_argv(
         self,
@@ -200,12 +260,15 @@ class LocalRunner(CodexRunner):
                 "-c",
                 f"{provider}.name=" + json.dumps(LOCAL_PROVIDER_ID),
                 "-c",
-                f"{provider}.base_url=" + json.dumps(self.local.base_url),
+                f"{provider}.base_url=" + json.dumps(self.provider_base_url),
                 "-c",
                 f"{provider}.wire_api=" + json.dumps(LOCAL_WIRE_API),
             ]
         )
-        if self.local.api_key_env is not None:
+        if self.local.api_key_env is not None and self.shim is None:
+            # With the shim in the path the key rides the upstream leg only:
+            # the shim reads the named variable itself, and codex stays
+            # unauthenticated on loopback.
             argv.extend(
                 ["-c", f"{provider}.env_key=" + json.dumps(self.local.api_key_env)]
             )
