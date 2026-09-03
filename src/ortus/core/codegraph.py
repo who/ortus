@@ -156,9 +156,10 @@ class CodeGraphAdapter:
                 else None
             )
             available = index and cli and capability is not None
-        elif backend == "grok":
-            # File-backed project registration in `.grok/config.toml`.
-            # GrokRunner is store-only and must not grow `-c` overrides.
+        elif backend in ("grok", "opencode"):
+            # File-backed project registration: `.grok/config.toml` for
+            # grok, the `mcp` table of `opencode.json` for opencode, which
+            # runs the server itself. Neither runner grows `-c` overrides.
             capability = None
             available = index and cli
         else:

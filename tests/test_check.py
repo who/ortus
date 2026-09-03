@@ -13,7 +13,12 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import check as check_mod
 from ortus.core.agent_files import MANAGED_FILES, render_block
-from ortus.core.local_backend import LocalConfig, LocalServerError, serving_hint
+from ortus.core.local_backend import (
+    LocalConfig,
+    LocalServerError,
+    opencode_provider_block,
+    serving_hint,
+)
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_text
 
 runner = CliRunner()
@@ -1336,3 +1341,417 @@ def test_backend_provisioned_opencode_is_the_file_itself(tmp_path: Path) -> None
     assert not check_mod.backend_provisioned(repo, "opencode")
     (repo / "opencode.json").write_text('{"provider": {}}\n')
     assert check_mod.backend_provisioned(repo, "opencode")
+
+
+# --- opencode backend rows -------------------------------------------------
+
+_OPENCODE_MCP: dict[str, object] = {
+    "type": "local",
+    "command": ["codegraph", "serve", "--mcp"],
+    "enabled": True,
+}
+
+
+def _opencode_json(
+    *,
+    provider: object = None,
+    mcp: object = _OPENCODE_MCP,
+    permission: object = None,
+) -> dict[str, object]:
+    """An `opencode.json` as init writes it, with the spike's mcp entry added."""
+    if provider is None:
+        provider = opencode_provider_block(_LOCAL_CONFIG)
+    data: dict[str, object] = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {"ortuslocal": provider},
+    }
+    if mcp is not None:
+        data["mcp"] = {"codegraph": mcp}
+    if permission is not None:
+        data["permission"] = permission
+    return data
+
+
+def _opencode_repo(
+    tmp_path: Path,
+    *,
+    ortusrc: str = 'backend = "opencode"\n' + _LOCAL_TABLE,
+    config: dict[str, object] | str | None = None,
+) -> Path:
+    """An opencode-provisioned repo: `[local]` in `.ortusrc`, `opencode.json`
+    at the root, and nothing of codex's."""
+    repo = tmp_path / "opencode-project"
+    (repo / ".beads").mkdir(parents=True)
+    (repo / ".codegraph").mkdir()
+    (repo / ".ortusrc").write_text(ortusrc)
+    if config is None:
+        config = _opencode_json()
+    text = config if isinstance(config, str) else json.dumps(config, indent=2) + "\n"
+    (repo / "opencode.json").write_text(text)
+    _healthy_agent_files(repo)
+    return repo
+
+
+def test_check_opencode_rows_all_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: binary, provider/model, MCP, and posture rows; codex rows absent."""
+    repo = _opencode_repo(tmp_path)
+    seen: list[str] = []
+
+    def which(binary: str) -> str:
+        seen.append(binary)
+        return f"/usr/bin/{binary}"
+
+    monkeypatch.setattr(check_mod.shutil, "which", which)
+    monkeypatch.setattr(
+        check_mod.subprocess, "run", _fake_bd_run(readiness_memory=True)
+    )
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    calls = _patch_probes(monkeypatch)
+    results = check_mod._run_all(repo, "opencode")
+    names = [r.name for r in results]
+    assert "opencode" in seen
+    assert "claude" not in seen
+    assert "codex" not in seen
+    start = names.index("opencode.json") + 1
+    assert tuple(names[start : start + 5]) == check_mod.OPENCODE_ROW_NAMES
+    assert all(r.ok for r in results), [(r.name, r.message) for r in results if not r.ok]
+    # `/models` is the one probe shared with the codex-driven backend; the
+    # Responses-wire tool probe and the context probe never run here.
+    assert calls == ["models"]
+    rows = {r.name: r for r in results}
+    assert rows["opencode"].message.startswith("/usr/bin/opencode")
+    assert rows["[local]"].message == (
+        "base_url=http://127.0.0.1:8080/v1 model=qwen3:4b key=none"
+    )
+    assert rows["opencode provider"].message == (
+        "ortuslocal/qwen3:4b at http://127.0.0.1:8080/v1"
+    )
+    assert rows["opencode endpoint"].message == "reachable; model qwen3:4b served"
+    assert rows["opencode mcp"].message == (
+        "codegraph server registered (codegraph serve --mcp)"
+    )
+    assert rows["opencode posture"].message == (
+        "implement: edit=allow write=allow bash=allow; "
+        "verify: OPENCODE_PERMISSION denies edit, write, bash"
+    )
+    assert "codegraph server registered" in rows["codegraph"].message
+    for absent in (
+        ".codex/config.toml",
+        ".claude/settings.json",
+        "hooks",
+        "verifier sandbox",
+        "local (provisioned)",
+        *check_mod.LOCAL_ROW_NAMES[1:],
+    ):
+        assert absent not in names, absent
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "FAIL" not in result.stdout
+    compact = _compact(result.stdout)
+    assert "opencodeposture" in compact
+    assert "opencodemcp" in compact
+
+
+def test_check_opencode_rows_route_by_flag_and_help(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the verb admits opencode, and a Claude tree fails its settings row."""
+    result = runner.invoke(
+        app, ["check", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
+    )
+    assert result.exit_code == 0
+    assert "claude|codex|grok|local|opencode" in result.stdout
+
+    repo = _healthy_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _never_probe(monkeypatch)
+    result = runner.invoke(app, ["check", str(repo), "--backend", "opencode"])
+    assert result.exit_code == 1
+    assert "opencode.json" in result.stdout
+    assert "FAIL" in result.stdout
+    compact = _compact(result.stdout)
+    assert "missing" in compact
+    assert "ortusinit--backendopencode" in compact
+
+
+def test_check_opencode_rows_skip_provider_and_endpoint_on_invalid_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad table fails its row and probes nothing; MCP and posture still report."""
+    repo = _opencode_repo(
+        tmp_path, ortusrc='backend = "opencode"\n[local]\nmodel = "two words"\n'
+    )
+    _never_probe(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    rows = check_mod.check_opencode_rows(repo)
+    assert [r.name for r in rows] == list(check_mod.OPENCODE_ROW_NAMES)
+    assert not rows[0].ok
+    assert "local.model" in rows[0].message
+    for row in rows[1:3]:
+        assert not row.ok
+        assert row.message == "skipped: [local] config invalid"
+    assert rows[3].ok
+    assert rows[4].ok
+
+
+def test_check_opencode_mismatch_fails_when_model_not_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the served ids are in the endpoint row, so the fix is a copy-paste."""
+    repo = _opencode_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    missing = LocalServerError(
+        "model-missing",
+        "model 'qwen3:4b' is not served; served: gemma4:26b, qwen3-coder:30b",
+        "set local.model to a served id or load the model",
+    )
+    calls = _patch_probes(monkeypatch, models=missing)
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    endpoint = rows["opencode endpoint"]
+    assert not endpoint.ok
+    assert endpoint.level == "strict"
+    assert "gemma4:26b, qwen3-coder:30b" in endpoint.message
+    assert "set local.model" in endpoint.message
+    assert rows["opencode provider"].ok
+    assert rows["opencode mcp"].ok
+    assert rows["opencode posture"].ok
+    assert calls == ["models"]
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    assert "FAIL" in result.stdout
+
+
+def test_check_opencode_mismatch_fails_when_mcp_is_unregistered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: no `mcp.codegraph` fails with the entry to add; Claude scopes do not count."""
+    repo = _opencode_repo(tmp_path, config=_opencode_json(mcp=None))
+    (repo / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"codegraph": {"command": "codegraph"}}})
+    )
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    _patch_probes(monkeypatch)
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    mcp = rows["opencode mcp"]
+    assert not mcp.ok
+    assert mcp.level == "strict"
+    assert '"mcp": {"codegraph": {"type": "local"' in mcp.message
+    assert '"command": ["codegraph", "serve", "--mcp"]' in mcp.message
+    assert "opencode mcp add codegraph" in mcp.message
+    assert rows["opencode provider"].ok
+    assert rows["opencode endpoint"].ok
+    # The codegraph row reports the gap without failing, as for Claude and
+    # Grok: the strict verdict is the row above.
+    codegraph = check_mod.check_codegraph(repo, "opencode")
+    assert codegraph.ok, codegraph.message
+    assert "codegraph server registered" not in codegraph.message
+    assert check_mod.OPENCODE_MCP_HINT in codegraph.message
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 1
+    assert "FAIL" in result.stdout
+
+
+def test_check_opencode_mismatch_fails_when_mcp_is_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry the worker will never see is not a registration."""
+    repo = _opencode_repo(
+        tmp_path, config=_opencode_json(mcp={**_OPENCODE_MCP, "enabled": False})
+    )
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    assert not rows["opencode mcp"].ok
+    assert "enabled=false" in rows["opencode mcp"].message
+    assert not check_mod._opencode_mcp_registered(repo)
+
+
+def test_check_opencode_mismatch_fails_when_provider_entry_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a provider entry that drifted from `[local]` names the re-init."""
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+
+    stale_model = _opencode_json(
+        provider=opencode_provider_block(
+            LocalConfig(base_url="http://127.0.0.1:8080/v1", model="other:7b")
+        )
+    )
+    repo = _opencode_repo(tmp_path, config=stale_model)
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    provider = rows["opencode provider"]
+    assert not provider.ok
+    assert "'qwen3:4b'" in provider.message
+    assert "other:7b" in provider.message
+    assert "ortus init --force --backend opencode" in provider.message
+    # The endpoint is still probed: the table is right, only the file is stale.
+    assert rows["opencode endpoint"].ok
+
+    stale_url = _opencode_json(
+        provider=opencode_provider_block(
+            LocalConfig(base_url="http://127.0.0.1:11434/v1", model="qwen3:4b")
+        )
+    )
+    (repo / "opencode.json").write_text(json.dumps(stale_url))
+    provider = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode provider"]
+    assert not provider.ok
+    assert "baseURL='http://127.0.0.1:11434/v1'" in provider.message
+    assert "local.base_url=http://127.0.0.1:8080/v1" in provider.message
+
+    (repo / "opencode.json").write_text(json.dumps({"provider": {}}))
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    assert not rows["opencode provider"].ok
+    assert "no provider.ortuslocal entry" in rows["opencode provider"].message
+    settings = check_mod.check_opencode_settings(repo)
+    assert not settings.ok
+    assert "no provider.ortuslocal entry" in settings.message
+    assert "ortus init --backend opencode" in settings.message
+
+
+def test_check_opencode_mismatch_fails_when_key_reference_drifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file must carry `{env:NAME}` for the named variable, never a value."""
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    monkeypatch.setenv("ORTUS_TEST_LOCAL_KEY", "hunter2-never-printed")
+    keyed_table = _LOCAL_TABLE + 'api_key_env = "ORTUS_TEST_LOCAL_KEY"\n'
+    repo = _opencode_repo(tmp_path, ortusrc='backend = "opencode"\n' + keyed_table)
+    provider = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode provider"]
+    assert not provider.ok
+    assert "{env:ORTUS_TEST_LOCAL_KEY}" in provider.message
+    assert "hunter2" not in provider.message
+
+    keyed = opencode_provider_block(
+        LocalConfig(
+            base_url="http://127.0.0.1:8080/v1",
+            model="qwen3:4b",
+            api_key_env="ORTUS_TEST_LOCAL_KEY",
+        )
+    )
+    (repo / "opencode.json").write_text(json.dumps(_opencode_json(provider=keyed)))
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    assert rows["opencode provider"].ok
+    assert "key=ORTUS_TEST_LOCAL_KEY" in rows["[local]"].message
+    assert "hunter2" not in " ".join(r.message for r in rows.values())
+
+
+def test_check_opencode_mismatch_fails_when_posture_denies_a_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A denied implement tool, from the file or the shell, fails by source."""
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    repo = _opencode_repo(tmp_path, config=_opencode_json(permission={"bash": "deny"}))
+    posture = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode posture"]
+    assert not posture.ok
+    assert posture.level == "strict"
+    assert "opencode.json sets permission.bash=deny" in posture.message
+    assert "set it to allow" in posture.message
+
+    # An operator's exported verify posture would cripple implement runs.
+    (repo / "opencode.json").write_text(json.dumps(_opencode_json()))
+    monkeypatch.setenv(
+        check_mod.OPENCODE_PERMISSION_ENV, json.dumps({"edit": "deny"})
+    )
+    posture = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode posture"]
+    assert not posture.ok
+    assert "$OPENCODE_PERMISSION sets permission.edit=deny" in posture.message
+
+    monkeypatch.setenv(check_mod.OPENCODE_PERMISSION_ENV, "not json")
+    posture = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode posture"]
+    assert not posture.ok
+    assert "posture unknown" in posture.message
+
+
+def test_check_opencode_rows_resolve_pattern_tables_by_catch_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `*` entry states the posture; a table without one is reported, not guessed."""
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    explicit = {"bash": {"rm -rf *": "deny", "*": "allow"}, "edit": "allow"}
+    repo = _opencode_repo(tmp_path, config=_opencode_json(permission=explicit))
+    posture = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode posture"]
+    assert posture.ok, posture.message
+    assert posture.message == (
+        "implement: edit=allow (opencode.json) write=allow "
+        "bash=allow (opencode.json); "
+        "verify: OPENCODE_PERMISSION denies edit, write, bash"
+    )
+
+    no_catch_all = {"bash": {"git *": "allow"}}
+    (repo / "opencode.json").write_text(
+        json.dumps(_opencode_json(permission=no_catch_all))
+    )
+    posture = {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode posture"]
+    assert not posture.ok
+    assert "posture unknown" in posture.message
+    assert "permission.bash" in posture.message
+
+
+def test_check_opencode_mismatch_fails_on_unparseable_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file opencode cannot read fails every row that reads it, by reason."""
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    repo = _opencode_repo(tmp_path, config="{not json\n")
+    settings = check_mod.check_opencode_settings(repo)
+    assert not settings.ok
+    assert "not valid JSON" in settings.message
+    rows = {r.name: r for r in check_mod.check_opencode_rows(repo)}
+    for name in ("opencode provider", "opencode mcp", "opencode posture"):
+        assert not rows[name].ok
+        assert "not valid JSON" in rows[name].message
+    assert rows["opencode endpoint"].ok
+
+
+def test_check_opencode_provisioned_row_never_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A codex run backend reports opencode as provisioned, offline, WARN-only."""
+    repo = _local_repo(tmp_path, ortusrc='backend = "codex"\n' + _LOCAL_TABLE)
+    (repo / "opencode.json").write_text(json.dumps(_opencode_json()))
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _never_probe(monkeypatch)
+    row = check_mod.check_provisioned_backend(repo, "opencode")
+    assert row.ok, row.message
+    assert row.level == "info"
+    assert "not probed" in row.message
+    assert "ortus check --backend opencode" in row.message
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    compact = _compact(result.stdout)
+    assert "opencode(provisioned)" in compact
+    assert "opencodeendpoint" not in compact
+
+    (repo / "opencode.json").write_text(json.dumps(_opencode_json(mcp=None)))
+    row = check_mod.check_provisioned_backend(repo, "opencode")
+    assert not row.ok
+    assert row.level == "info"
+    assert "codegraph MCP not registered" in row.message
+    assert "opencode mcp add codegraph" in row.message
+    result = runner.invoke(app, ["check", str(repo)])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "WARN" in result.stdout
+
+
+def test_backend_provisioned_local_needs_the_codex_config_too(tmp_path: Path) -> None:
+    """The shared `[local]` table alone does not make an opencode repo a codex one."""
+    repo = _opencode_repo(tmp_path)
+    assert not check_mod.backend_provisioned(repo, "local")
+    assert check_mod.backend_provisioned(repo, "opencode")
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text('sandbox_mode = "workspace-write"\n')
+    assert check_mod.backend_provisioned(repo, "local")

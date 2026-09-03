@@ -13,13 +13,20 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import typer
 from rich.text import Text
 
 from ortus.core import output, sandbox
-from ortus.core.agent import BACKEND_BINARIES, BACKENDS, BackendError, resolve_backend
+from ortus.core.agent import (
+    BACKEND_BINARIES,
+    BACKENDS,
+    OPENCODE_PERMISSION_ENV,
+    OPENCODE_READONLY_PERMISSION,
+    BackendError,
+    resolve_backend,
+)
 from ortus.core.agent_files import (
     BLOCK_SCHEMAS,
     MANAGED_FILES,
@@ -35,11 +42,16 @@ from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config, read_recorded_local
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
-from ortus.core.init_render import BACKEND_TEMPLATES, MERGED_CONFIGS
+from ortus.core.init_render import BACKEND_TEMPLATES, MERGED_CONFIGS, read_opencode_config
 from ortus.core.local_backend import (
+    LOCAL_TABLE_BACKENDS,
     MIN_RECOMMENDED_CONTEXT,
+    OPENCODE_CONFIG_FILE,
+    OPENCODE_PROVIDER_ID,
+    LocalConfig,
     LocalServerError,
     load_local_config,
+    opencode_provider_block,
     parse_local_table,
     probe_context_size,
     probe_models,
@@ -102,6 +114,10 @@ def check_codex() -> CheckResult:
 
 def check_grok() -> CheckResult:
     return _binary_check("grok")
+
+
+def check_opencode() -> CheckResult:
+    return _binary_check("opencode")
 
 
 def check_jq() -> CheckResult:
@@ -243,6 +259,30 @@ def check_grok_settings(repo: Path) -> CheckResult:
     return CheckResult(".grok/config.toml", True, str(settings))
 
 
+def check_opencode_settings(repo: Path) -> CheckResult:
+    """Project `opencode.json` exists, parses, and carries the Ortus provider.
+
+    The file is host-owned JSON that `ortus init` merges one key into, so a
+    file that is present but has no `provider.<OPENCODE_PROVIDER_ID>` entry
+    was never provisioned for this backend. Whether that entry still matches
+    the `[local]` table is the provider row's question, not this one's.
+    """
+    name = OPENCODE_CONFIG_FILE
+    settings = repo / name
+    if not settings.is_file():
+        return CheckResult(name, False, f"missing at {settings} — {OPENCODE_PROVISION_HINT}")
+    data, error = _read_opencode_json(repo)
+    if error is not None:
+        return CheckResult(name, False, error)
+    if _opencode_provider_entry(data) is None:
+        return CheckResult(
+            name,
+            False,
+            f"no provider.{OPENCODE_PROVIDER_ID} entry — {OPENCODE_PROVISION_HINT}",
+        )
+    return CheckResult(name, True, str(settings))
+
+
 #: The `[local]` rows in table order: config, endpoint, tool calling, context.
 LOCAL_ROW_NAMES: tuple[str, ...] = (
     "[local]",
@@ -278,20 +318,7 @@ def check_local_rows(repo: Path) -> list[CheckResult]:
             CheckResult(tools_name, False, skipped),
             CheckResult(context_name, False, skipped, level="info"),
         ]
-    if local.api_key_env is not None and not os.environ.get(local.api_key_env):
-        config_row = CheckResult(
-            config_name,
-            False,
-            f"api_key_env={local.api_key_env} is not set in the environment — "
-            "export it or drop the key",
-        )
-    else:
-        config_row = CheckResult(
-            config_name,
-            True,
-            f"base_url={local.base_url} model={local.model} "
-            f"key={local.api_key_env or 'none'}",
-        )
+    config_row = _local_config_row(config_name, local)
     try:
         probe_models(local)
     except LocalServerError as exc:
@@ -333,6 +360,286 @@ def check_local_rows(repo: Path) -> list[CheckResult]:
     else:
         context_row = CheckResult(context_name, True, f"n_ctx={n_ctx}", level="info")
     return [config_row, endpoint_row, tools_row, context_row]
+
+
+def _local_config_row(name: str, local: LocalConfig) -> CheckResult:
+    """A valid `[local]` table as one cell: the key variable by name, never by value."""
+    if local.api_key_env is not None and not os.environ.get(local.api_key_env):
+        return CheckResult(
+            name,
+            False,
+            f"api_key_env={local.api_key_env} is not set in the environment — "
+            "export it or drop the key",
+        )
+    return CheckResult(
+        name,
+        True,
+        f"base_url={local.base_url} model={local.model} "
+        f"key={local.api_key_env or 'none'}",
+    )
+
+
+#: The `opencode` rows in table order: the `[local]` table, the provider
+#: entry `opencode.json` registers for it, the served model, the CodeGraph
+#: MCP registration, and the permission posture.
+OPENCODE_ROW_NAMES: tuple[str, ...] = (
+    "[local]",
+    "opencode provider",
+    "opencode endpoint",
+    "opencode mcp",
+    "opencode posture",
+)
+OPENCODE_PROVISION_HINT = "run `ortus init --backend opencode --local-model <id>`"
+OPENCODE_REPROVISION_HINT = "re-run `ortus init --force --backend opencode`"
+#: The `mcp.codegraph` entry opencode 1.18.27 ran client-side, as JSON the
+#: operator can paste; `opencode mcp add` prompts for the same three facts.
+OPENCODE_MCP_HINT = (
+    'add to opencode.json: "mcp": {"codegraph": {"type": "local", '
+    '"command": ["codegraph", "serve", "--mcp"], "enabled": true}} '
+    "(or `opencode mcp add codegraph`)"
+)
+#: The tools an implement worker must hold and a verify worker must not.
+OPENCODE_POSTURE_TOOLS: tuple[str, ...] = tuple(OPENCODE_READONLY_PERMISSION)
+
+
+def _read_opencode_json(repo: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Project `opencode.json` parsed, or why it could not be: `(data, error)`."""
+    try:
+        return read_opencode_config(repo), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
+def _opencode_provider_entry(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`provider.<OPENCODE_PROVIDER_ID>` of a parsed `opencode.json`, when an object."""
+    if data is None:
+        return None
+    entry = (data.get("provider") or {}).get(OPENCODE_PROVIDER_ID)
+    return entry if isinstance(entry, dict) else None
+
+
+def _opencode_mcp_entry(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """`mcp.codegraph` of a parsed `opencode.json`, when an object."""
+    if data is None:
+        return None
+    servers = data.get("mcp")
+    if not isinstance(servers, dict):
+        return None
+    entry = servers.get("codegraph")
+    return entry if isinstance(entry, dict) else None
+
+
+def _opencode_mcp_registered(repo: Path) -> bool:
+    """Report whether project `opencode.json` registers an enabled `codegraph`.
+
+    opencode runs MCP servers itself from its own `mcp` table and presents
+    each tool as a flat function, so that table is the whole registration:
+    there is no launch-time injection as for codex and no Claude scope to
+    fall back on. An entry with `enabled: false` is one no worker will see.
+    """
+    data, _ = _read_opencode_json(repo)
+    entry = _opencode_mcp_entry(data)
+    return entry is not None and entry.get("enabled", True) is not False
+
+
+def _opencode_provider_row(
+    name: str, data: dict[str, Any] | None, error: str | None, local: LocalConfig
+) -> CheckResult:
+    """`opencode.json` registers the `[local]` table: same URL, model, and key reference.
+
+    The entry is compared fact by fact rather than whole, so a model option
+    the operator added survives; a drifted URL, a missing model, or a key
+    reference that names the wrong variable each name the re-init that
+    rewrites the entry. The key itself is never in the file, only `{env:NAME}`.
+    """
+    if error is not None:
+        return CheckResult(name, False, error)
+    entry = _opencode_provider_entry(data)
+    if entry is None:
+        return CheckResult(
+            name,
+            False,
+            f"no provider.{OPENCODE_PROVIDER_ID} entry in {OPENCODE_CONFIG_FILE} — "
+            f"{OPENCODE_PROVISION_HINT}",
+        )
+    expected = opencode_provider_block(local)
+    options = entry.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    base_url = options.get("baseURL")
+    if base_url != expected["options"]["baseURL"]:
+        return CheckResult(
+            name,
+            False,
+            f"baseURL={base_url!r} but local.base_url={local.base_url} — "
+            f"{OPENCODE_REPROVISION_HINT}",
+        )
+    models = entry.get("models")
+    if not isinstance(models, dict):
+        models = {}
+    if local.model not in models:
+        registered = ", ".join(sorted(models)) or "none"
+        return CheckResult(
+            name,
+            False,
+            f"models lack {local.model!r} (registered: {registered}) — "
+            f"{OPENCODE_REPROVISION_HINT}",
+        )
+    key_ref = expected["options"].get("apiKey")
+    if options.get("apiKey") != key_ref:
+        wanted = f"the {key_ref} reference" if key_ref else "absent"
+        return CheckResult(
+            name,
+            False,
+            f"apiKey is not {wanted} (local.api_key_env={local.api_key_env or 'none'}) — "
+            f"{OPENCODE_REPROVISION_HINT}",
+        )
+    return CheckResult(
+        name, True, f"{OPENCODE_PROVIDER_ID}/{local.model} at {local.base_url}"
+    )
+
+
+def _opencode_endpoint_row(name: str, local: LocalConfig) -> CheckResult:
+    """`GET {base_url}/models` lists the configured model; wire-agnostic, so shared."""
+    try:
+        probe_models(local)
+    except LocalServerError as exc:
+        return CheckResult(name, False, _local_failure(exc))
+    return CheckResult(name, True, f"reachable; model {local.model} served")
+
+
+def _opencode_mcp_row(
+    name: str, data: dict[str, Any] | None, error: str | None
+) -> CheckResult:
+    if error is not None:
+        return CheckResult(name, False, error)
+    entry = _opencode_mcp_entry(data)
+    if entry is None:
+        return CheckResult(
+            name,
+            False,
+            f"codegraph is not in the {OPENCODE_CONFIG_FILE} mcp table — {OPENCODE_MCP_HINT}",
+        )
+    if entry.get("enabled", True) is False:
+        return CheckResult(name, False, "mcp.codegraph has enabled=false — set it to true")
+    command = entry.get("command")
+    if isinstance(command, list):
+        shown = " ".join(str(part) for part in command)
+    else:
+        shown = str(entry.get("url") or entry.get("type") or "unspecified")
+    return CheckResult(name, True, f"codegraph server registered ({shown})")
+
+
+def _permission_verdict(table: dict[str, Any], tool: str) -> str | None:
+    """`allow`, `ask`, or `deny` for `tool` under `table`, or None when unclear.
+
+    A pattern table resolves by its catch-all `*` entry; without one the
+    posture depends on each command's text, which a check may not guess.
+    """
+    value = table.get(tool)
+    if isinstance(value, dict):
+        value = value.get("*")
+    return value if isinstance(value, str) else None
+
+
+def _opencode_posture_row(
+    name: str, data: dict[str, Any] | None, error: str | None
+) -> CheckResult:
+    """The permission posture an implement worker and a verify worker will get.
+
+    Resolved the way opencode resolves it at startup — the project
+    `permission` table with `OPENCODE_PERMISSION` from the environment merged
+    over it — because every worker inherits the operator's shell, so a
+    denial exported there would quietly cripple implement runs. A key the
+    tables do not mention is opencode's headless default, allow. The verify
+    posture is the denial `OpenCodeRunner` exports for that phase, reported
+    rather than exercised: no worker launches from check.
+    """
+    if error is not None:
+        return CheckResult(name, False, error)
+    table = (data or {}).get("permission")
+    if table is None:
+        table = {}
+    if not isinstance(table, dict):
+        return CheckResult(
+            name, False, f"posture unknown: {OPENCODE_CONFIG_FILE} permission is not an object"
+        )
+    env_source = f"${OPENCODE_PERMISSION_ENV}"
+    env_table: Any = {}
+    override = os.environ.get(OPENCODE_PERMISSION_ENV)
+    if override:
+        try:
+            env_table = json.loads(override)
+        except json.JSONDecodeError as exc:
+            return CheckResult(name, False, f"posture unknown: {env_source} is not JSON ({exc})")
+        if not isinstance(env_table, dict):
+            return CheckResult(
+                name, False, f"posture unknown: {env_source} is not a JSON object"
+            )
+    resolved: list[str] = []
+    for tool in OPENCODE_POSTURE_TOOLS:
+        if tool in env_table:
+            verdict, source = _permission_verdict(env_table, tool), env_source
+        elif tool in table:
+            verdict, source = _permission_verdict(table, tool), OPENCODE_CONFIG_FILE
+        else:
+            verdict, source = "allow", None
+        if verdict is None:
+            return CheckResult(
+                name,
+                False,
+                f"posture unknown: {source} permission.{tool} is a pattern table "
+                "with no '*' entry — state the catch-all",
+            )
+        if verdict != "allow":
+            return CheckResult(
+                name,
+                False,
+                f"{source} sets permission.{tool}={verdict}; a headless implement "
+                "worker needs allow — set it to allow (verify denies it on its own)",
+            )
+        resolved.append(f"{tool}={verdict}" if source is None else f"{tool}={verdict} ({source})")
+    verify = ", ".join(OPENCODE_READONLY_PERMISSION)
+    return CheckResult(
+        name,
+        True,
+        f"implement: {' '.join(resolved)}; verify: {OPENCODE_PERMISSION_ENV} denies {verify}",
+    )
+
+
+def check_opencode_rows(repo: Path) -> list[CheckResult]:
+    """The five `opencode` rows: table, provider entry, endpoint, MCP, posture.
+
+    The table row and the endpoint probe are the `[local]` questions the
+    codex-driven backend asks too, reused rather than restated: the served
+    model is the same and `GET /models` is wire-agnostic. The tool-calling
+    probe is not reused — it speaks the Responses wire opencode never uses —
+    and no row launches opencode: the MCP and posture rows read the file the
+    worker will read. An invalid table skips the provider and endpoint rows
+    but never the last two, which do not depend on it.
+    """
+    config_name, provider_name, endpoint_name, mcp_name, posture_name = OPENCODE_ROW_NAMES
+    data, error = _read_opencode_json(repo)
+    mcp_row = _opencode_mcp_row(mcp_name, data, error)
+    posture_row = _opencode_posture_row(posture_name, data, error)
+    try:
+        local = load_local_config(load_config(repo=repo))
+    except ProfileError as exc:
+        skipped = "skipped: [local] config invalid"
+        return [
+            CheckResult(config_name, False, str(exc)),
+            CheckResult(provider_name, False, skipped),
+            CheckResult(endpoint_name, False, skipped),
+            mcp_row,
+            posture_row,
+        ]
+    return [
+        _local_config_row(config_name, local),
+        _opencode_provider_row(provider_name, data, error, local),
+        _opencode_endpoint_row(endpoint_name, local),
+        mcp_row,
+        posture_row,
+    ]
 
 
 def check_hooks(repo: Path) -> CheckResult:
@@ -420,7 +727,8 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
     Claude's MCP registration is reported but never fails the check. Only the
     file-backed scopes are observable here, `ortus init` does not register the
     server, and the phase handshake — which does prove it, from inside the
-    agent — is what enforces it at run time.
+    agent — is what enforces it at run time. opencode's is reported the same
+    way here; its own `opencode mcp` row is the strict one.
     """
     name = "codegraph"
     try:
@@ -452,6 +760,13 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
             "codegraph server registered"
             if registered
             else f"not registered in a readable scope — {CODEGRAPH_MCP_HINT}"
+        )
+    elif backend == "opencode":
+        registered = _opencode_mcp_registered(repo)
+        registration = (
+            "codegraph server registered"
+            if registered
+            else f"not registered in {OPENCODE_CONFIG_FILE} — {OPENCODE_MCP_HINT}"
         )
     else:
         registered = _claude_mcp_registered(repo)
@@ -670,11 +985,15 @@ def backend_provisioned(repo: Path, backend: str) -> bool:
     Discovery is the config dir on disk, not an `.ortusrc` key: `ortus init
     --backend all` writes every backend's directory and pins only one run
     backend. `local` has no directory of its own — its provisioning is the
-    `[local]` table in the project `.ortusrc` — and a merged config such as
-    opencode's sits at the repo root, so the file itself is the proof.
+    `[local]` table in the project `.ortusrc` plus codex's project config,
+    since opencode reads that same table and the table alone would report
+    an opencode repo as a half-provisioned codex one — and a merged config
+    such as opencode's sits at the repo root, so the file itself is the proof.
     """
     if backend == "local":
-        return bool(read_recorded_local(repo))
+        return bool(read_recorded_local(repo)) and (
+            repo / BACKEND_TEMPLATES["local"]
+        ).is_file()
     if backend not in BACKEND_TEMPLATES:
         # No template means nothing could have been provisioned.
         return False
@@ -706,14 +1025,11 @@ def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
     elif backend == "grok" and not _grok_mcp_registered(repo):
         gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
     elif backend == "local":
-        table = read_recorded_local(repo)
-        if not table:
-            gaps.append(f"[local] table missing — {LOCAL_PROVISION_HINT}")
-        else:
-            try:
-                parse_local_table(table)
-            except ProfileError as exc:
-                gaps.append(f"[local] table invalid: {exc} — {LOCAL_PROVISION_HINT}")
+        gaps.extend(_local_table_gaps(repo, LOCAL_PROVISION_HINT))
+    elif backend == "opencode":
+        if not _opencode_mcp_registered(repo):
+            gaps.append(f"codegraph MCP not registered — {OPENCODE_MCP_HINT}")
+        gaps.extend(_local_table_gaps(repo, OPENCODE_PROVISION_HINT))
     # codex: CodeGraph is injected per child, so CLI + index (the strict
     # codegraph row) are its whole registration story.
     if gaps:
@@ -723,14 +1039,26 @@ def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
             "provisioned but not runnable: " + "; ".join(gaps),
             level="info",
         )
-    if backend == "local":
+    if backend in LOCAL_TABLE_BACKENDS:
         return CheckResult(
             name,
             True,
-            "provisioned; endpoint not probed — run `ortus check --backend local`",
+            f"provisioned; endpoint not probed — run `ortus check --backend {backend}`",
             level="info",
         )
     return CheckResult(name, True, "provisioned and runnable", level="info")
+
+
+def _local_table_gaps(repo: Path, hint: str) -> list[str]:
+    """The offline `[local]` verdict for a provisioned row: missing or invalid."""
+    table = read_recorded_local(repo)
+    if not table:
+        return [f"[local] table missing — {hint}"]
+    try:
+        parse_local_table(table)
+    except ProfileError as exc:
+        return [f"[local] table invalid: {exc} — {hint}"]
+    return []
 
 
 def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
@@ -753,6 +1081,12 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         backend_binary = check_codex
         settings_check = check_codex_settings
         settings_label = ".codex/config.toml"
+    elif backend == "opencode":
+        # opencode at the same served model: its own binary and project
+        # file, plus the rows that follow it. Nothing of codex's appears.
+        backend_binary = check_opencode
+        settings_check = check_opencode_settings
+        settings_label = OPENCODE_CONFIG_FILE
     else:
         raise ValueError(f"unsupported check backend {backend!r}")
     checks: list[Callable[..., CheckResult]] = [
@@ -771,6 +1105,8 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     ]
     if backend == "local":
         repo_checks.append((check_local_rows, "[local]"))
+    elif backend == "opencode":
+        repo_checks.append((check_opencode_rows, "opencode"))
     if backend == "claude":
         repo_checks.append((check_hooks, "hooks"))
         # Claude-only: the Codex verifier is not wrapped, so it has no
@@ -814,7 +1150,7 @@ def check(
         None,
         "--backend",
         help=(
-            "Agent backend to verify (claude|codex|grok|local); "
+            "Agent backend to verify (claude|codex|grok|local|opencode); "
             "defaults from .ortusrc."
         ),
     ),
