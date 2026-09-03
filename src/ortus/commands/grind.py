@@ -89,6 +89,7 @@ from ortus.core.grind_loop import (
     read_work_issue_condition,
     select_ready_issue,
 )
+from ortus.core.lifecycle import ISSUE_OPEN
 from ortus.core.local_backend import (
     LocalServerError,
     load_local_config,
@@ -665,6 +666,9 @@ def _flagged_claims(bd: BdClient) -> set[str]:
     return flagged
 
 
+_FLAGGED_REASON = "claim flagged human"
+
+
 def _reap_reason(
     bd: BdClient,
     git: GitClient,
@@ -698,8 +702,73 @@ def _reap_reason(
     except Exception:
         return None
     if flagged:
-        return f"claim flagged human ({', '.join(sorted(flagged))})"
+        return f"{_FLAGGED_REASON} ({', '.join(sorted(flagged))})"
     return None
+
+
+def _hand_back_comment(window: int) -> str:
+    return (
+        f"grind: handed back after window {window}. The worker claimed this "
+        "issue from bd ready although it was open and labelled human when the "
+        "window began, so it could never finish it. The claim is reverted to "
+        "open, the label is kept, and the packet is untouched. An issue "
+        "labelled human is the operator's: repair or unlabel it before a "
+        "worker can take it."
+    )
+
+
+def _hand_back_misclaims(
+    bd: BdClient,
+    *,
+    flagged_at_start: frozenset[str],
+    human_open_at_start: frozenset[str] | None,
+    window: int,
+    write_log: Callable[[str], None],
+) -> set[str]:
+    """Revert the reaped worker's claims on issues that were the operator's.
+
+    A worker that runs `bd ready` and claims the first non-epic can land on
+    an issue that already carried the human label: the listing does not
+    exclude it, and only the goal prompt's rule keeps the worker off it. The
+    flagged-claim reap then fires within a poll, but the claim used to stay
+    in_progress, and the next window's worker read it as a leftover to
+    continue — every later window inherited an issue no worker can finish,
+    until someone unclaimed it by hand. Handing it back here is what lets the
+    next window start clean.
+
+    Only a claim on an issue that was open and human-labelled when the window
+    began qualifies. A worker that flags its own claim on the PLAN-GAP exit
+    left a comment for the operator and keeps that claim in_progress, and a
+    claim flagged before the window was excluded at startup and is not this
+    worker's. The revert is status only: the label stays and no packet field
+    is touched, so the readiness hash is unchanged. A tracker error on any
+    step is logged and that claim is left as it is; the loop never crashes on
+    a hand-back. Returns the ids handed back.
+    """
+
+    if not human_open_at_start:
+        return set()
+    try:
+        flagged = _flagged_claims(bd) - flagged_at_start
+    except Exception as exc:
+        write_log(
+            f"iter {window}: could not read the flagged claims to hand back ({exc})"
+        )
+        return set()
+    handed_back: set[str] = set()
+    for issue_id in sorted(flagged & human_open_at_start):
+        try:
+            bd.update_status(issue_id, ISSUE_OPEN)
+            bd.add_comment(issue_id, _hand_back_comment(window))
+        except Exception as exc:
+            write_log(f"iter {window}: could not hand back {issue_id} ({exc})")
+            continue
+        handed_back.add(issue_id)
+        write_log(
+            f"iter {window}: handed back {issue_id} (open and labelled human "
+            "at window start; claim reverted to open, label kept)"
+        )
+    return handed_back
 
 
 def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
@@ -1737,6 +1806,9 @@ def grind(
                     # reason rather than a timeout. Codex runs its own turn
                     # loop and exits by itself; its termination stays as is.
                     reap_when = None
+                    reap_reasons: list[str] = []
+                    flagged_at_start: frozenset[str] | None = None
+                    human_open_at_start: frozenset[str] | None = None
                     if resolved_backend in ("claude", "grok"):
                         try:
                             baseline_closed = bd.count_by_status("closed")
@@ -1746,6 +1818,15 @@ def grind(
                             flagged_at_start = frozenset(_flagged_claims(bd))
                         except Exception:
                             flagged_at_start = None
+                        # The operator's open issues, remembered so a claim
+                        # the worker puts on one of them can be handed back
+                        # once the flagged-claim reap has fired.
+                        try:
+                            human_open_at_start = frozenset(
+                                bd.open_ids(labels=EXCLUDED_LABELS)
+                            )
+                        except Exception:
+                            human_open_at_start = None
 
                         def _reap_worker() -> bool:
                             reason = _reap_reason(
@@ -1758,6 +1839,7 @@ def grind(
                             if reason is None:
                                 return False
                             write_log(f"iter {iters_run}: {reason}; reaping worker")
+                            reap_reasons.append(reason)
                             return True
 
                         reap_when = _reap_worker
@@ -1777,6 +1859,21 @@ def grind(
                     write_log(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
+                    )
+                if (
+                    reap_reasons
+                    and reap_reasons[-1].startswith(_FLAGGED_REASON)
+                    and flagged_at_start is not None
+                ):
+                    # The worker is dead, so bd now shows the post-mortem
+                    # state: any claim it put on an issue that was the
+                    # operator's before the window began goes back.
+                    _hand_back_misclaims(
+                        bd,
+                        flagged_at_start=flagged_at_start,
+                        human_open_at_start=human_open_at_start,
+                        window=iters_run,
+                        write_log=write_log,
                     )
                 if resolved_backend == "claude":
                     rejection = _claude_goal_rejection(log, start_offset=phase_offset)

@@ -82,6 +82,36 @@ def test_worker_prompt_excludes_human_label() -> None:
     )
 
 
+def test_worker_prompt_never_continues_human_claim() -> None:
+    """AC-1 (ortus-nqde): the goal loop's continue rule treats an in_progress
+    issue labelled human as the operator's — never continued — and falls
+    through to `bd ready` when every leftover claim carries the label, so a
+    mis-claim on an operator-only issue cannot wedge every later window."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    body = bundled_prompt_text("goal-prompt")
+    lines = body.splitlines()
+    # The orient listing is where the worker reads labels from; the brief
+    # listing carries them, so no bd show per id is needed.
+    orient_listing = next(
+        line for line in lines if "bd list --status=in_progress" in line
+    )
+    assert "labels" in orient_listing
+    select_step = next(line for line in lines if line.startswith("2."))
+    assert "labeled `human` is the operator's" in select_step
+    assert "do not continue it" in select_step
+    assert "as if nothing were in progress" in select_step
+    assert "not labeled `human` is `in_progress`, continue that id" in select_step
+    # The exclusion precedes the continue rule and the ready query, so a
+    # worker reading in order rules the operator's claim out before either.
+    assert select_step.index("is the operator's") < select_step.index(
+        "continue that id"
+    )
+    assert select_step.index("as if nothing were in progress") < select_step.index(
+        "bd ready --json"
+    )
+
+
 def test_worker_prompt_forbids_pending_background_verification() -> None:
     """AC-1 (ortus-mpbw): the goal loop forbids ending the turn while
     verification the worker started is still running — a worker that launches

@@ -184,6 +184,22 @@ def test_in_progress_ids_honors_exclude_labels(bd_workspace: Path) -> None:
     assert client.in_progress_ids(exclude_labels=("human",)) == {plain}
 
 
+def test_open_ids_filters_by_any_label(bd_workspace: Path) -> None:
+    """open_ids narrows to open issues carrying any of the labels, so grind
+    can remember the operator's open issues at window start and hand back a
+    claim a worker puts on one of them."""
+    client = BdClient(bd_workspace)
+    plain = client.create(title="plain open", issue_type="task", priority=2)
+    escalated = client.create(title="escalated to human", issue_type="task", priority=2)
+    claimed = client.create(title="claimed and escalated", issue_type="task", priority=2)
+    client.add_label(escalated, "human")
+    client.add_label(claimed, "human")
+    client.update_status(claimed, "in_progress")
+    assert client.open_ids() == {plain, escalated}
+    assert client.open_ids(labels=("human",)) == {escalated}
+    assert client.open_ids(labels=("nobody",)) == set()
+
+
 def test_closed_ids_names_only_closed_issues(bd_workspace: Path) -> None:
     """closed_ids returns exactly the closed set, so grind's attribution
     diff can name a claim that closed within one worker window."""

@@ -1,13 +1,13 @@
 Read `AGENTS.md` first. One context window, one issue, then exit. Do not pick a second issue. Grind starts a fresh process for the next issue; do not compact.
 
 1. **Orient.** Ninety-second standup only: what is in flight, what just happened, what the tree looks like. Do not open work specs here. Each `bd` command is its own Bash call with `bd` as the first token. Never wrap `bd` in a pipe, `xargs`, `&&`, `;`, or `bash -c`. Git commands are their own Bash calls.
-   - `bd list --status=in_progress --json --brief` — leftover claims.
+   - `bd list --status=in_progress --json --brief` — leftover claims, each with its labels.
    - `bd events tail --limit 20 --json` — recent closes, comments, claims, creates. Comments are the interesting lines (`op=comment`); closes are next. `bd events` starts at enable and does not backfill older comments.
    - `git log -5 --oneline` — what actually landed.
    - `git status --porcelain` — inherited dirty paths.
    Do not `bd show`, `bd show --long`, or `bd comments` in this step. After you pick an id in step 2, `bd show <id> --json` is the work spec and `bd comments <id> --json` is that ticket's thread.
 
-2. **Continue or select.** If any issue is `in_progress`, continue that id. If more than one is `in_progress`, flag human, comment PLAN-GAP, and stop. Else run `bd ready --json`. If empty, exit with no sentinel. Skip issues labeled `human` — they await operator repair. Claim the first remaining non-epic issue with `bd update <id> --status=in_progress`. Then `bd show <id> --json` — that packet is the work spec.
+2. **Continue or select.** An `in_progress` issue labeled `human` is the operator's, never yours: do not continue it, and when every `in_progress` id is labeled `human`, proceed as if nothing were in progress. If exactly one issue not labeled `human` is `in_progress`, continue that id. If more than one is `in_progress` without that label, flag human, comment PLAN-GAP, and stop. Else run `bd ready --json`. If empty, exit with no sentinel. Skip issues labeled `human` — they await operator repair. Claim the first remaining non-epic issue with `bd update <id> --status=in_progress`. Then `bd show <id> --json` — that packet is the work spec.
 
 3. **Investigate and implement** only that issue. Use CodeGraph when the injected CodeGraph contract requires it. Run the issue's criterion-check commands; follow `docs/testing.md` only if that file exists. Fix failures. Every check you start must finish before your turn ends — never end the turn with verification still running in the background. A criterion check that cannot complete within this window is a work-spec defect: do not start it — comment PLAN-GAP, flag human, and stop. File leftover work as new beads; do not keep it on this id. Before filing or re-scoping any bead, run `bd memories <keyword>` for the task's subject; owner-decision memories (keys carrying a `policy` or `decision` token) are binding on the new bead's Non-goals and Resolved decisions.
 

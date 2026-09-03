@@ -450,6 +450,30 @@ class BdClient:
             return set()
         return {item["id"] for item in data if isinstance(item, dict) and "id" in item}
 
+    def open_ids(self, *, labels: tuple[str, ...] = ()) -> set[str]:
+        """`bd list --status open --limit 0 --json` → set of issue ids.
+
+        ``labels`` narrows the listing to issues carrying any of them
+        (``--label-any``). The grind harness passes ``("human",)`` at window
+        start to remember which open issues are the operator's: a worker
+        that claims one of those from `bd ready` has taken an issue it can
+        never finish, and the reap that follows hands it back. ``--limit 0``
+        lifts bd's default cap for the same reason as :meth:`closed_ids`.
+        A failed query answers with an empty set, which means nothing is
+        handed back rather than a crash mid-window.
+        """
+        args = ["list", "--status", "open"]
+        for label in labels:
+            args.extend(["--label-any", label])
+        args.extend(["--limit", "0", "--json"])
+        try:
+            _, data = self._run(*args, parse_json=True)
+        except BdError:
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {item["id"] for item in data if isinstance(item, dict) and "id" in item}
+
     def closed_ids(self) -> set[str]:
         """`bd list --status closed --limit 0 --json` → set of issue ids.
 

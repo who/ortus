@@ -14,6 +14,16 @@ a tracker error never reaps, and the done bar still reaps. One integration
 test then runs grind with a fake claude that claims its issue, flags it human,
 and hangs, and reads the reap out of the grind log: the flagged-claim line is
 present and the TIMEOUT line is not.
+
+The hand-back (ortus-nqde): a worker that claims an issue already labelled
+human from `bd ready` trips the same reap, but its claim used to stay
+in_progress and every later window's worker inherited it as a leftover. The
+pure helper is driven with fakes — a claim on an issue that was open and
+human-labelled at window start is reverted with the label kept and one
+comment, a self-flagged claim and a claim flagged before the window are left
+alone, and a tracker error is logged rather than raised — and one integration
+test runs grind with a fake claude that mis-claims and hangs, then reads the
+hand-back from the log and the reverted status from bd.
 """
 
 from __future__ import annotations
@@ -28,7 +38,7 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
-from ortus.core.bd import BdError
+from ortus.core.bd import BdClient, BdError
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
 from tests._shims import make_inline_python_shim
@@ -45,7 +55,9 @@ class _FakeBd:
 
     ``fail`` selects the failure the real client would surface. ``list`` and
     ``exclude`` answer with an empty set, which is how ``BdClient`` swallows a
-    failed query; ``show`` raises, which is how the confirmation read fails.
+    failed query; ``show`` raises, which is how the confirmation read fails;
+    ``update`` raises from the status write. Writes are recorded, never
+    applied, so a test reads exactly what the hand-back asked the tracker for.
     """
 
     def __init__(
@@ -58,6 +70,8 @@ class _FakeBd:
         self.claims = claims
         self.closed = closed
         self.fail = fail
+        self.updates: list[tuple[str, str]] = []
+        self.notes: list[tuple[str, str]] = []
 
     def count_by_status(
         self, status: str, *, exclude_labels: tuple[str, ...] = ()
@@ -80,6 +94,14 @@ class _FakeBd:
         if self.fail == "show":
             raise BdError(["bd", "show", issue_id], 1, "tracker down")
         return {"id": issue_id, "labels": list(self.claims[issue_id])}
+
+    def update_status(self, issue_id: str, status: str) -> None:
+        if self.fail == "update":
+            raise BdError(["bd", "update", issue_id], 1, "tracker down")
+        self.updates.append((issue_id, status))
+
+    def add_comment(self, issue_id: str, body: str) -> None:
+        self.notes.append((issue_id, body))
 
 
 class _RaisingBd(_FakeBd):
@@ -176,6 +198,103 @@ def test_flagged_claims_is_empty_when_nothing_is_in_progress() -> None:
     assert grind_mod._flagged_claims(_FakeBd({})) == set()  # type: ignore[arg-type]
 
 
+# --- handing back a mis-claim on the operator's issue ----------------------
+
+
+def _hand_back(
+    bd: object,
+    *,
+    flagged_at_start: frozenset[str] = frozenset(),
+    human_open_at_start: frozenset[str] = frozenset(),
+    window: int = 2,
+) -> tuple[set[str], list[str]]:
+    logged: list[str] = []
+    handed_back = grind_mod._hand_back_misclaims(
+        bd,  # type: ignore[arg-type]
+        flagged_at_start=flagged_at_start,
+        human_open_at_start=human_open_at_start,
+        window=window,
+        write_log=logged.append,
+    )
+    return handed_back, logged
+
+
+def test_misclaim_on_operator_issue_is_handed_back() -> None:
+    """The worker claimed an issue that was open and labelled human when the
+    window began: the claim goes back to open, the label stays, and one
+    comment names the window. Nothing else on the issue is written."""
+    bd = _FakeBd({"ortus-h": ["human", "phase3"]})
+    handed_back, logged = _hand_back(bd, human_open_at_start=frozenset({"ortus-h"}))
+    assert handed_back == {"ortus-h"}
+    assert bd.updates == [("ortus-h", "open")]
+    assert [issue for issue, _ in bd.notes] == ["ortus-h"]
+    assert "window 2" in bd.notes[0][1]
+    assert any("handed back ortus-h" in line for line in logged)
+
+
+def test_misclaim_hand_back_leaves_self_flag_in_progress() -> None:
+    """A worker that flagged its own claim on the PLAN-GAP exit keeps that
+    claim for the operator: the issue was not the operator's when the window
+    began, so the reap fires as before and nothing is reverted."""
+    bd = _FakeBd({"ortus-x": ["human"]})
+    handed_back, _ = _hand_back(bd)
+    assert handed_back == set()
+    assert bd.updates == []
+    assert bd.notes == []
+
+
+def test_misclaim_hand_back_reverts_each_qualifying_claim() -> None:
+    """Two mis-claims in one window both go back; the self-flag beside them
+    and a claim flagged before the window began are both left alone."""
+    bd = _FakeBd(
+        {
+            "ortus-a": ["human"],
+            "ortus-b": ["human"],
+            "ortus-x": ["human"],
+            "ortus-old": ["human"],
+        }
+    )
+    handed_back, _ = _hand_back(
+        bd,
+        flagged_at_start=frozenset({"ortus-old"}),
+        human_open_at_start=frozenset({"ortus-a", "ortus-b", "ortus-old"}),
+    )
+    assert handed_back == {"ortus-a", "ortus-b"}
+    assert bd.updates == [("ortus-a", "open"), ("ortus-b", "open")]
+    assert [issue for issue, _ in bd.notes] == ["ortus-a", "ortus-b"]
+
+
+def test_misclaim_hand_back_survives_a_tracker_error() -> None:
+    """A revert the tracker refuses is logged and left as is, and a listing
+    the tracker cannot answer hands nothing back; neither raises."""
+    bd = _FakeBd({"ortus-h": ["human"]}, fail="update")
+    handed_back, logged = _hand_back(bd, human_open_at_start=frozenset({"ortus-h"}))
+    assert handed_back == set()
+    assert bd.notes == []
+    assert any("could not hand back ortus-h" in line for line in logged)
+    handed_back, logged = _hand_back(
+        _RaisingBd({"ortus-h": ["human"]}),
+        human_open_at_start=frozenset({"ortus-h"}),
+    )
+    assert handed_back == set()
+    assert any("could not read the flagged claims" in line for line in logged)
+
+
+def test_misclaim_hand_back_is_a_no_op_without_operator_issues() -> None:
+    """No open human-labelled issue at window start means no tracker read at
+    all: the snapshot that could not be taken (None) is the same answer."""
+    bd = _RaisingBd({"ortus-h": ["human"]})
+    assert _hand_back(bd)[0] == set()
+    handed_back = grind_mod._hand_back_misclaims(
+        bd,  # type: ignore[arg-type]
+        flagged_at_start=frozenset(),
+        human_open_at_start=None,
+        window=1,
+        write_log=lambda _line: None,
+    )
+    assert handed_back == set()
+
+
 # --- grind wires the reap for claude ---------------------------------------
 
 
@@ -222,6 +341,29 @@ def _bd_show(repo: Path, issue_id: str) -> dict:
     )
     data = json.loads(proc.stdout)
     return data[0] if isinstance(data, list) else data
+
+
+def _seed_repo_with_operator_issue(tmp_path: Path) -> tuple[Path, str, str]:
+    """Returns (repo, head_id, operator_id): the ready leaf grind predicts,
+    plus an open issue already labelled human, both committed."""
+    workspace = copy_bd_workspace(tmp_path / "reap", "leaf")
+    repo = workspace.path
+    client = BdClient(repo)
+    operator_id = client.create(
+        title="operator-run audition", issue_type="task", priority=1
+    )
+    client.add_label(operator_id, "human")
+    (repo / ".gitignore").write_text(
+        "logs/\n.cache/\n.beads/ortus.flock\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture baseline"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    return repo, workspace.issues[0], operator_id
 
 
 class _RecordingRunner:
@@ -321,3 +463,71 @@ def test_flagged_claim_is_reaped_within_a_poll_not_timed_out(
     shown = _bd_show(repo, issue_id)
     assert shown["status"] == "in_progress"
     assert "human" in (shown.get("labels") or [])
+
+
+# A worker that claims the issue already labelled human from bd ready — the
+# mis-claim observed on a real run — and then hangs like a worker held by the
+# Stop hook.
+_MISCLAIM_THEN_HANG = textwrap.dedent(
+    """\
+    import json, subprocess, time
+    ready = json.loads(subprocess.run(
+        ["bd", "ready", "--json"], check=True, capture_output=True, text=True
+    ).stdout)
+    taken = next(
+        (i["id"] for i in ready if "human" in (i.get("labels") or [])), None
+    )
+    if taken:
+        subprocess.run(
+            ["bd", "update", taken, "--status", "in_progress"],
+            check=True, stdout=subprocess.DEVNULL,
+        )
+        print(f"claimed the operator's {taken}, now held by the hook", flush=True)
+    time.sleep(120)
+    """
+)
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+def test_misclaim_is_handed_back_after_the_reap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a claude worker that claims an issue already labelled human is
+    reaped, and grind hands the claim back — status open, label kept, one
+    comment — so the next window never inherits the operator's issue."""
+    repo, head_id, operator_id = _seed_repo_with_operator_issue(tmp_path)
+    _stub_sandbox(monkeypatch)
+    _force_fake_home(monkeypatch, tmp_path)
+    shim = make_inline_python_shim(tmp_path, "claude-misclaim-hang", _MISCLAIM_THEN_HANG)
+    monkeypatch.setattr(
+        grind_mod, "_make_runner", lambda *a, **k: ClaudeRunner(claude_binary=str(shim))
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--iterations",
+            "1",
+            "--idle-sleep",
+            "0",
+            "--worker-timeout",
+            "90",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+
+    log = _grind_log(repo)
+    assert f"claim flagged human ({operator_id}); reaping worker" in log, log
+    assert f"handed back {operator_id}" in log, log
+    assert "TIMEOUT" not in log, log
+    shown = _bd_show(repo, operator_id)
+    assert shown["status"] == "open"
+    assert "human" in (shown.get("labels") or [])
+    notes = BdClient(repo).comments(operator_id)
+    bodies = [str(note.get("text") or note.get("body") or "") for note in notes]
+    assert any("handed back after window 1" in body for body in bodies), bodies
+    # The head grind predicted was never touched.
+    assert _bd_show(repo, head_id)["status"] == "open"
