@@ -15,6 +15,15 @@ name; on the response leg it splits a returned flat name back into the
 JSON bodies alike. Everything else, on both legs, passes through untouched.
 It starts only when the local backend launches a worker with CodeGraph
 configured, and it stops when that worker exits.
+
+The request leg also normalizes two shapes llama-server cannot execute.
+codex opens every turn with a ``developer`` message in ``input[]`` after
+``instructions``; llama-server renders that role as a second system message,
+and a chat template that requires the system message first raises, so the
+server answers 500 before the model runs. Such messages, and ``system`` ones,
+become ``user`` messages in place, with ``instructions`` left as the one
+system message. A chunked request body is decoded here and forwarded with an
+accurate ``Content-Length``, so it never reaches the server as zero bytes.
 """
 
 from __future__ import annotations
@@ -26,7 +35,7 @@ import threading
 from dataclasses import dataclass
 from http.client import HTTPConnection, HTTPResponse, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
 from ortus.core.output import warn
@@ -38,6 +47,11 @@ SHIM_PATH_PREFIX = "/v1"
 #: The SSE events whose ``item`` is a function call codex acts on. Every
 #: other event line is forwarded byte-for-byte.
 RESTORED_EVENTS = frozenset({"response.output_item.added", "response.output_item.done"})
+#: ``input[]`` message roles the server renders as a second system message.
+#: Each becomes ``user``; ``instructions`` stays the single system message.
+DEMOTED_ROLES = frozenset({"developer", "system"})
+#: Longest chunk-size line or trailer accepted while decoding a chunked body.
+_MAX_LINE = 8192
 
 _HOP_BY_HOP = frozenset(
     {
@@ -102,25 +116,39 @@ def flatten_tools(tools: Any) -> tuple[Any, tuple[str, ...]]:
 
 
 def _flatten_input(items: Any) -> tuple[Any, bool]:
-    """Flatten ``function_call`` history items that carry a ``namespace``.
+    """Rewrite the ``input[]`` items the server cannot take as codex sends them.
 
-    codex replays earlier tool calls in the ``namespace`` plus ``name`` shape
-    the response leg restored; the server only ever knew the flat name.
+    Replayed ``function_call`` history items carry the ``namespace`` plus
+    ``name`` shape the response leg restored; the server only ever knew the
+    flat name. Messages in a demoted role become ``user`` messages in place,
+    text and order untouched. Every other item passes through as the same
+    object, so a list that needs nothing comes back as the same list.
     """
     if not isinstance(items, list):
         return items, False
     changed = False
     out: list[Any] = []
     for item in items:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        # A Responses input item without ``type`` is a message.
+        kind = item.get("type", "message")
         if (
-            isinstance(item, dict)
-            and item.get("type") == "function_call"
+            kind == "function_call"
             and isinstance(item.get("namespace"), str)
             and isinstance(item.get("name"), str)
         ):
             rest = {key: value for key, value in item.items() if key != "namespace"}
             rest["name"] = f"{item['namespace']}{SEPARATOR}{item['name']}"
             out.append(rest)
+            changed = True
+        elif (
+            kind == "message"
+            and isinstance(item.get("role"), str)
+            and item["role"] in DEMOTED_ROLES
+        ):
+            out.append({**item, "role": "user"})
             changed = True
         else:
             out.append(item)
@@ -250,8 +278,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._forward()
 
     def _forward(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        try:
+            raw = self._read_body()
+        except ValueError as exc:
+            self._send_bad_request(str(exc))
+            return
         body, namespaces = _rewrite_request_bytes(raw)
         headers = {
             name: value
@@ -284,6 +315,19 @@ class _Handler(BaseHTTPRequestHandler):
             self._relay(response, namespaces)
         finally:
             connection.close()
+
+    def _read_body(self) -> bytes:
+        """The request body with any chunked framing removed.
+
+        codex sends ``Content-Length`` today, but a chunked body read by its
+        declared length is zero bytes, and forwarding that would hand the
+        server an empty request. Decoding here keeps the upstream leg on an
+        accurate ``Content-Length`` whichever framing the client chose.
+        """
+        if _is_chunked(self.headers.get("Transfer-Encoding")):
+            return _decode_chunked(self.rfile)
+        length = int(self.headers.get("Content-Length") or 0)
+        return self.rfile.read(length) if length else b""
 
     def _relay(self, response: HTTPResponse, namespaces: tuple[str, ...]) -> None:
         content_type = response.getheader("Content-Type") or ""
@@ -334,14 +378,25 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_gateway_error(self, exc: OSError) -> None:
         """Report an unreachable server as a 502 naming it; never mask it."""
         upstream = self.server.upstream
-        message = (
+        self._send_json_error(
+            502,
+            "upstream_unreachable",
             f"ortus mcp shim: {upstream.scheme}://{upstream.host}:{upstream.port}"
-            f" unreachable: {exc}"
+            f" unreachable: {exc}",
         )
-        data = json.dumps(
-            {"error": {"type": "upstream_unreachable", "message": message}}
-        ).encode()
-        self.send_response(502)
+
+    def _send_bad_request(self, detail: str) -> None:
+        """Refuse a body the shim could not decode.
+
+        Forwarding whatever did decode would hand the server a truncated
+        request with a length that vouches for it; a 400 that names the
+        defect is the honest answer.
+        """
+        self._send_json_error(400, "malformed_request", f"ortus mcp shim: {detail}")
+
+    def _send_json_error(self, status: int, kind: str, message: str) -> None:
+        data = json.dumps({"error": {"type": kind, "message": message}}).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
@@ -350,8 +405,56 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def _is_chunked(transfer_encoding: str | None) -> bool:
+    """Whether the body carries chunked framing; ``chunked`` is always last."""
+    if not transfer_encoding:
+        return False
+    codings = [part.strip().lower() for part in transfer_encoding.split(",")]
+    return codings[-1] == "chunked"
+
+
+def _read_line(stream: BinaryIO) -> bytes:
+    """One line of chunk framing without its ending; EOF or overlong raises."""
+    line = stream.readline(_MAX_LINE + 1)
+    if len(line) > _MAX_LINE:
+        raise ValueError("chunked request body: framing line too long")
+    if not line.endswith(b"\n"):
+        raise ValueError("chunked request body ended before its final chunk")
+    return line.rstrip(b"\r\n")
+
+
+def _decode_chunked(stream: BinaryIO) -> bytes:
+    """Strip chunked framing: size lines, data, and a terminating zero chunk.
+
+    Chunk extensions and trailers are read and dropped. A body that ends
+    mid-stream or carries an unreadable size raises ``ValueError`` so the
+    caller refuses it instead of forwarding a short body under an accurate
+    length.
+    """
+    chunks: list[bytes] = []
+    while True:
+        size_line = _read_line(stream)
+        try:
+            size = int(size_line.split(b";", 1)[0].strip(), 16)
+        except ValueError:
+            raise ValueError("chunked request body: unreadable chunk size") from None
+        if size < 0:
+            raise ValueError("chunked request body: negative chunk size")
+        if size == 0:
+            break
+        data = stream.read(size)
+        if len(data) != size:
+            raise ValueError("chunked request body ended inside a chunk")
+        if _read_line(stream) != b"":
+            raise ValueError("chunked request body: chunk data not followed by CRLF")
+        chunks.append(data)
+    while _read_line(stream) != b"":
+        pass  # trailers: nothing in them reaches the upstream leg
+    return b"".join(chunks)
+
+
 def _rewrite_request_bytes(raw: bytes) -> tuple[bytes, tuple[str, ...]]:
-    """Flatten a JSON request body; a body without namespaces is forwarded as is."""
+    """Rewrite a JSON request body; one that needs no rewrite is forwarded as is."""
     if not raw:
         return raw, ()
     try:

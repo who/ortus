@@ -91,17 +91,20 @@ def message_item(text: str = "done") -> dict[str, Any]:
     }
 
 
+def input_message(role: str, text: str = "hi") -> dict[str, Any]:
+    """An ``input[]`` message the way codex sends one."""
+    return {
+        "type": "message",
+        "role": role,
+        "content": [{"type": "input_text", "text": text}],
+    }
+
+
 def request_body(
     *tools: dict[str, Any], input_items: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     if input_items is None:
-        input_items = [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "hi"}],
-            }
-        ]
+        input_items = [input_message("user")]
     return {
         "model": "m",
         "stream": True,
@@ -347,6 +350,33 @@ def send(
     return reply
 
 
+def raw_send(port: int, request: bytes) -> bytes:
+    """Write ``request`` over a bare socket, half-close, and read to EOF."""
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(request)
+        sock.shutdown(socket.SHUT_WR)
+        pieces = []
+        while True:
+            data = sock.recv(65536)
+            if not data:
+                break
+            pieces.append(data)
+    return b"".join(pieces)
+
+
+def split_chunks(payload: bytes) -> list[bytes]:
+    """The data of each chunk in a chunked response body, in order."""
+    chunks: list[bytes] = []
+    while payload:
+        size_line, _, rest = payload.partition(b"\r\n")
+        size = int(size_line, 16)
+        if size == 0:
+            break
+        chunks.append(rest[:size])
+        payload = rest[size + 2 :]
+    return chunks
+
+
 def raw_exchange(port: int, body: bytes) -> tuple[bytes, list[bytes]]:
     """POST over a bare socket and return the head plus the decoded chunks."""
     request = (
@@ -356,24 +386,26 @@ def raw_exchange(port: int, body: bytes) -> tuple[bytes, list[bytes]]:
         + b"\r\n\r\n"
         + body
     )
-    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
-        sock.sendall(request)
-        pieces = []
-        while True:
-            data = sock.recv(65536)
-            if not data:
-                break
-            pieces.append(data)
-    head, _, payload = b"".join(pieces).partition(b"\r\n\r\n")
-    chunks: list[bytes] = []
-    while payload:
-        size_line, _, rest = payload.partition(b"\r\n")
-        size = int(size_line, 16)
-        if size == 0:
-            break
-        chunks.append(rest[:size])
-        payload = rest[size + 2 :]
-    return head, chunks
+    head, _, payload = raw_send(port, request).partition(b"\r\n\r\n")
+    return head, split_chunks(payload)
+
+
+CHUNKED_HEAD = (
+    b"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+    b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n"
+)
+
+
+def chunked_request(
+    body: bytes, *, chunk_size: int = 7, extension: bytes = b"", trailers: bytes = b""
+) -> bytes:
+    """``body`` as a chunked POST: sized pieces, a zero chunk, then trailers."""
+    pieces = [body[i : i + chunk_size] for i in range(0, len(body), chunk_size)]
+    framed = b"".join(
+        f"{len(piece):X}".encode() + extension + b"\r\n" + piece + b"\r\n"
+        for piece in pieces
+    )
+    return CHUNKED_HEAD + framed + b"0\r\n" + trailers + b"\r\n"
 
 
 def _shim_threads() -> list[threading.Thread]:
@@ -473,6 +505,65 @@ def test_flattened_name_collision_is_warned_and_forwarded(
     send(shim, request_body(function_tool(FLAT), namespace_tool()))
     assert [tool["name"] for tool in upstream.last.body["tools"]] == [FLAT, FLAT]
     assert "collides" in capsys.readouterr().err
+
+
+def test_flatten_request_demotes_developer_role() -> None:
+    developer = input_message("developer", "codex preamble")
+    system = input_message("system", "a late system message")
+    user = input_message("user")
+    untyped = {"role": "developer", "content": "type defaults to message"}
+    untouched = [
+        message_item(),
+        {"type": "message", "content": "no role"},
+        {"type": "message", "role": ["developer"], "content": "role not a string"},
+        call_item(),
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+    ]
+    body = request_body(
+        function_tool(), input_items=[developer, user, system, untyped, *untouched]
+    )
+    rewritten, namespaces = flatten_request(body)
+    assert namespaces == ()
+    assert rewritten["input"] == [
+        {**developer, "role": "user"},
+        user,
+        {**system, "role": "user"},
+        {**untyped, "role": "user"},
+        *untouched,
+    ]
+    # Items that need nothing are the same objects; instructions is untouched.
+    assert all(a is b for a, b in zip(rewritten["input"][4:], untouched))
+    assert rewritten["instructions"] == "be brief"
+    assert rewritten["tools"] is body["tools"]
+    # Nothing to demote: the same object comes back, so bytes can be reused.
+    plain = request_body(function_tool(), input_items=[user, message_item()])
+    assert flatten_request(plain)[0] is plain
+
+
+def test_shim_demotes_developer_role_on_the_upstream_leg(
+    upstream: Upstream, shim: McpShim
+) -> None:
+    upstream.answer_stream(message_item())
+    developer = input_message("developer", "codex preamble")
+    output = {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+    reply = send(
+        shim,
+        request_body(
+            function_tool(),
+            input_items=[developer, input_message("user"), call_item(), output],
+        ),
+    )
+    assert reply.status == 200
+    sent = upstream.last
+    assert sent.body["input"] == [
+        {**developer, "role": "user"},
+        input_message("user"),
+        call_item(),
+        output,
+    ]
+    assert sent.body["instructions"] == "be brief"
+    assert sent.body["tools"] == [function_tool()]
+    assert sent.headers["content-length"] == str(len(sent.raw))
 
 
 def test_shim_passes_requests_without_namespaces_byte_identical(
@@ -590,6 +681,58 @@ def test_shim_streams_each_line_as_its_own_chunk(
 
 
 # --- forwarding --------------------------------------------------------------
+
+
+def test_shim_decodes_chunked_request_body(upstream: Upstream, shim: McpShim) -> None:
+    upstream.answer_stream(message_item())
+    body = json.dumps(request_body(function_tool())).encode()
+    raw = raw_send(
+        shim.port,
+        chunked_request(
+            body, chunk_size=7, extension=b";ext=1", trailers=b"X-Checksum: abc\r\n"
+        ),
+    )
+    assert raw.startswith(b"HTTP/1.1 200")
+    sent = upstream.last
+    assert sent.raw == body
+    assert sent.headers["content-length"] == str(len(body))
+    assert "transfer-encoding" not in sent.headers
+    assert "x-checksum" not in sent.headers
+
+
+def test_shim_decodes_chunked_request_body_then_rewrites_it(
+    upstream: Upstream, shim: McpShim
+) -> None:
+    """Both request rewrites compose on one chunked body."""
+    upstream.answer_stream(call_item())
+    developer = input_message("developer")
+    body = json.dumps(request_body(namespace_tool(), input_items=[developer])).encode()
+    raw = raw_send(shim.port, chunked_request(body, chunk_size=1000))
+    sent = upstream.last
+    assert sent.headers["content-length"] == str(len(sent.raw))
+    assert [tool["name"] for tool in sent.body["tools"]] == [FLAT]
+    assert sent.body["input"] == [{**developer, "role": "user"}]
+    head, _, payload = raw.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 200")
+    events = parse_sse(b"".join(split_chunks(payload)))
+    done = [e["item"] for e in events if e["type"] == "response.output_item.done"]
+    assert [(item["namespace"], item["name"]) for item in done] == [(NAMESPACE, TOOL)]
+
+
+def test_shim_refuses_a_truncated_chunked_body(
+    upstream: Upstream, shim: McpShim
+) -> None:
+    upstream.answer_stream(message_item())
+    body = json.dumps(request_body()).encode()
+    truncated = CHUNKED_HEAD + f"{len(body):X}\r\n".encode() + body[:10]
+    raw = raw_send(shim.port, truncated)
+    head, _, payload = raw.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 400")
+    error = json.loads(payload)["error"]
+    assert error["type"] == "malformed_request"
+    assert "chunk" in error["message"]
+    # Nothing reached the server: a short body under an honest length is worse.
+    assert upstream.received == []
 
 
 def test_shim_attaches_the_named_key_upstream_only(
