@@ -105,6 +105,34 @@ _GROK_TOOL_DETAIL_KEYS = (
     "pattern",
 )
 
+#: opencode `run --format json` events use these top-level `type` values,
+#: recorded verbatim from opencode 1.18.27. Every event wraps the part it
+#: reports under `part`, whose own `type` mirrors the envelope with a hyphen
+#: (`step-start`, `step-finish`, `tool`, `text`). `text` is also a Grok crumb
+#: type, so the envelope, never the name alone, tells the two apart.
+OPENCODE_EVENT_TYPES = frozenset({"step_start", "step_finish", "tool_use", "text"})
+#: The MCP servers Ortus registers for opencode. opencode runs each server
+#: itself and presents its tools to the model as flat functions named
+#: `<server>_<tool>`, so a tool name carrying one of these prefixes is an
+#: MCP call and the CodeGraph one is the required-mode handshake.
+OPENCODE_MCP_SERVERS = frozenset({"codegraph"})
+#: The `part.reason` a finished step carries once the worker has answered;
+#: any other reason (`tool-calls`) means further steps follow.
+OPENCODE_STEP_STOP = "stop"
+_OPENCODE_TOOL_DETAIL_KEYS = (
+    "command",
+    "filePath",
+    "file_path",
+    "path",
+    "pattern",
+    "query",
+    "url",
+    "description",
+)
+#: Numeric stamps at or above this are epoch milliseconds, not seconds: a
+#: seconds value this large names a year past 5000, which no log carries.
+_EPOCH_MS_THRESHOLD = 10**11
+
 
 class Writer(str, Enum):
     """Which process appended a log line."""
@@ -289,10 +317,64 @@ def is_grok_event(obj: object) -> bool:
 
     Detection is the object's top-level `type`, never a substring of the
     rendered text: a Claude assistant turn that happens to say "thought" is
-    not a Grok crumb.
+    not a Grok crumb. Nor is an opencode `text` event, which shares the type
+    name but carries the `part` envelope Grok never writes.
     """
 
-    return isinstance(obj, dict) and obj.get("type") in GROK_EVENT_TYPES
+    return (
+        isinstance(obj, dict)
+        and obj.get("type") in GROK_EVENT_TYPES
+        and not is_opencode_event(obj)
+    )
+
+
+def is_opencode_event(obj: object) -> bool:
+    """True when `obj` is a parsed opencode `run --format json` event.
+
+    Detection is the top-level `type` together with the `part` envelope
+    every opencode event carries, so the shared `text` name cannot claim a
+    Grok crumb and a Grok crumb cannot claim an opencode part.
+    """
+
+    return (
+        isinstance(obj, dict)
+        and obj.get("type") in OPENCODE_EVENT_TYPES
+        and isinstance(obj.get("part"), dict)
+    )
+
+
+def opencode_mcp_server(name: str) -> str | None:
+    """The registered MCP server an opencode tool name belongs to, if any."""
+
+    for server in OPENCODE_MCP_SERVERS:
+        prefix = f"{server}_"
+        if name.startswith(prefix) and len(name) > len(prefix):
+            return server
+    return None
+
+
+def summarize_opencode_tool(obj: dict[str, Any]) -> str:
+    """One-line name plus the first useful argument of an opencode tool_use.
+
+    Reads `part.tool` and `part.state.input` by typed path and never the
+    call's output, so a summary cannot carry a file body or a command's
+    stdout. A server that returns an empty tool name is shown as `tool`.
+    """
+
+    part = obj.get("part")
+    part = part if isinstance(part, dict) else {}
+    name = str(part.get("tool") or "tool")
+    state = part.get("state")
+    state = state if isinstance(state, dict) else {}
+    raw = state.get("input")
+    if not isinstance(raw, dict):
+        return name
+    for key in _OPENCODE_TOOL_DETAIL_KEYS:
+        value = raw.get(key)
+        if value:
+            detail = str(value).replace("\n", " ")[:160]
+            return f"{name}  {detail}"
+    return name
 
 
 def summarize_grok_tool(obj: dict[str, Any]) -> str:
@@ -640,8 +722,40 @@ def _describe(payload: dict[str, Any], kind: str) -> tuple[str, bool]:
         return _describe_codex_item(payload.get("item"))
     if kind == "turn.completed":
         return "turn completed", True
+    if is_opencode_event(payload):
+        return _describe_opencode(payload, kind)
     if is_grok_event(payload) or kind in GROK_EVENT_TYPES:
         return _describe_grok(payload, kind)
+    return _clip(kind or "event"), False
+
+
+def _describe_opencode(payload: dict[str, Any], kind: str) -> tuple[str, bool]:
+    """Describe an opencode event. Tool calls and assistant text are actions.
+
+    A `step_finish` whose reason is `stop` is the worker's answer, the end of
+    its turn, so it is an action like codex's `turn.completed`; one that
+    finished for `tool-calls` sits between tool calls and is bookkeeping, as
+    is every `step_start`. A tool's output is never read here.
+    """
+
+    part = payload.get("part")
+    part = part if isinstance(part, dict) else {}
+    if kind == "tool_use":
+        state = part.get("state")
+        state = state if isinstance(state, dict) else {}
+        summary = summarize_opencode_tool(payload)
+        if str(state.get("status") or "") == "error":
+            return _clip(f"error: {summary}"), True
+        return _clip(summary), True
+    if kind == "text":
+        return _clip(_first_line(part.get("text")) or "message"), True
+    if kind == "step_finish":
+        reason = str(part.get("reason") or "")
+        if reason == OPENCODE_STEP_STOP:
+            return "turn completed", True
+        return _clip(f"step finished{f' ({reason})' if reason else ''}"), False
+    if kind == "step_start":
+        return "step started", False
     return _clip(kind or "event"), False
 
 
@@ -761,6 +875,15 @@ def _event_time(payload: dict[str, Any]) -> _dt.datetime | None:
 
 
 def _parse_time(value: Any) -> _dt.datetime | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        # opencode stamps each event in epoch milliseconds.
+        seconds = value / 1000 if value >= _EPOCH_MS_THRESHOLD else value
+        try:
+            return _dt.datetime.fromtimestamp(seconds, tz=_dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     if not isinstance(value, str) or not value.strip():
         return None
     try:

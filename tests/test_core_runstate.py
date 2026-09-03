@@ -14,6 +14,8 @@ from ortus.core.runstate import (
     Writer,
     classify_line,
     find_log,
+    is_grok_event,
+    is_opencode_event,
     read_log_tail,
     read_snapshot,
 )
@@ -489,3 +491,146 @@ def test_events_carry_their_payload_for_downstream_panels(tmp_path: Path) -> Non
     assert isinstance(verdicts[0], LogEvent)
     assert verdicts[0].payload == envelope
     assert verdicts[0].text == "verdict pass"
+
+
+# --- ortus-t2kn.5: opencode `run --format json` events ----------------------
+
+
+_OPENCODE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "opencode-run-events.jsonl"
+
+
+def _opencode_lines() -> list[str]:
+    return _OPENCODE_FIXTURE.read_text(encoding="utf-8").splitlines()
+
+
+def test_opencode_events_decode_to_assistant_tool_and_finish(tmp_path: Path) -> None:
+    """AC-1: the captured stream classifies by recorded type, action, and time."""
+
+    log = _write_log(tmp_path, _OPENCODE_FIXTURE.read_text(encoding="utf-8"))
+
+    tail = read_log_tail(log)
+
+    assert len(tail.events) == len(_opencode_lines())
+    assert all(event.writer is Writer.AGENT for event in tail.events)
+    assert {event.kind for event in tail.events} == {
+        "step_start",
+        "text",
+        "step_finish",
+        "tool_use",
+    }
+    # Text is the message's first line, clipped to the description bound.
+    texts = [event for event in tail.events if event.kind == "text"]
+    assert [event.text for event in texts] == [
+        "OK",
+        "**Directory `/work/probe`:**",
+        "The tool returned a response, but found nothing: both calls replied "
+        '"No relevant code found" for "hello" (and "README hello"). Code doesn\'t '
+        "index README markdown as symbols, so an empty result is expe…",
+    ]
+    assert len(texts[-1].text) == 201
+    assert all(event.action for event in texts)
+    # Descriptions are clipped to single spaces, so the two-space join the
+    # tool summary uses collapses here as the Grok summary's does.
+    tools = [event for event in tail.events if event.kind == "tool_use"]
+    assert [event.text for event in tools] == [
+        "bash ls -la /work/probe",
+        "glob README.md",
+        "read /work/probe/README.md",
+        "codegraph_codegraph_explore hello",
+        "codegraph_codegraph_explore README hello",
+    ]
+    assert all(event.action for event in tools)
+    # A tool's output never reaches the model: the README body the worker read
+    # and the directory listing it ran are absent from every description.
+    assert not any("hello from the opencode probe" in event.text for event in tools)
+    assert not any("drwxr" in event.text for event in tools)
+    finishes = [event for event in tail.events if event.kind == "step_finish"]
+    assert [event.text for event in finishes] == [
+        "turn completed",
+        "step finished (tool-calls)",
+        "step finished (tool-calls)",
+        "turn completed",
+        "step finished (tool-calls)",
+        "step finished (tool-calls)",
+        "turn completed",
+    ]
+    assert [event.action for event in finishes] == [
+        True, False, False, True, False, False, True
+    ]
+    starts = [event for event in tail.events if event.kind == "step_start"]
+    assert {event.text for event in starts} == {"step started"}
+    assert not any(event.action for event in starts)
+    # opencode stamps events in epoch milliseconds; each decodes to an aware
+    # instant, and the stream is monotonic.
+    first = _dt.datetime.fromtimestamp(1788474266948 / 1000, tz=_dt.timezone.utc)
+    assert tail.events[0].at == first
+    stamps = [event.at for event in tail.events]
+    assert all(stamp is not None and stamp.tzinfo is not None for stamp in stamps)
+    assert stamps == sorted(stamps)  # type: ignore[type-var]
+
+    snapshot = read_snapshot(tmp_path)
+
+    assert snapshot.latest_action == "turn completed"
+
+
+def test_opencode_events_are_not_grok_crumbs() -> None:
+    """`text` is a type both vocabularies use; the `part` envelope decides."""
+
+    opencode_text = json.loads(next(line for line in _opencode_lines() if '"type":"text"' in line))
+    grok_text = {"type": "text", "data": "I'll inspect the leftover state."}
+
+    assert is_opencode_event(opencode_text) and not is_grok_event(opencode_text)
+    assert is_grok_event(grok_text) and not is_opencode_event(grok_text)
+    assert not is_opencode_event({"type": "text"})
+    assert not is_opencode_event({"type": "tool_use", "part": "flat"})
+
+    described = classify_line(json.dumps(grok_text))
+    assert described is not None
+    assert described.text == "I'll inspect the leftover state."
+    assert described.action is False
+
+
+def test_opencode_events_tolerate_odd_tool_names_errors_and_truncation(
+    tmp_path: Path,
+) -> None:
+    """Empty and dotted names, a failed call, a bare `tool_use`, and a cut line."""
+
+    def tool(name: str, status: str = "completed", **state: object) -> dict:
+        return {
+            "type": "tool_use",
+            "timestamp": 1788474287304,
+            "sessionID": "ses_x",
+            "part": {
+                "type": "tool",
+                "tool": name,
+                "callID": "call-1",
+                "state": {"status": status, **state},
+            },
+        }
+
+    empty = classify_line(_agent(tool("", input={"query": "x"})))
+    dotted = classify_line(_agent(tool("codegraph.codegraph_explore", input={"query": "x"})))
+    failed = classify_line(
+        _agent(tool("bash", "error", input={"command": "false"}, error="exit 1"))
+    )
+    stateless = classify_line(_agent({"type": "tool_use", "part": {"type": "tool"}}))
+    bare = classify_line(_agent({"type": "tool_use"}))
+
+    assert empty is not None and empty.text == "tool x" and empty.action
+    assert dotted is not None and dotted.text == "codegraph.codegraph_explore x"
+    assert failed is not None and failed.text == "error: bash false" and failed.action
+    assert stateless is not None and stateless.text == "tool"
+    assert bare is not None and bare.text == "tool_use" and not bare.action
+
+    # A final event still being written stays unread until its newline lands;
+    # a cut line that did get its newline is reported as the plain text it is.
+    body = _OPENCODE_FIXTURE.read_text(encoding="utf-8")
+    cut = _agent(tool("bash", input={"command": "ls"}))[:60]
+    log = _write_log(tmp_path, body + cut)
+    pending = read_log_tail(log)
+    assert len(pending.events) == len(_opencode_lines())
+    assert pending.offset == len(body.encode("utf-8"))
+    log.write_text(body + cut + "\n", encoding="utf-8")
+    finished = read_log_tail(log)
+    assert len(finished.events) == len(_opencode_lines()) + 1
+    assert finished.events[-1].writer is Writer.ORTUS

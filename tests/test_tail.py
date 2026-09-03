@@ -898,3 +898,103 @@ def test_claude_backend_still_takes_the_claude_decoder(
     """Widening the codex switch to local must not pull claude along."""
     _, asked_codex = _tail_backend(tmp_path, monkeypatch, "claude")
     assert asked_codex is False
+
+
+# --- ortus-t2kn.5: an opencode log takes the opencode decoder ---------------
+
+
+_OPENCODE_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "opencode-run-events.jsonl"
+)
+_OPENCODE_GOLDEN = (
+    Path(__file__).resolve().parent / "fixtures" / "opencode-tail-golden.txt"
+)
+
+
+def _tail_opencode_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> tuple[str, dict[str, bool], Path]:
+    """Run `ortus tail --backend <backend>` once over the opencode fixture.
+
+    Returns the render, which decoder switches the verb asked `_follow` for,
+    and the log the verb read, so a test can hand the same file to the
+    CodeGraph transcript parser grind runs after a worker exits.
+    """
+    from ortus.commands import tail as tail_module
+
+    repo = tmp_path / f"repo-{backend}"
+    (repo / ".beads").mkdir(parents=True)
+    logs = repo / "logs"
+    logs.mkdir()
+    log = logs / "grind-served.log"
+    log.write_text(_OPENCODE_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    buf = io.StringIO()
+    asked: dict[str, bool] = {}
+
+    def bounded(logs_dir: Path, **kwargs: object) -> None:
+        asked["codex"] = bool(kwargs["codex"])
+        asked["opencode"] = bool(kwargs["opencode"])
+        kwargs.update(iterations=1, out=buf)
+        _follow(logs_dir, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(tail_module, "_follow", bounded)
+    monkeypatch.setenv("NO_COLOR", "1")
+    result = runner.invoke(
+        app, ["tail", str(repo), "--backend", backend, "-v", "--lines", "0"]
+    )
+    assert result.exit_code == 0, result.output
+    return buf.getvalue(), asked, log
+
+
+def test_opencode_backend_uses_opencode_decoder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--backend opencode renders the captured stream as decoded events."""
+    out, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "opencode")
+    assert asked == {"codex": False, "opencode": True}
+    assert _OPENCODE_GOLDEN.read_text(encoding="utf-8") in out
+    assert '"type":"tool_use"' not in out
+    assert "sessionID" not in out
+
+
+def test_opencode_codegraph_handshake_is_rendered_and_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the flat MCP call renders as [MCP] and is the required-mode handshake."""
+    from ortus.core.codegraph import (
+        CodeGraphMode,
+        CodeGraphPhase,
+        CodeGraphProbe,
+        parse_transcript,
+        require_handshake,
+    )
+
+    out, _, log = _tail_opencode_log(tmp_path, monkeypatch, "opencode")
+    assert out.count("  [MCP] codegraph_codegraph_explore") == 2
+    assert out.count("  [RESULT] codegraph_codegraph_explore: completed") == 2
+    assert "  [TOOL] codegraph" not in out
+    assert "  [MCP] bash" not in out
+
+    summary = parse_transcript(
+        log,
+        phase=CodeGraphPhase.IMPLEMENTATION,
+        probe=CodeGraphProbe(CodeGraphMode.REQUIRED, True, True, True),
+    )
+    assert summary.capability_observed
+    assert [event.tool for event in summary.events] == [
+        "codegraph_codegraph_explore",
+        "codegraph_codegraph_explore",
+    ]
+    assert [event.query for event in summary.events] == ["hello", "README hello"]
+    assert all(event.success for event in summary.events)
+    require_handshake(summary)
+
+
+def test_local_backend_keeps_the_codex_decoder_until_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local run is still `codex exec`, so its log is not yet an opencode log."""
+    _, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "local")
+    assert asked == {"codex": True, "opencode": False}
+    _, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "grok")
+    assert asked == {"codex": False, "opencode": False}

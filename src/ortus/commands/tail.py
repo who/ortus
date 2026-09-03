@@ -65,8 +65,10 @@ from ortus.core import output
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.repo import resolve_repo
 from ortus.core.runstate import (
+    OPENCODE_STEP_STOP,
     _mtime,
     is_grok_event as _is_grok_event,
+    opencode_mcp_server as _opencode_mcp_server,
     summarize_grok_tool as _summarize_grok_tool,
 )
 
@@ -664,6 +666,179 @@ def _format_codex_line(
 
 
 # ---------------------------------------------------------------------------
+# opencode `opencode run --format json` decoder
+# ---------------------------------------------------------------------------
+#
+# opencode emits JSON Lines, one per message part, in the shape the Q1 spike
+# recorded from opencode 1.18.27 (tests/fixtures/opencode-run-events.jsonl):
+#
+#   {"type":"step_start","timestamp":<epoch ms>,"sessionID":...,
+#    "part":{"type":"step-start",...}}
+#   {"type":"text",...,"part":{"type":"text","text":...}}
+#   {"type":"tool_use",...,"part":{"type":"tool","tool":<name>,"callID":...,
+#    "state":{"status","input","output","title","time"}}}
+#   {"type":"step_finish",...,"part":{"type":"step-finish",
+#    "reason":"stop"|"tool-calls","tokens":{"total","input","output",
+#    "reasoning","cache":{"read","write"}},"cost"}}
+#
+# A tool_use is the call and its result in one event, so it renders as the
+# codex command pair does: the call under [TOOL] (or [MCP] for a tool opencode
+# runs on a registered MCP server, which it names `<server>_<tool>`) and the
+# outcome under [RESULT]. Every field is read by typed path, never by
+# grepping free text, so a schema change surfaces as a missing render.
+
+OPENCODE_DECODE_ERROR_PREFIX = "!!! OPENCODE DECODE ERROR"
+
+
+def _opencode_decode_error(reason: str, line: str, palette: _Palette) -> str:
+    """Loud, non-silent diagnostic for an event the decoder cannot read."""
+    excerpt = line if len(line) <= 200 else line[:200] + "..."
+    return _wrap(
+        f"{OPENCODE_DECODE_ERROR_PREFIX}: {reason}: {excerpt}",
+        palette.bold,
+        palette.red,
+        reset=palette.reset,
+    )
+
+
+def _render_opencode_tool(part: dict, *, palette: _Palette) -> list[str]:
+    """Render one tool part: the call, then its outcome."""
+    name = str(part.get("tool") or "tool")
+    label = "[MCP]" if _opencode_mcp_server(name) else "[TOOL]"
+    state = part.get("state")
+    state = state if isinstance(state, dict) else {}
+    out = [_wrap(f"  {label} {name}", palette.yellow, reset=palette.reset)]
+    raw = state.get("input")
+    if raw not in (None, "", {}):
+        out.append(_wrap(f"  {_truncate(raw, 200)}", palette.dim, reset=palette.reset))
+    status = str(state.get("status") or "?")
+    if status == "error":
+        out.append(
+            _wrap(f"  [RESULT] {name}: ERROR", palette.red, reset=palette.reset)
+        )
+        body = str(state.get("error") or "")
+    else:
+        out.append(
+            _wrap(f"  [RESULT] {name}: {status}", palette.cyan, reset=palette.reset)
+        )
+        output = state.get("output")
+        body = "" if output is None else _truncate(output, 200)
+    body = body.rstrip("\n")
+    if body:
+        out.append(_wrap(f"  {_truncate(body, 200)}", palette.dim, reset=palette.reset))
+    return out
+
+
+def _render_opencode_object(
+    obj: dict,
+    *,
+    show_tools: bool,
+    show_system: bool,
+    palette: _Palette,
+) -> list[str]:
+    kind = obj.get("type")
+
+    if kind == "ortus.codegraph":
+        return [_render_codegraph_event(obj, palette)]
+
+    if kind == "ortus.verdict":
+        decision = str(obj.get("decision", "unknown")).upper()
+        digest = str(obj.get("candidate_hash", ""))[:12]
+        reason = str(obj.get("reason", "")).strip()
+        colour = palette.green if decision == "PASS" else palette.red
+        rendered = f"[VERDICT] {decision} candidate={digest}"
+        if reason:
+            rendered += f" — {_truncate(reason, 160)}"
+        return [_wrap(rendered, colour, reset=palette.reset)]
+
+    part = obj.get("part")
+    if not isinstance(part, dict):
+        if show_system:
+            return [_wrap(f"[SYS] {kind}", palette.dim, reset=palette.reset)]
+        return []
+
+    if kind == "text":
+        text = part.get("text", "")
+        if not text:
+            return []
+        return [
+            "",
+            _wrap("<<< ASSISTANT", palette.bold, palette.green, reset=palette.reset),
+            _wrap(str(text), palette.green, reset=palette.reset),
+        ]
+
+    if kind == "tool_use":
+        if not show_tools:
+            return []
+        return _render_opencode_tool(part, palette=palette)
+
+    if kind == "step_finish":
+        reason = str(part.get("reason") or "?")
+        # The stop step is the turn's end and is always shown, as codex's
+        # turn.completed is; the steps between tool calls are system noise.
+        if reason != OPENCODE_STEP_STOP and not show_system:
+            return []
+        tokens = part.get("tokens")
+        tokens = tokens if isinstance(tokens, dict) else {}
+        cache = tokens.get("cache")
+        cache = cache if isinstance(cache, dict) else {}
+        return [
+            _wrap(
+                "  [USAGE] input={} cached={} output={} reasoning={} reason={}".format(
+                    tokens.get("input", 0),
+                    cache.get("read", 0),
+                    tokens.get("output", 0),
+                    tokens.get("reasoning", 0),
+                    reason,
+                ),
+                palette.cyan,
+                reset=palette.reset,
+            )
+        ]
+
+    if show_system:
+        # step_start, and any part kind this decoder was not written for
+        # (a reasoning part from a thinking model, say): named, never guessed.
+        return [_wrap(f"[SYS] {kind}", palette.dim, reset=palette.reset)]
+    return []
+
+
+def _format_opencode_line(
+    line: str,
+    *,
+    show_tools: bool,
+    show_system: bool,
+    palette: _Palette = _NO_COLOR_PALETTE,
+) -> str | None:
+    """Render one `opencode run --format json` line; None when filtered out.
+
+    A line that looks like an event but cannot be decoded (truncated write,
+    schema drift) is reported loudly rather than dropped, as the codex
+    decoder does — silent skipping is how a broken decoder masquerades as a
+    quiet run.
+    """
+    line = line.rstrip("\n")
+    if not line:
+        return None
+    if not line.startswith("{"):
+        return _render_plain(line, palette)
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return _opencode_decode_error(str(exc), line, palette)
+    if not isinstance(obj, dict):
+        return _opencode_decode_error("event is not a JSON object", line, palette)
+    if not obj.get("type"):
+        return _opencode_decode_error("event has no `type` field", line, palette)
+    pieces = _render_opencode_object(
+        obj, show_tools=show_tools, show_system=show_system, palette=palette
+    )
+    if not pieces:
+        return None
+    return "\n".join(pieces)
+
+
+# ---------------------------------------------------------------------------
 # Non-JSON line colouring (mirrors bash format_line non-JSON branch)
 # ---------------------------------------------------------------------------
 
@@ -1001,6 +1176,7 @@ def _follow(
     err: IO[str] | None = None,
     lines: int = DEFAULT_ATTACH_LINES,
     follow_all: bool = False,
+    opencode: bool = False,
 ) -> None:
     """Polling tail. `iterations<0` runs forever; finite values for tests.
 
@@ -1081,6 +1257,16 @@ def _follow(
                         if rendered is not None and CODEX_DECODE_ERROR_PREFIX in rendered:
                             err.write(rendered + "\n")
                             err.flush()
+                    elif opencode:
+                        rendered = _format_opencode_line(
+                            line,
+                            show_tools=show_tools,
+                            show_system=show_system,
+                            palette=palette,
+                        )
+                        if rendered is not None and OPENCODE_DECODE_ERROR_PREFIX in rendered:
+                            err.write(rendered + "\n")
+                            err.flush()
                     else:
                         rendered = _format_line(
                             line,
@@ -1152,7 +1338,7 @@ def tail(
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
-        help="Log backend (claude|codex|grok|local); defaults from .ortusrc.",
+        help="Log backend (claude|codex|grok|local|opencode); defaults from .ortusrc.",
     ),
     lines: int = typer.Option(
         DEFAULT_ATTACH_LINES,
@@ -1205,7 +1391,10 @@ def tail(
         show_system=system,
         assistant_only=assistant,
         # A local run is `codex exec` at an operator-served model, so its
-        # log is a codex log and takes the same decoder.
+        # log is a codex log and takes the same decoder until the retirement
+        # leaf moves that backend onto opencode; an opencode run writes
+        # opencode events and takes its own.
         codex=resolved_backend in ("codex", "local"),
+        opencode=resolved_backend == "opencode",
         lines=lines,
     )

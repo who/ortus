@@ -1,0 +1,61 @@
+[SYS] step_start
+
+<<< ASSISTANT
+OK
+  [USAGE] input=8876 cached=0 output=23 reasoning=0 reason=stop
+[SYS] step_start
+  [TOOL] bash
+  {"command": "ls -la /work/probe"}
+  [RESULT] bash: completed
+  total 20
+drwxr-xr-x  3 probe probe 4096 Sep  3 15:24 .
+drwxr-x--- 38 probe probe 4096 Sep  3 15:24 ..
+drwxr-xr-x  7 probe probe 4096 Sep  3 15:24 .git
+-rw-r--r--  1 probe probe   30 Sep  3 15:24 READM...
+  [TOOL] glob
+  {"pattern": "README.md"}
+  [RESULT] glob: completed
+  /work/probe/README.md
+  [USAGE] input=33 cached=8859 output=121 reasoning=0 reason=tool-calls
+[SYS] step_start
+  [TOOL] read
+  {"filePath": "/work/probe/README.md"}
+  [RESULT] read: completed
+  <path>/work/probe/README.md</path>
+<type>file</type>
+<content>
+1: hello from the opencode probe
+
+(End of file - total 1 lines)
+</content>
+  [USAGE] input=186 cached=9012 output=45 reasoning=0 reason=tool-calls
+[SYS] step_start
+
+<<< ASSISTANT
+**Directory `/work/probe`:**
+- `.git/` (directory)
+- `README.md` (30 bytes)
+- `opencode.json` (347 bytes)
+
+**README.md exact contents** (1 line):
+```
+hello from the opencode probe
+```
+  [USAGE] input=66 cached=9242 output=153 reasoning=0 reason=stop
+[SYS] step_start
+  [MCP] codegraph_codegraph_explore
+  {"query": "hello"}
+  [RESULT] codegraph_codegraph_explore: completed
+  No relevant code found for "hello"
+  [USAGE] input=10499 cached=0 output=81 reasoning=0 reason=tool-calls
+[SYS] step_start
+  [MCP] codegraph_codegraph_explore
+  {"query": "README hello"}
+  [RESULT] codegraph_codegraph_explore: completed
+  No relevant code found for "README hello"
+  [USAGE] input=24 cached=10579 output=80 reasoning=0 reason=tool-calls
+[SYS] step_start
+
+<<< ASSISTANT
+The tool returned a response, but found nothing: both calls replied "No relevant code found" for "hello" (and "README hello"). Code doesn't index README markdown as symbols, so an empty result is expected.
+  [USAGE] input=25 cached=10682 output=138 reasoning=0 reason=stop

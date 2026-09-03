@@ -341,7 +341,7 @@ def parse_transcript(
     probe: CodeGraphProbe,
     start_offset: int = 0,
 ) -> CodeGraphSummary:
-    """Normalize Claude/Codex/Grok JSONL CodeGraph calls without retaining payloads."""
+    """Normalize Claude/Codex/Grok/opencode JSONL CodeGraph calls without retaining payloads."""
     summary = CodeGraphSummary(phase.value, probe)
     if probe.mode is CodeGraphMode.OFF:
         summary.fallbacks.append("disabled by policy")
@@ -464,7 +464,7 @@ def _hit(result: object) -> bool:
 
 
 def _tool_records(obj: object) -> Iterable[tuple[str, str, object, object, object]]:
-    """Yield id/name/arguments/result/error across Claude, Codex, and Grok schemas."""
+    """Yield id/name/arguments/result/error across the Claude, Codex, Grok, and opencode schemas."""
     if not isinstance(obj, dict):
         return
     kind = obj.get("type")
@@ -492,6 +492,26 @@ def _tool_records(obj: object) -> Iterable[tuple[str, str, object, object, objec
                 item.get("result") if completed else None,
                 item.get("error") if completed else None,
             )
+    elif kind == "tool_use" and isinstance(obj.get("part"), dict):
+        # opencode `run --format json`: one event per tool part. opencode runs
+        # its MCP servers itself and names each tool `<server>_<tool>`, so the
+        # CodeGraph call arrives flat as `codegraph_codegraph_explore`, and a
+        # completed or errored part is the call's result as well as the call.
+        part = obj["part"]
+        state = part.get("state")
+        state = state if isinstance(state, dict) else {}
+        status = str(state.get("status") or "")
+        result = state.get("output") if status == "completed" else None
+        if status == "completed" and result is None:
+            result = ""
+        error = (state.get("error") or "error") if status == "error" else None
+        yield (
+            str(part.get("callID", "")),
+            str(part.get("tool", "")),
+            state.get("input"),
+            result,
+            error,
+        )
     elif kind == "tool_call":
         name, arguments = _grok_tool_name_and_input(obj)
         yield str(obj.get("toolCallId", "")), name, arguments, None, None

@@ -362,3 +362,61 @@ def test_auto_probe_mcp_failure_degrades(
     probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO)
     assert not probe.available
     assert "MCP tools/call failed" in (probe.reason or "")
+
+
+def test_opencode_flat_mcp_tool_counts_as_handshake(tmp_path: Path) -> None:
+    """opencode names an MCP tool `<server>_<tool>`; the captured call is the handshake."""
+    summary = parse_transcript(
+        FIXTURES / "opencode-run-events.jsonl",
+        phase=CodeGraphPhase.IMPLEMENTATION,
+        probe=_available(CodeGraphMode.REQUIRED),
+    )
+    assert summary.capability_observed
+    assert [event.tool for event in summary.events] == [
+        "codegraph_codegraph_explore",
+        "codegraph_codegraph_explore",
+    ]
+    assert [event.query for event in summary.events] == ["hello", "README hello"]
+    assert all(event.success for event in summary.events)
+    require_handshake(summary)
+    journal = tmp_path / "journal.jsonl"
+    append_normalized(journal, summary)
+    normalized = journal.read_text()
+    assert "No relevant code found" not in normalized
+    assert "hello from the opencode probe" not in normalized
+
+
+def test_opencode_errored_mcp_call_is_not_a_handshake(tmp_path: Path) -> None:
+    transcript = tmp_path / "opencode-failed.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "tool_use",
+                "timestamp": 1788474287304,
+                "sessionID": "ses_x",
+                "part": {
+                    "type": "tool",
+                    "tool": "codegraph_codegraph_explore",
+                    "callID": "call-1",
+                    "state": {
+                        "status": "error",
+                        "input": {"query": "orient to this repository"},
+                        "error": "MCP server exited",
+                    },
+                },
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "tool_use", "part": {"type": "tool", "tool": ""}})
+        + "\n"
+    )
+    summary = parse_transcript(
+        transcript,
+        phase=CodeGraphPhase.IMPLEMENTATION,
+        probe=_available(CodeGraphMode.REQUIRED),
+    )
+    assert not summary.capability_observed
+    assert summary.events[0].query == "orient to this repository"
+    assert "codegraph_codegraph_explore: tool error" in summary.fallbacks
+    with pytest.raises(CodeGraphUnavailable):
+        require_handshake(summary)
