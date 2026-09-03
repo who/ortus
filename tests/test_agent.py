@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import pytest
 
 from ortus.core.agent import (
+    OPENCODE_PERMISSION_ENV,
     BackendError,
     CodexRunner,
     GrokRunner,
     LocalRunner,
+    OpenCodeRunner,
     compose_worker_prompt,
     make_runner,
     resolve_backend,
@@ -180,7 +183,7 @@ def test_grok_codegraph_is_store_only() -> None:
 
 def test_runner_run_accepts_resume_kwarg() -> None:
     """f2he.5 AC-3: runners still accept resume=; grind just must not pass it."""
-    for cls in (ClaudeRunner, GrokRunner, CodexRunner, LocalRunner):
+    for cls in (ClaudeRunner, GrokRunner, CodexRunner, LocalRunner, OpenCodeRunner):
         assert "resume" in inspect.signature(cls.run).parameters
 
 
@@ -188,3 +191,36 @@ def test_codex_has_no_separate_handshake_agent() -> None:
     """AC-4: Codex no longer launches a child just to scrape a handshake log."""
     assert not hasattr(CodexRunner, "run_codegraph_handshake")
     assert "on_poll" in inspect.signature(CodexRunner.run).parameters
+
+
+def test_opencode_readonly_posture_is_technically_enforced(tmp_path: Path) -> None:
+    """The verify posture is opencode's own permission table, carried per launch."""
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    argv = runner.build_argv("verify", readonly=True)
+    assert argv[:2] == ["opencode", "run"]
+    assert runner._readonly_argv(argv, tmp_path) == argv
+    assert "bwrap" not in argv
+    posture = json.loads(runner.launch_env(readonly=True)[OPENCODE_PERMISSION_ENV])
+    assert posture["bash"] == "deny"
+    assert posture["edit"] == "deny"
+    assert posture["write"] == "deny"
+    assert OPENCODE_PERMISSION_ENV not in runner.launch_env()
+
+
+def test_make_runner_opencode_is_a_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    (tmp_path / ".ortusrc").write_text('[local]\nmodel = "m"\n')
+    runner = make_runner("opencode", repo=tmp_path)
+    assert type(runner) is OpenCodeRunner
+    assert not isinstance(runner, ClaudeRunner)
+    assert not isinstance(runner, CodexRunner)
+    assert not isinstance(runner, GrokRunner)
+
+
+def test_compose_worker_prompt_opencode() -> None:
+    prompt = compose_worker_prompt("opencode", "T")
+    assert prompt.startswith("T")
+    assert "/goal" not in prompt
+    assert "PLAN-GAP" in prompt

@@ -13,6 +13,15 @@ The local backend is the Codex CLI aimed at a model the operator serves
 themselves.  LocalRunner therefore *is* a CodexRunner: the same argv, followed
 by trusted ``-c`` overrides that register an ``ortus_local`` model provider
 from the ``[local]`` table of ``.ortusrc``.  The model is data in config.
+
+The opencode backend is that same operator-served model driven by the opencode
+CLI instead of Codex.  opencode speaks chat completions and runs MCP servers
+itself, presenting each tool as a flat function, so neither failure the Codex
+Responses path met at llama-server (a rejected ``developer`` role, namespace
+tools silently dropped) can arise and no shim is involved.  OpenCodeRunner is
+a sibling like GrokRunner because ``opencode run`` shares no flag with
+``codex exec``.  ``local`` keeps its Codex engine, byte for byte, until the
+retirement leaf removes it.
 """
 
 from __future__ import annotations
@@ -30,22 +39,25 @@ from ortus.core.codegraph import CodeGraphCapability
 from ortus.core.local_backend import (
     LOCAL_PROVIDER_ID,
     LOCAL_WIRE_API,
+    OPENCODE_PROVIDER_ID,
     LocalConfig,
     load_local_config,
 )
 from ortus.core.mcp_shim import McpShim, start_shim
 from ortus.core.profiles import AgentProfile, Phase as Phase, ProfileError
 
-Backend = Literal["claude", "codex", "grok", "local"]
-BACKENDS: tuple[Backend, ...] = ("claude", "codex", "grok", "local")
+Backend = Literal["claude", "codex", "grok", "local", "opencode"]
+BACKENDS: tuple[Backend, ...] = ("claude", "codex", "grok", "local", "opencode")
 #: The executable each backend launches. ``local`` drives the Codex CLI at an
 #: operator-served model, so readiness probes look for ``codex``, not for a
-#: binary called ``local``.
+#: binary called ``local``; ``opencode`` drives the same model through its
+#: own CLI.
 BACKEND_BINARIES: dict[Backend, str] = {
     "claude": "claude",
     "codex": "codex",
     "grok": "grok",
     "local": "codex",
+    "opencode": "opencode",
 }
 
 # Isolated probe 2026-08-13: grok -p '/goal …' is consumed by the host goal
@@ -380,6 +392,147 @@ class GrokRunner:
         return None
 
 
+#: The environment variable opencode parses as a JSON object and merges over
+#: the ``permission`` table of its configuration at startup.
+OPENCODE_PERMISSION_ENV = "OPENCODE_PERMISSION"
+#: The read-only verify posture proven against opencode 1.18.27: with these
+#: three denied, opencode drops the write, edit, and bash tools from the
+#: model's surface entirely, so a verifier has nothing that can touch the
+#: tree. ``bash`` is the vector the permission table cannot otherwise contain
+#: (an allowed bash tool writes through a redirect), so it is denied too.
+OPENCODE_READONLY_PERMISSION: dict[str, str] = {
+    "edit": "deny",
+    "write": "deny",
+    "bash": "deny",
+}
+
+
+@dataclass
+class OpenCodeRunner:
+    """Run one headless ``opencode run`` task at an operator-served model.
+
+    Sibling of ClaudeRunner and GrokRunner, not a CodexRunner subclass: the
+    ``run --format json -m provider/model`` surface shares nothing with
+    ``codex exec``. ``-m`` is always ``OPENCODE_PROVIDER_ID`` followed by a
+    slash and the model, so a served id that itself carries slashes or colons
+    still parses (opencode splits on the first slash). ``local`` supplies the
+    model; its ``api_key_env`` is only ever the *name* of a variable that the
+    provider entry in ``opencode.json`` resolves, so no key material enters
+    argv, the launch environment, or a log.
+    """
+
+    local: LocalConfig
+    opencode_binary: str = "opencode"
+    extra_env: dict[str, str] = field(default_factory=dict)
+    codegraph: CodeGraphCapability | None = None
+
+    def configure_codegraph(self, capability: CodeGraphCapability | None) -> None:
+        """Store the outer probe result.
+
+        opencode registers MCP servers in ``opencode.json`` and runs them
+        itself, so there is no launch-time override to emit; that file is
+        the init and check leaves' to write and to verify.
+        """
+        self.codegraph = capability
+
+    def build_argv(
+        self,
+        prompt: str,
+        *,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+        readonly: bool = False,
+        resume: str | None = None,
+    ) -> list[str]:
+        # `fast` is intentionally ignored: opencode has no tier flag. The
+        # read-only posture rides in the environment (`launch_env`), not in
+        # argv, so `readonly` leaves the argv unchanged.
+        model = self.local.model
+        if profile is not None and profile.model is not None:
+            model = profile.model
+        argv = [
+            self.opencode_binary,
+            "run",
+            "--format",
+            "json",
+            "-m",
+            f"{OPENCODE_PROVIDER_ID}/{model}",
+        ]
+        if profile is not None and profile.reasoning_effort is not None:
+            # A named variant of the model. opencode 1.18.27 applies nothing
+            # for a name the model does not define, so the profile validation
+            # in `profiles` is the only typo check.
+            argv.extend(["--variant", profile.reasoning_effort])
+        if resume:
+            argv.extend(["--session", resume])
+        argv.append(prompt)
+        return argv
+
+    def launch_env(self, *, readonly: bool = False) -> dict[str, str]:
+        """``extra_env``, plus the verify posture when ``readonly``.
+
+        The denial travels as JSON in ``OPENCODE_PERMISSION_ENV``, which
+        opencode merges over its configured ``permission`` table when it
+        starts, so the posture is per launch and no project file changes
+        for a verify run.
+        """
+        env = dict(self.extra_env)
+        if readonly:
+            env[OPENCODE_PERMISSION_ENV] = json.dumps(
+                OPENCODE_READONLY_PERMISSION, sort_keys=True
+            )
+        return env
+
+    def run(
+        self,
+        prompt: str,
+        *,
+        repo: Path,
+        log_path: Path,
+        fast: bool = False,
+        profile: AgentProfile | None = None,
+        timeout: float | None = None,
+        readonly: bool = False,
+        resume: str | None = None,
+        reap_when: Callable[[], bool] | None = None,
+        reap_poll: float = 2.0,
+        on_poll: Callable[[], None] | None = None,
+    ) -> int:
+        """Spawn opencode, tee output to log_path (NOT stdout), return exit code."""
+        argv = self.build_argv(
+            prompt, fast=fast, profile=profile, readonly=readonly, resume=resume
+        )
+        if readonly:
+            argv = self._readonly_argv(argv, repo)
+        return _spawn_logged(
+            argv,
+            repo=repo,
+            log_path=log_path,
+            extra_env=self.launch_env(readonly=readonly),
+            timeout=timeout,
+            readonly=readonly,
+            reap_when=reap_when,
+            reap_poll=reap_poll,
+            on_poll=on_poll,
+        )
+
+    def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
+        """The posture is opencode's own permission table; nothing wraps the process.
+
+        With write, edit, and bash denied the model has no tool that can
+        touch the tree. An outer read-only root would also make opencode's
+        own state directories read-only, the failure Codex documented, so
+        whether grind adds one on top is the preflight leaf's decision.
+        """
+
+        return argv
+
+    def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
+        """No Ortus-owned read-only wrapper to probe; mirrors ``_readonly_argv``."""
+
+        return None
+
+
 def wrap_grok_prompt(task: str, *, q1: str = GROK_GOAL_MODE) -> str:
     """Wrap a logical worker task for ``grok -p`` given the Q1 finding.
 
@@ -421,24 +574,26 @@ def resolve_backend(
 
 def make_runner(
     backend: Backend, *, repo: Path | None = None
-) -> ClaudeRunner | GrokRunner:
+) -> ClaudeRunner | GrokRunner | OpenCodeRunner:
     """Construct the runner for ``backend``.
 
-    ``repo`` matters only to ``local``, whose provider overrides come from the
-    ``[local]`` table of that repository's layered config; the other backends
-    ignore it. A missing or malformed table surfaces as ``BackendError`` with
-    the config error's own text, so every existing ``except BackendError``
-    site reports it unchanged.
+    ``repo`` matters only to ``local`` and ``opencode``, whose served model
+    comes from the ``[local]`` table of that repository's layered config; the
+    other backends ignore it. A missing or malformed table surfaces as
+    ``BackendError`` with the config error's own text, so every existing
+    ``except BackendError`` site reports it unchanged.
     """
     if backend == "codex":
         return CodexRunner()
     if backend == "grok":
         return GrokRunner()
-    if backend == "local":
+    if backend in ("local", "opencode"):
         try:
             local = load_local_config(load_config(repo=repo))
         except ProfileError as exc:
             raise BackendError(str(exc)) from exc
+        if backend == "opencode":
+            return OpenCodeRunner(local)
         return LocalRunner(local)
     return ClaudeRunner()
 
@@ -448,11 +603,20 @@ def compose_worker_prompt(backend: Backend, task: str) -> str:
 
     ``local`` is ``codex exec`` under another provider, so it takes the plain
     Codex prompt: a literal ``/goal`` would reach the model verbatim.
+    ``opencode`` has no slash commands at all and needs none: the objective
+    is the prompt, and its own turn loop runs to completion.
     """
     if backend == "claude":
         return f"/goal {task}"
     if backend == "grok":
         return wrap_grok_prompt(task)
+    if backend == "opencode":
+        return (
+            task
+            + "\n\nopencode lifecycle note: session-close per AGENTS.md. If "
+            "`git commit` or `bd close` cannot run non-interactively, that is "
+            "PLAN-GAP — do not invent a substitute."
+        )
     return (
         task
         + "\n\nCodex sandbox note: `.git` metadata is read-only in the "

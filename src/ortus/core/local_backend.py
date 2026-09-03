@@ -39,6 +39,11 @@ DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
 LOCAL_PROVIDER_ID = "ortus_local"
 #: The only wire API codex 0.147.0 accepts for a custom provider.
 LOCAL_WIRE_API = "responses"
+#: The `opencode.json` `provider.<id>` entry the opencode backend addresses
+#: as `-m <id>/<model>`. The same served model as `[local]`, reached through
+#: an OpenAI-compatible chat-completions provider that opencode.json
+#: registers under this id.
+OPENCODE_PROVIDER_ID = "ortuslocal"
 #: Tokens. A worker prompt plus CodeGraph tool output does not fit a smaller
 #: window; the context probe warns below this.
 MIN_RECOMMENDED_CONTEXT = 32768

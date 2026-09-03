@@ -1071,11 +1071,13 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
-        # Only the local backend has a server to reach. The table's rules
-        # run here so a missing [local] fails with one message whether the
-        # backend came from the flag, the environment, or .ortusrc.
+        # Only the operator-served backends have a server to reach. The
+        # table's rules run here so a missing [local] fails with one message
+        # whether the backend came from the flag, the environment, or .ortusrc.
         local_config = (
-            load_local_config(config) if resolved_backend == "local" else None
+            load_local_config(config)
+            if resolved_backend in ("local", "opencode")
+            else None
         )
         integration_branch = integration_branch or config.get(
             "integration_branch", DEFAULT_INTEGRATION_BRANCH

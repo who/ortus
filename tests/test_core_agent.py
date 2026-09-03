@@ -11,11 +11,14 @@ import pytest
 from ortus.core.agent import (
     BACKEND_BINARIES,
     BACKENDS,
+    OPENCODE_PERMISSION_ENV,
+    OPENCODE_READONLY_PERMISSION,
     AgentProfile,
     BackendError,
     CodexRunner,
     GrokRunner,
     LocalRunner,
+    OpenCodeRunner,
     compose_worker_prompt,
     make_runner,
     resolve_backend,
@@ -24,7 +27,8 @@ from ortus.core.agent import (
 )
 from ortus.core.claude import ClaudeRunner
 from ortus.core.codegraph import CodeGraphCapability
-from ortus.core.local_backend import LocalConfig
+from ortus.core.local_backend import OPENCODE_PROVIDER_ID, LocalConfig
+from ortus.core.profiles import SUPPORTED_EFFORTS, ProfileError, validate_profile_values
 
 
 def test_claude_is_the_default(tmp_path: Path) -> None:
@@ -168,7 +172,7 @@ def _fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def test_local_is_a_legal_backend(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    assert BACKENDS == ("claude", "codex", "grok", "local")
+    assert BACKENDS == ("claude", "codex", "grok", "local", "opencode")
     assert BACKEND_BINARIES["local"] == "codex"
     assert resolve_backend("local", repo=tmp_path, home=home) == "local"
     with pytest.raises(BackendError, match="claude, codex, grok, local"):
@@ -347,3 +351,179 @@ def test_make_runner_local_without_table_is_actionable(
     (tmp_path / ".ortusrc").write_text('backend = "codex"\n')
     with pytest.raises(BackendError, match="local.model"):
         make_runner("local", repo=tmp_path)
+
+
+# --- opencode backend --------------------------------------------------------
+#
+# The same served model as `[local]`, driven by the opencode CLI. `local`
+# keeps its codex engine byte for byte until the retirement leaf, so every
+# assertion above stays exactly as it was.
+
+OPENCODE_ARGV_PREFIX = ["opencode", "run", "--format", "json"]
+
+
+def test_opencode_runner_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-1: make_runner routes opencode to a sibling runner with the spike argv."""
+    _fake_home(tmp_path, monkeypatch)
+    (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
+    home = tmp_path / "home"
+    assert BACKEND_BINARIES["opencode"] == "opencode"
+    assert resolve_backend("opencode", repo=tmp_path, home=home) == "opencode"
+    runner = make_runner("opencode", repo=tmp_path)
+    assert isinstance(runner, OpenCodeRunner)
+    assert not isinstance(runner, ClaudeRunner)
+    assert not isinstance(runner, CodexRunner)
+    assert not isinstance(runner, GrokRunner)
+    assert runner.opencode_binary == "opencode"
+    assert runner.local == LocalConfig(
+        "http://127.0.0.1:11434/v1", "qwen3:4b", api_key_env="LLAMA_API_KEY"
+    )
+    argv = runner.build_argv("work")
+    assert argv == OPENCODE_ARGV_PREFIX + ["-m", "ortuslocal/qwen3:4b", "work"]
+    assert argv[argv.index("-m") + 1] == f"{OPENCODE_PROVIDER_ID}/qwen3:4b"
+    # Nothing codex-shaped leaks across: no exec, no -c overrides, no sandbox flag.
+    assert "exec" not in argv and "-c" not in argv and "--sandbox" not in argv
+    # A served id with slashes and a colon still rides behind the provider.
+    served = "0bserverx/Qwen3.8-27B-GGUF:Q4_K_M"
+    argv = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", served)).build_argv("w")
+    assert argv[argv.index("-m") + 1] == f"{OPENCODE_PROVIDER_ID}/{served}"
+
+
+def test_opencode_prompt_has_no_goal() -> None:
+    """AC-2: the opencode worker prompt is the plain objective, never /goal."""
+    task = "Work bd issue demo-123. Do not invoke goal.sh or ralph.sh."
+    prompt = compose_worker_prompt("opencode", task)
+    assert prompt.startswith(task)
+    assert "/goal" not in prompt
+    assert "PLAN-GAP" in prompt
+    assert "Codex sandbox note" not in prompt
+    argv = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m")).build_argv(prompt)
+    assert argv[-1] == prompt
+    assert "/goal" not in " ".join(argv)
+
+
+def test_opencode_profile_routes_model_and_variant() -> None:
+    local = LocalConfig("http://127.0.0.1:8080/v1", "configured-model")
+    profile = AgentProfile("opencode", Phase.IMPLEMENT, "profile-model", "high")
+    argv = OpenCodeRunner(local).build_argv("work", profile=profile)
+    assert argv.count("-m") == 1
+    assert argv[argv.index("-m") + 1] == f"{OPENCODE_PROVIDER_ID}/profile-model"
+    assert "configured-model" not in " ".join(argv)
+    assert argv[argv.index("--variant") + 1] == "high"
+    assert argv[-1] == "work"
+    # Effort only: the configured model still rides as the sole `-m`.
+    effort_only = AgentProfile("opencode", Phase.VERIFY, None, "low")
+    argv = OpenCodeRunner(local).build_argv("work", profile=effort_only)
+    assert argv[argv.index("-m") + 1] == f"{OPENCODE_PROVIDER_ID}/configured-model"
+    assert argv[argv.index("--variant") + 1] == "low"
+    # An unset profile leaves the plain argv alone.
+    plain = OpenCodeRunner(local).build_argv("work")
+    unset = OpenCodeRunner(local).build_argv(
+        "work", profile=AgentProfile("opencode", Phase.VERIFY)
+    )
+    assert unset == plain
+    assert "--variant" not in plain
+
+
+def test_opencode_efforts_are_variant_names() -> None:
+    assert SUPPORTED_EFFORTS["opencode"] == frozenset(
+        {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+    )
+    profile = validate_profile_values(
+        "opencode", Phase.IMPLEMENT, model="m", reasoning_effort="max"
+    )
+    assert profile.reasoning_effort == "max"
+    with pytest.raises(ProfileError, match="profiles.opencode.implement"):
+        validate_profile_values("opencode", Phase.IMPLEMENT, reasoning_effort="hgih")
+
+
+def test_opencode_resume_maps_to_session() -> None:
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    argv = runner.build_argv("work", resume="ses_1")
+    assert argv[argv.index("--session") + 1] == "ses_1"
+    assert argv[-1] == "work"
+    assert "--session" not in runner.build_argv("work")
+
+
+def test_opencode_readonly_posture_is_permission_denial(tmp_path: Path) -> None:
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    verify = runner.build_argv("verify", readonly=True)
+    assert verify == runner.build_argv("verify")
+    assert runner._readonly_argv(verify, tmp_path) == verify
+    assert "bwrap" not in verify
+    assert runner.preflight_readonly(tmp_path) is None
+    posture = json.loads(runner.launch_env(readonly=True)[OPENCODE_PERMISSION_ENV])
+    assert posture == {"edit": "deny", "write": "deny", "bash": "deny"}
+    assert posture == OPENCODE_READONLY_PERMISSION
+    assert OPENCODE_PERMISSION_ENV not in runner.launch_env()
+    # The implement posture is untouched: opencode auto-approves headless.
+    assert "--auto" not in runner.build_argv("implement")
+
+
+def test_opencode_readonly_permission_reaches_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launches: list[tuple[list[str], dict[str, str], bool]] = []
+
+    def fake_spawn(argv: list[str], **kwargs: object) -> int:
+        launches.append((list(argv), dict(kwargs["extra_env"]), bool(kwargs["readonly"])))  # type: ignore[arg-type]
+        return 0
+
+    monkeypatch.setattr("ortus.core.agent._spawn_logged", fake_spawn)
+    runner = OpenCodeRunner(
+        LocalConfig("http://127.0.0.1:8080/v1", "m"), extra_env={"BEADS_DIR": "/x"}
+    )
+    assert runner.run("verify", repo=tmp_path, log_path=tmp_path / "log", readonly=True) == 0
+    assert runner.run("implement", repo=tmp_path, log_path=tmp_path / "log") == 0
+    verify_argv, verify_env, verify_flag = launches[0]
+    implement_argv, implement_env, implement_flag = launches[1]
+    assert verify_flag and not implement_flag
+    assert json.loads(verify_env[OPENCODE_PERMISSION_ENV]) == OPENCODE_READONLY_PERMISSION
+    assert OPENCODE_PERMISSION_ENV not in implement_env
+    assert verify_env["BEADS_DIR"] == implement_env["BEADS_DIR"] == "/x"
+    assert verify_argv[:4] == implement_argv[:4] == OPENCODE_ARGV_PREFIX
+
+
+def test_opencode_argv_never_contains_key_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLAMA_API_KEY", "sk-live-secret")
+    local = LocalConfig("http://127.0.0.1:8080/v1", "m", api_key_env="LLAMA_API_KEY")
+    runner = OpenCodeRunner(local)
+    argv = runner.build_argv("work", readonly=True)
+    assert "sk-live-secret" not in " ".join(argv)
+    assert "sk-live-secret" not in " ".join(runner.launch_env(readonly=True).values())
+    # Not even the variable name: opencode.json resolves it, not argv.
+    assert "LLAMA_API_KEY" not in " ".join(argv)
+
+
+def test_opencode_codegraph_is_store_only() -> None:
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    runner.configure_codegraph(CodeGraphCapability("codegraph"))
+    argv = runner.build_argv("orient")
+    assert "mcp" not in " ".join(argv).lower()
+    assert runner.codegraph is not None
+
+
+def test_make_runner_opencode_without_table_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_home(tmp_path, monkeypatch)
+    with pytest.raises(BackendError, match="local.model"):
+        make_runner("opencode")
+    (tmp_path / ".ortusrc").write_text('backend = "opencode"\n')
+    with pytest.raises(BackendError, match="local.model"):
+        make_runner("opencode", repo=tmp_path)
+
+
+def test_local_keeps_its_codex_engine_beside_opencode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registering opencode changes nothing about what `local` launches."""
+    _fake_home(tmp_path, monkeypatch)
+    (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
+    local = make_runner("local", repo=tmp_path)
+    assert type(local) is LocalRunner
+    assert local.build_argv("work")[:2] == ["codex", "exec"]
+    assert type(make_runner("opencode", repo=tmp_path)) is OpenCodeRunner
+    assert compose_worker_prompt("local", "T") == compose_worker_prompt("codex", "T")

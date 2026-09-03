@@ -824,7 +824,12 @@ def check(
         raise typer.Exit(code=1)
     output.progress("check", f"target: {target}")
     output.progress("check", f"backend: {resolved_backend}")
-    results = _run_all(target, resolved_backend)
+    try:
+        results = _run_all(target, resolved_backend)
+    except ValueError as exc:
+        # A run backend the registry knows but check has no rows for yet.
+        output.error(str(exc), hint="check rows for this backend are a later leaf")
+        raise typer.Exit(code=1)
 
     def _row(r: CheckResult) -> tuple[Text, str, str, str]:
         # The glyph is a styled renderable rather than markup: `output.table`

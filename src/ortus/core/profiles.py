@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
-BackendName = Literal["claude", "codex", "grok", "local"]
+BackendName = Literal["claude", "codex", "grok", "local", "opencode"]
 
 #: The backend names as every "expected ..." message spells them.
-BACKEND_NAMES_PROSE = "claude, codex, grok, or local"
+BACKEND_NAMES_PROSE = "claude, codex, grok, local, or opencode"
 
 
 class Phase(str, Enum):
@@ -29,6 +29,15 @@ SUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     # verbatim as codex `model_reasoning_effort`, and codex 0.147.0 lists
     # minimal|low|medium|high|xhigh. `none` would be an unknown value there.
     "local": frozenset({"low", "medium", "high", "xhigh"}),
+    # Forwarded verbatim as `opencode run --variant`, which selects a named
+    # variant of the model. opencode 1.18.27 names the variants it derives
+    # from a provider catalog after the reasoning-effort values that catalog
+    # lists (none through xhigh) and thinking-budget variants high and max,
+    # so this is the union of every name it can define. A name the served
+    # model does not define is a no-op there, so this set only catches typos.
+    "opencode": frozenset(
+        {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+    ),
 }
 
 

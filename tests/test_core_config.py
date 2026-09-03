@@ -305,13 +305,13 @@ def test_profiles_local_accepts_codex_efforts(tmp_path: Path) -> None:
 
 def test_backend_all_message_names_local(tmp_path: Path) -> None:
     _write_toml(tmp_path / ".ortusrc", 'backend = "all"\n')
-    with pytest.raises(ProfileError, match="claude, codex, grok, or local"):
+    with pytest.raises(ProfileError, match="claude, codex, grok, local, or opencode"):
         load_config(repo=tmp_path, home=tmp_path / "home")
 
 
 def test_unknown_profile_backend_message_names_local(tmp_path: Path) -> None:
     _write_toml(tmp_path / ".ortusrc", '[profiles.other.plan]\nmodel = "x"\n')
-    with pytest.raises(ProfileError, match="claude, codex, grok, or local"):
+    with pytest.raises(ProfileError, match="claude, codex, grok, local, or opencode"):
         load_config(repo=tmp_path, home=tmp_path / "home")
 
 
