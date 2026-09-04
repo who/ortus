@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from ortus.core import agent_files
+from ortus.core.agent import GROK_GOAL_MODE
 from ortus.core.agent_files import (
     BD_CLAIM_COMMAND,
     BLOCK_SCHEMAS,
@@ -392,20 +393,34 @@ def test_agents_block_authoring_contract_sits_with_the_bd_guidance() -> None:
 
 
 def test_agents_block_names_every_plain_prompt_backend() -> None:
-    """A project provisioned for opencode reads its own worker shape here.
+    """A project provisioned for any backend reads its own worker shape here.
 
-    The README already names opencode beside Codex; the always-loaded block
-    must too, with `local` noted as its older name, or an agent under that
-    backend is told about every worker surface except the one driving it.
+    The README names Claude and Grok as the `/goal` workers and Codex and
+    opencode as the plain-prompt workers, with `local` noted as opencode's
+    older name. The always-loaded block must agree, or an agent under one of
+    those backends is told the wrong shape for the surface driving it.
     """
+    # The block follows the runner: Grok is a /goal worker in prose only
+    # while the recorded Q1 finding says `grok -p` expands the slash command.
+    # A re-probe that flips this constant must change the sentence with it.
+    assert GROK_GOAL_MODE == "EXPANDS"
     text = render_block("agents")
     orchestrator = text[text.index("### Orchestrator (ortus grind)") :]
-    for surface in ("`codex exec`", "`grok -p`", "`opencode run`"):
-        assert surface in orchestrator
-    assert "`local` is\nopencode's older name" in orchestrator
+    goal_at = orchestrator.index("Claude and Grok workers run `/goal`")
+    plain_at = orchestrator.index("Codex and opencode")
+    assert goal_at < plain_at
+    goal_sentence = orchestrator[goal_at:plain_at]
+    plain_sentence = orchestrator[plain_at:]
+    assert '`claude -p "/goal ..."`' in goal_sentence
+    assert "`grok -p`" in goal_sentence
+    assert "`grok -p`" not in plain_sentence
+    for surface in ("`codex exec`", "`opencode run`"):
+        assert surface in plain_sentence
+        assert surface not in goal_sentence
+    assert "`local` is\nopencode's older name" in plain_sentence
     # opencode has no slash commands at all; the block must not imply that
     # a `/goal` ever reaches it.
-    assert "opencode has none" in orchestrator
+    assert "opencode has none" in plain_sentence
 
 
 def test_blocks_substitute_every_placeholder_and_keep_shell_braces() -> None:
@@ -448,7 +463,7 @@ def test_bd_claim_command_matches_the_bundled_goal_prompt(tmp_path: Path) -> Non
 # so editing what a block teaches without bumping its schema fails here. Bump
 # BLOCK_SCHEMAS[<block>] and re-pin the digest in the same commit.
 PINNED_BLOCK_TEMPLATES: dict[str, tuple[int, str]] = {
-    "agents": (2, "ff0ccaa1c05ace538e5ef800ea84925eb3a3e54fdd6c497d20b47c9e22013c91"),
+    "agents": (3, "b0344c8191431c037964bfb39d0d1afa0429b1a5cef30c14fa54655b21231eda"),
     "pointer": (1, "e20aa4135de14e37eb79a5c589277750c37cfafbd16c8a4d7378a99ac606601a"),
 }
 
