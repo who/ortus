@@ -43,7 +43,13 @@ from ortus.core.agent_files import (
 )
 from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked
 from ortus.core.codegraph import CodeGraphMode
-from ortus.core.config import DEFAULT_CODEGRAPH_MODE, load_config, read_recorded_local
+from ortus.core.config import (
+    DEFAULT_CODEGRAPH_MODE,
+    DEFAULT_VERIFICATION_MODE,
+    VERIFICATION_PROTOTYPE,
+    load_config,
+    read_recorded_local,
+)
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.init_render import BACKEND_TEMPLATES, MERGED_CONFIGS, read_opencode_config
 from ortus.core.local_backend import (
@@ -666,6 +672,31 @@ def check_ortusrc(repo: Path) -> CheckResult:
     return CheckResult(".ortusrc", True, f"layers loaded: {sources}")
 
 
+def check_verification(repo: Path) -> CheckResult:
+    """Report the bar `ortus grind` will hold each issue to.
+
+    A prototype pin lowers what a worker must prove before it closes an
+    issue, so it is stated here, before any run, rather than discovered in a
+    grind log. The mode is validated by `load_config`; an unknown value is
+    the same parse failure the `.ortusrc` row reports, named for this key.
+    """
+    name = "verification"
+    try:
+        mode = load_config(repo=repo).get("verification", DEFAULT_VERIFICATION_MODE)
+    except Exception as exc:
+        return CheckResult(name, False, f".ortusrc parse error: {exc}")
+    if mode == VERIFICATION_PROTOTYPE:
+        return CheckResult(
+            name,
+            True,
+            "mode=prototype — lint + syntax gate only; the issue's behavioral "
+            "test commands are not run",
+        )
+    return CheckResult(
+        name, True, "mode=full — the issue's criterion-check commands"
+    )
+
+
 CODEGRAPH_INSTALL_HINT = (
     "install the CodeGraph CLI (https://github.com/colbymchenry/codegraph)"
 )
@@ -1115,6 +1146,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     repo_checks.extend(
         [
             (check_ortusrc, ".ortusrc"),
+            (check_verification, "verification"),
             (lambda r: check_codegraph(r, backend), "codegraph"),
             (check_prompt_overrides, ".ortus/prompts/"),
         ]

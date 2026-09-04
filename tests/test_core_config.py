@@ -9,6 +9,7 @@ import pytest
 from ortus.core.config import (
     DEFAULT_CODEGRAPH_MODE,
     DEFAULT_MERGE_GATE_TIMEOUT,
+    DEFAULT_VERIFICATION_MODE,
     DEFAULTS,
     load_config,
     read_recorded_local,
@@ -350,3 +351,41 @@ def test_read_recorded_local_reads_the_project_file_only(tmp_path: Path) -> None
     }
     _write_toml(repo / ".ortusrc", 'local = "not a table"\n')
     assert read_recorded_local(repo) == {}
+
+
+# --- verification mode -------------------------------------------------------
+
+
+def test_verification_mode_defaults_to_full(tmp_path: Path) -> None:
+    """AC-2 / AC-1: no `verification` key in any layer resolves to full, so
+    every existing project keeps the bar it has today."""
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert DEFAULT_VERIFICATION_MODE == "full"
+    assert DEFAULTS["verification"] == "full"
+    assert cfg.get("verification") == "full"
+
+
+def test_verification_mode_accepts_full_and_prototype(tmp_path: Path) -> None:
+    """AC-2: both named bars load; the project pin beats the user pin."""
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for mode in ("prototype", "full"):
+        _write_toml(repo / ".ortusrc", f'verification = "{mode}"\n')
+        assert load_config(repo=repo, home=home).get("verification") == mode
+    _write_toml(home / ".ortusrc", 'verification = "prototype"\n')
+    _write_toml(repo / ".ortusrc", 'verification = "full"\n')
+    assert load_config(repo=repo, home=home).get("verification") == "full"
+    _write_toml(repo / ".ortusrc", 'owner = "alice"\n')
+    assert load_config(repo=repo, home=home).get("verification") == "prototype"
+
+
+@pytest.mark.parametrize("value", ['"lint"', '"Prototype"', "true", '""'])
+def test_verification_mode_rejects_other_values(tmp_path: Path, value: str) -> None:
+    """AC-2: anything but the two bars fails with the key and the accepted
+    values named — a typo must never resolve to either bar by accident."""
+    _write_toml(tmp_path / ".ortusrc", f"verification = {value}\n")
+    with pytest.raises(
+        ProfileError, match=r"invalid verification mode .*expected full or prototype"
+    ):
+        load_config(repo=tmp_path, home=tmp_path / "home")

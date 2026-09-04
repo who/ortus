@@ -567,3 +567,158 @@ def test_pending_proposals_are_not_injected() -> None:
     assert _lessons_text(
         {LESSON_PROPOSAL_PREFIX + "only-pending": "not yet curated (2026-08-12)"}
     ) == ""
+
+
+# ---------------------------------------------------------------------------
+# (11) prototype verification — lint and syntax as the whole bar (ortus-u8rp)
+# ---------------------------------------------------------------------------
+#
+# Under `verification = "prototype"` (or `ortus grind --prototype`) the
+# worker proves an issue with the project's linter plus a syntax/compile gate
+# and never runs its behavioural test commands. Grind composes that as a
+# section after the CodeGraph contract and swaps the pointer's verification
+# framing; full mode composes exactly today's condition.
+
+_PROTOTYPE_GATE = (("ruff check .",), ("python -m compileall -q .",))
+
+
+def _prototype_prompt(
+    backend: str = "claude",
+    gate: tuple[tuple[str, ...], tuple[str, ...]] = _PROTOTYPE_GATE,
+    lessons_text: str = "",
+) -> str:
+    from ortus.commands.grind import (
+        _IMPLEMENTATION_INSTRUCTION,
+        _compose_work_prompt,
+        _prototype_verification_section,
+    )
+
+    return _compose_work_prompt(
+        "",
+        {"id": "repo-1", "title": "an issue"},
+        backend,
+        phase_instruction=_IMPLEMENTATION_INSTRUCTION,
+        phase_contract_text="\n\n## CodeGraph phase contract v1\nprobe contract",
+        verification_text=_prototype_verification_section(*gate),
+        lessons_text=lessons_text,
+    )
+
+
+def test_prototype_verify_instruction_names_lint_and_syntax_gate() -> None:
+    """AC-1: the prototype prompt names the resolved lint and syntax commands,
+    states that lint and syntax are the whole verification and that the
+    behavioural tests are not run, and swaps the pointer's criterion-check
+    framing for the lint one while the done bar stays closed + in sync."""
+    body = _prototype_prompt()
+    assert body.startswith("/goal ")
+    assert "## Prototype verification" in body
+    assert "`ruff check .` and `python -m compileall -q .`" in body
+    assert "Lint and syntax are the whole verification" in body
+    assert (
+        "Do not run the issue's behavioral test commands or the repo test suite"
+        in body
+    )
+    # The pointer's framing is replaced, not contradicted.
+    assert "lint and syntax gate already ran during implement" in body
+    assert "the lint and syntax commands that already passed" in body
+    assert "criterion-check commands already ran" not in body
+    assert "the criterion-check commands that already passed" not in body
+    lowered = body.lower()
+    assert "achieved when that issue is closed and head is in sync with origin" in lowered
+    assert "do not re-read the implementation" in lowered
+    assert "worker instructions, not extra achievement criteria" in lowered
+    # The section follows the CodeGraph contract, so the "injected sections
+    # below" note in the pointer covers it.
+    assert body.index("CodeGraph phase contract") < body.index(
+        "## Prototype verification"
+    )
+    # The shared instruction text reaches every backend the same way.
+    for backend in ("codex", "opencode", "grok"):
+        assert "## Prototype verification" in _prototype_prompt(backend)
+        assert "`ruff check .`" in _prototype_prompt(backend)
+
+
+def test_prototype_verify_instruction_absent_in_full_mode() -> None:
+    """AC-4: no verification text composes today's condition byte for byte —
+    the criterion-check framing, and no prototype section."""
+    from ortus.commands.grind import (
+        _GOAL_POINTER,
+        _IMPLEMENTATION_INSTRUCTION,
+        _compose_work_prompt,
+    )
+
+    body = _composed_implement_prompt()
+    assert "Prototype verification" not in body
+    assert (
+        "The issue's criterion-check commands already ran during implement — "
+        "they are the whole verification. Do not run pytest or the repo test "
+        "suite after session-close. After session-close, answer with the id, "
+        "close reason, HEAD sha, and the criterion-check commands that already "
+        "passed, then stop. Do not re-read the implementation."
+    ) in _GOAL_POINTER
+    assert _GOAL_POINTER in body
+    assert body == _compose_work_prompt(
+        "",
+        {"id": "repo-1", "title": "an issue"},
+        "claude",
+        phase_instruction=_IMPLEMENTATION_INSTRUCTION,
+        verification_text="",
+    )
+
+
+def test_prototype_verify_instruction_without_a_gate_is_parse_only() -> None:
+    """Edge cases: a linter of none drops the lint command; no gate at all
+    is stated as syntax-parse only, never a silent no-op; three commands
+    read as a list."""
+    from ortus.commands.grind import _prototype_verification_section
+
+    none_at_all = _prototype_verification_section((), ())
+    assert "syntax-parse only" in none_at_all
+    assert "`" not in none_at_all
+    assert "Do not run the issue's behavioral test commands" in none_at_all
+    syntax_only = _prototype_verification_section((), ("go build ./...",))
+    assert "run `go build ./...`," in syntax_only
+    assert " and " not in syntax_only.split("run `go build")[1].split(",")[0]
+    three = _prototype_verification_section(
+        ("ruff check .",), ("python -m compileall -q .", "go build ./...")
+    )
+    assert "`ruff check .`, `python -m compileall -q .`, and `go build ./...`" in three
+
+
+def test_prototype_verify_instruction_fits_the_claude_cap() -> None:
+    """The section is part of the run's bar, so it is never the part dropped
+    for the Claude cap: with the section in place the condition stays under
+    the cap and an oversized lessons section is what gets left out."""
+    from ortus.commands.grind import _CLAUDE_GOAL_CONDITION_LIMIT, _lessons_section
+
+    section_only = _prototype_prompt()
+    assert len(section_only) - len("/goal ") <= _CLAUDE_GOAL_CONDITION_LIMIT
+    huge = _lessons_section((("a-lesson", "x" * 3_000),))
+    body = _prototype_prompt(lessons_text=huge)
+    assert "## Prototype verification" in body
+    assert "Prior lessons" not in body
+    assert body == section_only
+    small = _lessons_section((("a-lesson", "look at the sandbox first"),))
+    with_lessons = _prototype_prompt(lessons_text=small)
+    assert "## Prototype verification" in with_lessons
+    assert "Prior lessons" in with_lessons
+    assert with_lessons.index("## Prototype verification") < with_lessons.index(
+        "## Prior lessons"
+    )
+
+
+def test_worker_prompt_verify_step_reads_the_composed_mode() -> None:
+    """The goal loop's verify step defers to the composed instruction: the
+    issue's criterion checks by default, the injected prototype section's
+    lint and syntax gate otherwise — it hard-codes neither."""
+    from ortus.core.prompts import bundled_prompt_text
+
+    body = bundled_prompt_text("goal-prompt")
+    implement_step = next(
+        line for line in body.splitlines() if line.startswith("3.")
+    )
+    assert "criterion-check commands" in implement_step
+    assert "## Prototype verification" in implement_step
+    assert "lint and syntax gate instead of the issue's test commands" in implement_step
+    exit_step = next(line for line in body.splitlines() if line.startswith("5."))
+    assert "checks you ran in step 3 are the whole verification" in exit_step

@@ -63,7 +63,12 @@ from ortus.core.codegraph import (
     phase_contract,
     require_handshake,
 )
-from ortus.core.config import DEFAULT_MERGE_GATE_TIMEOUT, load_config
+from ortus.core.config import (
+    DEFAULT_MERGE_GATE_TIMEOUT,
+    DEFAULT_VERIFICATION_MODE,
+    VERIFICATION_PROTOTYPE,
+    load_config,
+)
 from ortus.core.profiles import Phase, ProfileError
 from ortus.core.readiness import (
     READINESS_MEMORY_KEY,
@@ -74,6 +79,12 @@ from ortus.core.grind_logic import (
     FlockBusy,
     build_condition,
     grind_flock,
+)
+from ortus.core.init_render import (
+    LANGUAGE_MARKERS,
+    LINTER_DEFAULTS,
+    PROTOTYPE_LINT_COMMANDS,
+    PROTOTYPE_SYNTAX_COMMANDS,
 )
 from ortus.core.grind_loop import (
     DEFAULT_INTEGRATION_BRANCH,
@@ -483,20 +494,39 @@ _CLAUDE_GOAL_CONDITION_LIMIT = 4_000
 
 # The /goal condition itself. Grok expands /goal and the host skeptics
 # independently verify this text, so it must stay a pointer with a tight
-# done bar — not the inlined goal-prompt.md body.
-_GOAL_POINTER = (
+# done bar — not the inlined goal-prompt.md body. The done bar is the same
+# under either verification mode; only the framing of what already counted
+# as verification differs, and the two framings are the same length to within
+# a few characters so neither inflates the condition.
+_GOAL_POINTER_HEAD = (
     "One window, one issue. Continue leftover in_progress, else run "
     "bd ready and claim the first non-epic. Read AGENTS.md. Run "
     "`ortus prompt show goal` and follow that one-issue loop. "
     "Session-close that id per AGENTS.md. "
     "Achieved when that issue is closed and HEAD is in sync with origin. "
+)
+_FULL_VERIFICATION_FRAMING = (
     "The issue's criterion-check commands already ran during implement — "
     "they are the whole verification. Do not run pytest or the repo test "
     "suite after session-close. After session-close, answer with the id, "
     "close reason, HEAD sha, and the criterion-check commands that already "
-    "passed, then stop. Do not re-read the implementation. Do not start "
+    "passed, then stop. "
+)
+_PROTOTYPE_VERIFICATION_FRAMING = (
+    "This is a prototype run: the project's lint and syntax gate already ran "
+    "during implement — it is the whole verification. Do not run the issue's "
+    "behavioral test commands, pytest, or the repo test suite. After "
+    "session-close, answer with the id, close reason, HEAD sha, and the lint "
+    "and syntax commands that already passed, then stop. "
+)
+_GOAL_POINTER_TAIL = (
+    "Do not re-read the implementation. Do not start "
     "another issue. Injected sections below are worker instructions, not "
     "extra achievement criteria."
+)
+_GOAL_POINTER = _GOAL_POINTER_HEAD + _FULL_VERIFICATION_FRAMING + _GOAL_POINTER_TAIL
+_PROTOTYPE_GOAL_POINTER = (
+    _GOAL_POINTER_HEAD + _PROTOTYPE_VERIFICATION_FRAMING + _GOAL_POINTER_TAIL
 )
 
 # Bounds for the prior-lessons section (ortus-s0tj). Every lesson costs
@@ -575,6 +605,102 @@ def _log_dropped_lessons(
     )
 
 
+def _resolve_verification(config: Any, prototype: bool) -> tuple[str, str]:
+    """The run's verification mode, and the mode with its provenance for the log.
+
+    The flag wins, then `.ortusrc`, then the default. The note names the
+    source whenever it is not the default, and names an overridden `.ortusrc`
+    pin outright, so a log reader knows a prototype run held a lighter bar
+    and why it did.
+    """
+    configured = str(config.get("verification", DEFAULT_VERIFICATION_MODE))
+    pinned = any(
+        "verification" in layer.data
+        for layer in getattr(config, "layers", ())
+        if layer.source != "defaults"
+    )
+    if prototype:
+        note = f"{VERIFICATION_PROTOTYPE} from --prototype"
+        if pinned and configured != VERIFICATION_PROTOTYPE:
+            note += f", .ortusrc pins {configured}"
+        return VERIFICATION_PROTOTYPE, note
+    if pinned:
+        return configured, f"{configured} from .ortusrc"
+    return configured, configured
+
+
+def _resolve_prototype_gates(
+    repo: Path, project_type: str, linter: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The (lint commands, syntax/compile commands) a prototype run verifies with.
+
+    A typed project resolves one command per kind from the tables beside
+    init's linter defaults. `polyglot` — or a type the tables do not know —
+    resolves the syntax gate of every language whose marker file the
+    repository root carries. A `linter` of none drops the lint command
+    rather than inventing one; the worker's instruction then says so.
+    """
+    lint = PROTOTYPE_LINT_COMMANDS.get(linter)
+    lints = (lint,) if lint else ()
+    syntax = PROTOTYPE_SYNTAX_COMMANDS.get(project_type)
+    if syntax is not None:
+        return lints, (syntax,)
+    detected = tuple(
+        PROTOTYPE_SYNTAX_COMMANDS[language]
+        for language, markers in LANGUAGE_MARKERS.items()
+        if any((repo / marker).is_file() for marker in markers)
+    )
+    return lints, detected
+
+
+def _gate_summary(lints: tuple[str, ...], syntaxes: tuple[str, ...]) -> str:
+    """One log-line description of a prototype run's gate."""
+    parts = []
+    if lints:
+        parts.append("lint: " + ", ".join(lints))
+    if syntaxes:
+        parts.append("syntax: " + ", ".join(syntaxes))
+    if not parts:
+        return "no linter or compile gate resolved; syntax-parse only"
+    return "; ".join(parts)
+
+
+def _prototype_verification_section(
+    lints: tuple[str, ...], syntaxes: tuple[str, ...]
+) -> str:
+    """The prototype verification section of a worker's contract.
+
+    Injected after the CodeGraph phase contract, and never dropped for the
+    Claude cap the way lessons are: it is the run's bar, not a prior. It
+    names the commands so the worker runs the resolved gate rather than
+    choosing one, and states what it must not run. A project with no gate
+    at all is told verification is syntax-parse only — never left with a
+    silent no-op.
+    """
+    commands = [f"`{command}`" for command in (*lints, *syntaxes)]
+    if len(commands) > 2:
+        named = ", ".join(commands[:-1]) + ", and " + commands[-1]
+    else:
+        named = " and ".join(commands)
+    if named:
+        gate = (
+            f"Lint and syntax are the whole verification: run {named}, fix "
+            "what they report, and session-close on a clean pass."
+        )
+    else:
+        gate = (
+            "No linter or compile gate resolved for this project, so "
+            "verification is syntax-parse only: parse every file you changed "
+            "with its language's own parser and session-close on a clean parse."
+        )
+    return (
+        "\n\n## Prototype verification\n"
+        f"This run holds the prototype bar. {gate} Do not run the issue's "
+        "behavioral test commands or the repo test suite; its Criterion checks "
+        "stay in the work spec as the record, not as this run's bar."
+    )
+
+
 def _compose_work_prompt(
     template: str,
     issue: dict,
@@ -582,6 +708,7 @@ def _compose_work_prompt(
     *,
     phase_instruction: str = "",
     phase_contract_text: str = "",
+    verification_text: str = "",
     lessons_text: str = "",
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
@@ -591,16 +718,22 @@ def _compose_work_prompt(
     ``issue`` remain on the signature so existing callers keep compiling;
     neither is substituted into the prompt.
 
+    ``verification_text`` is the prototype verification section. When it is
+    present the pointer carries the prototype framing — lint and syntax are
+    the whole verification — in place of the criterion-check one, and the
+    section follows the phase contract. Empty text composes today's full-mode
+    condition byte for byte.
+
     ``lessons_text`` is the one optional section: when appending it would
     push the Claude ``/goal`` condition past the cap it is dropped rather
     than halting the run. The 4,000-character cap is Claude-only.
     """
     del template, issue
 
-    task = _GOAL_POINTER
+    task = _PROTOTYPE_GOAL_POINTER if verification_text else _GOAL_POINTER
     if phase_instruction:
         task = phase_instruction.rstrip() + "\n\n" + task
-    task += phase_contract_text
+    task += phase_contract_text + verification_text
     wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend == "claude" else None
     if (
         lessons_text
@@ -1068,6 +1201,16 @@ def grind(
         help="CodeGraph policy: off|auto|required (defaults from .ortusrc).",
         case_sensitive=False,
     ),
+    prototype: bool = typer.Option(
+        False,
+        "--prototype",
+        help=(
+            "Prototype verification for this run: the worker proves each issue "
+            "with the project's linter plus a syntax/compile gate and never runs "
+            "its behavioral test commands or the repo suite. Overrides "
+            "`verification` in .ortusrc, whose default is full."
+        ),
+    ),
 ) -> None:
     """Drive the bd queue via a subprocess-per-task /goal loop (ortus-3ico)."""
     target = resolve_repo(repo)
@@ -1086,6 +1229,9 @@ def grind(
             "integration_branch", DEFAULT_INTEGRATION_BRANCH
         )
         merge_gate, merge_gate_timeout = _resolve_merge_gate(config)
+        verification_mode, verification_note = _resolve_verification(
+            config, prototype
+        )
         implement_profile = config.resolve_profile(
             resolved_backend,
             Phase.IMPLEMENT,
@@ -1104,6 +1250,17 @@ def grind(
     except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
+
+    # The prototype bar is resolved once per run from the project facts
+    # `.ortusrc` records, and its section rides in every worker prompt. Full
+    # mode composes no section, so the condition is unchanged.
+    verification_text = ""
+    prototype_gates: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    if verification_mode == VERIFICATION_PROTOTYPE:
+        project_type = str(config.get("project_type") or "polyglot")
+        linter = str(config.get("linter") or LINTER_DEFAULTS.get(project_type, "none"))
+        prototype_gates = _resolve_prototype_gates(target, project_type, linter)
+        verification_text = _prototype_verification_section(*prototype_gates)
 
     configured_mode = config.get("codegraph", "auto")
     try:
@@ -1170,6 +1327,7 @@ def grind(
         output.info(f"verify:         {verify_profile.display_name}")
         output.info(f"finalize:       {finalize_profile.display_name}")
         output.info(f"codegraph:      {codegraph_mode.value}")
+        output.info(f"verification:   {verification_note}")
         output.info(
             "merge-gate:     "
             + (
@@ -1188,6 +1346,7 @@ def grind(
                     work_template,
                     {"id": "<ISSUE_ID>", "title": "<ISSUE_DETAILS>"},
                     resolved_backend,
+                    verification_text=verification_text,
                 )
                 + "\n(the worker orients, continues leftover in_progress or "
                 "runs bd ready, and claims; grind only decides whether to spawn.)"
@@ -1256,8 +1415,14 @@ def grind(
             write_log = _log_writer(log)
             write_log(
                 "=== ortus grind started "
-                f"(subprocess-per-task shape; backend={resolved_backend}) ==="
+                f"(subprocess-per-task shape; backend={resolved_backend}; "
+                f"verification={verification_note}) ==="
             )
+            if verification_text:
+                write_log(
+                    "verification: prototype bar — "
+                    + _gate_summary(*prototype_gates)
+                )
             write_log(f"profile: {implement_profile.display_name}")
             write_log(f"profile: {verify_profile.display_name}")
             write_log(f"profile: {finalize_profile.display_name}")
@@ -1729,6 +1894,7 @@ def grind(
                             phase_contract_text=phase_contract(
                                 CodeGraphPhase.IMPLEMENTATION, implementation_probe
                             ),
+                            verification_text=verification_text,
                             lessons_text=iteration_lessons_text,
                         )
                     except BackendError as exc:

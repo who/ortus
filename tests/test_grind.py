@@ -3018,3 +3018,190 @@ def test_startup_ignores_leftover_finalized_journal(
     assert "session-close resume" not in log
     assert "HALT" not in log
     assert "discarded leftover candidate journal" in log
+
+
+# ---------------------------------------------------------------------------
+# Prototype verification mode (ortus-u8rp)
+# ---------------------------------------------------------------------------
+#
+# `verification = "prototype"` in .ortusrc, or `--prototype`, lowers what a
+# worker must prove before closing an issue to the project's lint and syntax
+# gate. The mode is a property of the run: the start line records it, and the
+# composed prompt carries the resolved gate.
+
+
+class _PromptRecorder:
+    """A worker that records the prompt it was handed and exits untouched."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def run(
+        self, prompt: str, *, repo: Path, log_path: Path, **kwargs: object
+    ) -> int:
+        self.prompts.append(prompt)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        return 0
+
+
+def _recorded_grind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str,
+    ortusrc: str,
+    args: tuple[str, ...] = (),
+) -> tuple[str, list[str]]:
+    """One window against a recording worker: the grind log and its prompts."""
+    repo = _bd_repo(tmp_path, name)
+    _create_ready_issue(repo, "prototype leaf")
+    if ortusrc:
+        (repo / ".ortusrc").write_text(ortusrc)
+    worker = _PromptRecorder()
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: worker)
+    result = runner.invoke(
+        app,
+        ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0", *args],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    return _grind_log(repo), worker.prompts
+
+
+def test_grind_start_line_records_verification_mode_from_ortusrc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: a `.ortusrc` prototype pin is named on the start line, the
+    resolved gate is logged beneath it, and the worker prompt carries the
+    prototype section with that gate."""
+    log, prompts = _recorded_grind(
+        tmp_path,
+        monkeypatch,
+        name="proto-rc",
+        ortusrc='project_type = "python"\nverification = "prototype"\n',
+    )
+    assert "backend=claude; verification=prototype from .ortusrc) ===" in log
+    assert (
+        "verification: prototype bar — lint: ruff check .; "
+        "syntax: python -m compileall -q ." in log
+    )
+    assert len(prompts) == 1
+    assert "## Prototype verification" in prompts[0]
+    assert "`ruff check .` and `python -m compileall -q .`" in prompts[0]
+    assert "criterion-check commands already ran" not in prompts[0]
+
+
+def test_grind_start_line_records_verification_mode_flag_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 edge: `--prototype` beats a pinned full, and the start line says
+    which pin it overrode."""
+    log, prompts = _recorded_grind(
+        tmp_path,
+        monkeypatch,
+        name="proto-flag",
+        ortusrc='project_type = "go"\nverification = "full"\n',
+        args=("--prototype",),
+    )
+    assert (
+        "verification=prototype from --prototype, .ortusrc pins full) ===" in log
+    )
+    assert "verification: prototype bar — lint: golangci-lint run ./...; syntax: go build ./..." in log
+    assert "`golangci-lint run ./...` and `go build ./...`" in prompts[0]
+
+
+def test_grind_start_line_records_verification_mode_default_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: no key means full — the start line says so, no gate line is
+    logged, and the worker prompt is today's criterion-check condition."""
+    log, prompts = _recorded_grind(tmp_path, monkeypatch, name="full", ortusrc="")
+    assert "backend=claude; verification=full) ===" in log
+    assert "verification: prototype bar" not in log
+    assert "Prototype verification" not in prompts[0]
+    assert "criterion-check commands already ran during implement" in prompts[0]
+
+
+def test_grind_dry_run_shows_prototype_verification(tmp_path: Path) -> None:
+    """`--dry-run --prototype` reports the mode and prints the composed section."""
+    repo = _fixture_repo(tmp_path)
+    (repo / ".ortusrc").write_text('project_type = "rust"\n')
+    result = runner.invoke(app, ["grind", str(repo), "--dry-run", "--prototype"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "verification:   prototype from --prototype" in result.stdout
+    assert "## Prototype verification" in result.stdout
+    assert "cargo clippy --all-targets" in result.stdout
+    assert "cargo check" in result.stdout
+    plain = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert plain.exit_code == 0
+    assert "verification:   full" in plain.stdout
+    assert "Prototype verification" not in plain.stdout
+
+
+def test_grind_resolves_verification_flag_then_ortusrc_then_default(
+    tmp_path: Path,
+) -> None:
+    """Resolved decision 1: flag, then `.ortusrc`, then default, one switch."""
+    from ortus.core.config import load_config
+
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def resolve(ortusrc: str, prototype: bool) -> tuple[str, str]:
+        if ortusrc:
+            (repo / ".ortusrc").write_text(ortusrc)
+        elif (repo / ".ortusrc").exists():
+            (repo / ".ortusrc").unlink()
+        return grind_mod._resolve_verification(
+            load_config(repo=repo, home=home), prototype
+        )
+
+    assert resolve("", False) == ("full", "full")
+    assert resolve("", True) == ("prototype", "prototype from --prototype")
+    assert resolve('verification = "prototype"\n', False) == (
+        "prototype",
+        "prototype from .ortusrc",
+    )
+    assert resolve('verification = "prototype"\n', True) == (
+        "prototype",
+        "prototype from --prototype",
+    )
+    assert resolve('verification = "full"\n', False) == ("full", "full from .ortusrc")
+    assert resolve('verification = "full"\n', True) == (
+        "prototype",
+        "prototype from --prototype, .ortusrc pins full",
+    )
+
+
+def test_grind_resolves_prototype_gates_by_type_and_markers(tmp_path: Path) -> None:
+    """Resolved decision 2: a typed project resolves one lint and one syntax
+    command from the tables beside init's linter defaults; a linter of none
+    drops the lint command; polyglot resolves the gate of every language
+    whose marker file the root carries, and nothing when it carries none."""
+    resolve = grind_mod._resolve_prototype_gates
+    assert resolve(tmp_path, "python", "ruff") == (
+        ("ruff check .",),
+        ("python -m compileall -q .",),
+    )
+    assert resolve(tmp_path, "typescript", "eslint") == (
+        ("npx eslint .",),
+        ("npx tsc --noEmit",),
+    )
+    assert resolve(tmp_path, "rust", "none") == ((), ("cargo check",))
+    assert resolve(tmp_path, "polyglot", "none") == ((), ())
+    (tmp_path / "go.mod").write_text("module example\n")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    assert resolve(tmp_path, "polyglot", "none") == (
+        (),
+        ("python -m compileall -q .", "go build ./..."),
+    )
+    # A type the tables do not know takes the polyglot path.
+    assert resolve(tmp_path, "haskell", "none")[1] == (
+        "python -m compileall -q .",
+        "go build ./...",
+    )

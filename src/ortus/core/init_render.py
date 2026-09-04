@@ -107,6 +107,34 @@ LINTER_DEFAULTS: dict[str, str] = {
 
 PROJECT_TYPES: tuple[str, ...] = tuple(PACKAGE_MANAGER_CHOICES.keys())
 
+# Prototype verification gates (`verification = "prototype"` in `.ortusrc`,
+# or `ortus grind --prototype`): the worker proves an issue with the project's
+# linter plus a syntax/compile check instead of its behavioural tests. Every
+# command is bounded — a lint pass or a type/compile pass, never the build or
+# the suite — and the tables are keyed by the same linter and project-type
+# choices `ortus init` records, so init and grind never disagree about what a
+# project runs.
+PROTOTYPE_LINT_COMMANDS: dict[str, str] = {
+    "ruff": "ruff check .",
+    "eslint": "npx eslint .",
+    "golangci": "golangci-lint run ./...",
+    "clippy": "cargo clippy --all-targets",
+}
+PROTOTYPE_SYNTAX_COMMANDS: dict[str, str] = {
+    "python": "python -m compileall -q .",
+    "typescript": "npx tsc --noEmit",
+    "go": "go build ./...",
+    "rust": "cargo check",
+}
+# A `polyglot` project has no single gate: grind resolves the syntax gate of
+# every language whose marker file sits at the repository root, in this order.
+LANGUAGE_MARKERS: dict[str, tuple[str, ...]] = {
+    "python": ("pyproject.toml", "setup.py", "setup.cfg"),
+    "typescript": ("tsconfig.json",),
+    "go": ("go.mod",),
+    "rust": ("Cargo.toml",),
+}
+
 
 @dataclass(frozen=True)
 class RenderContext:

@@ -31,6 +31,13 @@ codegraph = "{{ codegraph }}"
 # merge_gate = false
 # merge_gate_timeout = 1800
 
+# The bar `ortus grind` holds each issue to: full | prototype. `full` (the
+# default) runs the issue's criterion-check commands. `prototype` runs only the
+# project's linter plus a syntax/compile gate, so an issue closes on a clean
+# lint pass — a lighter bar for throwaway or exploratory work.
+# `ortus grind --prototype` sets it for one run.
+# verification = "full"
+
 {% if backend in ["local", "opencode"] -%}
 # The operator-served model `ortus grind` drives through opencode, whose
 # provider entry lives in opencode.json; backend = "local" is opencode's older

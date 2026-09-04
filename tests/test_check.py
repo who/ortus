@@ -1832,3 +1832,36 @@ def test_codegraph_local_uses_the_opencode_registration(
     unregistered = check_mod.check_codegraph(repo, "local")
     assert check_mod.OPENCODE_MCP_HINT in unregistered.message
     assert unregistered.message == check_mod.check_codegraph(repo, "opencode").message
+
+
+# --- verification bar (ortus-u8rp) --------------------------------------------
+
+
+def test_verification_row_reports_the_configured_bar(tmp_path: Path) -> None:
+    """The bar grind will hold each issue to is stated before any run: full by
+    default, prototype when pinned, and a FAIL naming the key for a typo."""
+    repo = _healthy_repo(tmp_path)
+    row = check_mod.check_verification(repo)
+    assert (row.name, row.ok) == ("verification", True)
+    assert "mode=full" in row.message
+    (repo / ".ortusrc").write_text('verification = "prototype"\n')
+    row = check_mod.check_verification(repo)
+    assert row.ok
+    assert "mode=prototype" in row.message
+    assert "not run" in row.message
+    (repo / ".ortusrc").write_text('verification = "lint"\n')
+    row = check_mod.check_verification(repo)
+    assert not row.ok
+    assert "invalid verification mode 'lint'" in row.message
+
+
+def test_verification_row_is_in_every_backend_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row sits beside `.ortusrc` for whichever backend is checked."""
+    repo = _codex_repo(tmp_path)
+    _all_binaries_present(monkeypatch)
+    _fake_sandbox_ok(monkeypatch)
+    _never_probe(monkeypatch)
+    names = [r.name for r in check_mod._run_all(repo, "codex")]
+    assert names.index(".ortusrc") + 1 == names.index("verification")

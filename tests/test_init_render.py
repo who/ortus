@@ -975,3 +975,14 @@ def test_opencode_mcp_merge_writes_nothing_under_codegraph_off(
     assert merge.mcp is None
     assert not merge.changed
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_rendered_ortusrc_names_the_verification_key() -> None:
+    """The scaffold reports the `verification` key and the one-run flag, as a
+    commented reference: absent still resolves to full, so the parsed file
+    carries no such key."""
+    text = render_template(".ortusrc", RenderContext(prefix="acme"))
+    assert '# verification = "full"' in text
+    assert "full | prototype" in text
+    assert "ortus grind --prototype" in text
+    assert "verification" not in tomllib.loads(text)

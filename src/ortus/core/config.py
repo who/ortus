@@ -43,6 +43,16 @@ DEFAULT_CODEGRAPH_MODE = "required"
 # Seconds. Used when `.ortusrc` omits `merge_gate_timeout`.
 DEFAULT_MERGE_GATE_TIMEOUT = 1800
 
+# The bar `ortus grind` holds each issue to before the worker may session-close
+# it. `full` is the issue's criterion-check commands; `prototype` is the
+# project's linter plus a syntax/compile gate and nothing behavioural, so an
+# issue closes on a clean lint pass. Full is the default, and a `.ortusrc`
+# without the key resolves to it, so no existing project changes bar.
+VERIFICATION_FULL = "full"
+VERIFICATION_PROTOTYPE = "prototype"
+VERIFICATION_MODES: tuple[str, ...] = (VERIFICATION_FULL, VERIFICATION_PROTOTYPE)
+DEFAULT_VERIFICATION_MODE = VERIFICATION_FULL
+
 # `ortus init --backend all` provisions every backend but always pins one
 # concrete run backend; `all` must therefore never survive into a resolved
 # run configuration, whatever layer tries to smuggle it in.
@@ -71,6 +81,11 @@ DEFAULTS: dict[str, Any] = {
     # typical hermetic matrix; the workflow itself has no shorter job
     # timeout to inherit.
     "merge_gate_timeout": DEFAULT_MERGE_GATE_TIMEOUT,
+    # What a grind worker must prove before it session-closes an issue: the
+    # issue's criterion checks (`full`) or only the project's lint and
+    # syntax gate (`prototype`). `ortus grind --prototype` overrides it for
+    # one run.
+    "verification": DEFAULT_VERIFICATION_MODE,
     # Branch `grind` pins the working tree to and re-asserts each iteration.
     # "main" fits a fresh `ortus init`; a repo whose default branch is named
     # something else (e.g. "master") pins it here instead of passing
@@ -175,6 +190,21 @@ def _validate_backend(values: dict[str, Any]) -> None:
         raise ProfileError(INIT_ONLY_BACKEND_MESSAGE)
 
 
+def _validate_verification(values: dict[str, Any]) -> None:
+    """Reject a verification mode that names neither bar.
+
+    The mode decides what a worker may skip before closing an issue, so a
+    typo must fail here with the accepted values named rather than resolve
+    to either bar by accident.
+    """
+    mode = values.get("verification", DEFAULT_VERIFICATION_MODE)
+    if mode not in VERIFICATION_MODES:
+        raise ProfileError(
+            f"invalid verification mode {mode!r}; expected "
+            + " or ".join(VERIFICATION_MODES)
+        )
+
+
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -251,6 +281,7 @@ def load_config(
             cfg.layers.append(LoadedLayer("project", project_path, data))
 
     _validate_backend(cfg.values)
+    _validate_verification(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
     return cfg
