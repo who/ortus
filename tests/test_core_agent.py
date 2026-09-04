@@ -527,3 +527,43 @@ def test_local_keeps_its_codex_engine_beside_opencode(
     assert local.build_argv("work")[:2] == ["codex", "exec"]
     assert type(make_runner("opencode", repo=tmp_path)) is OpenCodeRunner
     assert compose_worker_prompt("local", "T") == compose_worker_prompt("codex", "T")
+
+
+def test_opencode_verify_readonly_denies_write_tools_in_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: the verify launch hands the spawned process the denial, over the operator's shell.
+
+    opencode's permission is tool-level: with edit, write, and bash denied it
+    drops those tools from the model's surface, so a verifier holds nothing
+    that can touch the tree. This drives the real spawn path with a stand-in
+    binary that echoes what it was given, so the proof is about the process
+    opencode would be, not a patched function: the denial arrives intact, an
+    allow exported in the operator's shell cannot leak into it, the implement
+    launch inherits that shell untouched, and no project file is written to
+    carry the posture.
+    """
+    fake = tmp_path / "bin" / "opencode"
+    fake.parent.mkdir()
+    fake.write_text('#!/bin/sh\nprintf \'%s\\n\' "${OPENCODE_PERMISSION-unset}"\n')
+    fake.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    inherited = {"bash": "allow", "write": "allow", "edit": "allow"}
+    monkeypatch.setenv(OPENCODE_PERMISSION_ENV, json.dumps(inherited))
+    runner = OpenCodeRunner(
+        LocalConfig("http://127.0.0.1:8080/v1", "m"), opencode_binary=str(fake)
+    )
+
+    verify_log = tmp_path / "verify.log"
+    assert runner.run("verify", repo=repo, log_path=verify_log, readonly=True) == 0
+    posture = json.loads(verify_log.read_text().strip())
+    assert posture == OPENCODE_READONLY_PERMISSION
+    assert {posture[tool] for tool in ("edit", "write", "bash")} == {"deny"}
+    assert "allow" not in posture.values()
+
+    implement_log = tmp_path / "implement.log"
+    assert runner.run("implement", repo=repo, log_path=implement_log) == 0
+    assert json.loads(implement_log.read_text().strip()) == inherited
+
+    assert list(repo.iterdir()) == []

@@ -9,6 +9,8 @@ request; `ortus check` owns the tool-calling probe.
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
+from ortus.core.codegraph import CodeGraphAdapter
 from ortus.core.local_backend import LocalConfig, LocalServerError, serving_hint
 from tests.test_grind import (
     _bd_repo,
@@ -241,3 +244,138 @@ def test_other_backends_skip_local_probe(
     combined = _plain(result.stdout + result.stderr)
     assert "local server reachable" not in combined
     assert "local backend:" not in combined
+
+
+# --- opencode -----------------------------------------------------------------
+#
+# The same `[local]` table drives the opencode backend, so the same `/models`
+# request is its preflight. What differs: the abort names the backend the
+# operator launched, and CodeGraph policy reaches the file-backed registration,
+# because opencode runs the MCP server itself from `opencode.json` and a worker
+# without that entry could only fail its handshake after a claim. Under
+# `required` that stops the run at the probe, before the server is asked.
+
+_OPENCODE_ARGS = ["--backend", "opencode", "--tasks", "1", "--idle-sleep", "0"]
+_OPENCODE_MCP = {
+    "mcp": {
+        "codegraph": {
+            "type": "local",
+            "command": ["codegraph", "serve", "--mcp"],
+            "enabled": True,
+        }
+    }
+}
+
+
+@pytest.mark.slow
+def test_opencode_server_down_aborts_before_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: an unreachable server exits 1 naming opencode, with the serving hint; nothing is claimed."""
+    repo = _bd_repo(tmp_path, "opencode-down")
+    (repo / ".ortusrc").write_text(_LOCAL_TABLE)
+    issue_id = _create_ready_issue(repo, "stay open")
+    _isolate(monkeypatch, tmp_path)
+    calls = _patch_probe(monkeypatch, raises=_server_down())
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: _NeverRuns())
+
+    result = runner.invoke(app, ["grind", str(repo), *_OPENCODE_ARGS])
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    combined = _squash(result.stdout + result.stderr)
+    assert "opencode backend: local server unreachable" in combined
+    assert "local backend:" not in combined
+    assert "Connection refused" in combined
+    assert "llama-server" in combined
+    assert "--jinja" in combined
+    assert calls == [_LOCAL_CONFIG]
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "open"
+    assert not shown.get("assignee")
+    assert _grind_log(repo) == "", "the preflight must abort before the log and flock"
+
+
+@pytest.mark.slow
+def test_opencode_reachable_launches_opencode_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reachable server logs the endpoint and hands the loop one opencode runner."""
+    repo = _bd_repo(tmp_path, "opencode-up")
+    (repo / ".ortusrc").write_text(_LOCAL_TABLE)
+    issue_id = _create_ready_issue(repo, "close me")
+    _isolate(monkeypatch, tmp_path)
+    calls = _patch_probe(monkeypatch)
+    made: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    fake = _CountingCloseRunner(repo)
+
+    def make_runner(*args: object, **kwargs: object) -> _CountingCloseRunner:
+        made.append((args, kwargs))
+        return fake
+
+    monkeypatch.setattr(grind_mod, "_make_runner", make_runner)
+
+    result = runner.invoke(app, ["grind", str(repo), *_OPENCODE_ARGS])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert calls == [_LOCAL_CONFIG]
+    assert fake.launches == 1
+    assert made == [(("opencode",), {"repo": repo.resolve()})]
+    assert _issue(repo, issue_id)["status"] == "closed"
+    combined = _squash(result.stdout + result.stderr)
+    assert f"local server reachable: {_DISPLAY}" in combined
+
+
+def test_opencode_required_without_mcp_aborts_before_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under `required`, no codegraph entry in `opencode.json` stops the run at the CodeGraph probe.
+
+    The index and CLI are present, so the file-backed registration is the
+    only gap. The server is never asked anything and no claim is made. With
+    the entry `ortus init` writes in place, the same run reaches the server
+    preflight instead.
+    """
+    repo = _bd_repo(tmp_path, "opencode-unregistered")
+    (repo / ".ortusrc").write_text('codegraph = "required"\n' + _LOCAL_TABLE)
+    (repo / ".codegraph").mkdir()
+    issue_id = _create_ready_issue(repo, "stay open")
+    _isolate(monkeypatch, tmp_path)
+    calls = _patch_probe(monkeypatch)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name, *a, **k: (
+            "/bin/codegraph" if name == "codegraph" else real_which(name, *a, **k)
+        ),
+    )
+    rpcs: list[object] = []
+    monkeypatch.setattr(
+        CodeGraphAdapter,
+        "mcp_tools_call",
+        lambda self, *a, **k: rpcs.append(a) or {"content": []},
+    )
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: _NeverRuns())
+
+    result = runner.invoke(app, ["grind", str(repo), *_OPENCODE_ARGS])
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    combined = _squash(result.stdout + result.stderr)
+    assert "CodeGraph required but unavailable" in combined
+    assert "opencode.json does not register a codegraph MCP server" in combined
+    assert calls == [] and rpcs == []
+    assert _issue(repo, issue_id)["status"] == "open"
+    assert _grind_log(repo) == ""
+
+    (repo / "opencode.json").write_text(json.dumps(_OPENCODE_MCP))
+    calls = _patch_probe(monkeypatch, raises=_server_down())
+
+    result = runner.invoke(app, ["grind", str(repo), *_OPENCODE_ARGS])
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    combined = _squash(result.stdout + result.stderr)
+    assert "CodeGraph required but unavailable" not in combined
+    assert "opencode backend: local server unreachable" in combined
+    assert calls == [_LOCAL_CONFIG] and len(rpcs) == 1
+    assert _issue(repo, issue_id)["status"] == "open"
+    assert _grind_log(repo) == ""

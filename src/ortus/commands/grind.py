@@ -1207,16 +1207,22 @@ def grind(
         output.error(str(exc).splitlines()[0])
         raise typer.Exit(code=1)
 
-    # Phase 0b — local server preflight. One cheap /models request before the
-    # flock and before any bd read, so a dead endpoint or a mis-served model
-    # leaves the tracker untouched and no claim is burned on a worker that
-    # could only hang on it. The server is operator-managed: no retry loop,
-    # and no tool-calling probe here (ortus check owns the expensive one).
+    # Phase 0b — served-model preflight, for both backends that drive an
+    # operator-served model (`local` through codex, `opencode` through
+    # opencode). One cheap /models request before the flock and before any
+    # bd read, so a dead endpoint or a mis-served model leaves the tracker
+    # untouched and no claim is burned on a worker that could only hang on
+    # it. The server is operator-managed: no retry loop, and no tool-calling
+    # probe here (ortus check owns the expensive one). The message names the
+    # backend that was launched, so an opencode operator is not sent to fix
+    # a `local` run. CodeGraph policy was enforced at the probe above, which
+    # for opencode includes the `opencode.json` registration the worker
+    # would otherwise discover by failing its handshake after a claim.
     if local_config is not None:
         try:
             probe_models(local_config)
         except LocalServerError as exc:
-            output.error(f"local backend: {exc}", hint=exc.remediation)
+            output.error(f"{resolved_backend} backend: {exc}", hint=exc.remediation)
             raise typer.Exit(code=1)
         output.progress("grind", f"local server reachable: {local_config.display}")
 

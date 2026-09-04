@@ -420,3 +420,86 @@ def test_opencode_errored_mcp_call_is_not_a_handshake(tmp_path: Path) -> None:
     assert "codegraph_codegraph_explore: tool error" in summary.fallbacks
     with pytest.raises(CodeGraphUnavailable):
         require_handshake(summary)
+
+
+def test_opencode_probe_requires_the_project_mcp_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opencode runs the server from `opencode.json`; no entry means unavailable, fatal under required.
+
+    The index and CLI are present throughout, so the registration is the only
+    thing that changes the verdict. Nothing is injected per child (no
+    capability), and the outer RPC is not attempted for an unregistered
+    server: a worker without the entry could only fail its handshake after a
+    claim, which is what the probe exists to prevent.
+    """
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    rpcs: list[object] = []
+    monkeypatch.setattr(
+        CodeGraphAdapter,
+        "mcp_tools_call",
+        lambda self, *a, **k: rpcs.append(a) or {"content": []},
+    )
+    adapter = CodeGraphAdapter()
+    entry = {"type": "local", "command": ["codegraph", "serve", "--mcp"]}
+    config = tmp_path / "opencode.json"
+
+    # No file at all.
+    probe = adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="opencode")
+    assert not probe.available and probe.capability is None
+    assert probe.cli_present and probe.index_present
+    assert probe.reason == "opencode.json does not register a codegraph MCP server"
+    with pytest.raises(CodeGraphUnavailable, match=r"opencode\.json does not register"):
+        adapter.probe(tmp_path, CodeGraphMode.REQUIRED, backend="opencode")
+    assert rpcs == []
+
+    # A file with no `mcp` table, then one whose entry is switched off.
+    config.write_text(json.dumps({"provider": {}}))
+    assert not adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="opencode").available
+    config.write_text(json.dumps({"mcp": {"codegraph": {**entry, "enabled": False}}}))
+    disabled = adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="opencode")
+    assert not disabled.available
+    assert disabled.reason == (
+        "opencode.json registers the codegraph MCP server with enabled: false"
+    )
+
+    # An unreadable file is a reason, never a traceback.
+    config.write_text("{not json")
+    broken = adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="opencode")
+    assert not broken.available and "not valid JSON" in (broken.reason or "")
+    with pytest.raises(CodeGraphUnavailable, match="not valid JSON"):
+        adapter.probe(tmp_path, CodeGraphMode.REQUIRED, backend="opencode")
+    assert rpcs == []
+
+    # The registration the init leaf writes: available, no capability, one RPC.
+    config.write_text(json.dumps({"mcp": {"codegraph": {**entry, "enabled": True}}}))
+    registered = adapter.probe(tmp_path, CodeGraphMode.REQUIRED, backend="opencode")
+    assert registered.available and registered.capability is None
+    assert registered.reason is None
+    assert len(rpcs) == 1
+
+    # A missing index still leads the reasons; the registration gap follows it.
+    (tmp_path / ".codegraph").rmdir()
+    config.unlink()
+    both = adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="opencode")
+    assert both.reason == (
+        "project index .codegraph/ is missing; "
+        "opencode.json does not register a codegraph MCP server"
+    )
+
+
+def test_grok_probe_ignores_opencode_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The opencode registration check is opencode's alone; grok is unchanged."""
+    (tmp_path / ".codegraph").mkdir()
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
+    )
+    (tmp_path / "opencode.json").write_text("{not json")
+    for backend in ("grok", "claude", "codex", "local"):
+        probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.REQUIRED, backend=backend)
+        assert probe.available, backend
+        assert probe.reason is None, backend

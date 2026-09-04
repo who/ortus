@@ -18,6 +18,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable
 
+from ortus.core.init_render import read_opencode_config
+from ortus.core.local_backend import OPENCODE_CONFIG_FILE
+
 MCP_ORIENT_QUERY = "orient to this repository"
 MCP_RPC_TIMEOUT = 20.0
 
@@ -134,6 +137,32 @@ def _bounded_join(values: Iterable[str]) -> str:
     return ", ".join(bounded) if bounded else "none"
 
 
+def opencode_mcp_registration_gap(repo: Path) -> str | None:
+    """Why project ``opencode.json`` gives a worker no CodeGraph server, or None.
+
+    opencode runs MCP servers itself from the ``mcp`` table of its project
+    configuration and presents each tool as a flat function, so that table
+    is the whole registration: nothing is injected per child as for codex,
+    and no user scope stands in for it. A missing file, an unreadable one,
+    a missing entry, and ``enabled: false`` each read as unregistered with
+    their own reason, never as an exception — the probe reports them.
+    """
+    try:
+        data = read_opencode_config(repo)
+    except ValueError as exc:
+        return str(exc)
+    servers = (data or {}).get("mcp")
+    entry = servers.get("codegraph") if isinstance(servers, dict) else None
+    if not isinstance(entry, dict):
+        return f"{OPENCODE_CONFIG_FILE} does not register a codegraph MCP server"
+    if entry.get("enabled", True) is False:
+        return (
+            f"{OPENCODE_CONFIG_FILE} registers the codegraph MCP server "
+            "with enabled: false"
+        )
+    return None
+
+
 class CodeGraphAdapter:
     """Outer-process adapter; replaceable with a fake in command tests."""
 
@@ -145,6 +174,7 @@ class CodeGraphAdapter:
         index = (repo / ".codegraph").is_dir()
         cli_path = shutil.which("codegraph")
         cli = cli_path is not None
+        registration: str | None = None
         if backend in ("codex", "local"):
             # Codex receives the exact registration represented by
             # ``capability`` on every fresh process, avoiding reliance on
@@ -156,10 +186,19 @@ class CodeGraphAdapter:
                 else None
             )
             available = index and cli and capability is not None
-        elif backend in ("grok", "opencode"):
-            # File-backed project registration: `.grok/config.toml` for
-            # grok, the `mcp` table of `opencode.json` for opencode, which
-            # runs the server itself. Neither runner grows `-c` overrides.
+        elif backend == "opencode":
+            # File-backed project registration that only opencode acts on:
+            # it runs the server from the `mcp` table of `opencode.json` and
+            # presents each tool as a flat function. A worker launched
+            # without that entry holds no CodeGraph tool and could only fail
+            # its handshake after a claim was burned, so the entry is part
+            # of availability here, before any claim. No `-c` overrides.
+            capability = None
+            registration = opencode_mcp_registration_gap(repo)
+            available = index and cli and registration is None
+        elif backend == "grok":
+            # File-backed project registration in `.grok/config.toml`; the
+            # runner grows no `-c` overrides.
             capability = None
             available = index and cli
         else:
@@ -171,6 +210,8 @@ class CodeGraphAdapter:
             missing.append("project index .codegraph/ is missing")
         if not cli:
             missing.append("codegraph CLI is not on PATH")
+        if registration is not None:
+            missing.append(registration)
         probe = CodeGraphProbe(
             mode, index, cli, available, "; ".join(missing) or None, capability
         )

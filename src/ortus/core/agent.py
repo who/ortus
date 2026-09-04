@@ -519,16 +519,27 @@ class OpenCodeRunner:
     def _readonly_argv(self, argv: list[str], repo: Path) -> list[str]:
         """The posture is opencode's own permission table; nothing wraps the process.
 
-        With write, edit, and bash denied the model has no tool that can
-        touch the tree. An outer read-only root would also make opencode's
-        own state directories read-only, the failure Codex documented, so
-        whether grind adds one on top is the preflight leaf's decision.
+        Settled, not deferred: the denial ``launch_env`` exports is the whole
+        verify posture. opencode's permission is tool-level, and with write,
+        edit, and bash denied it drops those tools from the model's surface,
+        so the verifier holds nothing that can touch the tree — bash
+        included, the one tool a permission table cannot otherwise contain.
+        An outer read-only root would add nothing the denial does not
+        already guarantee, and would make opencode's own state directories
+        read-only, the failure Codex documented; grind adds none on top.
         """
 
         return argv
 
     def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
-        """No Ortus-owned read-only wrapper to probe; mirrors ``_readonly_argv``."""
+        """Nothing to probe; mirrors ``_readonly_argv``.
+
+        The Claude preflight exists because its verifier runs commands
+        through a wrapper that can turn out unable to execute anything. An
+        opencode verifier runs no commands at all — bash is among the denied
+        tools — and no Ortus-owned wrapper sits in its path, so the
+        blocked-execution failure that guard catches cannot arise here.
+        """
 
         return None
 
