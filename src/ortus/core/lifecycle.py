@@ -243,23 +243,19 @@ def render_mermaid(machine: StateMachine) -> str:
             lines.append(f'    state "{state}" as {node}')
     if machine.initial in included:
         lines.append(f"    [*] --> {_node_id(machine.initial)}")
-    # Collapse parallel edges (same source and target) into one labeled edge.
-    # Two self-loops on a node render as overlapping arcs that hide each
-    # other's labels, so their triggers are stacked into one edge with a
-    # line break instead.
-    grouped: dict[tuple[str, str], list[str]] = {}
-    order: list[tuple[str, str]] = []
+    # Self-loops (the leftover-claim and human-flag cases) draw as arcs that
+    # collide with the forward path and each other's labels, so the diagram
+    # shows only the forward path between distinct states. Every self-loop is
+    # still in the exhaustive transition table below.
     for transition in machine.transitions:
         if transition.source not in included or transition.target not in included:
             continue
-        key = (transition.source, transition.target)
-        if key not in grouped:
-            grouped[key] = []
-            order.append(key)
-        grouped[key].append(transition.trigger)
-    for source, target in order:
-        label = "<br>".join(grouped[(source, target)])
-        lines.append(f"    {_node_id(source)} --> {_node_id(target)}: {label}")
+        if transition.source == transition.target:
+            continue
+        lines.append(
+            f"    {_node_id(transition.source)} --> "
+            f"{_node_id(transition.target)}: {transition.trigger}"
+        )
     for state in drawn:
         if state in machine.terminal:
             lines.append(f"    {_node_id(state)} --> [*]")

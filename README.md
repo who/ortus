@@ -428,7 +428,6 @@ stateDiagram-v2
     direction TB
     [*] --> open
     open --> in_progress: the worker claims the selected issue
-    in_progress --> in_progress: the leftover claim continues in the next window<br>grind labels human and stops
     in_progress --> closed: the worker session-closes the issue
     closed --> [*]
 ```
