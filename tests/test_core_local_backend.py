@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import sys
 import threading
@@ -10,6 +11,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import FrozenInstanceError, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,17 +21,21 @@ from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
     LOCAL_TABLE_BACKENDS,
     MIN_RECOMMENDED_CONTEXT,
+    OPENCODE_BINARY,
     OPENCODE_CONFIG_FILE,
+    OPENCODE_INSTALL_DIR,
     OPENCODE_PROVIDER_ID,
     OPENCODE_PROVIDER_NPM,
     OPENCODE_SCHEMA_URL,
     LocalConfig,
     LocalServerError,
+    OpenCodeBinaryError,
     load_local_config,
     opencode_provider_block,
     parse_local_table,
     probe_context_size,
     probe_models,
+    resolve_opencode_binary,
     serving_hint,
 )
 from ortus.core.profiles import SUPPORTED_EFFORTS, ProfileError
@@ -66,6 +72,134 @@ def test_local_config_is_immutable() -> None:
     local = LocalConfig(DEFAULT_LOCAL_BASE_URL, "m")
     with pytest.raises(FrozenInstanceError):
         local.model = "other"  # type: ignore[misc]
+
+
+# --- the opencode executable -------------------------------------------------
+#
+# The installer puts opencode in `~/.opencode/bin`, off a non-login PATH, so
+# the resolver looks there after PATH and nowhere else. Every test fakes the
+# home directory: the developer's own install must not answer for it.
+
+
+def _install(home: Path, *, mode: int = 0o755) -> Path:
+    """A stand-in opencode where the installer puts it."""
+    binary = home / OPENCODE_INSTALL_DIR / OPENCODE_BINARY
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(mode)
+    return binary
+
+
+def _path_holds(monkeypatch: pytest.MonkeyPatch, **found: str) -> list[str]:
+    """`shutil.which` answering from `found` only; returns the names it was asked."""
+    asked: list[str] = []
+
+    def which(name: str, *args: object, **kwargs: object) -> str | None:
+        asked.append(name)
+        return found.get(name)
+
+    monkeypatch.setattr(shutil, "which", which)
+    return asked
+
+
+def test_opencode_install_dir_is_the_installer_default() -> None:
+    assert OPENCODE_BINARY == "opencode"
+    assert OPENCODE_INSTALL_DIR == Path(".opencode") / "bin"
+    assert issubclass(OpenCodeBinaryError, RuntimeError)
+
+
+def test_resolve_opencode_binary_path_wins_over_the_install_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An on-PATH opencode is the answer even with an install beside it."""
+    home = tmp_path / "home"
+    _install(home)
+    asked = _path_holds(monkeypatch, opencode="/usr/bin/opencode")
+    assert resolve_opencode_binary(home=home) == Path("/usr/bin/opencode")
+    assert asked == ["opencode"]
+
+
+def test_resolve_opencode_binary_returns_the_real_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative PATH entry or a symlink resolves to the executable's real path."""
+    real = tmp_path / "tools" / "opencode-real"
+    real.parent.mkdir()
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    (tmp_path / "tools" / "opencode").symlink_to(real)
+    monkeypatch.chdir(tmp_path)
+    _path_holds(monkeypatch, opencode="tools/opencode")
+    resolved = resolve_opencode_binary(home=tmp_path / "home")
+    assert resolved.is_absolute()
+    assert resolved == real.resolve()
+
+
+def test_resolve_opencode_binary_falls_back_to_the_install_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off PATH, `~/.opencode/bin/opencode` is found and handed back absolute."""
+    home = tmp_path / "home"
+    installed = _install(home)
+    _path_holds(monkeypatch)
+    assert resolve_opencode_binary(home=home) == installed.resolve()
+    # `home` defaults to the home directory of the process.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert resolve_opencode_binary() == installed.resolve()
+
+
+def test_resolve_opencode_binary_not_executable_names_the_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file at the install path that cannot run is a miss with the chmod as the fix."""
+    home = tmp_path / "home"
+    installed = _install(home, mode=0o644)
+    _path_holds(monkeypatch)
+    with pytest.raises(OpenCodeBinaryError) as info:
+        resolve_opencode_binary(home=home)
+    assert str(installed) in str(info.value)
+    assert "not executable" in str(info.value)
+    assert info.value.remediation == f"chmod +x {installed}"
+
+
+def test_resolve_opencode_binary_missing_names_both_fixes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nowhere at all: the message says where it looked; the fix is PATH or install."""
+    home = tmp_path / "home"
+    _path_holds(monkeypatch)
+    with pytest.raises(OpenCodeBinaryError) as info:
+        resolve_opencode_binary(home=home)
+    install_dir = home / OPENCODE_INSTALL_DIR
+    assert str(info.value) == (
+        f"opencode CLI not on PATH and not at {install_dir / 'opencode'}"
+    )
+    assert info.value.remediation == (
+        f"add {install_dir} to PATH, or install opencode (https://opencode.ai)"
+    )
+
+
+def test_resolve_opencode_binary_explicit_path_is_taken_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path rather than a name skips the search: it is checked and made absolute."""
+    asked = _path_holds(monkeypatch, opencode="/usr/bin/opencode")
+    explicit = tmp_path / "bin" / "opencode"
+    explicit.parent.mkdir()
+    explicit.write_text("#!/bin/sh\nexit 0\n")
+    explicit.chmod(0o755)
+    home = tmp_path / "home"
+    assert resolve_opencode_binary(str(explicit), home=home) == explicit.resolve()
+    assert asked == []
+    explicit.chmod(0o644)
+    with pytest.raises(OpenCodeBinaryError, match="not executable") as info:
+        resolve_opencode_binary(str(explicit), home=home)
+    assert info.value.remediation == f"chmod +x {explicit}"
+    with pytest.raises(OpenCodeBinaryError) as info:
+        resolve_opencode_binary(str(tmp_path / "nowhere" / "opencode"), home=home)
+    assert "not found at" in str(info.value)
+    assert "install opencode" in info.value.remediation
+    assert asked == []
 
 
 @pytest.mark.parametrize(

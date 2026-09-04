@@ -49,17 +49,20 @@ from ortus.core.init_render import BACKEND_TEMPLATES, MERGED_CONFIGS, read_openc
 from ortus.core.local_backend import (
     LOCAL_TABLE_BACKENDS,
     MIN_RECOMMENDED_CONTEXT,
+    OPENCODE_BINARY,
     OPENCODE_CONFIG_FILE,
     OPENCODE_MCP_SERVER,
     OPENCODE_PROVIDER_ID,
     LocalConfig,
     LocalServerError,
+    OpenCodeBinaryError,
     load_local_config,
     opencode_mcp_entry,
     opencode_provider_block,
     parse_local_table,
     probe_context_size,
     probe_models,
+    resolve_opencode_binary,
 )
 from ortus.core.profiles import ProfileError
 from ortus.core.prompts import (
@@ -89,13 +92,25 @@ class CheckResult:
     level: str = "strict"
 
 
-def _binary_check(name: str, *, version_flag: str = "--version") -> CheckResult:
-    path = shutil.which(name)
+def _binary_check(
+    name: str, *, version_flag: str = "--version", path: str | None = None
+) -> CheckResult:
+    """`name` answers `version_flag`: found on PATH, or at `path` when the
+    caller already resolved it, in which case that path is what runs."""
     if path is None:
-        return CheckResult(name, False, f"{name} not on PATH")
+        path = shutil.which(name)
+        if path is None:
+            return CheckResult(name, False, f"{name} not on PATH")
+        executable = name
+    else:
+        executable = path
     try:
         proc = subprocess.run(
-            [name, version_flag], capture_output=True, text=True, timeout=10, check=False
+            [executable, version_flag],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
         version = (proc.stdout or proc.stderr).splitlines()[0:1]
         line = version[0] if version else "(version unknown)"
@@ -121,7 +136,18 @@ def check_grok() -> CheckResult:
 
 
 def check_opencode() -> CheckResult:
-    return _binary_check("opencode")
+    """The `opencode` binary row, resolved the way the runner resolves it.
+
+    PATH first, then the installer's `~/.opencode/bin`, which a non-login
+    shell's PATH does not include: a row that stopped at PATH failed a
+    standard install that grind would in fact launch. What this row reports
+    is the path grind hands the worker, and a miss names both fixes.
+    """
+    try:
+        path = resolve_opencode_binary()
+    except OpenCodeBinaryError as exc:
+        return CheckResult(OPENCODE_BINARY, False, f"{exc} — {exc.remediation}")
+    return _binary_check(OPENCODE_BINARY, path=str(path))
 
 
 def check_jq() -> CheckResult:
@@ -983,7 +1009,14 @@ def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
     gaps: list[str] = []
     if not (repo / config_rel).is_file():
         gaps.append(f"{config_rel} missing — run `ortus init --force`")
-    if shutil.which(binary) is None:
+    if backend in LOCAL_TABLE_BACKENDS:
+        # The installer's `~/.opencode/bin` counts, as it does for the run
+        # backend's own row and for the launch.
+        try:
+            resolve_opencode_binary()
+        except OpenCodeBinaryError as exc:
+            gaps.append(f"{exc} — {exc.remediation}")
+    elif shutil.which(binary) is None:
         gaps.append(f"{binary} CLI not on PATH — install it")
     if backend == "claude" and not _claude_mcp_registered(repo):
         gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")

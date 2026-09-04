@@ -41,7 +41,9 @@ from ortus.core.local_backend import (
     LOCAL_TABLE_BACKENDS,
     OPENCODE_PROVIDER_ID,
     LocalConfig,
+    OpenCodeBinaryError,
     load_local_config,
+    resolve_opencode_binary,
 )
 from ortus.core.profiles import AgentProfile, Phase as Phase, ProfileError
 
@@ -365,6 +367,10 @@ class OpenCodeRunner:
     """
 
     local: LocalConfig
+    #: What ``argv[0]`` is. ``make_runner`` supplies the absolute path
+    #: ``resolve_opencode_binary`` found (PATH, then ``~/.opencode/bin``); the
+    #: bare default is for callers that construct the runner themselves and
+    #: launches by PATH like any other name.
     opencode_binary: str = "opencode"
     extra_env: dict[str, str] = field(default_factory=dict)
     codegraph: CodeGraphCapability | None = None
@@ -556,7 +562,11 @@ def make_runner(
     comes from the ``[local]`` table of that repository's layered config; the
     other backends ignore it. A missing or malformed table surfaces as
     ``BackendError`` with the config error's own text, so every existing
-    ``except BackendError`` site reports it unchanged.
+    ``except BackendError`` site reports it unchanged. Those two backends
+    also resolve the opencode executable here, once: the runner is handed
+    an absolute path, so the worker runs whatever PATH it inherits, and a
+    binary that is nowhere is the same ``BackendError`` naming the fix
+    rather than a ``FileNotFoundError`` at spawn time.
     """
     if backend == "codex":
         return CodexRunner()
@@ -567,7 +577,11 @@ def make_runner(
             local = load_local_config(load_config(repo=repo))
         except ProfileError as exc:
             raise BackendError(str(exc)) from exc
-        return OpenCodeRunner(local)
+        try:
+            binary = resolve_opencode_binary()
+        except OpenCodeBinaryError as exc:
+            raise BackendError(f"{exc}; {exc.remediation}") from exc
+        return OpenCodeRunner(local, opencode_binary=str(binary))
     return ClaudeRunner()
 
 

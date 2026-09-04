@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -318,6 +319,8 @@ def test_make_runner_opencode_is_a_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    # The factory resolves the executable; here it is on PATH.
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: "/usr/bin/opencode")
     (tmp_path / ".ortusrc").write_text('[local]\nmodel = "m"\n')
     runner = make_runner("opencode", repo=tmp_path)
     assert type(runner) is OpenCodeRunner

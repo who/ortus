@@ -227,7 +227,12 @@ order, writes nothing when both are already current, and refuses a file that
 is not a JSON object before anything else is touched.
 
 `ortus check --backend opencode` prints the `opencode` binary row, the
-`opencode.json` row, and six rows after them. `[local]` validates the table
+`opencode.json` row, and six rows after them. The binary row looks on PATH
+and then in `~/.opencode/bin`, where the opencode installer puts the
+executable and a non-login shell's PATH does not reach; the worker is
+launched by that same resolved absolute path, so a green row is a launchable
+worker, and a miss names both fixes: add the directory to PATH, or install
+opencode. `[local]` validates the table
 and, when `api_key_env` is set, that the variable is exported; the row shows
 the variable's name and never its value. `opencode provider` compares the
 `ortuslocal` entry with the table fact by fact — `baseURL`, the served model
@@ -243,9 +248,10 @@ worker, because a denial exported in the shell would quietly cripple every
 implement run; the same row reports the verify denial. `opencode context`
 reads `n_ctx` from llama-server's `/props` and is informational: it warns
 below 32768 and never fails the check. No row launches opencode.
-`ortus grind` repeats the endpoint probe at startup, before it takes the lock
-or launches a worker, so a server that has gone away fails fast with the same
-remediation, and its CodeGraph probe treats a missing or disabled
+`ortus grind` repeats the binary resolution and the endpoint probe at startup,
+before it takes the lock or launches a worker, so a missing install or a
+server that has gone away fails fast with the same remediation and no issue
+is claimed, and its CodeGraph probe treats a missing or disabled
 `mcp.codegraph` entry as CodeGraph unavailable, which under `required` stops
 the run before any issue is claimed.
 

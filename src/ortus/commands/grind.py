@@ -93,8 +93,10 @@ from ortus.core.lifecycle import ISSUE_OPEN
 from ortus.core.local_backend import (
     LOCAL_TABLE_BACKENDS,
     LocalServerError,
+    OpenCodeBinaryError,
     load_local_config,
     probe_models,
+    resolve_opencode_binary,
 )
 from ortus.core.repo import resolve_repo
 
@@ -1208,19 +1210,30 @@ def grind(
         output.error(str(exc).splitlines()[0])
         raise typer.Exit(code=1)
 
-    # Phase 0b — served-model preflight, for the backends that drive an
-    # operator-served model (`opencode`, and `local`, its older name). One
-    # cheap /models request before the flock and before any bd read, so a
-    # dead endpoint or a mis-served model leaves the tracker untouched and no
-    # claim is burned on a worker that could only hang on it. The server is
-    # operator-managed: no retry loop, and no tool-calling probe here (the
-    # worker's own CodeGraph handshake proves that). The message names the
-    # backend that was launched, so an operator who wrote `local` is not sent
-    # to fix an `opencode` run. CodeGraph policy was enforced at the probe
-    # above, which for these backends includes the `opencode.json`
-    # registration the worker would otherwise discover by failing its
-    # handshake after a claim.
+    # Phase 0b — executable and served-model preflight, for the backends that
+    # drive an operator-served model (`opencode`, and `local`, its older
+    # name). First the opencode binary, resolved the way the runner will
+    # resolve it (PATH, then the installer's `~/.opencode/bin`): a standard
+    # install is off a non-login PATH, and finding that out at
+    # `subprocess.Popen` meant a raw traceback after every other preflight
+    # had passed. Then one cheap /models request. Both run before the flock
+    # and before any bd read, so a missing binary, a dead endpoint, or a
+    # mis-served model leaves the tracker untouched and no claim is burned
+    # on a worker that could only fail. The server is operator-managed: no
+    # retry loop, and no tool-calling probe here (the worker's own CodeGraph
+    # handshake proves that). The message names the backend that was
+    # launched, so an operator who wrote `local` is not sent to fix an
+    # `opencode` run. CodeGraph policy was enforced at the probe above,
+    # which for these backends includes the `opencode.json` registration
+    # the worker would otherwise discover by failing its handshake after a
+    # claim.
     if local_config is not None:
+        try:
+            opencode_binary = resolve_opencode_binary()
+        except OpenCodeBinaryError as exc:
+            output.error(f"{resolved_backend} backend: {exc}", hint=exc.remediation)
+            raise typer.Exit(code=1)
+        output.progress("grind", f"opencode binary: {opencode_binary}")
         try:
             probe_models(local_config)
         except LocalServerError as exc:

@@ -1253,6 +1253,52 @@ def test_check_opencode_rows_all_green(
     assert "opencodemcp" in compact
 
 
+def test_check_opencode_binary_row_resolves_the_install_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The binary row finds `~/.opencode/bin/opencode` off PATH and names each fix when it cannot.
+
+    The row resolves exactly as grind's launch does, so a green row is a
+    launchable worker: the version probe runs the resolved path, not a name
+    the shell would have to find.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(check_mod.shutil, "which", lambda binary: None)
+    ran: list[list[str]] = []
+    fake_run = _fake_bd_run(readiness_memory=True)
+
+    def run(args, *a, **k):
+        ran.append(list(args))
+        return fake_run(args, *a, **k)
+
+    monkeypatch.setattr(check_mod.subprocess, "run", run)
+
+    row = check_mod.check_opencode()
+    assert row.name == "opencode"
+    assert not row.ok
+    assert row.message.startswith("opencode CLI not on PATH")
+    assert f"add {home / '.opencode' / 'bin'} to PATH" in row.message
+    assert "install opencode" in row.message
+    assert ran == []
+
+    installed = home / ".opencode" / "bin" / "opencode"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("#!/bin/sh\nexit 0\n")
+    installed.chmod(0o644)
+    row = check_mod.check_opencode()
+    assert not row.ok
+    assert "not executable" in row.message
+    assert f"chmod +x {installed}" in row.message
+    assert ran == []
+
+    installed.chmod(0o755)
+    row = check_mod.check_opencode()
+    assert row.ok, row.message
+    assert row.message.startswith(f"{installed.resolve()} — fake 1.0.0")
+    assert ran == [[str(installed.resolve()), "--version"]]
+
+
 def test_check_opencode_rows_route_by_flag_and_help(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1710,12 +1756,16 @@ def test_check_opencode_provisioned_row_names_the_gaps(
         tmp_path, ortusrc='backend = "codex"\n[local]\nmodel = "two words"\n'
     )
     monkeypatch.setattr(check_mod.shutil, "which", lambda binary: None)
+    # The CLI is also looked for at the installer's `~/.opencode/bin`; keep
+    # the developer's own install out of the verdict.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     _never_probe(monkeypatch)
     row = check_mod.check_provisioned_backend(repo, "opencode")
     assert not row.ok
     assert row.level == "info"
     assert "opencode.json missing" in row.message
     assert "opencode CLI not on PATH" in row.message
+    assert f"add {tmp_path / 'home' / '.opencode' / 'bin'} to PATH" in row.message
     assert "codegraph MCP not registered" in row.message
     assert "local.model" in row.message
     assert "ortus init --backend opencode" in row.message

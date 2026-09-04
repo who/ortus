@@ -51,8 +51,10 @@ from ortus.core.local_backend import (
     OPENCODE_PROVIDER_ID,
     LocalConfig,
     LocalServerError,
+    OpenCodeBinaryError,
     parse_local_table,
     probe_models,
+    resolve_opencode_binary,
     serving_hint,
 )
 from ortus.core.profiles import ProfileError
@@ -234,8 +236,16 @@ def _backend_cli(name: str) -> str | None:
     """Locate a backend's executable; the seam init tests replace.
 
     Resolved through `BACKEND_BINARIES`, so `local` looks for `opencode`: it
-    is that backend under its older name, not a binary of its own.
+    is that backend under its older name, not a binary of its own. For that
+    pair the installer's `~/.opencode/bin` counts as well as PATH, the way
+    the runner and `ortus check` resolve it, so a standard install pins as
+    the run backend instead of being refused as "not on PATH".
     """
+    if name in LOCAL_TABLE_BACKENDS:
+        try:
+            return str(resolve_opencode_binary())
+        except OpenCodeBinaryError:
+            return None
     return shutil.which(BACKEND_BINARIES[name])
 
 

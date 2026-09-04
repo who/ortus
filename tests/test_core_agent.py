@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -151,11 +152,29 @@ LOCAL_TABLE = (
 
 
 def _fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keep the developer's own ~/.ortusrc out of the layered config."""
+    """Keep the developer's own ~/.ortusrc and ~/.opencode out of the picture."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     return home
+
+
+def _opencode_on_path(monkeypatch: pytest.MonkeyPatch) -> str:
+    """PATH holds opencode at a fixed place and nothing else; returns that place."""
+    path = "/usr/bin/opencode"
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: path if name == "opencode" else None
+    )
+    return path
+
+
+def _install_opencode(home: Path, script: str = "#!/bin/sh\nexit 0\n") -> Path:
+    """A stand-in opencode where the installer puts it, off PATH."""
+    binary = home / ".opencode" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text(script)
+    binary.chmod(0o755)
+    return binary
 
 
 def test_local_is_a_legal_backend(tmp_path: Path) -> None:
@@ -172,6 +191,7 @@ def test_local_is_the_opencode_engine(
 ) -> None:
     """`local` launches exactly what `opencode` launches; nothing of codex's remains."""
     _fake_home(tmp_path, monkeypatch)
+    binary = _opencode_on_path(monkeypatch)
     (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
     local = make_runner("local", repo=tmp_path)
     opencode = make_runner("opencode", repo=tmp_path)
@@ -184,7 +204,7 @@ def test_local_is_the_opencode_engine(
     for readonly in (False, True):
         argv = local.build_argv("work", readonly=readonly)
         assert argv == opencode.build_argv("work", readonly=readonly)
-        assert argv[:2] == ["opencode", "run"]
+        assert argv[:2] == [binary, "run"]
         assert "exec" not in argv and "-c" not in argv and "--sandbox" not in argv
         assert "ortus_local" not in " ".join(argv)
     assert local.launch_env(readonly=True) == opencode.launch_env(readonly=True)
@@ -224,8 +244,13 @@ OPENCODE_ARGV_PREFIX = ["opencode", "run", "--format", "json"]
 
 
 def test_opencode_runner_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC-1: make_runner routes opencode to a sibling runner with the spike argv."""
+    """AC-1: make_runner routes opencode to a sibling runner with the spike argv.
+
+    On PATH, the executable resolves to where PATH has it and nothing else
+    changes: `argv[0]` is that absolute path, the rest is the spike argv.
+    """
     _fake_home(tmp_path, monkeypatch)
+    binary = _opencode_on_path(monkeypatch)
     (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
     home = tmp_path / "home"
     assert BACKEND_BINARIES["opencode"] == "opencode"
@@ -235,12 +260,12 @@ def test_opencode_runner_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert not isinstance(runner, ClaudeRunner)
     assert not isinstance(runner, CodexRunner)
     assert not isinstance(runner, GrokRunner)
-    assert runner.opencode_binary == "opencode"
+    assert runner.opencode_binary == binary
     assert runner.local == LocalConfig(
         "http://127.0.0.1:11434/v1", "qwen3:4b", api_key_env="LLAMA_API_KEY"
     )
     argv = runner.build_argv("work")
-    assert argv == OPENCODE_ARGV_PREFIX + ["-m", "ortuslocal/qwen3:4b", "work"]
+    assert argv == [binary, *OPENCODE_ARGV_PREFIX[1:], "-m", "ortuslocal/qwen3:4b", "work"]
     assert argv[argv.index("-m") + 1] == f"{OPENCODE_PROVIDER_ID}/qwen3:4b"
     # Nothing codex-shaped leaks across: no exec, no -c overrides, no sandbox flag.
     assert "exec" not in argv and "-c" not in argv and "--sandbox" not in argv
@@ -375,6 +400,58 @@ def test_make_runner_opencode_without_table_is_actionable(
     (tmp_path / ".ortusrc").write_text('backend = "opencode"\n')
     with pytest.raises(BackendError, match="local.model"):
         make_runner("opencode", repo=tmp_path)
+
+
+def test_opencode_binary_fallback_launches_from_the_install_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: off PATH but at `~/.opencode/bin/opencode`, the runner resolves and launches it.
+
+    The stand-in prints its own path, so the log proves which executable
+    `subprocess.Popen` received: the absolute install path, not a name the
+    child's PATH would have had to find.
+    """
+    home = _fake_home(tmp_path, monkeypatch)
+    installed = _install_opencode(home, "#!/bin/sh\nprintf 'launched %s\\n' \"$0\"\n")
+    (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+    runner = make_runner("opencode", repo=tmp_path)
+    assert isinstance(runner, OpenCodeRunner)
+    assert runner.opencode_binary == str(installed.resolve())
+    argv = runner.build_argv("work")
+    assert Path(argv[0]).is_absolute() and argv[0] == runner.opencode_binary
+    assert argv[1:] == [*OPENCODE_ARGV_PREFIX[1:], "-m", "ortuslocal/qwen3:4b", "work"]
+    # `local` is the same backend under its older name: the same executable.
+    assert make_runner("local", repo=tmp_path).opencode_binary == runner.opencode_binary
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    log = tmp_path / "worker.log"
+    assert runner.run("work", repo=repo, log_path=log) == 0
+    assert log.read_text().strip() == f"launched {installed.resolve()}"
+
+
+def test_opencode_missing_binary_is_a_backend_error_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nowhere at all, `make_runner` raises the error every verb already reports.
+
+    The message names both fixes. The other backends never resolve opencode
+    and keep launching by name, so a missing opencode cannot touch them.
+    """
+    home = _fake_home(tmp_path, monkeypatch)
+    (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+    for backend in ("opencode", "local"):
+        with pytest.raises(BackendError) as info:
+            make_runner(backend, repo=tmp_path)
+        message = str(info.value)
+        assert "opencode CLI not on PATH" in message
+        assert f"add {home / '.opencode' / 'bin'} to PATH" in message
+        assert "install opencode" in message
+    assert make_runner("claude").claude_binary == "claude"
+    assert make_runner("codex").codex_binary == "codex"
+    assert isinstance(make_runner("grok"), GrokRunner)
 
 
 def test_opencode_verify_readonly_denies_write_tools_in_the_child(

@@ -24,9 +24,11 @@ import http.client
 import json
 import os
 import re
+import shutil
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -195,6 +197,79 @@ def load_local_config(cfg: Config) -> LocalConfig:
     so the rules run again and a missing table gets the same message either way.
     """
     return parse_local_table(cfg.get("local"))
+
+
+# --- the opencode executable ------------------------------------------------
+#
+# The opencode installer puts the binary in `~/.opencode/bin`, which a
+# non-login shell's PATH does not include. A lookup that stopped at PATH
+# therefore missed a standard install: grind passed every other preflight,
+# then died in `subprocess.Popen` with a raw `FileNotFoundError`. The runner,
+# the grind preflight, and the check rows all resolve through the one function
+# below, so what check reports is what grind launches, and a miss is a
+# message naming both fixes rather than a traceback.
+
+#: The executable every `[local]`-table backend launches.
+OPENCODE_BINARY = "opencode"
+#: Where the opencode installer puts it, relative to the home directory. The
+#: one place searched beyond PATH: any other location is PATH's to name.
+OPENCODE_INSTALL_DIR = Path(".opencode") / "bin"
+OPENCODE_INSTALL_HINT = "install opencode (https://opencode.ai)"
+
+
+class OpenCodeBinaryError(RuntimeError):
+    """The opencode executable could not be resolved.
+
+    `remediation` is the fix to print under the message: the PATH export or
+    the install for a binary that is nowhere, the chmod for one that is
+    present but not executable.
+    """
+
+    def __init__(self, message: str, remediation: str) -> None:
+        super().__init__(message)
+        self.remediation = remediation
+
+
+def resolve_opencode_binary(
+    binary: str = OPENCODE_BINARY, *, home: Path | None = None
+) -> Path:
+    """The absolute path of the opencode executable a launch should receive.
+
+    A `binary` that is itself a path is an explicit override and is taken as
+    given. A bare name is looked up on PATH first, so an on-PATH opencode
+    wins unchanged, then at `~/.opencode/bin/<name>`. The result is absolute
+    with symlinks resolved, so the child runs it whatever PATH it inherits.
+    Raises `OpenCodeBinaryError` when nothing is found, naming both fixes,
+    or when the install-directory file exists but is not executable, naming
+    the chmod.
+    """
+    candidate = Path(binary).expanduser()
+    if candidate.name != binary:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+        if candidate.is_file():
+            raise OpenCodeBinaryError(
+                f"{OPENCODE_BINARY} CLI at {candidate} is not executable",
+                f"chmod +x {candidate}",
+            )
+        raise OpenCodeBinaryError(
+            f"{OPENCODE_BINARY} CLI not found at {candidate}",
+            f"{OPENCODE_INSTALL_HINT}, or point the runner at its executable",
+        )
+    found = shutil.which(binary)
+    if found is not None:
+        return Path(found).resolve()
+    fallback = (home if home is not None else Path.home()) / OPENCODE_INSTALL_DIR / binary
+    if fallback.is_file():
+        if os.access(fallback, os.X_OK):
+            return fallback.resolve()
+        raise OpenCodeBinaryError(
+            f"{binary} CLI at {fallback} is not executable", f"chmod +x {fallback}"
+        )
+    raise OpenCodeBinaryError(
+        f"{binary} CLI not on PATH and not at {fallback}",
+        f"add {fallback.parent} to PATH, or {OPENCODE_INSTALL_HINT}",
+    )
 
 
 # --- probes -----------------------------------------------------------------

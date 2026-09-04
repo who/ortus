@@ -65,11 +65,31 @@ def _patch_probe(
     return calls
 
 
-def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """No host sandbox, no ORTUS_BACKEND, and no user-level .ortusrc."""
+def _install_opencode(home: Path) -> Path:
+    """A stand-in opencode where the installer puts it: off PATH, found by the fallback."""
+    binary = home / ".opencode" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    return binary
+
+
+def _isolate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, opencode: bool = True
+) -> None:
+    """No host sandbox, no ORTUS_BACKEND, no user-level .ortusrc, and the fake
+    home's own opencode install unless `opencode` is false.
+
+    The binary preflight must pass on a host with no opencode on PATH, and
+    the developer's real `~/.opencode` must never answer for it, so the fake
+    home carries a stand-in at the install path.
+    """
     _fake_sandbox(monkeypatch)
     monkeypatch.delenv("ORTUS_BACKEND", raising=False)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    home = tmp_path / "fake-home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    if opencode:
+        _install_opencode(home)
 
 
 def _squash(text: str) -> str:
@@ -173,6 +193,64 @@ def test_reachable_launches_local_runner(
     assert _issue(repo, issue_id)["status"] == "closed"
     combined = _squash(result.stdout + result.stderr)
     assert f"local server reachable: {_DISPLAY}" in combined
+
+
+@pytest.mark.slow
+def test_opencode_missing_binary_aborts_before_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: no opencode anywhere exits 1 naming both fixes; no traceback, no claim.
+
+    The executable is resolved before the server is asked, so a dead server
+    cannot mask a missing install, and the abort names `local` as the
+    backend that was launched. The installer's path is looked up under the
+    fake home, so the developer's own install cannot answer.
+    """
+    repo = _bd_repo(tmp_path, "local-no-binary")
+    (repo / ".ortusrc").write_text(_LOCAL_TABLE)
+    issue_id = _create_ready_issue(repo, "stay open")
+    _isolate(monkeypatch, tmp_path, opencode=False)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name, *a, **k: (
+            None if name == "opencode" else real_which(name, *a, **k)
+        ),
+    )
+    calls = _patch_probe(monkeypatch)
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: _NeverRuns())
+
+    result = runner.invoke(
+        app,
+        [
+            "grind",
+            str(repo),
+            "--backend",
+            "local",
+            "--tasks",
+            "1",
+            "--idle-sleep",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    # A clean exit, not an exception the runner caught for us.
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    text = _plain(result.stdout + result.stderr)
+    combined = " ".join(text.split())
+    assert "local backend: opencode CLI not on PATH" in combined
+    assert "install opencode" in combined
+    assert "Traceback" not in combined and "FileNotFoundError" not in combined
+    # Rich may fold a long path mid-word, so compare with all whitespace gone.
+    install_dir = tmp_path / "fake-home" / ".opencode" / "bin"
+    assert f"add{install_dir}toPATH" in "".join(text.split())
+    assert calls == [], "the executable is resolved before the server is asked"
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "open"
+    assert not shown.get("assignee")
+    assert _grind_log(repo) == "", "the preflight must abort before the log and flock"
 
 
 def test_dry_run_prints_endpoint(
