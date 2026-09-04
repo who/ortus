@@ -176,8 +176,8 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="work spec",
         definition=(
-            "The authored bd issue content — description, design, acceptance "
-            "criteria, notes — that a worker treats as authoritative, not any "
+            "The authored bd issue content (description, design, acceptance "
+            "criteria, notes) that a worker treats as authoritative, not any "
             "message on a queue."
         ),
         home="`src/ortus/core/readiness.py`",
@@ -193,8 +193,8 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="worker",
         definition=(
-            "One agent subprocess that implements one issue end to end — "
-            "including its acceptance checks and session-close — started fresh "
+            "One agent subprocess that implements one issue end to end, "
+            "including its acceptance checks and session-close, started fresh "
             "with no memory of any worker before it."
         ),
         home="`compose_worker_prompt()` in `src/ortus/core/agent.py`",
