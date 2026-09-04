@@ -17,15 +17,12 @@ import pytest
 from ortus.core.config import Config
 from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
-    LOCAL_PROVIDER_ID,
     LOCAL_TABLE_BACKENDS,
-    LOCAL_WIRE_API,
     MIN_RECOMMENDED_CONTEXT,
     OPENCODE_CONFIG_FILE,
     OPENCODE_PROVIDER_ID,
     OPENCODE_PROVIDER_NPM,
     OPENCODE_SCHEMA_URL,
-    PROBE_TOOL_NAME,
     LocalConfig,
     LocalServerError,
     load_local_config,
@@ -33,7 +30,6 @@ from ortus.core.local_backend import (
     parse_local_table,
     probe_context_size,
     probe_models,
-    probe_tool_calling,
     serving_hint,
 )
 from ortus.core.profiles import SUPPORTED_EFFORTS, ProfileError
@@ -41,8 +37,6 @@ from ortus.core.profiles import SUPPORTED_EFFORTS, ProfileError
 
 def test_constants_pin_the_serving_contract() -> None:
     assert DEFAULT_LOCAL_BASE_URL == "http://127.0.0.1:8080/v1"
-    assert LOCAL_PROVIDER_ID == "ortus_local"
-    assert LOCAL_WIRE_API == "responses"
     assert MIN_RECOMMENDED_CONTEXT == 32768
     assert OPENCODE_PROVIDER_ID == "ortuslocal"
     assert OPENCODE_PROVIDER_NPM == "@ai-sdk/openai-compatible"
@@ -122,10 +116,11 @@ def test_load_local_config_without_a_table_names_local_model() -> None:
         load_local_config(Config(values={"backend": "claude"}))
 
 
-def test_local_efforts_are_the_codex_set_but_not_the_same_object() -> None:
-    assert SUPPORTED_EFFORTS["local"] == SUPPORTED_EFFORTS["codex"]
-    assert SUPPORTED_EFFORTS["local"] is not SUPPORTED_EFFORTS["codex"]
-    assert "none" not in SUPPORTED_EFFORTS["local"]
+def test_local_efforts_are_the_opencode_variant_names() -> None:
+    """`local` is opencode under its older name, so its efforts are variant names."""
+    assert SUPPORTED_EFFORTS["local"] == SUPPORTED_EFFORTS["opencode"]
+    assert SUPPORTED_EFFORTS["local"] != SUPPORTED_EFFORTS["codex"]
+    assert "none" in SUPPORTED_EFFORTS["local"]
 
 
 # --- the opencode provider block --------------------------------------------
@@ -212,12 +207,6 @@ class FakeServer:
         self.routes[("GET", "/v1/models")] = (
             200,
             {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]},
-        )
-
-    def answer_responses(self, *output: dict[str, Any]) -> None:
-        self.routes[("POST", "/v1/responses")] = (
-            200,
-            {"object": "response", "output": list(output)},
         )
 
 
@@ -313,19 +302,6 @@ def _closed_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-
-
-def _function_call(name: str = PROBE_TOOL_NAME) -> dict[str, Any]:
-    return {"type": "function_call", "name": name, "arguments": "{}", "call_id": "c1"}
-
-
-_NARRATION = {
-    "type": "message",
-    "role": "assistant",
-    "content": [
-        {"type": "output_text", "text": f"I would call {PROBE_TOOL_NAME} now."}
-    ],
-}
 
 
 def test_serving_hint_names_the_port_and_jinja() -> None:
@@ -452,101 +428,6 @@ def test_probe_models_hits_v1_models_after_normalisation(
     assert fake_server.received[0].path == "/v1/models"
 
 
-def test_probe_tool_calling_accepts_function_call_item(
-    fake_server: FakeServer,
-) -> None:
-    fake_server.answer_responses({"type": "reasoning", "summary": []}, _function_call())
-    assert probe_tool_calling(fake_server.config("qwen3:4b"), timeout=1.0) is None
-    [seen] = fake_server.received
-    assert (seen.method, seen.path) == ("POST", "/v1/responses")
-    assert seen.headers["content-type"] == "application/json"
-    assert seen.body == {
-        "model": "qwen3:4b",
-        "input": "Call the ortus_ping tool once.",
-        "tools": [
-            {
-                "type": "function",
-                "name": "ortus_ping",
-                "description": "Readiness probe.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            }
-        ],
-        "tool_choice": "required",
-        "max_output_tokens": 64,
-        "stream": False,
-    }
-
-
-def test_probe_tool_calling_narration_is_tools_unsupported(
-    fake_server: FakeServer,
-) -> None:
-    fake_server.answer_responses(_NARRATION)
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(fake_server.config(), timeout=1.0)
-    assert info.value.kind == "tools-unsupported"
-    assert str(info.value) == "server answered without calling the tool"
-    assert "--jinja" in info.value.remediation
-
-
-def test_probe_tool_calling_other_tool_name_is_tools_unsupported(
-    fake_server: FakeServer,
-) -> None:
-    fake_server.answer_responses(_function_call("ping"))
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(fake_server.config(), timeout=1.0)
-    assert info.value.kind == "tools-unsupported"
-
-
-def test_probe_tool_calling_401_is_auth_demanded(fake_server: FakeServer) -> None:
-    fake_server.routes[("POST", "/v1/responses")] = (
-        401,
-        {"error": {"message": "invalid api key"}},
-    )
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(fake_server.config(), timeout=1.0)
-    assert info.value.kind == "auth-demanded"
-    assert "HTTP 401" in str(info.value)
-    assert "local.api_key_env" in info.value.remediation
-
-
-@pytest.mark.parametrize("status", [400, 404, 422, 500])
-def test_probe_tool_calling_tool_rejection_is_tools_unsupported(
-    fake_server: FakeServer, status: int
-) -> None:
-    fake_server.routes[("POST", "/v1/responses")] = (
-        status,
-        {"error": "this chat template does not support tools"},
-    )
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(fake_server.config(), timeout=1.0)
-    assert info.value.kind == "tools-unsupported"
-    assert f"HTTP {status}" in str(info.value)
-    assert "chat template" in str(info.value)
-    assert "--jinja" in info.value.remediation
-
-
-def test_probe_tool_calling_unrelated_failure_is_unreachable(
-    fake_server: FakeServer,
-) -> None:
-    fake_server.routes[("POST", "/v1/responses")] = (500, {"error": "out of memory"})
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(fake_server.config(), timeout=1.0)
-    assert info.value.kind == "unreachable"
-    assert "HTTP 500 from /responses" in str(info.value)
-
-
-def test_probe_tool_calling_refused_connection_is_unreachable() -> None:
-    config = LocalConfig(f"http://127.0.0.1:{_closed_port()}/v1", "m")
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(config, timeout=1.0)
-    assert info.value.kind == "unreachable"
-    assert info.value.remediation == serving_hint(config)
-
-
 def test_probe_context_size_reads_props(fake_server: FakeServer) -> None:
     fake_server.routes[("GET", "/props")] = (
         200,
@@ -591,7 +472,6 @@ def test_probes_send_bearer_only_from_env(
 ) -> None:
     monkeypatch.setenv("LLAMA_API_KEY", "sk-secret-value")
     fake_server.serve_models("qwen3:4b")
-    fake_server.routes[("POST", "/v1/responses")] = (403, {"error": "forbidden"})
     fake_server.routes[("GET", "/props")] = (
         200,
         {"default_generation_settings": {"n_ctx": 8192}},
@@ -599,13 +479,15 @@ def test_probes_send_bearer_only_from_env(
     config = fake_server.config("qwen3:4b", api_key_env="LLAMA_API_KEY")
 
     assert probe_models(config, timeout=1.0) == ("qwen3:4b",)
-    with pytest.raises(LocalServerError) as info:
-        probe_tool_calling(config, timeout=1.0)
     assert probe_context_size(config, timeout=1.0) == 8192
     assert [seen.headers.get("authorization") for seen in fake_server.received] == [
         "Bearer sk-secret-value"
-    ] * 3
+    ] * 2
 
+    # A server that demands a key names the variable, never its value.
+    fake_server.routes[("GET", "/v1/models")] = (403, {"error": "forbidden"})
+    with pytest.raises(LocalServerError) as info:
+        probe_models(config, timeout=1.0)
     assert info.value.kind == "auth-demanded"
     assert "LLAMA_API_KEY" in info.value.remediation
     for text in (str(info.value), info.value.remediation, repr(info.value)):
@@ -614,6 +496,7 @@ def test_probes_send_bearer_only_from_env(
     # The value is read at call time, so a variable that is not exported
     # sends nothing rather than a stale header.
     monkeypatch.delenv("LLAMA_API_KEY")
+    fake_server.serve_models("qwen3:4b")
     fake_server.received.clear()
     probe_models(config, timeout=1.0)
     assert "authorization" not in fake_server.received[0].headers

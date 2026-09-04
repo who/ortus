@@ -21,23 +21,24 @@ class Phase(str, Enum):
     FINALIZE = "finalize"
 
 
+# Forwarded verbatim as `opencode run --variant`, which selects a named
+# variant of the model. opencode 1.18.27 names the variants it derives from a
+# provider catalog after the reasoning-effort values that catalog lists (none
+# through xhigh) and thinking-budget variants high and max, so this is the
+# union of every name it can define. A name the served model does not define
+# is a no-op there, so this set only catches typos.
+_OPENCODE_EFFORTS: frozenset[str] = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
 SUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     "claude": frozenset({"low", "medium", "high", "max"}),
     "codex": frozenset({"low", "medium", "high", "xhigh"}),
     "grok": frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"}),
-    # A separate set that happens to equal codex's: the value is forwarded
-    # verbatim as codex `model_reasoning_effort`, and codex 0.147.0 lists
-    # minimal|low|medium|high|xhigh. `none` would be an unknown value there.
-    "local": frozenset({"low", "medium", "high", "xhigh"}),
-    # Forwarded verbatim as `opencode run --variant`, which selects a named
-    # variant of the model. opencode 1.18.27 names the variants it derives
-    # from a provider catalog after the reasoning-effort values that catalog
-    # lists (none through xhigh) and thinking-budget variants high and max,
-    # so this is the union of every name it can define. A name the served
-    # model does not define is a no-op there, so this set only catches typos.
-    "opencode": frozenset(
-        {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-    ),
+    # `local` is opencode under its older name, so a `[profiles.local.*]`
+    # table validates against the same variant names.
+    "local": _OPENCODE_EFFORTS,
+    "opencode": _OPENCODE_EFFORTS,
 }
 
 

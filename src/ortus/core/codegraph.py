@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ortus.core.init_render import read_opencode_config
-from ortus.core.local_backend import OPENCODE_CONFIG_FILE
+from ortus.core.local_backend import LOCAL_TABLE_BACKENDS, OPENCODE_CONFIG_FILE
 
 MCP_ORIENT_QUERY = "orient to this repository"
 MCP_RPC_TIMEOUT = 20.0
@@ -175,20 +175,20 @@ class CodeGraphAdapter:
         cli_path = shutil.which("codegraph")
         cli = cli_path is not None
         registration: str | None = None
-        if backend in ("codex", "local"):
+        if backend == "codex":
             # Codex receives the exact registration represented by
             # ``capability`` on every fresh process, avoiding reliance on
-            # project trust or mutable user configuration. ``local`` is the
-            # Codex CLI at an operator-served model, so it takes the same path.
+            # project trust or mutable user configuration.
             capability = (
                 CodeGraphCapability(cli_path)
                 if index and cli_path is not None
                 else None
             )
             available = index and cli and capability is not None
-        elif backend == "opencode":
-            # File-backed project registration that only opencode acts on:
-            # it runs the server from the `mcp` table of `opencode.json` and
+        elif backend in LOCAL_TABLE_BACKENDS:
+            # File-backed project registration that only opencode acts on
+            # (``local`` is opencode under its older name): it runs the
+            # server from the `mcp` table of `opencode.json` and
             # presents each tool as a flat function. A worker launched
             # without that entry holds no CodeGraph tool and could only fail
             # its handshake after a claim was burned, so the entry is part

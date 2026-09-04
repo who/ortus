@@ -836,7 +836,7 @@ def test_raw_lines_one_is_still_the_last_raw_line(tmp_path: Path) -> None:
     assert "hidden by raw cap" not in out
 
 
-# --- ortus-d333.8: a local log is a codex log ------------------------------
+# --- the codex decoder is codex's alone -------------------------------------
 
 
 _CODEX_FIXTURE = (
@@ -880,22 +880,18 @@ def _tail_backend(
     return buf.getvalue(), asked["codex"]
 
 
-def test_local_backend_uses_codex_decoder(
+def test_codex_backend_uses_codex_decoder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ortus-d333.8 AC-1: --backend local renders a codex log as --backend codex does."""
-    local, local_asked_codex = _tail_backend(tmp_path, monkeypatch, "local")
-    codex, codex_asked_codex = _tail_backend(tmp_path, monkeypatch, "codex")
-    assert local_asked_codex is True
-    assert codex_asked_codex is True
-    assert local == codex
-    assert _CODEX_GOLDEN.read_text(encoding="utf-8") in local
+    codex, asked_codex = _tail_backend(tmp_path, monkeypatch, "codex")
+    assert asked_codex is True
+    assert _CODEX_GOLDEN.read_text(encoding="utf-8") in codex
 
 
 def test_claude_backend_still_takes_the_claude_decoder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Widening the codex switch to local must not pull claude along."""
+    """The codex switch never pulls claude along."""
     _, asked_codex = _tail_backend(tmp_path, monkeypatch, "claude")
     assert asked_codex is False
 
@@ -990,11 +986,18 @@ def test_opencode_codegraph_handshake_is_rendered_and_recognised(
     require_handshake(summary)
 
 
-def test_local_backend_keeps_the_codex_decoder_until_retired(
+def test_local_backend_uses_opencode_decoder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A local run is still `codex exec`, so its log is not yet an opencode log."""
-    _, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "local")
-    assert asked == {"codex": True, "opencode": False}
+    """--backend local renders an opencode log exactly as --backend opencode does.
+
+    `local` is opencode under its older name, so its log is an opencode log;
+    grok takes neither decoder.
+    """
+    local, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "local")
+    opencode, _, _ = _tail_opencode_log(tmp_path, monkeypatch, "opencode")
+    assert asked == {"codex": False, "opencode": True}
+    assert local == opencode
+    assert _OPENCODE_GOLDEN.read_text(encoding="utf-8") in local
     _, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "grok")
     assert asked == {"codex": False, "opencode": False}

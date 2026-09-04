@@ -213,10 +213,9 @@ def _codegraph_cli() -> str | None:
 
 
 #: The backends `ortus init` can provision: those with a project config file.
-#: `local` shares codex's, so `--backend all` still produces exactly the config
-#: directories it did before and adds only the commented `[local]` reference
-#: block to `.ortusrc`. `opencode`'s file needs the served model, so `all`
-#: leaves it to a pinned `--backend opencode` init.
+#: `opencode`'s file (shared by `local`, its older name) needs the served
+#: model, so `--backend all` leaves it to a pinned init and adds only the
+#: commented `[local]` reference block to `.ortusrc`.
 PROVISIONABLE_BACKENDS: tuple[str, ...] = tuple(
     b for b in BACKENDS if b in BACKEND_TEMPLATES
 )
@@ -233,8 +232,8 @@ LOCAL_MODEL_REQUIRED_MESSAGE = (
 def _backend_cli(name: str) -> str | None:
     """Locate a backend's executable; the seam init tests replace.
 
-    Resolved through `BACKEND_BINARIES`, so `local` looks for `codex`: it is
-    the Codex CLI pointed at an operator-served model, not a binary of its own.
+    Resolved through `BACKEND_BINARIES`, so `local` looks for `opencode`: it
+    is that backend under its older name, not a binary of its own.
     """
     return shutil.which(BACKEND_BINARIES[name])
 
@@ -321,11 +320,7 @@ def _summarize_backends(run_backend: str) -> None:
             # Provisioned but unpinned: `.ortusrc` carries only the commented
             # reference block, so no CLI state can make this a failed init.
             # opencode's own file cannot be written without the model.
-            state = (
-                f"{config_path} written"
-                if b == "local"
-                else f"{config_path} not written (it needs the served model)"
-            )
+            state = f"{config_path} not written (it needs the served model)"
             output.warn(
                 f"{b}: {state}; [local] left commented in "
                 f".ortusrc — pin it with ortus init --backend {b} "
@@ -756,7 +751,7 @@ def init(
     # `required` must fail while nothing has been written, and so must an
     # `opencode.json` the merge could only clobber.
     _require_codegraph_cli(resolved_codegraph)
-    if local is not None and run_backend == "opencode":
+    if local is not None:
         _require_mergeable_opencode_config(target)
 
     output.progress("init", f"target: {target}")
@@ -836,7 +831,9 @@ def init(
     )
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
-    if local is not None and run_backend == "opencode":
+    if local is not None:
+        # Pinned to opencode, or to `local`, its older name: either way the
+        # served model is registered in opencode's file.
         if _write_opencode_config(target, local):
             written.append(target / OPENCODE_CONFIG_FILE)
 

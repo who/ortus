@@ -1,9 +1,9 @@
 """The `[local]` table: an operator-served OpenAI-compatible model.
 
-`local` is the Ortus backend for a model the operator serves themselves
+`opencode` is the Ortus backend for a model the operator serves themselves
 (llama-server first; Ollama and vLLM through the same seam), driven through
-the Codex CLI; `opencode` drives the same served model through opencode.
-Either harness reaches the server through a custom model provider, so
+the opencode CLI; `local` is that backend under its older name. opencode
+reaches the server through the provider `opencode.json` registers, so
 everything Ortus has to know about the model is data in `.ortusrc`:
 
     [local]
@@ -11,11 +11,10 @@ everything Ortus has to know about the model is data in `.ortusrc`:
     model = "qwen3:4b"                       # required; as GET {base_url}/models reports it
     api_key_env = "LLAMA_API_KEY"            # optional; a variable NAME, never a value
 
-The wire API is not configuration. Codex 0.147.0 speaks only the Responses
-API to a custom provider, so `LOCAL_WIRE_API` is a constant and the serving
-contract is `POST {base_url}/responses`. opencode speaks chat completions to
-the provider `opencode.json` registers; `opencode_provider_block` is that
-entry, built from the same table.
+The wire API is not configuration: opencode speaks chat completions to that
+provider, and `opencode_provider_block` is the entry it registers, built from
+the same table. The serving contract the probes below check is
+`GET {base_url}/models`.
 """
 
 from __future__ import annotations
@@ -37,23 +36,19 @@ if TYPE_CHECKING:  # pragma: no cover - config.py imports this module
 
 #: Where llama-server listens by default. Ollama's own default is port 11434.
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
-#: The codex `model_providers.<id>` entry Ortus registers at launch. Codex
-#: reserves `openai`, `ollama`, and `lmstudio`, so the id is namespaced.
-LOCAL_PROVIDER_ID = "ortus_local"
-#: The only wire API codex 0.147.0 accepts for a custom provider.
-LOCAL_WIRE_API = "responses"
 #: The `opencode.json` `provider.<id>` entry the opencode backend addresses
-#: as `-m <id>/<model>`. The same served model as `[local]`, reached through
-#: an OpenAI-compatible chat-completions provider that opencode.json
-#: registers under this id.
+#: as `-m <id>/<model>`: the model `[local]` names, reached through an
+#: OpenAI-compatible chat-completions provider that opencode.json registers
+#: under this id.
 OPENCODE_PROVIDER_ID = "ortuslocal"
 #: The provider package that entry loads for an OpenAI-compatible server, the
 #: project file it lives in, and the schema that file declares.
 OPENCODE_PROVIDER_NPM = "@ai-sdk/openai-compatible"
 OPENCODE_CONFIG_FILE = "opencode.json"
 OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
-#: The backends that read the `[local]` table: the Codex CLI and opencode at
-#: the same operator-served model.
+#: The backends that read the `[local]` table: `opencode`, and `local`, its
+#: older name. Both launch the opencode CLI at the model the table names, so
+#: every dispatch on the backend name treats the pair alike.
 LOCAL_TABLE_BACKENDS: tuple[str, ...] = ("local", "opencode")
 #: Tokens. A worker prompt plus CodeGraph tool output does not fit a smaller
 #: window; the context probe warns below this.
@@ -77,10 +72,9 @@ _URL_SCHEMES = ("http://", "https://")
 class LocalConfig:
     """Immutable, validated `[local]` table.
 
-    `api_key_env` is the name of an environment variable. The harness reads
-    its value at launch (codex from its environment, opencode through the
-    `{env:NAME}` reference in `opencode.json`); Ortus never does, so nothing
-    here can carry a secret.
+    `api_key_env` is the name of an environment variable. opencode reads its
+    value at launch, through the `{env:NAME}` reference in `opencode.json`;
+    Ortus never does, so nothing here can carry a secret.
     """
 
     base_url: str
@@ -182,29 +176,20 @@ def load_local_config(cfg: Config) -> LocalConfig:
 
 # --- probes -----------------------------------------------------------------
 #
-# Four questions `ortus check` and the grind preflight share: is the server
-# up, does it serve the configured model, does it call tools, and how big is
-# its window. Each is one request over stdlib urllib, and each failure names
-# the exact serving command so a mis-served model is caught here rather than
-# as a hung worker.
+# Three questions `ortus check`, `ortus init`, and the grind preflight share:
+# is the server up, does it serve the configured model, and how big is its
+# window. Each is one request over stdlib urllib, and each failure names the
+# exact serving command so a mis-served model is caught here rather than as a
+# hung worker. Whether the model calls tools is proven by the worker's own
+# CodeGraph handshake, on the chat-completions wire opencode actually uses.
 
 #: The verdicts a probe can hand back, each with its own remediation.
 PROBE_KINDS: tuple[str, ...] = (
     "unreachable",
     "model-missing",
-    "tools-unsupported",
     "auth-demanded",
 )
-#: The function the tool-calling probe asks the model to call.
-PROBE_TOOL_NAME = "ortus_ping"
-#: Words in an error body from `/responses` that mean the server understood
-#: the request and rejected the tool part of it.
-_TOOL_REJECTION_WORDS = ("tool", "template", "jinja")
-_TOOL_REJECTION_STATUSES = frozenset({400, 404, 422, 500})
 _EXCERPT_CHARS = 200
-_TOOLS_REMEDIATION = (
-    "restart llama-server with --jinja (and a tool-capable chat template)"
-)
 
 
 class LocalServerError(RuntimeError):
@@ -280,62 +265,6 @@ def probe_models(config: LocalConfig, *, timeout: float = 5.0) -> tuple[str, ...
             "set local.model to a served id or load the model",
         )
     return served
-
-
-def probe_tool_calling(config: LocalConfig, *, timeout: float = 120.0) -> None:
-    """Ask `POST {base_url}/responses` to call one tool and check that it did.
-
-    This is the endpoint and the tool shape codex uses, so a server that
-    narrates here instead of calling would hang a worker later. The default
-    timeout leaves room for a cold model load.
-    """
-    body = {
-        "model": config.model,
-        "input": f"Call the {PROBE_TOOL_NAME} tool once.",
-        "tools": [
-            {
-                "type": "function",
-                "name": PROBE_TOOL_NAME,
-                "description": "Readiness probe.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            }
-        ],
-        "tool_choice": "required",
-        "max_output_tokens": 64,
-        "stream": False,
-    }
-    try:
-        status, payload = _request_json(
-            "POST",
-            f"{config.base_url}/responses",
-            body=body,
-            headers=_auth_headers(config),
-            timeout=timeout,
-        )
-    except _Unreachable as exc:
-        raise _unreachable(config, exc.reason) from None
-    if status in (401, 403):
-        raise _auth_demanded(config, status)
-    if status in _TOOL_REJECTION_STATUSES and _mentions_tools(payload):
-        raise LocalServerError(
-            "tools-unsupported",
-            f"server rejected the tool call (HTTP {status}): {_excerpt(payload)}",
-            _TOOLS_REMEDIATION,
-        )
-    if not 200 <= status < 300:
-        raise _unreachable(
-            config, f"HTTP {status} from /responses: {_excerpt(payload)}"
-        )
-    if not _called_probe_tool(payload):
-        raise LocalServerError(
-            "tools-unsupported",
-            "server answered without calling the tool",
-            _TOOLS_REMEDIATION,
-        )
 
 
 def probe_context_size(config: LocalConfig, *, timeout: float = 5.0) -> int | None:
@@ -452,24 +381,6 @@ def _served_ids(payload: Any) -> tuple[str, ...]:
         for entry in entries
         if isinstance(entry, dict) and "id" in entry
     )
-
-
-def _called_probe_tool(payload: Any) -> bool:
-    """Whether a `/responses` body carries a call to `PROBE_TOOL_NAME`."""
-    output = payload.get("output") if isinstance(payload, dict) else None
-    if not isinstance(output, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and item.get("type") == "function_call"
-        and item.get("name") == PROBE_TOOL_NAME
-        for item in output
-    )
-
-
-def _mentions_tools(text: Any) -> bool:
-    lowered = str(text).lower()
-    return any(word in lowered for word in _TOOL_REJECTION_WORDS)
 
 
 def _excerpt(text: Any) -> str:

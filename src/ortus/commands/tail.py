@@ -63,6 +63,7 @@ import typer
 
 from ortus.core import output
 from ortus.core.agent import BackendError, resolve_backend
+from ortus.core.local_backend import LOCAL_TABLE_BACKENDS
 from ortus.core.repo import resolve_repo
 from ortus.core.runstate import (
     OPENCODE_STEP_STOP,
@@ -1390,11 +1391,9 @@ def tail(
         show_tools=tools,
         show_system=system,
         assistant_only=assistant,
-        # A local run is `codex exec` at an operator-served model, so its
-        # log is a codex log and takes the same decoder until the retirement
-        # leaf moves that backend onto opencode; an opencode run writes
-        # opencode events and takes its own.
-        codex=resolved_backend in ("codex", "local"),
-        opencode=resolved_backend == "opencode",
+        # An opencode run writes opencode events and takes its own decoder;
+        # `local` is opencode under its older name, so its log is one too.
+        codex=resolved_backend == "codex",
+        opencode=resolved_backend in LOCAL_TABLE_BACKENDS,
         lines=lines,
     )

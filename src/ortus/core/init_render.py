@@ -44,15 +44,12 @@ BACKEND_TEMPLATES: dict[str, str] = {
     "claude": ".claude/settings.json",
     "codex": ".codex/config.toml",
     "grok": ".grok/config.toml",
-    # `local` is the Codex CLI at an operator-served model: the same project
-    # config, with the provider overrides passed at launch, so it shares
-    # codex's template rather than owning a copy. Its own provisioning is the
-    # `[local]` table `.ortusrc` renders.
-    "local": ".codex/config.toml",
-    # `opencode` reads the same `[local]` table and registers the served model
-    # in its own project file. That file is host-owned JSON with no room for
-    # comment markers, so it is a keyed merge (`merge_opencode_config`) that
-    # `render_all` skips, never a whole-file render.
+    # `opencode` reads the `[local]` table `.ortusrc` renders and registers
+    # the served model in its own project file. That file is host-owned JSON
+    # with no room for comment markers, so it is a keyed merge
+    # (`merge_opencode_config`) that `render_all` skips, never a whole-file
+    # render. `local` is opencode under its older name and shares the file.
+    "local": OPENCODE_CONFIG_FILE,
     "opencode": OPENCODE_CONFIG_FILE,
 }
 
@@ -176,10 +173,10 @@ def render_all(
     """
     written: list[Path] = []
     selected = backends if backends is not None else (ctx.backend,)
-    # `codex` and `local` share a template, so widening to every backend would
-    # name `.codex/config.toml` twice; the ordered de-duplication renders each
-    # file once while keeping the slot order the backends were given in. A
-    # merged config has no template and is left to its merge.
+    # `local` and `opencode` share a config file, so widening to every backend
+    # would name it twice; the ordered de-duplication renders each file once
+    # while keeping the slot order the backends were given in. A merged config
+    # has no template and is left to its merge.
     names: tuple[str, ...] = tuple(
         dict.fromkeys(
             rendered

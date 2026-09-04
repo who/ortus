@@ -644,15 +644,15 @@ def test_ortusrc_round_trips_as_toml(tmp_path: Path) -> None:
 
 # --- the local backend -------------------------------------------------------
 #
-# `local` is the Codex CLI at an operator-served model, so its provisioning is
-# codex's config plus a `[local]` table in `.ortusrc`; every other backend gets
-# the same table as a commented reference block.
+# `local` is opencode under its older name, so its provisioning is opencode's
+# merged `opencode.json` plus a `[local]` table in `.ortusrc`; every other
+# backend gets the same table as a commented reference block.
 
 
-def test_init_local_writes_codex_config_and_local_table(
+def test_init_local_writes_opencode_json_and_local_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--backend local` shares codex's config and pins an active [local] table."""
+    """`--backend local` provisions exactly what `--backend opencode` does."""
     import ortus.commands.init as init_mod
 
     monkeypatch.setattr(init_mod, "probe_models", lambda config, **kwargs: ("m1",))
@@ -661,13 +661,18 @@ def test_init_local_writes_codex_config_and_local_table(
         app, ["init", str(target), "--backend", "local", "--local-model", "m1"]
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert (target / ".codex" / "config.toml").is_file()
+    data = json.loads((target / "opencode.json").read_text())
+    assert list(data["provider"]) == ["ortuslocal"]
+    assert data["provider"]["ortuslocal"]["models"] == {"m1": {}}
     assert not (target / ".claude").exists()
     assert not (target / ".grok").exists()
-    data = tomllib.loads((target / ".ortusrc").read_text())
-    assert data["backend"] == "local"
-    assert data["local"] == {"model": "m1", "base_url": DEFAULT_LOCAL_BASE_URL}
-    assert "local server reachable" in result.stdout + result.stderr
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "wrote .codex/config.toml" not in combined
+    assert "created opencode.json provider ortuslocal" in combined
+    ortusrc = tomllib.loads((target / ".ortusrc").read_text())
+    assert ortusrc["backend"] == "local"
+    assert ortusrc["local"] == {"model": "m1", "base_url": DEFAULT_LOCAL_BASE_URL}
+    assert "local server reachable" in combined
 
 
 def test_init_local_warns_when_the_server_is_down(tmp_path: Path) -> None:

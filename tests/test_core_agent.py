@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import socket
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from ortus.core.agent import (
     BackendError,
     CodexRunner,
     GrokRunner,
-    LocalRunner,
     OpenCodeRunner,
     compose_worker_prompt,
     make_runner,
@@ -139,6 +137,10 @@ def test_compose_worker_prompt_grok_follows_q1_expands() -> None:
 
 
 # --- local backend -----------------------------------------------------------
+#
+# `local` is opencode under its older name: the same `[local]` table, the
+# same runner, the same prompt. The Codex-driven engine it once named, with
+# the loopback shim that flattened namespace tools for it, is retired.
 
 LOCAL_TABLE = (
     "[local]\n"
@@ -146,20 +148,6 @@ LOCAL_TABLE = (
     'model = "qwen3:4b"\n'
     'api_key_env = "LLAMA_API_KEY"\n'
 )
-
-#: The provider overrides in their pinned order, as LocalRunner emits them.
-PROVIDER_PAIRS = [
-    "-c",
-    'model_providers.ortus_local.name="ortus_local"',
-    "-c",
-    'model_providers.ortus_local.base_url="http://127.0.0.1:11434/v1"',
-    "-c",
-    'model_providers.ortus_local.wire_api="responses"',
-    "-c",
-    'model_providers.ortus_local.env_key="LLAMA_API_KEY"',
-    "-c",
-    'model_provider="ortus_local"',
-]
 
 
 def _fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -173,28 +161,38 @@ def _fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_local_is_a_legal_backend(tmp_path: Path) -> None:
     home = tmp_path / "home"
     assert BACKENDS == ("claude", "codex", "grok", "local", "opencode")
-    assert BACKEND_BINARIES["local"] == "codex"
+    assert BACKEND_BINARIES["local"] == BACKEND_BINARIES["opencode"] == "opencode"
     assert resolve_backend("local", repo=tmp_path, home=home) == "local"
     with pytest.raises(BackendError, match="claude, codex, grok, local"):
         resolve_backend("other", repo=tmp_path, home=home)
 
 
-def test_local_argv_carries_provider_overrides(
+def test_local_is_the_opencode_engine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`local` launches exactly what `opencode` launches; nothing of codex's remains."""
     _fake_home(tmp_path, monkeypatch)
     (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
-    runner = make_runner("local", repo=tmp_path)
-    assert isinstance(runner, LocalRunner)
-    assert isinstance(runner, CodexRunner)
-    assert runner.codex_binary == "codex"
-    assert runner.local == LocalConfig(
+    local = make_runner("local", repo=tmp_path)
+    opencode = make_runner("opencode", repo=tmp_path)
+    assert type(local) is OpenCodeRunner
+    assert not isinstance(local, ClaudeRunner)
+    assert not isinstance(local, CodexRunner)
+    assert local.local == opencode.local == LocalConfig(
         "http://127.0.0.1:11434/v1", "qwen3:4b", api_key_env="LLAMA_API_KEY"
     )
-    argv = runner.build_argv("work")
-    plain = CodexRunner().build_argv("work")
-    assert argv[: len(plain)] == plain
-    assert argv[len(plain) :] == PROVIDER_PAIRS + ["-m", "qwen3:4b"]
+    for readonly in (False, True):
+        argv = local.build_argv("work", readonly=readonly)
+        assert argv == opencode.build_argv("work", readonly=readonly)
+        assert argv[:2] == ["opencode", "run"]
+        assert "exec" not in argv and "-c" not in argv and "--sandbox" not in argv
+        assert "ortus_local" not in " ".join(argv)
+    assert local.launch_env(readonly=True) == opencode.launch_env(readonly=True)
+    task = "Work bd issue demo-123."
+    prompt = compose_worker_prompt("local", task)
+    assert prompt == compose_worker_prompt("opencode", task)
+    assert prompt != compose_worker_prompt("codex", task)
+    assert "/goal" not in prompt and "Codex sandbox note" not in prompt
 
 
 def test_make_runner_other_backends_ignore_repo(
@@ -205,141 +203,6 @@ def test_make_runner_other_backends_ignore_repo(
     assert type(make_runner("claude", repo=tmp_path)) is ClaudeRunner
     assert type(make_runner("codex", repo=tmp_path)) is CodexRunner
     assert type(make_runner("grok", repo=tmp_path)) is GrokRunner
-
-
-def test_local_profile_model_wins_over_config() -> None:
-    local = LocalConfig("http://127.0.0.1:8080/v1", "configured-model")
-    profile = AgentProfile("local", Phase.IMPLEMENT, "profile-model", "high")
-    argv = LocalRunner(local).build_argv("work", profile=profile)
-    assert argv.count("-m") == 1
-    assert argv[argv.index("-m") + 1] == "profile-model"
-    assert "configured-model" not in argv
-    # The inherited effort pair precedes the provider pairs.
-    assert argv.index("model_reasoning_effort=high") < argv.index(
-        'model_providers.ortus_local.name="ortus_local"'
-    )
-    # Effort only: the configured model still rides along as the sole `-m`.
-    effort_only = AgentProfile("local", Phase.VERIFY, None, "low")
-    argv = LocalRunner(local).build_argv("work", profile=effort_only)
-    assert argv.count("-m") == 1
-    assert argv[-2:] == ["-m", "configured-model"]
-
-
-def test_local_readonly_argv(tmp_path: Path) -> None:
-    runner = LocalRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
-    argv = runner.build_argv("verify", readonly=True)
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
-    assert 'model_provider="ortus_local"' in argv
-    assert argv[-2:] == ["-m", "m"]
-    assert runner._readonly_argv(argv, tmp_path) == argv
-    assert runner.preflight_readonly(tmp_path) is None
-    assert "bwrap" not in argv
-
-
-def test_local_argv_never_contains_key_material(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("LLAMA_API_KEY", "sk-live-secret")
-    local = LocalConfig("http://127.0.0.1:8080/v1", "m", api_key_env="LLAMA_API_KEY")
-    runner = LocalRunner(local)
-    argv = runner.build_argv("work", readonly=True)
-    assert "sk-live-secret" not in " ".join(argv)
-    assert "sk-live-secret" not in " ".join(runner.extra_env.values())
-    assert 'model_providers.ortus_local.env_key="LLAMA_API_KEY"' in argv
-    # No api_key_env, no env_key pair at all.
-    bare = LocalRunner(LocalConfig("http://127.0.0.1:8080/v1", "m")).build_argv("work")
-    assert not any(value.startswith("model_providers.ortus_local.env_key") for value in bare)
-
-
-def _provider_override(argv: list[str], key: str) -> str | None:
-    prefix = f"model_providers.ortus_local.{key}="
-    for value in argv:
-        if value.startswith(prefix):
-            return json.loads(value[len(prefix) :])
-    return None
-
-
-def test_local_runner_base_url_targets_shim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With CodeGraph the override names the shim and the key rides its leg."""
-    local = LocalConfig("http://127.0.0.1:8080/v1", "m", api_key_env="LLAMA_API_KEY")
-    launches: list[tuple[list[str], str | None, bool]] = []
-
-    def fake_spawn(argv: list[str], **kwargs: object) -> int:
-        shim = runner.shim
-        listening = False
-        if shim is not None:
-            with socket.create_connection(("127.0.0.1", shim.port), timeout=1):
-                listening = True
-        shim_url = None if shim is None else shim.base_url
-        launches.append((list(argv), shim_url, listening))
-        return 0
-
-    monkeypatch.setattr("ortus.core.claude._spawn_logged", fake_spawn)
-    runner = LocalRunner(local, codegraph=CodeGraphCapability("codegraph"))
-    assert runner.provider_base_url == local.base_url
-    assert runner.run("work", repo=tmp_path, log_path=tmp_path / "log") == 0
-    argv, shim_url, listening = launches[0]
-    base_url = _provider_override(argv, "base_url")
-    assert base_url == shim_url
-    assert base_url != local.base_url
-    assert base_url.startswith("http://127.0.0.1:")
-    assert base_url.endswith("/v1")
-    assert listening
-    # The key rides the shim's upstream leg, never the codex argv.
-    assert _provider_override(argv, "env_key") is None
-    assert runner.shim is None
-    assert runner.provider_base_url == local.base_url
-
-
-def test_local_runner_shim_without_codegraph(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No CodeGraph still means the shim: the role demotion is not an MCP fix."""
-    local = LocalConfig("http://127.0.0.1:8080/v1", "m", api_key_env="LLAMA_API_KEY")
-    launches: list[tuple[list[str], str | None, bool]] = []
-
-    def fake_spawn(argv: list[str], **kwargs: object) -> int:
-        shim = runner.shim
-        listening = False
-        if shim is not None:
-            with socket.create_connection(("127.0.0.1", shim.port), timeout=1):
-                listening = True
-        shim_url = None if shim is None else shim.base_url
-        launches.append((list(argv), shim_url, listening))
-        return 0
-
-    monkeypatch.setattr("ortus.core.claude._spawn_logged", fake_spawn)
-    runner = LocalRunner(local)
-    assert runner.codegraph is None
-    assert runner.provider_base_url == local.base_url
-    assert runner.run("work", repo=tmp_path, log_path=tmp_path / "log") == 0
-    argv, shim_url, listening = launches[0]
-    base_url = _provider_override(argv, "base_url")
-    assert shim_url is not None
-    assert base_url == shim_url
-    assert base_url != local.base_url
-    assert base_url.startswith("http://127.0.0.1:")
-    assert base_url.endswith("/v1")
-    assert listening
-    assert "mcp_servers.codegraph" not in " ".join(argv)
-    # The key still rides the shim's upstream leg, never the codex argv.
-    assert _provider_override(argv, "env_key") is None
-    # The shim closed with the child: nothing listens on its port any more.
-    port = int(base_url.removeprefix("http://127.0.0.1:").removesuffix("/v1"))
-    assert runner.shim is None
-    with pytest.raises(OSError):
-        socket.create_connection(("127.0.0.1", port), timeout=1)
-    assert runner.provider_base_url == local.base_url
-
-
-def test_compose_worker_prompt_local_matches_codex() -> None:
-    task = "Work bd issue demo-123."
-    prompt = compose_worker_prompt("local", task)
-    assert prompt == compose_worker_prompt("codex", task)
-    assert not prompt.startswith("/goal")
-    assert "/goal" not in prompt
 
 
 def test_make_runner_local_without_table_is_actionable(
@@ -355,9 +218,7 @@ def test_make_runner_local_without_table_is_actionable(
 
 # --- opencode backend --------------------------------------------------------
 #
-# The same served model as `[local]`, driven by the opencode CLI. `local`
-# keeps its codex engine byte for byte until the retirement leaf, so every
-# assertion above stays exactly as it was.
+# The served model `[local]` names, driven by the opencode CLI.
 
 OPENCODE_ARGV_PREFIX = ["opencode", "run", "--format", "json"]
 
@@ -514,19 +375,6 @@ def test_make_runner_opencode_without_table_is_actionable(
     (tmp_path / ".ortusrc").write_text('backend = "opencode"\n')
     with pytest.raises(BackendError, match="local.model"):
         make_runner("opencode", repo=tmp_path)
-
-
-def test_local_keeps_its_codex_engine_beside_opencode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Registering opencode changes nothing about what `local` launches."""
-    _fake_home(tmp_path, monkeypatch)
-    (tmp_path / ".ortusrc").write_text(LOCAL_TABLE)
-    local = make_runner("local", repo=tmp_path)
-    assert type(local) is LocalRunner
-    assert local.build_argv("work")[:2] == ["codex", "exec"]
-    assert type(make_runner("opencode", repo=tmp_path)) is OpenCodeRunner
-    assert compose_worker_prompt("local", "T") == compose_worker_prompt("codex", "T")
 
 
 def test_opencode_verify_readonly_denies_write_tools_in_the_child(

@@ -214,8 +214,10 @@ def test_rendered_ortusrc_keeps_local_commented_for_other_backends(
     assert "--jinja" in text
 
 
-def test_list_bundled_local_uses_codex_config() -> None:
-    assert list_bundled("local") == [".codex/config.toml", ".ortusrc"]
+def test_list_bundled_local_uses_opencode_config() -> None:
+    """`local` is opencode under its older name: the same merged file, no template."""
+    assert BACKEND_TEMPLATES["local"] == BACKEND_TEMPLATES["opencode"] == "opencode.json"
+    assert list_bundled("local") == list_bundled("opencode") == [".ortusrc"]
 
 
 def test_list_bundled_opencode_ships_no_config_template() -> None:

@@ -91,6 +91,7 @@ from ortus.core.grind_loop import (
 )
 from ortus.core.lifecycle import ISSUE_OPEN
 from ortus.core.local_backend import (
+    LOCAL_TABLE_BACKENDS,
     LocalServerError,
     load_local_config,
     probe_models,
@@ -1076,7 +1077,7 @@ def grind(
         # whether the backend came from the flag, the environment, or .ortusrc.
         local_config = (
             load_local_config(config)
-            if resolved_backend in ("local", "opencode")
+            if resolved_backend in LOCAL_TABLE_BACKENDS
             else None
         )
         integration_branch = integration_branch or config.get(
@@ -1207,17 +1208,18 @@ def grind(
         output.error(str(exc).splitlines()[0])
         raise typer.Exit(code=1)
 
-    # Phase 0b — served-model preflight, for both backends that drive an
-    # operator-served model (`local` through codex, `opencode` through
-    # opencode). One cheap /models request before the flock and before any
-    # bd read, so a dead endpoint or a mis-served model leaves the tracker
-    # untouched and no claim is burned on a worker that could only hang on
-    # it. The server is operator-managed: no retry loop, and no tool-calling
-    # probe here (ortus check owns the expensive one). The message names the
-    # backend that was launched, so an opencode operator is not sent to fix
-    # a `local` run. CodeGraph policy was enforced at the probe above, which
-    # for opencode includes the `opencode.json` registration the worker
-    # would otherwise discover by failing its handshake after a claim.
+    # Phase 0b — served-model preflight, for the backends that drive an
+    # operator-served model (`opencode`, and `local`, its older name). One
+    # cheap /models request before the flock and before any bd read, so a
+    # dead endpoint or a mis-served model leaves the tracker untouched and no
+    # claim is burned on a worker that could only hang on it. The server is
+    # operator-managed: no retry loop, and no tool-calling probe here (the
+    # worker's own CodeGraph handshake proves that). The message names the
+    # backend that was launched, so an operator who wrote `local` is not sent
+    # to fix an `opencode` run. CodeGraph policy was enforced at the probe
+    # above, which for these backends includes the `opencode.json`
+    # registration the worker would otherwise discover by failing its
+    # handshake after a claim.
     if local_config is not None:
         try:
             probe_models(local_config)

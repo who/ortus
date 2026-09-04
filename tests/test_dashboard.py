@@ -2777,28 +2777,32 @@ def test_backend_conflict_is_recorded_not_silenced(tmp_path: Path) -> None:
     assert "think" in frame.crumbs
 
 
-def test_backend_conflict_treats_local_as_codex(tmp_path: Path) -> None:
-    """ortus-d333.8 AC-2: a start line naming local agrees with codex events.
+def test_backend_conflict_treats_local_as_opencode(tmp_path: Path) -> None:
+    """A start line naming local agrees with opencode events, no longer codex's.
 
-    Against claude or grok events the line still names `local`, and the
-    existing grok-versus-codex disagreement is unchanged.
+    Against claude, codex, or grok events the line still names `local`, and
+    the existing grok-versus-codex disagreement is unchanged.
     """
 
-    assert dash.backend_conflict("local", "codex") == ""
+    assert dash.backend_conflict("local", "opencode") == ""
+    assert dash.backend_conflict("opencode", "opencode") == ""
     assert dash.backend_conflict("codex", "codex") == ""
-    against_claude = dash.backend_conflict("local", "claude")
-    assert "PLAN-GAP" in against_claude
-    assert "named backend=local" in against_claude
-    assert "event backend=claude" in against_claude
-    assert "named backend=local" in dash.backend_conflict("local", "grok")
+    for event_backend in ("claude", "codex", "grok"):
+        conflict = dash.backend_conflict("local", event_backend)
+        assert "PLAN-GAP" in conflict
+        assert "named backend=local" in conflict
+        assert f"event backend={event_backend}" in conflict
     assert "named backend=grok" in dash.backend_conflict("grok", "codex")
 
+    # A codex log under a `local` start line is the retired engine's shape,
+    # and is now named as a disagreement rather than waved through.
     codex_event = (
         '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"hi"}}\n'
     )
     repo = _painted_repo(tmp_path, "local-served", codex_event, backend="local")
     app = dash.DashboardApp(repo, refresh_seconds=3600)
     frame = app.advance()
-    assert app.conflict == ""
+    assert "named backend=local" in app.conflict
+    assert "event backend=codex" in app.conflict
+    assert app.conflict in frame.warnings
     assert app.grok is False
-    assert not any("PLAN-GAP" in warning for warning in frame.warnings)

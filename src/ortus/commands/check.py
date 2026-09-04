@@ -55,7 +55,6 @@ from ortus.core.local_backend import (
     parse_local_table,
     probe_context_size,
     probe_models,
-    probe_tool_calling,
 )
 from ortus.core.profiles import ProfileError
 from ortus.core.prompts import (
@@ -283,83 +282,32 @@ def check_opencode_settings(repo: Path) -> CheckResult:
     return CheckResult(name, True, str(settings))
 
 
-#: The `[local]` rows in table order: config, endpoint, tool calling, context.
-LOCAL_ROW_NAMES: tuple[str, ...] = (
-    "[local]",
-    "local endpoint",
-    "local tools",
-    "local context",
-)
-
-
 def _local_failure(exc: LocalServerError) -> str:
     """A probe verdict plus the first line of its remediation, for one cell."""
     return f"{exc} — {exc.remediation.splitlines()[0]}"
 
 
-def check_local_rows(repo: Path) -> list[CheckResult]:
-    """The four `[local]` rows: config, endpoint, tool calling, context size.
+def _context_row(name: str, local: LocalConfig) -> CheckResult:
+    """`n_ctx` from the server, as an informational row.
 
-    The rows short-circuit: an invalid table skips every probe, and an
-    endpoint that is down or serving the wrong model skips the tool and
-    context probes rather than reporting three flavours of one outage. The
-    context row is informational — a small window degrades a worker, it does
-    not stop the run. Nothing here prints a key: the `[local]` row shows the
-    variable's name, and the probes read its value only into a header.
+    A small window degrades a worker (a prompt plus CodeGraph tool output
+    does not fit it) but does not stop the run, so the row warns and never
+    fails. A server without `/props` (Ollama, vLLM) is a pass, not a guess.
     """
-    config_name, endpoint_name, tools_name, context_name = LOCAL_ROW_NAMES
-    try:
-        local = load_local_config(load_config(repo=repo))
-    except ProfileError as exc:
-        skipped = "skipped: [local] config invalid"
-        return [
-            CheckResult(config_name, False, str(exc)),
-            CheckResult(endpoint_name, False, skipped),
-            CheckResult(tools_name, False, skipped),
-            CheckResult(context_name, False, skipped, level="info"),
-        ]
-    config_row = _local_config_row(config_name, local)
-    try:
-        probe_models(local)
-    except LocalServerError as exc:
-        skipped = "skipped: endpoint failed"
-        return [
-            config_row,
-            CheckResult(endpoint_name, False, _local_failure(exc)),
-            CheckResult(tools_name, False, skipped),
-            CheckResult(context_name, False, skipped, level="info"),
-        ]
-    endpoint_row = CheckResult(
-        endpoint_name, True, f"reachable; model {local.model} served"
-    )
-    # One real completion request; a model that is not resident yet loads
-    # here, so this is the row that legitimately takes a while.
-    output.progress("check", "local tools ... (a cold model can take a minute)")
-    try:
-        probe_tool_calling(local)
-    except LocalServerError as exc:
-        tools_row = CheckResult(tools_name, False, _local_failure(exc))
-    else:
-        tools_row = CheckResult(tools_name, True, "function call returned")
     n_ctx = probe_context_size(local)
     if n_ctx is None:
-        context_row = CheckResult(
-            context_name,
-            True,
-            "context size not exposed by this server",
-            level="info",
+        return CheckResult(
+            name, True, "context size not exposed by this server", level="info"
         )
-    elif n_ctx < MIN_RECOMMENDED_CONTEXT:
-        context_row = CheckResult(
-            context_name,
+    if n_ctx < MIN_RECOMMENDED_CONTEXT:
+        return CheckResult(
+            name,
             False,
             f"n_ctx={n_ctx} below the recommended {MIN_RECOMMENDED_CONTEXT} — "
             f"restart with --ctx-size {MIN_RECOMMENDED_CONTEXT}",
             level="info",
         )
-    else:
-        context_row = CheckResult(context_name, True, f"n_ctx={n_ctx}", level="info")
-    return [config_row, endpoint_row, tools_row, context_row]
+    return CheckResult(name, True, f"n_ctx={n_ctx}", level="info")
 
 
 def _local_config_row(name: str, local: LocalConfig) -> CheckResult:
@@ -381,13 +329,14 @@ def _local_config_row(name: str, local: LocalConfig) -> CheckResult:
 
 #: The `opencode` rows in table order: the `[local]` table, the provider
 #: entry `opencode.json` registers for it, the served model, the CodeGraph
-#: MCP registration, and the permission posture.
+#: MCP registration, the permission posture, and the context window.
 OPENCODE_ROW_NAMES: tuple[str, ...] = (
     "[local]",
     "opencode provider",
     "opencode endpoint",
     "opencode mcp",
     "opencode posture",
+    "opencode context",
 )
 OPENCODE_PROVISION_HINT = "run `ortus init --backend opencode --local-model <id>`"
 OPENCODE_REPROVISION_HINT = "re-run `ortus init --force --backend opencode`"
@@ -608,17 +557,24 @@ def _opencode_posture_row(
 
 
 def check_opencode_rows(repo: Path) -> list[CheckResult]:
-    """The five `opencode` rows: table, provider entry, endpoint, MCP, posture.
+    """The six `opencode` rows: table, provider, endpoint, MCP, posture, context.
 
-    The table row and the endpoint probe are the `[local]` questions the
-    codex-driven backend asks too, reused rather than restated: the served
-    model is the same and `GET /models` is wire-agnostic. The tool-calling
-    probe is not reused — it speaks the Responses wire opencode never uses —
-    and no row launches opencode: the MCP and posture rows read the file the
-    worker will read. An invalid table skips the provider and endpoint rows
-    but never the last two, which do not depend on it.
+    No row launches opencode: the MCP and posture rows read the file the
+    worker will read, and the endpoint row is one wire-agnostic `GET /models`.
+    Whether the model calls tools is the worker's own CodeGraph handshake to
+    prove, on the wire opencode actually uses. An invalid table skips the
+    provider, endpoint, and context rows but never MCP and posture, which do
+    not depend on it; a failed endpoint skips the context probe rather than
+    reporting one outage twice. The context row is informational either way.
     """
-    config_name, provider_name, endpoint_name, mcp_name, posture_name = OPENCODE_ROW_NAMES
+    (
+        config_name,
+        provider_name,
+        endpoint_name,
+        mcp_name,
+        posture_name,
+        context_name,
+    ) = OPENCODE_ROW_NAMES
     data, error = _read_opencode_json(repo)
     mcp_row = _opencode_mcp_row(mcp_name, data, error)
     posture_row = _opencode_posture_row(posture_name, data, error)
@@ -632,13 +588,22 @@ def check_opencode_rows(repo: Path) -> list[CheckResult]:
             CheckResult(endpoint_name, False, skipped),
             mcp_row,
             posture_row,
+            CheckResult(context_name, False, skipped, level="info"),
         ]
+    endpoint_row = _opencode_endpoint_row(endpoint_name, local)
+    if endpoint_row.ok:
+        context_row = _context_row(context_name, local)
+    else:
+        context_row = CheckResult(
+            context_name, False, "skipped: endpoint failed", level="info"
+        )
     return [
         _local_config_row(config_name, local),
         _opencode_provider_row(provider_name, data, error, local),
-        _opencode_endpoint_row(endpoint_name, local),
+        endpoint_row,
         mcp_row,
         posture_row,
+        context_row,
     ]
 
 
@@ -749,9 +714,8 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
     index = (repo / ".codegraph").is_dir()
     # Codex never reads a user MCP config: `CodeGraphAdapter.probe()` builds a
     # CodeGraphCapability and Ortus injects it into every fresh child, so its
-    # registration is satisfied exactly when the CLI and index are. `local`
-    # is the same CLI at another provider and gets the same injection.
-    if backend in ("codex", "local"):
+    # registration is satisfied exactly when the CLI and index are.
+    if backend == "codex":
         registered = cli.ok and index
         registration = "injected per child by ortus" if registered else "needs CLI + index"
     elif backend == "grok":
@@ -761,7 +725,7 @@ def check_codegraph(repo: Path, backend: str = "claude") -> CheckResult:
             if registered
             else f"not registered in a readable scope — {CODEGRAPH_MCP_HINT}"
         )
-    elif backend == "opencode":
+    elif backend in LOCAL_TABLE_BACKENDS:
         registered = _opencode_mcp_registered(repo)
         registration = (
             "codegraph server registered"
@@ -967,33 +931,18 @@ def check_prompt_overrides(repo: Path) -> CheckResult:
     return CheckResult(".ortus/prompts/", True, message)
 
 
-LOCAL_PROVISION_HINT = "run `ortus init --backend local --local-model <id>`"
-
-
-def _provisioned_config(backend: str) -> str:
-    """The project file whose presence proves `backend` was provisioned.
-
-    `local` is the Codex CLI pointed at another provider, so it shares
-    codex's `.codex/config.toml` rather than owning a template of its own.
-    """
-    return BACKEND_TEMPLATES["codex" if backend == "local" else backend]
-
-
 def backend_provisioned(repo: Path, backend: str) -> bool:
     """Whether `repo` carries provisioning for `backend`.
 
     Discovery is the config dir on disk, not an `.ortusrc` key: `ortus init
     --backend all` writes every backend's directory and pins only one run
-    backend. `local` has no directory of its own — its provisioning is the
-    `[local]` table in the project `.ortusrc` plus codex's project config,
-    since opencode reads that same table and the table alone would report
-    an opencode repo as a half-provisioned codex one — and a merged config
-    such as opencode's sits at the repo root, so the file itself is the proof.
+    backend. A merged config such as opencode's sits at the repo root, so the
+    file itself is the proof. `local` is opencode under its older name and
+    never earns a row of its own: the `opencode` row reports that
+    provisioning once.
     """
     if backend == "local":
-        return bool(read_recorded_local(repo)) and (
-            repo / BACKEND_TEMPLATES["local"]
-        ).is_file()
+        return False
     if backend not in BACKEND_TEMPLATES:
         # No template means nothing could have been provisioned.
         return False
@@ -1007,13 +956,13 @@ def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
     """Informational row for a provisioned backend that is not the run backend.
 
     Gaps here are WARN rows with a remediation, never failures: the exit code
-    belongs to the run backend. For `local` the row is deliberately offline —
-    it validates the `[local]` table and the codex prerequisites and says
-    where the endpoint probes live, because checking one backend must never
-    wait on another backend's server.
+    belongs to the run backend. For `opencode` the row is deliberately
+    offline — it validates the `[local]` table and the file-backed
+    registration and says where the endpoint probes live, because checking
+    one backend must never wait on another backend's server.
     """
     name = f"{backend} (provisioned)"
-    config_rel = _provisioned_config(backend)
+    config_rel = BACKEND_TEMPLATES[backend]
     binary = BACKEND_BINARIES[backend]
     gaps: list[str] = []
     if not (repo / config_rel).is_file():
@@ -1024,9 +973,7 @@ def check_provisioned_backend(repo: Path, backend: str) -> CheckResult:
         gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
     elif backend == "grok" and not _grok_mcp_registered(repo):
         gaps.append(f"codegraph MCP not registered — {CODEGRAPH_MCP_HINT}")
-    elif backend == "local":
-        gaps.extend(_local_table_gaps(repo, LOCAL_PROVISION_HINT))
-    elif backend == "opencode":
+    elif backend in LOCAL_TABLE_BACKENDS:
         if not _opencode_mcp_registered(repo):
             gaps.append(f"codegraph MCP not registered — {OPENCODE_MCP_HINT}")
         gaps.extend(_local_table_gaps(repo, OPENCODE_PROVISION_HINT))
@@ -1063,6 +1010,10 @@ def _local_table_gaps(repo: Path, hint: str) -> list[str]:
 
 def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     results: list[CheckResult] = []
+    if backend == "local":
+        # opencode under its older name: the same binary, file, and rows, and
+        # the same exclusion from the provisioned rows below.
+        backend = "opencode"
     if backend == "claude":
         backend_binary = check_claude
         settings_check: Callable[[Path], CheckResult] = check_claude_settings
@@ -1075,12 +1026,6 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         backend_binary = check_grok
         settings_check = check_grok_settings
         settings_label = ".grok/config.toml"
-    elif backend == "local":
-        # The Codex CLI at an operator-served model: same binary, same
-        # project config, plus the `[local]` rows that follow it.
-        backend_binary = check_codex
-        settings_check = check_codex_settings
-        settings_label = ".codex/config.toml"
     elif backend == "opencode":
         # opencode at the same served model: its own binary and project
         # file, plus the rows that follow it. Nothing of codex's appears.
@@ -1103,9 +1048,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         (check_readiness_memory, "bd readiness memory"),
         (settings_check, settings_label),
     ]
-    if backend == "local":
-        repo_checks.append((check_local_rows, "[local]"))
-    elif backend == "opencode":
+    if backend == "opencode":
         repo_checks.append((check_opencode_rows, "opencode"))
     if backend == "claude":
         repo_checks.append((check_hooks, "hooks"))

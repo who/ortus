@@ -9,19 +9,20 @@ EXPANDS), so that backend uses the same wrap as Claude.  GrokRunner is a
 sibling of ClaudeRunner, not a subclass: Grok's sandbox and approval flags
 are not Claude's.
 
-The local backend is the Codex CLI aimed at a model the operator serves
-themselves.  LocalRunner therefore *is* a CodexRunner: the same argv, followed
-by trusted ``-c`` overrides that register an ``ortus_local`` model provider
-from the ``[local]`` table of ``.ortusrc``.  The model is data in config.
-
-The opencode backend is that same operator-served model driven by the opencode
-CLI instead of Codex.  opencode speaks chat completions and runs MCP servers
-itself, presenting each tool as a flat function, so neither failure the Codex
+The opencode backend is a model the operator serves themselves, driven by the
+opencode CLI.  opencode speaks chat completions and runs MCP servers itself,
+presenting each tool as a flat function, so neither failure the Codex
 Responses path met at llama-server (a rejected ``developer`` role, namespace
-tools silently dropped) can arise and no shim is involved.  OpenCodeRunner is
-a sibling like GrokRunner because ``opencode run`` shares no flag with
-``codex exec``.  ``local`` keeps its Codex engine, byte for byte, until the
-retirement leaf removes it.
+tools silently dropped) can arise and nothing sits between the worker and the
+server.  OpenCodeRunner is a sibling like GrokRunner because ``opencode run``
+shares no flag with ``codex exec``.  The model is data in config: the
+``[local]`` table of ``.ortusrc``.
+
+``local`` names that same engine.  It stays a legal backend so a pinned
+``backend = "local"`` and its ``[profiles.local.*]`` keep loading, and every
+dispatch on the name (runner, prompt, decoder, check rows, CodeGraph
+registration) takes opencode's path.  The Codex-driven engine it once named,
+with the loopback shim that flattened namespace tools for it, is retired.
 """
 
 from __future__ import annotations
@@ -37,26 +38,23 @@ from ortus.core.claude import ClaudeRunner, _spawn_logged
 from ortus.core.config import INIT_ONLY_BACKEND_MESSAGE, load_config
 from ortus.core.codegraph import CodeGraphCapability
 from ortus.core.local_backend import (
-    LOCAL_PROVIDER_ID,
-    LOCAL_WIRE_API,
+    LOCAL_TABLE_BACKENDS,
     OPENCODE_PROVIDER_ID,
     LocalConfig,
     load_local_config,
 )
-from ortus.core.mcp_shim import McpShim, start_shim
 from ortus.core.profiles import AgentProfile, Phase as Phase, ProfileError
 
 Backend = Literal["claude", "codex", "grok", "local", "opencode"]
 BACKENDS: tuple[Backend, ...] = ("claude", "codex", "grok", "local", "opencode")
-#: The executable each backend launches. ``local`` drives the Codex CLI at an
-#: operator-served model, so readiness probes look for ``codex``, not for a
-#: binary called ``local``; ``opencode`` drives the same model through its
-#: own CLI.
+#: The executable each backend launches. ``local`` is ``opencode`` under its
+#: older name, so readiness probes look for ``opencode``, not for a binary
+#: called ``local``.
 BACKEND_BINARIES: dict[Backend, str] = {
     "claude": "claude",
     "codex": "codex",
     "grok": "grok",
-    "local": "codex",
+    "local": "opencode",
     "opencode": "opencode",
 }
 
@@ -163,135 +161,6 @@ class CodexRunner(ClaudeRunner):
         """
 
         return None
-
-
-class LocalRunner(CodexRunner):
-    """Codex argv plus an ``ortus_local`` provider aimed at an operator-served model.
-
-    A subclass, unlike GrokRunner: the argv *is* the codex argv followed by
-    trusted ``-c`` provider overrides, so there is no foreign flag surface to
-    keep apart. The overrides carry a URL, a provider id, a wire API, and at
-    most the *name* of an environment variable. Codex reads that variable at
-    launch, so no key material ever enters argv, ``extra_env``, or a log.
-
-    The worker always talks to a loopback shim rather than the server. The
-    shim flattens codex's namespace-shaped MCP tools, which the servers this
-    backend targets drop on the floor, and it demotes the ``developer`` role
-    codex opens every turn with, which llama-server's chat template rejects
-    before the model runs, so the shim is needed whether or not CodeGraph is
-    configured. It lives exactly as long as the child, and the provider
-    ``base_url`` override names its port.
-    """
-
-    def __init__(
-        self,
-        local: LocalConfig,
-        codex_binary: str = "codex",
-        *,
-        extra_env: dict[str, str] | None = None,
-        codegraph: CodeGraphCapability | None = None,
-        sandbox_mode: str = "workspace-write",
-    ) -> None:
-        super().__init__(
-            codex_binary,
-            extra_env=extra_env,
-            codegraph=codegraph,
-            sandbox_mode=sandbox_mode,
-        )
-        self.local = local
-        #: The shim serving the child that ``run`` is currently supervising.
-        self.shim: McpShim | None = None
-
-    @property
-    def provider_base_url(self) -> str:
-        """Where the provider override points: the shim while one is running.
-
-        Outside ``run`` that is the configured server itself, which is what
-        ``ortus check`` and the probes read.
-        """
-        return self.local.base_url if self.shim is None else self.shim.base_url
-
-    def run(
-        self,
-        prompt: str,
-        *,
-        repo: Path,
-        log_path: Path,
-        fast: bool = False,
-        profile: AgentProfile | None = None,
-        timeout: float | None = None,
-        readonly: bool = False,
-        resume: str | None = None,
-        reap_when: Callable[[], bool] | None = None,
-        reap_poll: float = 2.0,
-        on_poll: Callable[[], None] | None = None,
-    ) -> int:
-        """Spawn codex through the loopback shim, for every local worker.
-
-        The shim starts before the argv is built so the provider override can
-        name its port, and stops in ``finally`` however the child ends (exit,
-        reap, timeout, interrupt), so no listener or thread outlives a worker.
-        A shim that cannot bind raises here, before codex is spawned.
-        """
-        launch = dict(
-            repo=repo,
-            log_path=log_path,
-            fast=fast,
-            profile=profile,
-            timeout=timeout,
-            readonly=readonly,
-            resume=resume,
-            reap_when=reap_when,
-            reap_poll=reap_poll,
-            on_poll=on_poll,
-        )
-        self.shim = start_shim(self.local.base_url, api_key_env=self.local.api_key_env)
-        try:
-            return super().run(prompt, **launch)
-        finally:
-            shim, self.shim = self.shim, None
-            if shim is not None:
-                shim.close()
-
-    def build_argv(
-        self,
-        prompt: str,
-        *,
-        fast: bool = False,
-        profile: AgentProfile | None = None,
-        readonly: bool = False,
-        resume: str | None = None,
-    ) -> list[str]:
-        argv = super().build_argv(
-            prompt, fast=fast, profile=profile, readonly=readonly, resume=resume
-        )
-        provider = f"model_providers.{LOCAL_PROVIDER_ID}"
-        # Values render through json.dumps exactly like the CodeGraph block, so
-        # each is a TOML string. Codex 0.147.0 connects to a provider with no
-        # credential source as-is, so no requires_openai_auth pair is needed.
-        argv.extend(
-            [
-                "-c",
-                f"{provider}.name=" + json.dumps(LOCAL_PROVIDER_ID),
-                "-c",
-                f"{provider}.base_url=" + json.dumps(self.provider_base_url),
-                "-c",
-                f"{provider}.wire_api=" + json.dumps(LOCAL_WIRE_API),
-            ]
-        )
-        if self.local.api_key_env is not None and self.shim is None:
-            # With the shim in the path the key rides the upstream leg only:
-            # the shim reads the named variable itself, and codex stays
-            # unauthenticated on loopback.
-            argv.extend(
-                ["-c", f"{provider}.env_key=" + json.dumps(self.local.api_key_env)]
-            )
-        argv.extend(["-c", "model_provider=" + json.dumps(LOCAL_PROVIDER_ID)])
-        if profile is None or profile.model is None:
-            # A profile model already rode in on the superclass argv and wins;
-            # otherwise the configured model is the only `-m`.
-            argv.extend(["-m", self.local.model])
-        return argv
 
 
 @dataclass
@@ -411,7 +280,7 @@ OPENCODE_READONLY_PERMISSION: dict[str, str] = {
 class OpenCodeRunner:
     """Run one headless ``opencode run`` task at an operator-served model.
 
-    Sibling of ClaudeRunner and GrokRunner, not a CodexRunner subclass: the
+    Sibling of ClaudeRunner and GrokRunner, not a subclass of either: the
     ``run --format json -m provider/model`` surface shares nothing with
     ``codex exec``. ``-m`` is always ``OPENCODE_PROVIDER_ID`` followed by a
     slash and the model, so a served id that itself carries slashes or colons
@@ -598,30 +467,28 @@ def make_runner(
         return CodexRunner()
     if backend == "grok":
         return GrokRunner()
-    if backend in ("local", "opencode"):
+    if backend in LOCAL_TABLE_BACKENDS:
         try:
             local = load_local_config(load_config(repo=repo))
         except ProfileError as exc:
             raise BackendError(str(exc)) from exc
-        if backend == "opencode":
-            return OpenCodeRunner(local)
-        return LocalRunner(local)
+        return OpenCodeRunner(local)
     return ClaudeRunner()
 
 
 def compose_worker_prompt(backend: Backend, task: str) -> str:
     """Wrap a logical worker task for the selected execution surface.
 
-    ``local`` is ``codex exec`` under another provider, so it takes the plain
-    Codex prompt: a literal ``/goal`` would reach the model verbatim.
-    ``opencode`` has no slash commands at all and needs none: the objective
-    is the prompt, and its own turn loop runs to completion.
+    ``opencode``, and ``local`` as its older name, has no slash commands at
+    all and needs none: the objective is the prompt, and its own turn loop
+    runs to completion. Codex takes the plain prompt because a literal
+    ``/goal`` would reach the model verbatim.
     """
     if backend == "claude":
         return f"/goal {task}"
     if backend == "grok":
         return wrap_grok_prompt(task)
-    if backend == "opencode":
+    if backend in LOCAL_TABLE_BACKENDS:
         return (
             task
             + "\n\nopencode lifecycle note: session-close per AGENTS.md. If "

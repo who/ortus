@@ -4,7 +4,7 @@
 the sandbox smoke test, before the flock and before any bd read. A dead
 endpoint therefore costs the serving command on stderr and exit 1, never a
 claim on a worker that could only hang. The preflight is the cheap `/models`
-request; `ortus check` owns the tool-calling probe.
+request; `ortus check` owns the fuller row set.
 """
 
 from __future__ import annotations

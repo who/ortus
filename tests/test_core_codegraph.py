@@ -52,26 +52,32 @@ def test_codex_probe_produces_the_child_registration(
     assert probe.capability.args == ("serve", "--mcp")
 
 
-def test_probe_local_takes_codex_capability_path(
+def test_probe_local_takes_the_opencode_registration_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`local` is opencode under its older name: file-backed registration, nothing injected."""
     (tmp_path / ".codegraph").mkdir()
     monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
     monkeypatch.setattr(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )
-    local = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="local")
-    codex = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="codex")
-    assert local == codex
-    assert local.available
-    assert local.capability is not None
-    assert local.capability.command == "/bin/codegraph"
-    assert local.capability.args == ("serve", "--mcp")
-    # Same absence as codex when the CLI is missing: no capability, no fallback.
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: None)
-    missing = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="local")
-    assert not missing.available and missing.capability is None
-    assert missing.reason == "codegraph CLI is not on PATH"
+    adapter = CodeGraphAdapter()
+    unregistered = adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="local")
+    assert unregistered == adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="opencode")
+    assert not unregistered.available and unregistered.capability is None
+    assert unregistered.reason == "opencode.json does not register a codegraph MCP server"
+    with pytest.raises(CodeGraphUnavailable, match=r"opencode\.json does not register"):
+        adapter.probe(tmp_path, CodeGraphMode.REQUIRED, backend="local")
+    (tmp_path / "opencode.json").write_text(
+        json.dumps(
+            {"mcp": {"codegraph": {"type": "local", "command": ["codegraph", "serve", "--mcp"]}}}
+        )
+    )
+    registered = adapter.probe(tmp_path, CodeGraphMode.REQUIRED, backend="local")
+    assert registered == adapter.probe(tmp_path, CodeGraphMode.REQUIRED, backend="opencode")
+    assert registered.available and registered.capability is None
+    # Nothing of codex's: the injected capability is codex's alone.
+    assert adapter.probe(tmp_path, CodeGraphMode.AUTO, backend="codex").capability is not None
 
 
 def test_grok_probe_is_cli_and_index_not_injected_capability(
@@ -499,7 +505,7 @@ def test_grok_probe_ignores_opencode_registration(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )
     (tmp_path / "opencode.json").write_text("{not json")
-    for backend in ("grok", "claude", "codex", "local"):
+    for backend in ("grok", "claude", "codex"):
         probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.REQUIRED, backend=backend)
         assert probe.available, backend
         assert probe.reason is None, backend

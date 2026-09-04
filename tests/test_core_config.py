@@ -195,7 +195,7 @@ def test_finalize_phase_profile_is_named_in_the_error_for_an_unknown_phase(
         ('[profiles.other.plan]\nmodel = "x"\n', "profile backend"),
         ('[profiles.claude.plan]\nmodel = ""\n', "invalid model"),
         ('[profiles.codex.verify]\nreasoning_effort = "max"\n', "reasoning_effort"),
-        ('[profiles.local.plan]\nreasoning_effort = "none"\n', "reasoning_effort"),
+        ('[profiles.local.plan]\nreasoning_effort = "hgih"\n', "reasoning_effort"),
     ],
 )
 def test_invalid_profile_configuration_is_actionable(
@@ -304,14 +304,17 @@ def test_local_api_key_env_is_stored_as_a_name(
     assert "sk-never-read-here" not in repr(local)
 
 
-def test_profiles_local_accepts_codex_efforts(tmp_path: Path) -> None:
+def test_profiles_local_accepts_opencode_variants(tmp_path: Path) -> None:
+    """`local` is opencode under its older name, so its profiles take variant names."""
+    for effort in ("xhigh", "none", "max"):
+        _write_toml(
+            tmp_path / ".ortusrc",
+            f'[profiles.local.implement]\nreasoning_effort = "{effort}"\n',
+        )
+        cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+        assert cfg.resolve_profile("local", Phase.IMPLEMENT).reasoning_effort == effort
     _write_toml(
-        tmp_path / ".ortusrc", '[profiles.local.implement]\nreasoning_effort = "xhigh"\n'
-    )
-    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
-    assert cfg.resolve_profile("local", Phase.IMPLEMENT).reasoning_effort == "xhigh"
-    _write_toml(
-        tmp_path / ".ortusrc", '[profiles.local.implement]\nreasoning_effort = "none"\n'
+        tmp_path / ".ortusrc", '[profiles.local.implement]\nreasoning_effort = "hgih"\n'
     )
     with pytest.raises(
         ProfileError, match="reasoning_effort for profiles.local.implement"
