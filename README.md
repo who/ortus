@@ -66,6 +66,9 @@ ortus grind . --backend codex
 
 # Bounded: stop after N tasks
 ortus grind . --tasks 5
+
+# Prototype bar for one run: lint and syntax checks only, no behavioral tests
+ortus grind . --prototype
 ```
 
 **Note:** Ortus is a global CLI you install once and use everywhere, not a Python dependency. You don't clone this repository into your project. `ortus init` only adds a small set of per-project files (`.beads/`, `.ortusrc`, `.gitignore`, managed blocks in `AGENTS.md` and `CLAUDE.md`, and the provisioned backends' config directories) to an existing directory. Host prose outside the Ortus markers in `AGENTS.md` and `CLAUDE.md` is preserved byte-for-byte, and the bundled runtime prompts are never copied into the repo.
@@ -317,6 +320,7 @@ project_type = "python" # python | typescript | go | rust | polyglot
 backend = "claude"      # claude | codex | grok | opencode (older name: local); always concrete, "all" is init-only and invalid here
 codegraph = "required"  # off | auto | required (default: required)
 codegraph_refresh_blocking = false
+verification = "full"   # full | prototype (default: full)
 merge_gate = false      # wait for issue-branch checks before fast-forward
 merge_gate_timeout = 1800  # seconds; timeout blocks, never lands
 
@@ -365,6 +369,22 @@ model does not define. `ortus plan` accepts `--model` and `--reasoning-effort`; 
 accepts `--implement-model`, `--implement-reasoning-effort`, `--verify-model`,
 and `--verify-reasoning-effort`. The compatibility `--fast` flag applies only
 to Claude implementation workers and never to verification.
+
+`verification` is the bar a grind worker must clear before it session-closes
+an issue. `full`, the default, runs the issue's criterion-check commands.
+`prototype` runs only the project's linter (`ruff`, `eslint`, `golangci-lint`,
+or `cargo clippy`) plus a syntax or compile gate chosen from `project_type`
+(`python -m compileall`, `tsc --noEmit`, `go build ./...`, or `cargo check`; a
+`polyglot` project gets the gate of every language whose marker file sits at
+the repository root) and deliberately skips the issue's behavioral test
+commands and the repo test suite. The acceptance criteria stay in the work
+spec as the record; prototype mode does not run them. `ortus grind --prototype`
+selects the mode for one run and wins over the `.ortusrc` pin, which wins over
+the default. The grind start line records the resolved mode and where it came
+from, and `ortus check` reports it before a run. Prototype mode is a lowered
+bar for throwaway or exploratory work on high-velocity prototype projects, not
+a faster full verification. An issue closes on a clean lint pass with its
+behavior unproven.
 
 ### Implementation readiness
 

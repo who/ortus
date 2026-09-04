@@ -78,3 +78,20 @@ def test_readme_lists_grok_backend() -> None:
     assert "claude remains the default" in lowered
     assert "grok -p" in section
     assert "/goal" in section
+
+
+def test_readme_documents_prototype_verification() -> None:
+    text = README.read_text(encoding="utf-8")
+    config = text[text.index("## Configuration") : text.index("## Runtime prompts")]
+    for needle in (
+        'verification = "full"   # full | prototype (default: full)',
+        "`ortus grind --prototype`",
+        "criterion-check commands",
+        "linter",
+        "syntax or compile gate",
+        "behavioral test\ncommands and the repo test suite",
+        "lowered\nbar",
+    ):
+        assert needle in config
+    quick_start = text[text.index("## Quick start") : text.index("## The verbs")]
+    assert "ortus grind . --prototype" in quick_start
