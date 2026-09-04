@@ -30,6 +30,7 @@ from ortus.core.local_backend import (
     LocalConfig,
     LocalServerError,
     OpenCodeBinaryError,
+    list_served_models,
     load_local_config,
     opencode_provider_block,
     parse_local_table,
@@ -560,6 +561,81 @@ def test_probe_models_hits_v1_models_after_normalisation(
     fake_server.serve_models("m")
     assert probe_models(config, timeout=1.0) == ("m",)
     assert fake_server.received[0].path == "/v1/models"
+
+
+def test_list_served_models_needs_no_model(fake_server: FakeServer) -> None:
+    """The unpinned listing hits the same endpoint, with the slash normalised."""
+    fake_server.serve_models("qwen3:4b", "gemma4:26b")
+    assert list_served_models(fake_server.base_url + "/", timeout=1.0) == (
+        "qwen3:4b",
+        "gemma4:26b",
+    )
+    [seen] = fake_server.received
+    assert (seen.method, seen.path) == ("GET", "/v1/models")
+    assert "authorization" not in seen.headers
+
+
+def test_list_served_models_empty_list_is_an_answer(fake_server: FakeServer) -> None:
+    """Nothing loaded is a listing, not a verdict; only the pinned probe objects."""
+    fake_server.serve_models()
+    assert list_served_models(fake_server.base_url, timeout=1.0) == ()
+
+
+def test_list_served_models_sends_the_named_key(
+    fake_server: FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLAMA_API_KEY", "sk-secret-value")
+    fake_server.serve_models("m")
+    assert list_served_models(
+        fake_server.base_url, api_key_env="LLAMA_API_KEY", timeout=1.0
+    ) == ("m",)
+    assert fake_server.received[0].headers["authorization"] == "Bearer sk-secret-value"
+
+
+def test_list_served_models_unreachable_hints_an_unpinned_alias() -> None:
+    base_url = f"http://127.0.0.1:{_closed_port()}/v1"
+    with pytest.raises(LocalServerError) as info:
+        list_served_models(base_url, timeout=1.0)
+    assert info.value.kind == "unreachable"
+    assert str(info.value).startswith(f"local server unreachable at {base_url}: ")
+    assert "refused" in str(info.value).lower()
+    assert "--alias <model>" in info.value.remediation
+
+
+def test_list_served_models_401_is_auth_demanded(fake_server: FakeServer) -> None:
+    fake_server.routes[("GET", "/v1/models")] = (401, {"error": "unauthorized"})
+    with pytest.raises(LocalServerError) as info:
+        list_served_models(fake_server.base_url, timeout=1.0)
+    assert info.value.kind == "auth-demanded"
+    assert "local.api_key_env" in info.value.remediation
+
+
+_NOT_A_BASE_URL = [
+    "127.0.0.1:8080/v1",
+    "http:///v1",
+    "ftp://gpu-box/v1",
+    "http://[::1",
+    "http://127.0.0.1:abc/v1",
+]
+
+
+@pytest.mark.parametrize("base_url", _NOT_A_BASE_URL)
+def test_list_served_models_rejects_a_non_url_as_unreachable(base_url: str) -> None:
+    """A base_url the request could not even address is unreachable, not a crash."""
+    with pytest.raises(LocalServerError) as info:
+        list_served_models(base_url, timeout=1.0)
+    assert info.value.kind == "unreachable"
+    assert "http:// or https://" in str(info.value)
+    assert "local.base_url" in info.value.remediation
+
+
+@pytest.mark.parametrize("base_url", _NOT_A_BASE_URL)
+def test_parse_local_table_rejects_a_url_the_parser_cannot_read(
+    base_url: str,
+) -> None:
+    """The same shapes fail the table rules, so no later reader has to parse them."""
+    with pytest.raises(ProfileError, match="invalid local.base_url"):
+        parse_local_table({"base_url": base_url, "model": "m"})
 
 
 def test_probe_context_size_reads_props(fake_server: FakeServer) -> None:

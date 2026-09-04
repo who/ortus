@@ -52,6 +52,7 @@ from ortus.core.local_backend import (
     LocalConfig,
     LocalServerError,
     OpenCodeBinaryError,
+    list_served_models,
     parse_local_table,
     probe_models,
     resolve_opencode_binary,
@@ -454,10 +455,12 @@ def _resolve_local_table(
                 raise typer.Exit(code=1)
         return table, None
     if "model" not in table:
-        base_url = table.get("base_url", DEFAULT_LOCAL_BASE_URL)
         output.error(
             LOCAL_MODEL_REQUIRED_MESSAGE % run_backend,
-            hint=f"list the served ids with: curl {base_url}/models",
+            hint=_served_models_hint(
+                table.get("base_url", DEFAULT_LOCAL_BASE_URL),
+                table.get("api_key_env"),
+            ),
         )
         raise typer.Exit(code=1)
     table.setdefault("base_url", DEFAULT_LOCAL_BASE_URL)
@@ -474,6 +477,35 @@ def _resolve_local_table(
         "api_key_env": local.api_key_env,
     }
     return rendered, local
+
+
+def _served_models_hint(base_url: Any, api_key_env: Any) -> str:
+    """The ids to pin, listed from the server, else the curl line that lists them.
+
+    The listing is informational and runs on every unpinned init, so it is
+    best-effort on the short probe timeout: a server that is down or wants a
+    key, or a `base_url` that is not a URL, degrades to the curl line the
+    operator can run by hand, never to a traceback. The table has not been
+    validated yet (the model is checked first), so a value that is not a
+    string is left for the curl line as well. The exit code is the caller's
+    and stays 1: a model is still required, this only shows which.
+    """
+    curl_hint = f"list the served ids with: curl {base_url}/models"
+    if not isinstance(base_url, str) or not (
+        api_key_env is None or isinstance(api_key_env, str)
+    ):
+        return curl_hint
+    try:
+        served = list_served_models(
+            base_url, api_key_env=api_key_env, timeout=LOCAL_PROBE_TIMEOUT
+        )
+    except LocalServerError:
+        return curl_hint
+    if not served:
+        return f"no models served at {base_url}; {curl_hint}"
+    return f"served models at {base_url}:\n" + "\n".join(
+        f"- {model}" for model in served
+    )
 
 
 def _probe_local_server(local: LocalConfig) -> None:

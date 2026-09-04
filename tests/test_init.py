@@ -72,16 +72,19 @@ def _fake_backend_clis(monkeypatch: pytest.MonkeyPatch) -> None:
 def _fake_local_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep `--backend local` inits off the network.
 
-    A pinned local backend gets one reachability probe after rendering. The
-    default fake answers "down", the shape a fresh bootstrap usually meets;
-    tests about a served model re-patch `probe_models` themselves.
+    A pinned local backend gets one reachability probe after rendering, and
+    an unpinned one lists the served ids for the missing-model error. The
+    default fake answers "down" to both, the shape a fresh bootstrap usually
+    meets; tests about a served model re-patch `probe_models` or
+    `list_served_models` themselves.
     """
     import ortus.commands.init as init_mod
 
-    def down(config, **kwargs):
+    def down(*args, **kwargs):
         raise LocalServerError("unreachable", "connection refused", "start it")
 
     monkeypatch.setattr(init_mod, "probe_models", down)
+    monkeypatch.setattr(init_mod, "list_served_models", down)
 
 
 def test_init_on_empty_dir_creates_all_artifacts(tmp_path: Path) -> None:
@@ -688,13 +691,114 @@ def test_init_local_warns_when_the_server_is_down(tmp_path: Path) -> None:
     assert tomllib.loads((target / ".ortusrc").read_text())["local"]["model"] == "m1"
 
 
-def test_init_local_requires_local_model(tmp_path: Path) -> None:
-    """A first local init without a model fails naming the flag, before writing."""
+def test_init_local_requires_local_model_lists_served_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a model, a reachable server's ids are the hint, one per line.
+
+    The listing asks the base_url the pinned path would record, on the short
+    init timeout, and replaces the curl line rather than adding to it. The
+    init still fails naming the flag, before writing anything.
+    """
+    import ortus.commands.init as init_mod
+
+    asked: list[tuple[str, str | None, float]] = []
+
+    def served(base_url: str, *, api_key_env: str | None = None, timeout: float):
+        asked.append((base_url, api_key_env, timeout))
+        return ("qwen3:4b", "gemma4:26b")
+
+    monkeypatch.setattr(init_mod, "list_served_models", served)
+    target = tmp_path / "nomodel"
+    result = runner.invoke(
+        app,
+        [
+            "init", str(target),
+            "--backend", "local",
+            "--local-base-url", "http://127.0.0.1:11434/v1",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "--backend local needs --local-model" in combined
+    assert (
+        "served models at http://127.0.0.1:11434/v1: - qwen3:4b - gemma4:26b"
+        in combined
+    )
+    assert "curl" not in combined
+    assert asked == [("http://127.0.0.1:11434/v1", None, init_mod.LOCAL_PROBE_TIMEOUT)]
+    assert not target.exists()
+
+
+def test_init_local_requires_local_model_lists_served_through_the_recorded_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-init on a table that names a key variable lists through that key."""
+    import ortus.commands.init as init_mod
+
+    target = tmp_path / "keyed"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    ortusrc = target / ".ortusrc"
+    ortusrc.write_text(
+        ortusrc.read_text().replace('model = "m1"', 'api_key_env = "LLAMA_API_KEY"')
+    )
+    asked: list[tuple[str, str | None]] = []
+
+    def served(base_url: str, *, api_key_env: str | None = None, timeout: float):
+        asked.append((base_url, api_key_env))
+        return ("m1",)
+
+    monkeypatch.setattr(init_mod, "list_served_models", served)
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "--backend local needs --local-model" in combined
+    assert f"served models at {DEFAULT_LOCAL_BASE_URL}: - m1" in combined
+    assert asked == [(DEFAULT_LOCAL_BASE_URL, "LLAMA_API_KEY")]
+
+
+@pytest.mark.parametrize("kind", ["unreachable", "auth-demanded"])
+def test_init_local_requires_local_model_unreachable_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A server that is down or wants a key leaves the curl line, and no traceback."""
+    import ortus.commands.init as init_mod
+
+    def refuse(base_url: str, **kwargs: object) -> tuple[str, ...]:
+        raise LocalServerError(kind, "no listing", "fix the server")
+
+    monkeypatch.setattr(init_mod, "list_served_models", refuse)
+    target = tmp_path / "nomodel"
+    result = runner.invoke(app, ["init", str(target), "--backend", "local"])
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, LocalServerError)
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "--backend local needs --local-model" in combined
+    assert "list the served ids with: curl http://127.0.0.1:8080/v1/models" in combined
+    assert "served models" not in combined
+    assert "Traceback" not in combined
+    assert not target.exists()
+
+
+def test_init_local_requires_local_model_reports_no_models_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that answers with nothing loaded says so, then the curl line."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "list_served_models", lambda base_url, **kwargs: ())
     target = tmp_path / "nomodel"
     result = runner.invoke(app, ["init", str(target), "--backend", "local"])
     assert result.exit_code == 1
     combined = " ".join((result.stdout + result.stderr).split())
     assert "--backend local needs --local-model" in combined
+    assert (
+        "no models served at http://127.0.0.1:8080/v1; "
+        "list the served ids with: curl http://127.0.0.1:8080/v1/models"
+    ) in combined
     assert not target.exists()
 
 
@@ -879,12 +983,21 @@ def test_init_opencode_creates_opencode_json_with_the_schema(tmp_path: Path) -> 
     assert "local server not reachable" in combined
 
 
-def test_init_opencode_requires_local_model(tmp_path: Path) -> None:
+def test_init_opencode_requires_local_model_lists_served_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The opencode name takes the same unpinned listing path as local."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod, "list_served_models", lambda base_url, **kwargs: ("m1",)
+    )
     target = tmp_path / "nomodel"
     result = runner.invoke(app, ["init", str(target), "--backend", "opencode"])
     assert result.exit_code == 1
     combined = " ".join((result.stdout + result.stderr).split())
     assert "--backend opencode needs --local-model" in combined
+    assert "served models at http://127.0.0.1:8080/v1: - m1" in combined
     assert not target.exists()
 
 

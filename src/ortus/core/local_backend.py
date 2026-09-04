@@ -167,11 +167,7 @@ def parse_local_table(table: Any) -> LocalConfig:
             "invalid local.model: expected a non-empty model id without whitespace"
         )
     base_url = table.get("base_url", DEFAULT_LOCAL_BASE_URL)
-    if (
-        not isinstance(base_url, str)
-        or not base_url.startswith(_URL_SCHEMES)
-        or not urlsplit(base_url).netloc
-    ):
+    if not _is_http_url(base_url):
         raise ProfileError(
             "invalid local.base_url: expected an http:// or https:// URL "
             "with a host, such as http://127.0.0.1:8080/v1"
@@ -288,6 +284,9 @@ PROBE_KINDS: tuple[str, ...] = (
     "auth-demanded",
 )
 _EXCERPT_CHARS = 200
+#: The alias the serving hint names before a model is pinned: listing the
+#: served ids is how an operator finds the one to pin.
+_UNPINNED_MODEL = "<model>"
 
 
 class LocalServerError(RuntimeError):
@@ -335,6 +334,31 @@ def serving_hint(config: LocalConfig) -> str:
     )
 
 
+def list_served_models(
+    base_url: str, *, api_key_env: str | None = None, timeout: float = 5.0
+) -> tuple[str, ...]:
+    """The ids `GET {base_url}/models` serves, with no model to look for yet.
+
+    This is `probe_models` before a model is pinned: `ortus init` lists the
+    ids an operator can pin when `--local-model` is missing. Raises
+    `unreachable` when `base_url` is not an http(s) URL with a host or the
+    server does not answer with a JSON body, and `auth-demanded` when it
+    wants a key. An empty list is an answer here, not a verdict; only the
+    pinned probe turns it into `model-missing`.
+    """
+    if not _is_http_url(base_url):
+        # Not through `_unreachable`: the serving hint splits the URL too.
+        raise LocalServerError(
+            "unreachable",
+            f"local server unreachable at {base_url}: not an http:// or "
+            "https:// URL with a host",
+            "set local.base_url to an http:// or https:// URL with a host, "
+            "such as http://127.0.0.1:8080/v1",
+        )
+    config = LocalConfig(base_url.rstrip("/"), _UNPINNED_MODEL, api_key_env)
+    return _fetch_served_ids(config, timeout=timeout)
+
+
 def probe_models(config: LocalConfig, *, timeout: float = 5.0) -> tuple[str, ...]:
     """The ids `GET {base_url}/models` serves, once `config.model` is among them.
 
@@ -342,20 +366,7 @@ def probe_models(config: LocalConfig, *, timeout: float = 5.0) -> tuple[str, ...
     `auth-demanded` when it wants a key, and `model-missing` when it answers
     but the configured model is not in the list.
     """
-    try:
-        status, payload = _request_json(
-            "GET",
-            f"{config.base_url}/models",
-            headers=_auth_headers(config),
-            timeout=timeout,
-        )
-    except _Unreachable as exc:
-        raise _unreachable(config, exc.reason) from None
-    if status in (401, 403):
-        raise _auth_demanded(config, status)
-    if not 200 <= status < 300:
-        raise _unreachable(config, f"HTTP {status} from /models: {_excerpt(payload)}")
-    served = _served_ids(payload)
+    served = _fetch_served_ids(config, timeout=timeout)
     if config.model not in served:
         raise LocalServerError(
             "model-missing",
@@ -467,6 +478,47 @@ def _auth_demanded(config: LocalConfig, status: int) -> LocalServerError:
         f"local server at {config.base_url} demands authentication (HTTP {status})",
         remediation,
     )
+
+
+def _is_http_url(value: Any) -> bool:
+    """`value` is an http(s) URL with a host, the shape `base_url` must have.
+
+    The split and the port are read here because both raise `ValueError` on
+    a URL the standard library cannot parse (an unclosed IPv6 bracket, a port
+    that is not a number), and every later reader of `base_url` would raise
+    the same way instead of reporting a verdict.
+    """
+    if not isinstance(value, str) or not value.startswith(_URL_SCHEMES):
+        return False
+    try:
+        parts = urlsplit(value)
+        parts.port
+    except ValueError:
+        return False
+    return bool(parts.netloc)
+
+
+def _fetch_served_ids(config: LocalConfig, *, timeout: float) -> tuple[str, ...]:
+    """One `GET {base_url}/models`, classified: the served ids or a verdict.
+
+    The fetch `list_served_models` and `probe_models` share, so a server that
+    is down or wants a key reads the same before and after a model is pinned;
+    only the remediation's alias differs.
+    """
+    try:
+        status, payload = _request_json(
+            "GET",
+            f"{config.base_url}/models",
+            headers=_auth_headers(config),
+            timeout=timeout,
+        )
+    except _Unreachable as exc:
+        raise _unreachable(config, exc.reason) from None
+    if status in (401, 403):
+        raise _auth_demanded(config, status)
+    if not 200 <= status < 300:
+        raise _unreachable(config, f"HTTP {status} from /models: {_excerpt(payload)}")
+    return _served_ids(payload)
 
 
 def _served_ids(payload: Any) -> tuple[str, ...]:
