@@ -1206,7 +1206,8 @@ def test_check_opencode_rows_all_green(
     )
     assert rows["opencode posture"].message == (
         "implement: edit=allow write=allow bash=allow; "
-        "verify: OPENCODE_PERMISSION denies edit, write, bash"
+        "verify: OPENCODE_PERMISSION denies edit, write, bash globally "
+        "and OPENCODE_CONFIG_CONTENT denies them for agent build"
     )
     assert rows["opencode context"].message == "n_ctx=32768"
     assert rows["opencode context"].level == "info"
@@ -1551,6 +1552,45 @@ def test_check_opencode_mismatch_fails_when_posture_denies_a_tool(
     assert "posture unknown" in posture.message
 
 
+def test_check_opencode_posture_row_names_agent_scope_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3: the verify posture is the global denial plus the agent-scope one."""
+    _patch_probes(monkeypatch)
+    monkeypatch.delenv(check_mod.OPENCODE_PERMISSION_ENV, raising=False)
+    monkeypatch.delenv(check_mod.OPENCODE_CONFIG_CONTENT_ENV, raising=False)
+    repo = _opencode_repo(tmp_path)
+
+    def posture_row() -> check_mod.CheckResult:
+        return {r.name: r for r in check_mod.check_opencode_rows(repo)}["opencode posture"]
+
+    posture = posture_row()
+    assert posture.ok, posture.message
+    assert posture.message.endswith(
+        "verify: OPENCODE_PERMISSION denies edit, write, bash globally "
+        "and OPENCODE_CONFIG_CONTENT denies them for agent build"
+    )
+    # The row names the agent the denial targets: a project that selects a
+    # different default agent would sidestep a build-only denial.
+    assert f"for agent {check_mod.OPENCODE_VERIFY_AGENT}" in posture.message
+
+    # An operator document with unrelated keys is merged over, not a finding.
+    monkeypatch.setenv(
+        check_mod.OPENCODE_CONFIG_CONTENT_ENV, json.dumps({"theme": "dark"})
+    )
+    posture = posture_row()
+    assert posture.ok, posture.message
+
+    # One the denial cannot merge into is reported here, because the verify
+    # launch refuses it rather than replacing it.
+    for bad in ("not json", "[1]"):
+        monkeypatch.setenv(check_mod.OPENCODE_CONFIG_CONTENT_ENV, bad)
+        posture = posture_row()
+        assert not posture.ok
+        assert posture.message.startswith("posture unknown: $OPENCODE_CONFIG_CONTENT")
+        assert "unset the variable" in posture.message
+
+
 def test_check_opencode_rows_resolve_pattern_tables_by_catch_all(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1564,7 +1604,8 @@ def test_check_opencode_rows_resolve_pattern_tables_by_catch_all(
     assert posture.message == (
         "implement: edit=allow (opencode.json) write=allow "
         "bash=allow (opencode.json); "
-        "verify: OPENCODE_PERMISSION denies edit, write, bash"
+        "verify: OPENCODE_PERMISSION denies edit, write, bash globally "
+        "and OPENCODE_CONFIG_CONTENT denies them for agent build"
     )
 
     no_catch_all = {"bash": {"git *": "allow"}}

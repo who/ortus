@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from ortus.core.agent import (
+    OPENCODE_CONFIG_CONTENT_ENV,
     OPENCODE_PERMISSION_ENV,
+    OPENCODE_VERIFY_AGENT,
     BackendError,
     CodexRunner,
     GrokRunner,
     OpenCodeRunner,
     compose_worker_prompt,
     make_runner,
+    opencode_agent_scope_denial,
     resolve_backend,
     wrap_grok_prompt,
 )
-from ortus.core.claude import ClaudeRunner, _readonly_wrapper
+from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked, _readonly_wrapper
 from ortus.core.local_backend import LocalConfig
 from ortus.core.profiles import Phase, ProfileError, validate_profile_values
 
@@ -186,8 +190,11 @@ def test_codex_has_no_separate_handshake_agent() -> None:
     assert "on_poll" in inspect.signature(CodexRunner.run).parameters
 
 
-def test_opencode_readonly_posture_is_technically_enforced(tmp_path: Path) -> None:
+def test_opencode_readonly_posture_is_technically_enforced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The verify posture is opencode's own permission table, carried per launch."""
+    monkeypatch.delenv(OPENCODE_CONFIG_CONTENT_ENV, raising=False)
     runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
     argv = runner.build_argv("verify", readonly=True)
     assert argv[:2] == ["opencode", "run"]
@@ -198,6 +205,113 @@ def test_opencode_readonly_posture_is_technically_enforced(tmp_path: Path) -> No
     assert posture["edit"] == "deny"
     assert posture["write"] == "deny"
     assert OPENCODE_PERMISSION_ENV not in runner.launch_env()
+
+
+_DENIED = {"bash": "deny", "edit": "deny", "write": "deny"}
+
+
+def test_opencode_agent_scope_denial_is_exported_for_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-1: the verify launch also denies at agent scope, with nothing to merge over.
+
+    A global denial alone is a hole: an ``agent.build.permission`` allow in
+    any configuration scope is the last match in opencode's ruleset and
+    re-advertises the write tools. The agent-scope copy is the guard.
+    """
+    monkeypatch.delenv(OPENCODE_CONFIG_CONTENT_ENV, raising=False)
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    env = runner.launch_env(readonly=True)
+    content = json.loads(env[OPENCODE_CONFIG_CONTENT_ENV])
+    assert content == {"agent": {"build": {"permission": _DENIED}}}
+    assert content == opencode_agent_scope_denial()
+    # `opencode run` resolves the build agent when build_argv passes no --agent.
+    assert OPENCODE_VERIFY_AGENT == "build"
+    assert "--agent" not in runner.build_argv("verify", readonly=True)
+    # The global denial stays exported as belt and braces.
+    assert json.loads(env[OPENCODE_PERMISSION_ENV]) == _DENIED
+    # The document carries no key material and the implement phase is unchanged.
+    assert "api" not in env[OPENCODE_CONFIG_CONTENT_ENV].lower()
+    assert OPENCODE_CONFIG_CONTENT_ENV not in runner.launch_env()
+    assert OPENCODE_PERMISSION_ENV not in runner.launch_env()
+
+
+def test_opencode_agent_scope_denial_merges_over_operator_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-1: an operator document keeps its other keys; only the three tools flip."""
+    operator = {
+        "theme": "dark",
+        "agent": {
+            "build": {
+                "model": "x/y",
+                "permission": {
+                    "bash": {"rm -rf *": "deny", "*": "allow"},
+                    "edit": "allow",
+                    "webfetch": "ask",
+                },
+            },
+            "plan": {"permission": {"edit": "allow"}},
+        },
+    }
+    monkeypatch.setenv(OPENCODE_CONFIG_CONTENT_ENV, json.dumps(operator))
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    content = json.loads(runner.launch_env(readonly=True)[OPENCODE_CONFIG_CONTENT_ENV])
+    assert content["theme"] == "dark"
+    assert content["agent"]["plan"] == {"permission": {"edit": "allow"}}
+    build = content["agent"]["build"]
+    assert build["model"] == "x/y"
+    # A pattern table under a denied tool gives way to the plain deny.
+    assert build["permission"] == {**_DENIED, "webfetch": "ask"}
+    # The operator's variable is untouched; the merge is per launch.
+    assert json.loads(os.environ[OPENCODE_CONFIG_CONTENT_ENV]) == operator
+
+    # extra_env is read before the process environment, the order the launch
+    # applies, so a runner-level document wins over the shell's.
+    runner.extra_env[OPENCODE_CONFIG_CONTENT_ENV] = json.dumps({"theme": "light"})
+    content = json.loads(runner.launch_env(readonly=True)[OPENCODE_CONFIG_CONTENT_ENV])
+    assert content["theme"] == "light"
+    assert content["agent"]["build"]["permission"] == _DENIED
+    del runner.extra_env[OPENCODE_CONFIG_CONTENT_ENV]
+
+    # An empty value counts as absent; a document that already denies is idempotent.
+    monkeypatch.setenv(OPENCODE_CONFIG_CONTENT_ENV, "")
+    exported = json.loads(runner.launch_env(readonly=True)[OPENCODE_CONFIG_CONTENT_ENV])
+    assert exported == opencode_agent_scope_denial()
+    monkeypatch.setenv(OPENCODE_CONFIG_CONTENT_ENV, json.dumps(exported))
+    exported = json.loads(runner.launch_env(readonly=True)[OPENCODE_CONFIG_CONTENT_ENV])
+    assert exported == opencode_agent_scope_denial()
+
+
+def test_opencode_preflight_config_content_refuses_a_non_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a value the denial cannot merge into is refused, naming the variable.
+
+    Replacing it would drop configuration the operator meant to apply and
+    passing it through would launch a verifier with an unknown agent-scope
+    posture, so the preflight and the launch refuse the same way.
+    """
+    runner = OpenCodeRunner(LocalConfig("http://127.0.0.1:8080/v1", "m"))
+    monkeypatch.delenv(OPENCODE_CONFIG_CONTENT_ENV, raising=False)
+    assert runner.preflight_readonly(tmp_path) is None
+    monkeypatch.setenv(OPENCODE_CONFIG_CONTENT_ENV, json.dumps({"theme": "dark"}))
+    assert runner.preflight_readonly(tmp_path) is None
+    for bad in ("not json", "[1, 2]", '"text"', "42"):
+        monkeypatch.setenv(OPENCODE_CONFIG_CONTENT_ENV, bad)
+        with pytest.raises(ReadOnlyExecutionBlocked, match=r"\$OPENCODE_CONFIG_CONTENT"):
+            runner.preflight_readonly(tmp_path)
+        with pytest.raises(ReadOnlyExecutionBlocked, match=r"\$OPENCODE_CONFIG_CONTENT"):
+            runner.launch_env(readonly=True)
+    # Only the verify phase reads the variable; implement launches never refuse.
+    assert OPENCODE_CONFIG_CONTENT_ENV not in runner.launch_env()
+    # A runner-level document is read first, so it stands in for a broken shell value.
+    runner.extra_env[OPENCODE_CONFIG_CONTENT_ENV] = "{}"
+    assert runner.preflight_readonly(tmp_path) is None
+    runner.extra_env[OPENCODE_CONFIG_CONTENT_ENV] = "[]"
+    monkeypatch.setenv(OPENCODE_CONFIG_CONTENT_ENV, "{}")
+    with pytest.raises(ReadOnlyExecutionBlocked):
+        runner.preflight_readonly(tmp_path)
 
 
 def test_make_runner_opencode_is_a_sibling(

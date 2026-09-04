@@ -22,9 +22,12 @@ from ortus.core import output, sandbox
 from ortus.core.agent import (
     BACKEND_BINARIES,
     BACKENDS,
+    OPENCODE_CONFIG_CONTENT_ENV,
     OPENCODE_PERMISSION_ENV,
     OPENCODE_READONLY_PERMISSION,
+    OPENCODE_VERIFY_AGENT,
     BackendError,
+    read_opencode_config_content,
     resolve_backend,
 )
 from ortus.core.agent_files import (
@@ -504,8 +507,12 @@ def _opencode_posture_row(
     over it — because every worker inherits the operator's shell, so a
     denial exported there would quietly cripple implement runs. A key the
     tables do not mention is opencode's headless default, allow. The verify
-    posture is the denial `OpenCodeRunner` exports for that phase, reported
-    rather than exercised: no worker launches from check.
+    posture is the denial `OpenCodeRunner` exports for that phase, in the
+    global table and again at agent scope for the agent a headless run
+    resolves, reported rather than exercised: no worker launches from check.
+    The agent-scope copy is merged over the operator's
+    `OPENCODE_CONFIG_CONTENT`, so a value there that is not a JSON object is
+    the one thing that makes the verify launch refuse, and the row says so.
     """
     if error is not None:
         return CheckResult(name, False, error)
@@ -528,6 +535,10 @@ def _opencode_posture_row(
             return CheckResult(
                 name, False, f"posture unknown: {env_source} is not a JSON object"
             )
+    try:
+        read_opencode_config_content(os.environ)
+    except ReadOnlyExecutionBlocked as exc:
+        return CheckResult(name, False, f"posture unknown: {exc}")
     resolved: list[str] = []
     for tool in OPENCODE_POSTURE_TOOLS:
         if tool in env_table:
@@ -555,7 +566,9 @@ def _opencode_posture_row(
     return CheckResult(
         name,
         True,
-        f"implement: {' '.join(resolved)}; verify: {OPENCODE_PERMISSION_ENV} denies {verify}",
+        f"implement: {' '.join(resolved)}; verify: {OPENCODE_PERMISSION_ENV} denies "
+        f"{verify} globally and {OPENCODE_CONFIG_CONTENT_ENV} denies them for "
+        f"agent {OPENCODE_VERIFY_AGENT}",
     )
 
 

@@ -29,12 +29,12 @@ from __future__ import annotations
 
 import os
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
-from ortus.core.claude import ClaudeRunner, _spawn_logged
+from ortus.core.claude import ClaudeRunner, ReadOnlyExecutionBlocked, _spawn_logged
 from ortus.core.config import INIT_ONLY_BACKEND_MESSAGE, load_config
 from ortus.core.codegraph import CodeGraphCapability
 from ortus.core.local_backend import (
@@ -274,6 +274,80 @@ OPENCODE_READONLY_PERMISSION: dict[str, str] = {
     "write": "deny",
     "bash": "deny",
 }
+#: The environment variable opencode parses as a JSON configuration document
+#: and merges over its resolved configuration at startup. Rows it places
+#: under ``agent.<name>.permission`` follow the global rows in opencode's
+#: permission ruleset, and the last matching row wins.
+OPENCODE_CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
+#: The agent ``opencode run`` uses when no ``--agent`` is passed.
+#: ``OpenCodeRunner.build_argv`` never passes one, so this is the agent a
+#: verify run resolves its permissions for.
+OPENCODE_VERIFY_AGENT = "build"
+
+
+def opencode_agent_scope_denial() -> dict[str, Any]:
+    """The verify denial as an agent-scoped configuration document.
+
+    ``OPENCODE_PERMISSION`` lands in the global permission table. An
+    ``agent.build.permission`` allow in the project ``opencode.json``, in the
+    user-level config, in ``OPENCODE_CONFIG_CONTENT``, or in an agent file
+    appends its rows after the global ones, so that allow is the last match
+    and hands the verifier the write tools back: proven live against
+    opencode 1.18.27, where a project allow had the model rewrite a guard
+    file under the global denial. The same denial placed at agent scope was
+    the last match under every scope tested, so it is the guard.
+    """
+    return {
+        "agent": {
+            OPENCODE_VERIFY_AGENT: {"permission": dict(OPENCODE_READONLY_PERMISSION)}
+        }
+    }
+
+
+def read_opencode_config_content(env: Mapping[str, str]) -> dict[str, Any]:
+    """The operator's ``OPENCODE_CONFIG_CONTENT`` under ``env`` as an object.
+
+    Absent or empty means no operator document: ``{}``. A value that is
+    present but not a JSON object raises ``ReadOnlyExecutionBlocked``: the
+    verify denial is merged over the operator's document so their other keys
+    survive, and there is nothing to merge into a string or a list. Replacing
+    the value would silently drop configuration the operator meant to apply,
+    and passing it through would launch a verifier whose agent-scope posture
+    is whatever that value resolves to, so neither is a verify posture.
+    """
+    raw = env.get(OPENCODE_CONFIG_CONTENT_ENV)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ReadOnlyExecutionBlocked(
+            f"${OPENCODE_CONFIG_CONTENT_ENV} is not JSON ({exc}); the verify "
+            "denial cannot be merged into it — fix or unset the variable"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ReadOnlyExecutionBlocked(
+            f"${OPENCODE_CONFIG_CONTENT_ENV} is not a JSON object; the verify "
+            "denial cannot be merged into it — fix or unset the variable"
+        )
+    return parsed
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """``base`` with ``overlay`` merged in, nested objects key by key.
+
+    A key both sides hold as objects merges recursively; otherwise the
+    overlay's value replaces the base's, so a pattern table the operator put
+    under a denied tool gives way to the plain ``deny``.
+    """
+    merged = dict(base)
+    for key, value in overlay.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 @dataclass
@@ -340,17 +414,33 @@ class OpenCodeRunner:
     def launch_env(self, *, readonly: bool = False) -> dict[str, str]:
         """``extra_env``, plus the verify posture when ``readonly``.
 
-        The denial travels as JSON in ``OPENCODE_PERMISSION_ENV``, which
-        opencode merges over its configured ``permission`` table when it
-        starts, so the posture is per launch and no project file changes
-        for a verify run.
+        The denial travels twice, as JSON in the environment, so the posture
+        is per launch and no project file changes for a verify run.
+        ``OPENCODE_PERMISSION_ENV`` carries it as the global table opencode
+        merges over its configured ``permission`` at startup.
+        ``OPENCODE_CONFIG_CONTENT_ENV`` carries it again at agent scope for
+        ``OPENCODE_VERIFY_AGENT``, merged over the document the operator
+        already exports there (``extra_env`` first, the process environment
+        second, the order the launch applies) so their unrelated keys
+        survive. Without that second copy an agent-scoped allow in any
+        configuration scope is the last match and re-advertises the write
+        tools. Raises ``ReadOnlyExecutionBlocked`` when the operator's value
+        is not a JSON object, the same refusal ``preflight_readonly`` gives.
         """
         env = dict(self.extra_env)
         if readonly:
             env[OPENCODE_PERMISSION_ENV] = json.dumps(
                 OPENCODE_READONLY_PERMISSION, sort_keys=True
             )
+            operator = read_opencode_config_content(self._operator_env())
+            env[OPENCODE_CONFIG_CONTENT_ENV] = json.dumps(
+                _deep_merge(operator, opencode_agent_scope_denial()), sort_keys=True
+            )
         return env
+
+    def _operator_env(self) -> dict[str, str]:
+        """The environment a launch resolves: ``extra_env`` over the process's."""
+        return {**os.environ, **self.extra_env}
 
     def run(
         self,
@@ -401,16 +491,21 @@ class OpenCodeRunner:
         return argv
 
     def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
-        """Nothing to probe; mirrors ``_readonly_argv``.
+        """Refuse a verify launch whose agent-scope denial has nowhere to land.
 
-        The Claude preflight exists because its verifier runs commands
-        through a wrapper that can turn out unable to execute anything. An
-        opencode verifier runs no commands at all — bash is among the denied
-        tools — and no Ortus-owned wrapper sits in its path, so the
-        blocked-execution failure that guard catches cannot arise here.
+        No command is probed. The Claude preflight exists because its
+        verifier runs commands through a wrapper that can turn out unable to
+        execute anything; an opencode verifier runs no commands at all — bash
+        is among the denied tools — and no Ortus-owned wrapper sits in its
+        path, so that failure cannot arise here. What can is an operator
+        ``OPENCODE_CONFIG_CONTENT_ENV`` that is not a JSON object: the denial
+        ``launch_env`` exports is merged over that document rather than
+        replacing it, so the ``ReadOnlyExecutionBlocked`` the launch would
+        raise is raised here instead, naming the variable, before a worker
+        is dispatched.
         """
 
-        return None
+        read_opencode_config_content(self._operator_env())
 
 
 def wrap_grok_prompt(task: str, *, q1: str = GROK_GOAL_MODE) -> str:

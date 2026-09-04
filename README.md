@@ -259,8 +259,16 @@ launch as `OPENCODE_PERMISSION={"bash": "deny", "edit": "deny", "write": "deny"}
 opencode drops those three tools from the model's surface entirely, bash
 included, which is the one tool a permission table cannot otherwise contain
 because an allowed bash writes through a redirect. A verifier therefore holds
-nothing that can touch the tree and needs no read-only root on top. Denied
-tools simply never appear in the session; the log records no denial event.
+nothing that can touch the tree and needs no read-only root on top. The same
+denial is exported once more at agent scope, as
+`OPENCODE_CONFIG_CONTENT={"agent": {"build": {"permission": ...}}}` merged
+over any document already in that variable, because opencode resolves
+permissions as an ordered ruleset in which agent-scoped rows follow the
+global ones and the last match wins: an `agent.build.permission` allow in the
+project or user config would otherwise hand the write tools back to the
+verifier. A value in that variable that is not a JSON object is refused
+before launch rather than replaced. Denied tools simply never appear in the
+session; the log records no denial event.
 
 **Wall clock.** Local decode is slower than a hosted model, and a worker runs
 the work spec's checks inside its window. Raise `--worker-timeout` above the
