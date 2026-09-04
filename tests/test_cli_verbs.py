@@ -444,7 +444,7 @@ def _flat_help(*argv: str) -> str:
         ("init", "Bootstrap a fresh repo for Claude, Codex, Grok, or a local model."),
         ("plan", "claude, codex, grok, local, or opencode; defaults from .ortusrc"),
         ("interview", "claude, codex, grok, local, or opencode; defaults from .ortusrc."),
-        ("tail", "Log backend (claude|codex|grok|local); defaults from .ortusrc."),
+        ("tail", "Log backend (claude|codex|grok|local|opencode); defaults from .ortusrc."),
     ],
 )
 def test_help_texts_name_local_backend(verb: str, phrase: str) -> None:
