@@ -1056,7 +1056,7 @@ def grind(
         None,
         "--backend",
         help=(
-            "claude, codex, grok, or local; overrides ORTUS_BACKEND and .ortusrc "
+            "claude, codex, grok, local, or opencode; overrides ORTUS_BACKEND and .ortusrc "
             "('all' is an init provisioning option, not a run backend)."
         ),
     ),

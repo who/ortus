@@ -144,7 +144,7 @@ def plan(
         None,
         "--backend",
         help=(
-            "claude, codex, grok, or local; defaults from .ortusrc "
+            "claude, codex, grok, local, or opencode; defaults from .ortusrc "
             "('all' is an init provisioning option, not a run backend)."
         ),
     ),

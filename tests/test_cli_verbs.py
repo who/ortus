@@ -442,8 +442,8 @@ def _flat_help(*argv: str) -> str:
     ("verb", "phrase"),
     [
         ("init", "Bootstrap a fresh repo for Claude, Codex, Grok, or a local model."),
-        ("plan", "claude, codex, grok, or local; defaults from .ortusrc"),
-        ("interview", "claude, codex, grok, or local; defaults from .ortusrc."),
+        ("plan", "claude, codex, grok, local, or opencode; defaults from .ortusrc"),
+        ("interview", "claude, codex, grok, local, or opencode; defaults from .ortusrc."),
         ("tail", "Log backend (claude|codex|grok|local); defaults from .ortusrc."),
     ],
 )
