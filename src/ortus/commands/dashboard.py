@@ -137,6 +137,7 @@ from ortus.core.runstate import (
     RunSnapshot,
     find_log,
     is_grok_event,
+    is_opencode_event,
     read_snapshot,
     summarize_grok_tool,
 )
@@ -598,9 +599,20 @@ def journal_backend(repo: Path) -> str:
 
 
 def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) -> str:
-    """Backend implied by parsed event types, or empty when none have spoken."""
+    """Backend implied by parsed event types, or empty when none have spoken.
 
-    if crumbs or any(event.payload and is_grok_event(event.payload) for event in events):
+    Tested in the order opencode, grok, codex, claude; the first vocabulary
+    seen names the run. opencode goes before grok because both carry a
+    `text` type: `is_grok_event` already declines the opencode `part`
+    envelope, so the order is belt and braces rather than the fix. A log
+    holding two vocabularies (a run whose backend changed mid-log) is named
+    by that same order rather than special-cased.
+    """
+
+    payloads = [event.payload for event in events if event.payload]
+    if any(is_opencode_event(payload) for payload in payloads):
+        return "opencode"
+    if crumbs or any(is_grok_event(payload) for payload in payloads):
         return "grok"
     kinds = {event.kind for event in events}
     if kinds & {"item.started", "item.completed", "turn.completed"}:

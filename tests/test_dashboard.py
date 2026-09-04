@@ -2806,3 +2806,85 @@ def test_backend_conflict_treats_local_as_opencode(tmp_path: Path) -> None:
     assert "event backend=codex" in app.conflict
     assert app.conflict in frame.warnings
     assert app.grok is False
+
+
+_OPENCODE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "opencode-run-events.jsonl"
+
+
+def _opencode_events() -> tuple[LogEvent, ...]:
+    events = []
+    for line in _OPENCODE_FIXTURE.read_text(encoding="utf-8").splitlines():
+        event = classify_line(line)
+        assert event is not None
+        events.append(event)
+    return tuple(events)
+
+
+def test_opencode_log_backend_names_opencode_from_its_events() -> None:
+    """AC-1: the captured `run --format json` stream names opencode, not grok.
+
+    The `text` type both vocabularies share is decided by the `part`
+    envelope, and opencode is tested first, so a log that also carries codex
+    or claude events is still named opencode.
+    """
+
+    events = _opencode_events()
+    assert dash.log_backend(events) == "opencode"
+
+    text_only = tuple(event for event in events if event.kind == "text")
+    assert text_only
+    assert dash.log_backend(text_only) == "opencode"
+
+    codex_event = _event(
+        {"type": "item.completed", "item": {"id": "i", "type": "agent_message", "text": "hi"}}
+    )
+    claude_event = _event({"type": "assistant", "message": {"content": []}})
+    assert dash.log_backend(events + (codex_event,)) == "opencode"
+    assert dash.log_backend((claude_event,) + events) == "opencode"
+    assert dash.log_backend((codex_event,)) == "codex"
+    assert dash.log_backend((claude_event,)) == "claude"
+
+    grok_text = _event({"type": "text", "data": "I will inspect the leftover state."})
+    assert dash.log_backend((grok_text,)) == "grok"
+    assert dash.log_backend(()) == ""
+
+
+def test_opencode_backend_conflict_named_from_the_start_line(tmp_path: Path) -> None:
+    """AC-2: a codex start line over opencode events is a conflict; opencode's is not.
+
+    The disagreement is named exactly as it is for the other backends, and
+    an opencode start line over codex events is a conflict the other way.
+    """
+
+    body = _OPENCODE_FIXTURE.read_text(encoding="utf-8")
+
+    repo = _painted_repo(tmp_path, "codex-named", body, backend="codex")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+    assert "PLAN-GAP" in app.conflict
+    assert "named backend=codex" in app.conflict
+    assert "event backend=opencode" in app.conflict
+    assert app.conflict in frame.warnings
+    assert app.grok is False
+
+    repo = _painted_repo(tmp_path, "claude-named", body, backend="claude")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    app.advance()
+    assert "named backend=claude" in app.conflict
+    assert "event backend=opencode" in app.conflict
+
+    repo = _painted_repo(tmp_path, "opencode-named", body, backend="opencode")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+    assert app.conflict == ""
+    assert not any("PLAN-GAP" in warning for warning in frame.warnings)
+    assert app.grok is False
+
+    codex_event = (
+        '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"hi"}}\n'
+    )
+    repo = _painted_repo(tmp_path, "opencode-over-codex", codex_event, backend="opencode")
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    app.advance()
+    assert "named backend=opencode" in app.conflict
+    assert "event backend=codex" in app.conflict
