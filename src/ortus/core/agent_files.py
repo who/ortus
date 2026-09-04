@@ -38,7 +38,7 @@ BD_CLAIM_COMMAND = "bd update <id> --status=in_progress"
 
 #: Schema integer per block. Bump when the rendered body changes meaning; the
 #: drift gate in the test suite fails a body edit that forgets to.
-BLOCK_SCHEMAS: dict[str, int] = {"agents": 1, "pointer": 1}
+BLOCK_SCHEMAS: dict[str, int] = {"agents": 2, "pointer": 1}
 
 
 @dataclass(frozen=True)

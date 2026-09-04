@@ -46,9 +46,11 @@ spawns a fresh agent with a narrow per-task condition ("close one issue"); the
 outer loop trusts only observable bd state to decide success, orphan-claim, or
 no-change retry.
 
-Claude workers run `claude -p "/goal ..."`. Codex and Grok workers run a plain
-`exec` prompt, because those non-interactive surfaces do not expand slash
-commands. Never invoke `ortus grind` from inside a worker.
+Claude workers run `claude -p "/goal ..."`. Codex, Grok, and opencode workers
+run a plain prompt (`codex exec`, `grok -p`, `opencode run`; `local` is
+opencode's older name), because those non-interactive surfaces do not expand
+slash commands and opencode has none. Never invoke `ortus grind` from inside
+a worker.
 
 ```bash
 ortus grind .                            # drain bd ready

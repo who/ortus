@@ -391,6 +391,23 @@ def test_agents_block_authoring_contract_sits_with_the_bd_guidance() -> None:
     )
 
 
+def test_agents_block_names_every_plain_prompt_backend() -> None:
+    """A project provisioned for opencode reads its own worker shape here.
+
+    The README already names opencode beside Codex; the always-loaded block
+    must too, with `local` noted as its older name, or an agent under that
+    backend is told about every worker surface except the one driving it.
+    """
+    text = render_block("agents")
+    orchestrator = text[text.index("### Orchestrator (ortus grind)") :]
+    for surface in ("`codex exec`", "`grok -p`", "`opencode run`"):
+        assert surface in orchestrator
+    assert "`local` is\nopencode's older name" in orchestrator
+    # opencode has no slash commands at all; the block must not imply that
+    # a `/goal` ever reaches it.
+    assert "opencode has none" in orchestrator
+
+
 def test_blocks_substitute_every_placeholder_and_keep_shell_braces() -> None:
     for block in BLOCK_SCHEMAS:
         text = render_block(block)
@@ -431,7 +448,7 @@ def test_bd_claim_command_matches_the_bundled_goal_prompt(tmp_path: Path) -> Non
 # so editing what a block teaches without bumping its schema fails here. Bump
 # BLOCK_SCHEMAS[<block>] and re-pin the digest in the same commit.
 PINNED_BLOCK_TEMPLATES: dict[str, tuple[int, str]] = {
-    "agents": (1, "abede8bbcbac750f3e0ce8b3243fc2c66a73158b3b834d35a99c7ed44fe54768"),
+    "agents": (2, "ff0ccaa1c05ace538e5ef800ea84925eb3a3e54fdd6c497d20b47c9e22013c91"),
     "pointer": (1, "e20aa4135de14e37eb79a5c589277750c37cfafbd16c8a4d7378a99ac606601a"),
 }
 

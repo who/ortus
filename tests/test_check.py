@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import check as check_mod
-from ortus.core.agent_files import MANAGED_FILES, render_block
+from ortus.core.agent_files import BLOCK_SCHEMAS, MANAGED_FILES, render_block
 from ortus.core.local_backend import (
     LocalConfig,
     LocalServerError,
@@ -752,7 +752,7 @@ def test_check_reports_the_managed_blocks_as_current(
     compact = "".join(result.stdout.split())
     assert "AGENTS.md" in compact
     assert "CLAUDE.md" in compact
-    assert "block=agentsschema=1current" in compact
+    assert f"block=agentsschema={BLOCK_SCHEMAS['agents']}current" in compact
 
 
 @pytest.mark.parametrize("filename", ["AGENTS.md", "CLAUDE.md"])
@@ -794,6 +794,28 @@ def test_check_reports_same_schema_content_drift(tmp_path: Path) -> None:
     result = check_mod.check_agent_file(repo, MANAGED_FILES[0])
     assert not result.ok
     assert "content drift" in result.message
+    assert "ortus init --force" in result.message
+
+
+def test_check_reports_an_older_schema_as_schema_drift(tmp_path: Path) -> None:
+    """A block from an older ortus is schema drift with the repair command.
+
+    A schema bump must not turn every existing project's block into a
+    malformed or content-drift row: the older block is classified by the
+    same newer-or-older rule as before, and `ortus init --force` refreshes it.
+    """
+    repo = _healthy_repo(tmp_path)
+    current = BLOCK_SCHEMAS["agents"]
+    assert current > 1
+    older = render_block("agents").replace(
+        f"block=agents schema={current}", "block=agents schema=1", 1
+    )
+    (repo / "AGENTS.md").write_text(older + "\n", encoding="utf-8")
+    result = check_mod.check_agent_file(repo, MANAGED_FILES[0])
+    assert not result.ok
+    assert "schema drift" in result.message
+    assert "content drift" not in result.message
+    assert f"schema={current}" in result.message
     assert "ortus init --force" in result.message
 
 
@@ -867,7 +889,7 @@ def test_check_duplicate_headings_warn_keeps_exit_zero(
     compact = _compact(result.stdout)
     assert "duplicatesmanaged-blockheadings" in compact
     # The strict row for the same file still reports the block as current.
-    assert "block=agentsschema=1current" in compact
+    assert f"block=agentsschema={BLOCK_SCHEMAS['agents']}current" in compact
 
 
 def test_check_agent_files_make_no_writes(tmp_path: Path) -> None:
