@@ -13,8 +13,9 @@ everything Ortus has to know about the model is data in `.ortusrc`:
 
 The wire API is not configuration: opencode speaks chat completions to that
 provider, and `opencode_provider_block` is the entry it registers, built from
-the same table. The serving contract the probes below check is
-`GET {base_url}/models`.
+the same table. `opencode_mcp_entry` is the CodeGraph MCP server registered
+beside it, which opencode runs client-side. The serving contract the probes
+below check is `GET {base_url}/models`.
 """
 
 from __future__ import annotations
@@ -46,6 +47,11 @@ OPENCODE_PROVIDER_ID = "ortuslocal"
 OPENCODE_PROVIDER_NPM = "@ai-sdk/openai-compatible"
 OPENCODE_CONFIG_FILE = "opencode.json"
 OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json"
+#: The `mcp.<name>` entry of `opencode.json` that registers CodeGraph. opencode
+#: presents a server's tools to the model as flat functions named
+#: `<name>_<tool>`, so this name is also the prefix a worker's CodeGraph
+#: handshake carries in the event stream.
+OPENCODE_MCP_SERVER = "codegraph"
 #: The backends that read the `[local]` table: `opencode`, and `local`, its
 #: older name. Both launch the opencode CLI at the model the table names, so
 #: every dispatch on the backend name treats the pair alike.
@@ -111,6 +117,23 @@ def opencode_provider_block(config: LocalConfig) -> dict[str, Any]:
         "name": "Ortus local model",
         "options": options,
         "models": {config.model: {}},
+    }
+
+
+def opencode_mcp_entry() -> dict[str, Any]:
+    """The `mcp.<OPENCODE_MCP_SERVER>` entry of `opencode.json`.
+
+    The shape opencode 1.18.27 ran client-side, presenting the server's tools
+    to the model as plain functions: a local server it launches itself, and
+    enabled so a worker sees those tools. The command names the bare
+    `codegraph` executable rather than a resolved path, so the file stays
+    portable across machines. A fresh dict each call: callers merge it into
+    a document they go on to mutate.
+    """
+    return {
+        "type": "local",
+        "command": ["codegraph", "serve", "--mcp"],
+        "enabled": True,
     }
 
 

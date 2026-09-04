@@ -16,6 +16,7 @@ from ortus.core.agent_files import MANAGED_FILES, render_block
 from ortus.core.local_backend import (
     LocalConfig,
     LocalServerError,
+    opencode_mcp_entry,
     opencode_provider_block,
     serving_hint,
 )
@@ -1112,6 +1113,13 @@ _OPENCODE_MCP: dict[str, object] = {
     "command": ["codegraph", "serve", "--mcp"],
     "enabled": True,
 }
+
+
+def test_opencode_mcp_hint_pastes_the_entry_init_writes() -> None:
+    """The remediation and `ortus init` agree on the one registration shape."""
+    assert _OPENCODE_MCP == opencode_mcp_entry()
+    assert json.dumps({"codegraph": opencode_mcp_entry()}) in check_mod.OPENCODE_MCP_HINT
+    assert "opencode mcp add codegraph" in check_mod.OPENCODE_MCP_HINT
 
 
 def _opencode_json(

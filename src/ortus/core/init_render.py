@@ -22,9 +22,11 @@ from ortus.core.config import DEFAULT_CODEGRAPH_MODE
 from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
     OPENCODE_CONFIG_FILE,
+    OPENCODE_MCP_SERVER,
     OPENCODE_PROVIDER_ID,
     OPENCODE_SCHEMA_URL,
     LocalConfig,
+    opencode_mcp_entry,
     opencode_provider_block,
 )
 
@@ -248,17 +250,19 @@ def merge_gitignore(target: Path, ctx: RenderContext) -> BlockOutcome:
 
 # `opencode.json` is the fourth host-owned file. JSON carries no comments, so
 # the marker fence the other three use cannot fence a region of it; Ortus owns
-# exactly one key instead — `provider.<OPENCODE_PROVIDER_ID>` — and a merge
-# rewrites that key only. Every other key the operator wrote (their own
-# providers, `mcp` servers, a theme) survives in its original order.
+# exactly two keys instead — `provider.<OPENCODE_PROVIDER_ID>` and
+# `mcp.<OPENCODE_MCP_SERVER>` — and a merge rewrites those keys only. Every
+# other key the operator wrote (their own providers and `mcp` servers, a
+# theme) survives in its original order.
 
 
 def read_opencode_config(target: Path) -> dict[str, Any] | None:
     """The parsed `target/opencode.json`, or None when absent or empty.
 
     Raises `ValueError` naming the file when it is not a JSON object or its
-    `provider` key is not one: init refuses such a file rather than guessing
-    at what the operator meant, and it does so before writing anything.
+    `provider` or `mcp` key is not one: init refuses such a file rather than
+    guessing at what the operator meant, and it does so before writing
+    anything.
     """
     path = target / OPENCODE_CONFIG_FILE
     if not path.is_file():
@@ -272,32 +276,73 @@ def read_opencode_config(target: Path) -> dict[str, Any] | None:
         raise ValueError(f"{path} is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{path} is not a JSON object")
-    providers = data.get("provider")
-    if providers is not None and not isinstance(providers, dict):
-        raise ValueError(f'{path}: "provider" is not a JSON object')
+    for table in ("provider", "mcp"):
+        section = data.get(table)
+        if section is not None and not isinstance(section, dict):
+            raise ValueError(f'{path}: "{table}" is not a JSON object')
     return data
 
 
-def merge_opencode_config(target: Path, local: LocalConfig) -> BlockOutcome:
-    """Register `local` as the Ortus provider in `target/opencode.json`.
+@dataclass(frozen=True)
+class OpenCodeMerge:
+    """What one `merge_opencode_config` call did to each key Ortus owns.
 
-    Absent (or empty) file: created with the schema reference and the one
-    provider. Existing file: the Ortus provider entry replaced and nothing
-    else touched, and nothing written at all when the entry is already
-    current, so a hand-formatted file is not re-indented for no change.
+    Reported per key rather than per file so init can say which entry it
+    created, rewrote, or left alone: an operator whose own `mcp.codegraph`
+    was just replaced should hear that, not that the file was "updated".
+    `mcp` is None when CodeGraph is off for the repo and the entry was not
+    considered at all.
     """
-    data = read_opencode_config(target)
-    if data is None:
-        outcome = BlockOutcome.CREATED
-        data = {"$schema": OPENCODE_SCHEMA_URL}
-    else:
-        outcome = BlockOutcome.UPDATED
-    providers = data.setdefault("provider", {})
-    block = opencode_provider_block(local)
-    if providers.get(OPENCODE_PROVIDER_ID) == block:
-        return BlockOutcome.UNCHANGED
-    providers[OPENCODE_PROVIDER_ID] = block
-    (target / OPENCODE_CONFIG_FILE).write_text(
-        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+
+    provider: BlockOutcome
+    mcp: BlockOutcome | None
+
+    @property
+    def changed(self) -> bool:
+        """True when the merge wrote the file."""
+        return any(
+            outcome is not BlockOutcome.UNCHANGED
+            for outcome in (self.provider, self.mcp)
+            if outcome is not None
+        )
+
+
+def merge_opencode_config(
+    target: Path, local: LocalConfig, *, register_codegraph: bool = True
+) -> OpenCodeMerge:
+    """Register `local` and the CodeGraph server in `target/opencode.json`.
+
+    Absent (or empty) file: created with the schema reference and the Ortus
+    entries. Existing file: each Ortus entry replaced when it differs and
+    nothing else touched, and nothing written at all when both are already
+    current, so a hand-formatted file is not re-indented for no change.
+    `register_codegraph` false (the repo's CodeGraph policy is `off`) leaves
+    the `mcp` table exactly as it was, an operator's own `codegraph` entry
+    included: init writes no registration that check would not then verify.
+    """
+    existing = read_opencode_config(target)
+    written = BlockOutcome.CREATED if existing is None else BlockOutcome.UPDATED
+    data: dict[str, Any] = (
+        {"$schema": OPENCODE_SCHEMA_URL} if existing is None else existing
     )
-    return outcome
+
+    def own(table: str, key: str, entry: dict[str, Any]) -> BlockOutcome:
+        section = data.setdefault(table, {})
+        if section.get(key) == entry:
+            return BlockOutcome.UNCHANGED
+        section[key] = entry
+        return written
+
+    merge = OpenCodeMerge(
+        provider=own("provider", OPENCODE_PROVIDER_ID, opencode_provider_block(local)),
+        mcp=(
+            own("mcp", OPENCODE_MCP_SERVER, opencode_mcp_entry())
+            if register_codegraph
+            else None
+        ),
+    )
+    if merge.changed:
+        (target / OPENCODE_CONFIG_FILE).write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+    return merge

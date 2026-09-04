@@ -47,6 +47,7 @@ from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
     LOCAL_TABLE_BACKENDS,
     OPENCODE_CONFIG_FILE,
+    OPENCODE_MCP_SERVER,
     OPENCODE_PROVIDER_ID,
     LocalConfig,
     LocalServerError,
@@ -508,26 +509,36 @@ def _require_mergeable_opencode_config(target: Path) -> None:
         raise typer.Exit(code=1)
 
 
-def _write_opencode_config(target: Path, local: LocalConfig) -> bool:
-    """Merge the served model into `opencode.json`; True when the file changed.
+def _report_opencode_key(label: str, outcome: BlockOutcome) -> None:
+    """One line per Ortus-owned `opencode.json` key: what the merge did to it."""
+    if outcome is BlockOutcome.UNCHANGED:
+        output.success(f"{OPENCODE_CONFIG_FILE} {label} already current")
+    else:
+        output.success(f"{outcome.value} {OPENCODE_CONFIG_FILE} {label}")
 
-    A keyed merge rather than a render: the operator's own providers and MCP
-    servers in that file are theirs to keep across a re-init.
+
+def _write_opencode_config(
+    target: Path, local: LocalConfig, *, register_codegraph: bool
+) -> bool:
+    """Merge the Ortus entries into `opencode.json`; True when the file changed.
+
+    A keyed merge rather than a render: Ortus owns the served-model provider
+    and, unless CodeGraph is off for the repo, the `codegraph` MCP server;
+    the operator's own providers and MCP servers in that file are theirs to
+    keep across a re-init. Each owned key is reported on its own line, so an
+    operator whose hand-written `codegraph` entry was rewritten reads that.
     """
     try:
-        outcome = merge_opencode_config(target, local)
+        merge = merge_opencode_config(
+            target, local, register_codegraph=register_codegraph
+        )
     except ValueError as exc:
         output.error(str(exc), hint=OPENCODE_REPAIR_HINT)
         raise typer.Exit(code=1)
-    if outcome is BlockOutcome.UNCHANGED:
-        output.success(
-            f"{OPENCODE_CONFIG_FILE} provider {OPENCODE_PROVIDER_ID} already current"
-        )
-        return False
-    output.success(
-        f"{outcome.value} {OPENCODE_CONFIG_FILE} provider {OPENCODE_PROVIDER_ID}"
-    )
-    return True
+    _report_opencode_key(f"provider {OPENCODE_PROVIDER_ID}", merge.provider)
+    if merge.mcp is not None:
+        _report_opencode_key(f"mcp {OPENCODE_MCP_SERVER}", merge.mcp)
+    return merge.changed
 
 
 def _resolve_choice(
@@ -833,8 +844,14 @@ def init(
         output.success(f"wrote {p.relative_to(target)}")
     if local is not None:
         # Pinned to opencode, or to `local`, its older name: either way the
-        # served model is registered in opencode's file.
-        if _write_opencode_config(target, local):
+        # served model is registered in opencode's file, and so is the
+        # CodeGraph server opencode runs for the worker, unless the policy
+        # is off.
+        if _write_opencode_config(
+            target,
+            local,
+            register_codegraph=resolved_codegraph != CodeGraphMode.OFF.value,
+        ):
             written.append(target / OPENCODE_CONFIG_FILE)
 
     try:

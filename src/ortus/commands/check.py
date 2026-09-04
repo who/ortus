@@ -47,10 +47,12 @@ from ortus.core.local_backend import (
     LOCAL_TABLE_BACKENDS,
     MIN_RECOMMENDED_CONTEXT,
     OPENCODE_CONFIG_FILE,
+    OPENCODE_MCP_SERVER,
     OPENCODE_PROVIDER_ID,
     LocalConfig,
     LocalServerError,
     load_local_config,
+    opencode_mcp_entry,
     opencode_provider_block,
     parse_local_table,
     probe_context_size,
@@ -340,12 +342,13 @@ OPENCODE_ROW_NAMES: tuple[str, ...] = (
 )
 OPENCODE_PROVISION_HINT = "run `ortus init --backend opencode --local-model <id>`"
 OPENCODE_REPROVISION_HINT = "re-run `ortus init --force --backend opencode`"
-#: The `mcp.codegraph` entry opencode 1.18.27 ran client-side, as JSON the
-#: operator can paste; `opencode mcp add` prompts for the same three facts.
+#: The `mcp.codegraph` entry init writes and opencode 1.18.27 ran client-side,
+#: as JSON the operator can paste; `opencode mcp add` prompts for the same
+#: three facts.
 OPENCODE_MCP_HINT = (
-    'add to opencode.json: "mcp": {"codegraph": {"type": "local", '
-    '"command": ["codegraph", "serve", "--mcp"], "enabled": true}} '
-    "(or `opencode mcp add codegraph`)"
+    f'add to {OPENCODE_CONFIG_FILE}: "mcp": '
+    f"{json.dumps({OPENCODE_MCP_SERVER: opencode_mcp_entry()})} "
+    f"(or `opencode mcp add {OPENCODE_MCP_SERVER}`)"
 )
 #: The tools an implement worker must hold and a verify worker must not.
 OPENCODE_POSTURE_TOOLS: tuple[str, ...] = tuple(OPENCODE_READONLY_PERMISSION)
@@ -374,7 +377,7 @@ def _opencode_mcp_entry(data: dict[str, Any] | None) -> dict[str, Any] | None:
     servers = data.get("mcp")
     if not isinstance(servers, dict):
         return None
-    entry = servers.get("codegraph")
+    entry = servers.get(OPENCODE_MCP_SERVER)
     return entry if isinstance(entry, dict) else None
 
 

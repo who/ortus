@@ -40,9 +40,11 @@ from ortus.core.init_render import (
 )
 from ortus.core.local_backend import (
     DEFAULT_LOCAL_BASE_URL,
+    OPENCODE_MCP_SERVER,
     OPENCODE_PROVIDER_ID,
     OPENCODE_SCHEMA_URL,
     LocalConfig,
+    opencode_mcp_entry,
     opencode_provider_block,
 )
 from ortus.core.prompts import resolve_prompt
@@ -726,21 +728,30 @@ def test_render_missing_variable_raises() -> None:
 # --- opencode.json keyed merge -----------------------------------------------
 #
 # The fourth host-owned file. JSON has no comment syntax for a marker fence,
-# so Ortus owns one key — `provider.ortuslocal` — and touches nothing else.
+# so Ortus owns two keys — `provider.ortuslocal` and `mcp.codegraph` — and
+# touches nothing else.
 
 
 def _served() -> LocalConfig:
     return LocalConfig("http://127.0.0.1:8080/v1", "m1")
 
 
-def test_merge_opencode_config_creates_the_file(tmp_path: Path) -> None:
-    outcome = merge_opencode_config(tmp_path, _served())
-    assert outcome is agent_files.BlockOutcome.CREATED
-    data = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
-    assert data == {
-        "$schema": OPENCODE_SCHEMA_URL,
+def _ortus_entries() -> dict[str, object]:
+    """The two tables a fresh merge writes, exactly as it writes them."""
+    return {
         "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+        "mcp": {OPENCODE_MCP_SERVER: opencode_mcp_entry()},
     }
+
+
+def test_merge_opencode_config_creates_the_file(tmp_path: Path) -> None:
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.CREATED
+    assert merge.mcp is agent_files.BlockOutcome.CREATED
+    assert merge.changed
+    data = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    assert data == {"$schema": OPENCODE_SCHEMA_URL, **_ortus_entries()}
+    assert list(data) == ["$schema", "provider", "mcp"]
 
 
 def test_merge_opencode_config_is_a_no_op_when_current(tmp_path: Path) -> None:
@@ -748,8 +759,10 @@ def test_merge_opencode_config_is_a_no_op_when_current(tmp_path: Path) -> None:
     path = tmp_path / "opencode.json"
     hand_formatted = path.read_text(encoding="utf-8").replace("  ", "\t")
     path.write_text(hand_formatted, encoding="utf-8")
-    outcome = merge_opencode_config(tmp_path, _served())
-    assert outcome is agent_files.BlockOutcome.UNCHANGED
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.UNCHANGED
+    assert merge.mcp is agent_files.BlockOutcome.UNCHANGED
+    assert not merge.changed
     # never re-indented for no change
     assert path.read_text(encoding="utf-8") == hand_formatted
 
@@ -773,8 +786,9 @@ def test_merge_opencode_config_preserves_host_keys_and_replaces_the_provider(
     }
     path = tmp_path / "opencode.json"
     path.write_text(json.dumps(host, indent=4) + "\n", encoding="utf-8")
-    outcome = merge_opencode_config(tmp_path, _served())
-    assert outcome is agent_files.BlockOutcome.UPDATED
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.UPDATED
+    assert merge.mcp is agent_files.BlockOutcome.UNCHANGED
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["theme"] == "dark"
     assert data["mcp"] == host["mcp"]
@@ -791,11 +805,12 @@ def test_merge_opencode_config_adds_the_provider_table_when_absent(
 ) -> None:
     path = tmp_path / "opencode.json"
     path.write_text('{"theme": "dark"}\n', encoding="utf-8")
-    outcome = merge_opencode_config(tmp_path, _served())
-    assert outcome is agent_files.BlockOutcome.UPDATED
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.UPDATED
+    assert merge.mcp is agent_files.BlockOutcome.UPDATED
     assert json.loads(path.read_text(encoding="utf-8")) == {
         "theme": "dark",
-        "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+        **_ortus_entries(),
     }
 
 
@@ -803,8 +818,8 @@ def test_merge_opencode_config_fills_an_empty_file(tmp_path: Path) -> None:
     path = tmp_path / "opencode.json"
     path.write_text("\n", encoding="utf-8")
     assert read_opencode_config(tmp_path) is None
-    outcome = merge_opencode_config(tmp_path, _served())
-    assert outcome is agent_files.BlockOutcome.CREATED
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.CREATED
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["$schema"] == OPENCODE_SCHEMA_URL
 
@@ -815,6 +830,7 @@ def test_merge_opencode_config_fills_an_empty_file(tmp_path: Path) -> None:
         ("{ not json", "not valid JSON"),
         ("[]", "not a JSON object"),
         ('{"provider": []}', '"provider" is not a JSON object'),
+        ('{"mcp": "codegraph"}', '"mcp" is not a JSON object'),
     ],
 )
 def test_merge_opencode_config_refuses_a_malformed_file(
@@ -827,3 +843,103 @@ def test_merge_opencode_config_refuses_a_malformed_file(
         merge_opencode_config(tmp_path, _served())
     assert "opencode.json" in str(excinfo.value)
     assert path.read_text(encoding="utf-8") == text
+
+
+# The `mcp.codegraph` key. opencode runs the server itself and presents its
+# tools to the model as flat functions, so this entry is the whole CodeGraph
+# registration for an opencode worker; check reads the same key.
+
+
+def test_opencode_mcp_merge_writes_the_verified_entry_beside_the_provider(
+    tmp_path: Path,
+) -> None:
+    """A fresh file carries the shape the spike proved opencode runs client-side."""
+    merge_opencode_config(tmp_path, _served())
+    data = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    assert data["mcp"] == {
+        "codegraph": {
+            "type": "local",
+            "command": ["codegraph", "serve", "--mcp"],
+            "enabled": True,
+        }
+    }
+    assert data["mcp"] == {OPENCODE_MCP_SERVER: opencode_mcp_entry()}
+    assert list(data) == ["$schema", "provider", "mcp"]
+
+
+def test_opencode_mcp_merge_keeps_foreign_servers_and_rewrites_a_drifted_entry(
+    tmp_path: Path,
+) -> None:
+    """Ortus owns `mcp.codegraph` only: other servers and their order survive."""
+    host = {
+        "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+        "mcp": {
+            "github": {"type": "remote", "url": "https://example.invalid/mcp"},
+            "codegraph": {
+                "type": "local",
+                "command": ["/usr/local/bin/codegraph", "serve", "--mcp"],
+                "enabled": False,
+            },
+            "zeta": {"type": "local", "command": ["zeta"], "enabled": True},
+        },
+    }
+    path = tmp_path / "opencode.json"
+    path.write_text(json.dumps(host, indent=4) + "\n", encoding="utf-8")
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.UNCHANGED
+    assert merge.mcp is agent_files.BlockOutcome.UPDATED
+    assert merge.changed
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mcp"]["github"] == host["mcp"]["github"]
+    assert data["mcp"]["zeta"] == host["mcp"]["zeta"]
+    assert data["mcp"]["codegraph"] == opencode_mcp_entry()
+    # The rewritten key keeps its slot among the operator's servers.
+    assert list(data["mcp"]) == ["github", "codegraph", "zeta"]
+    assert list(data) == ["provider", "mcp"]
+    assert "$schema" not in data
+
+
+def test_opencode_mcp_merge_adds_the_mcp_table_when_absent(tmp_path: Path) -> None:
+    """A file with the provider but no `mcp` table gains exactly the one entry."""
+    host = {
+        "theme": "dark",
+        "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+    }
+    path = tmp_path / "opencode.json"
+    path.write_text(json.dumps(host, indent=2) + "\n", encoding="utf-8")
+    merge = merge_opencode_config(tmp_path, _served())
+    assert merge.provider is agent_files.BlockOutcome.UNCHANGED
+    assert merge.mcp is agent_files.BlockOutcome.UPDATED
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        **host,
+        "mcp": {OPENCODE_MCP_SERVER: opencode_mcp_entry()},
+    }
+
+
+def test_opencode_mcp_merge_writes_nothing_under_codegraph_off(
+    tmp_path: Path,
+) -> None:
+    """Policy `off`: no entry on a fresh file, and an operator's own is left alone."""
+    merge = merge_opencode_config(tmp_path, _served(), register_codegraph=False)
+    assert merge.provider is agent_files.BlockOutcome.CREATED
+    assert merge.mcp is None
+    path = tmp_path / "opencode.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "mcp" not in data
+    assert data == {
+        "$schema": OPENCODE_SCHEMA_URL,
+        "provider": {OPENCODE_PROVIDER_ID: opencode_provider_block(_served())},
+    }
+
+    # A drifted entry the operator wrote is theirs under `off`: neither
+    # rewritten nor reported, and the file is not touched.
+    data["mcp"] = {
+        "codegraph": {"type": "local", "command": ["their-codegraph"], "enabled": True}
+    }
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    merge = merge_opencode_config(tmp_path, _served(), register_codegraph=False)
+    assert merge.provider is agent_files.BlockOutcome.UNCHANGED
+    assert merge.mcp is None
+    assert not merge.changed
+    assert path.read_text(encoding="utf-8") == before

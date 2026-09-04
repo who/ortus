@@ -906,6 +906,101 @@ def test_init_opencode_refuses_a_malformed_opencode_json(tmp_path: Path) -> None
     assert not (target / ".ortusrc").exists()
 
 
+def test_init_opencode_mcp_entry_is_written_beside_the_provider(
+    tmp_path: Path,
+) -> None:
+    """A fresh opencode repo registers CodeGraph the way opencode runs it: `mcp.codegraph`."""
+    target = tmp_path / "fresh"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "opencode", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    raw = (target / "opencode.json").read_text()
+    data = json.loads(raw)
+    assert list(data) == ["$schema", "provider", "mcp"]
+    assert list(data["provider"]) == ["ortuslocal"]
+    assert data["mcp"] == {
+        "codegraph": {
+            "type": "local",
+            "command": ["codegraph", "serve", "--mcp"],
+            "enabled": True,
+        }
+    }
+    # The bare executable, never the host's resolved path: the file travels.
+    assert "/usr/bin/codegraph" not in raw
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "created opencode.json provider ortuslocal" in combined
+    assert "created opencode.json mcp codegraph" in combined
+
+
+def test_init_opencode_mcp_entry_rewrites_drift_and_keeps_foreign_servers(
+    tmp_path: Path,
+) -> None:
+    """An operator's other servers survive; their `codegraph` is Ortus's key to fix."""
+    target = tmp_path / "drifted"
+    target.mkdir()
+    host = {
+        "provider": {"mine": {"npm": "@ai-sdk/anthropic", "models": {"x": {}}}},
+        "mcp": {
+            "github": {"type": "remote", "url": "https://example.invalid/mcp"},
+            "codegraph": {
+                "type": "local",
+                "command": ["/opt/codegraph", "serve", "--mcp"],
+                "enabled": False,
+            },
+        },
+    }
+    config = target / "opencode.json"
+    config.write_text(json.dumps(host, indent=2) + "\n")
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "opencode", "--local-model", "m1"]
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads(config.read_text())
+    assert data["mcp"]["github"] == host["mcp"]["github"]
+    assert data["mcp"]["codegraph"] == {
+        "type": "local",
+        "command": ["codegraph", "serve", "--mcp"],
+        "enabled": True,
+    }
+    assert list(data["mcp"]) == ["github", "codegraph"]
+    assert data["provider"]["mine"] == host["provider"]["mine"]
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "updated opencode.json provider ortuslocal" in combined
+    assert "updated opencode.json mcp codegraph" in combined
+
+    # `--force` re-init: the entry is current, so the bytes are left alone.
+    before = config.read_bytes()
+    result = runner.invoke(app, ["init", str(target), "--force"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert config.read_bytes() == before
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "opencode.json mcp codegraph already current" in combined
+
+
+def test_init_opencode_mcp_entry_is_skipped_under_codegraph_off(
+    tmp_path: Path,
+) -> None:
+    """`--codegraph off` registers the provider only; no server no worker will use."""
+    target = tmp_path / "off"
+    result = runner.invoke(
+        app,
+        [
+            "init", str(target),
+            "--backend", "opencode",
+            "--local-model", "m1",
+            "--codegraph", "off",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    data = json.loads((target / "opencode.json").read_text())
+    assert "mcp" not in data
+    assert list(data["provider"]) == ["ortuslocal"]
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "created opencode.json provider ortuslocal" in combined
+    assert "mcp codegraph" not in combined
+
+
 def test_init_all_leaves_opencode_json_to_a_pinned_init(tmp_path: Path) -> None:
     """`--backend all` has no model to register, so it says how to pin one."""
     target = tmp_path / "everything"
