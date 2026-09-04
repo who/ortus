@@ -802,6 +802,263 @@ def test_init_local_requires_local_model_reports_no_models_served(
     assert not target.exists()
 
 
+def test_init_interactive_gate_is_stdin_isatty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prompt gate is `sys.stdin.isatty()` and nothing else.
+
+    A terminal answers True; a pipe, a closed stream, and a missing stdin
+    answer False without a traceback, so the list-and-exit path is the one
+    every non-terminal caller keeps.
+    """
+    import io
+
+    import ortus.commands.init as init_mod
+
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", Terminal())
+    assert init_mod._stdin_is_interactive() is True
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    assert init_mod._stdin_is_interactive() is False
+    closed = io.StringIO()
+    closed.close()
+    monkeypatch.setattr(sys, "stdin", closed)
+    assert init_mod._stdin_is_interactive() is False
+    monkeypatch.setattr(sys, "stdin", None)
+    assert init_mod._stdin_is_interactive() is False
+
+
+@pytest.mark.parametrize("backend", ["local", "opencode"])
+def test_init_local_interactive_selects_served_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """At a terminal the served ids are a menu, and the pick is the pinned model.
+
+    The listing is asked for once. The chosen id lands in the slot
+    `--local-model` fills, so the `.ortusrc` table, the `opencode.json`
+    provider, and the probe run exactly as a pinned init would, with no
+    re-run and no exit 1. The menu and the prompt stay on stderr.
+    """
+    import ortus.commands.init as init_mod
+
+    asked: list[str] = []
+
+    def served(base_url: str, **kwargs: object) -> tuple[str, ...]:
+        asked.append(base_url)
+        return ("qwen3:4b", "gemma4:26b")
+
+    monkeypatch.setattr(init_mod, "list_served_models", served)
+    monkeypatch.setattr(
+        init_mod, "probe_models", lambda config, **kwargs: ("qwen3:4b", "gemma4:26b")
+    )
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    target = tmp_path / "picked"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", backend], input="2\n"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert asked == [DEFAULT_LOCAL_BASE_URL]
+    err = " ".join(result.stderr.split())
+    assert (
+        f"served models at {DEFAULT_LOCAL_BASE_URL}: 1) qwen3:4b 2) gemma4:26b"
+        in err
+    )
+    assert "pick a model to pin by number:" in err
+    assert "qwen3:4b" not in result.stdout
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "needs --local-model" not in combined
+    assert "local server reachable" in combined
+    ortusrc = tomllib.loads((target / ".ortusrc").read_text())
+    assert ortusrc["backend"] == backend
+    assert ortusrc["local"] == {
+        "model": "gemma4:26b",
+        "base_url": DEFAULT_LOCAL_BASE_URL,
+    }
+    data = json.loads((target / "opencode.json").read_text())
+    assert data["provider"]["ortuslocal"]["models"] == {"gemma4:26b": {}}
+
+
+@pytest.mark.parametrize("backend", ["local", "opencode"])
+def test_init_local_non_tty_lists_and_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """Off a terminal, a served list is still the listing error, never a menu.
+
+    The runner's stdin is a pipe, so the gate is the real one, unpatched. An
+    answer is waiting on that stdin and would satisfy the menu; it is never
+    read. A script or a CI job keeps the copyable list and exit 1.
+    """
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod,
+        "list_served_models",
+        lambda base_url, **kwargs: ("qwen3:4b", "gemma4:26b"),
+    )
+    target = tmp_path / "nomodel"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", backend], input="2\n"
+    )
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert f"--backend {backend} needs --local-model" in combined
+    assert (
+        f"served models at {DEFAULT_LOCAL_BASE_URL}: - qwen3:4b - gemma4:26b"
+        in combined
+    )
+    assert "pick a model" not in combined
+    assert "1)" not in combined
+    assert not target.exists()
+
+
+def test_init_local_interactive_single_model_is_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One served id is offered with itself as the default: Enter confirms it."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(init_mod, "list_served_models", lambda base_url, **kwargs: ("m1",))
+    monkeypatch.setattr(init_mod, "probe_models", lambda config, **kwargs: ("m1",))
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    target = tmp_path / "single"
+    result = runner.invoke(app, ["init", str(target), "--backend", "local"], input="\n")
+    assert result.exit_code == 0, result.stdout + result.stderr
+    err = " ".join(result.stderr.split())
+    assert f"served models at {DEFAULT_LOCAL_BASE_URL}: 1) m1" in err
+    assert "pick a model to pin by number [1]:" in err
+    assert tomllib.loads((target / ".ortusrc").read_text())["local"]["model"] == "m1"
+
+
+def test_init_local_interactive_reprompts_a_bad_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A word, a zero, and an out-of-range number each get another prompt.
+
+    Three wrong answers spend the whole retry budget; the fourth read is
+    still offered and pins the model.
+    """
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod, "list_served_models", lambda base_url, **kwargs: ("qwen3:4b", "gemma4:26b")
+    )
+    monkeypatch.setattr(init_mod, "probe_models", lambda config, **kwargs: ("qwen3:4b",))
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    assert init_mod.LOCAL_MODEL_PROMPT_RETRIES == 3
+    target = tmp_path / "retried"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local"], input="x\n0\n3\n1\n"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    err = " ".join(result.stderr.split())
+    for wrong in ("'x'", "'0'", "'3'"):
+        assert f"{wrong} is not a number from 1 to 2" in err
+    assert err.count("pick a model to pin by number:") == 4
+    assert tomllib.loads((target / ".ortusrc").read_text())["local"]["model"] == "qwen3:4b"
+
+
+def test_init_local_interactive_gives_up_after_the_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wrong answers past the budget end as the non-terminal path does: list, exit 1."""
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod, "list_served_models", lambda base_url, **kwargs: ("qwen3:4b", "gemma4:26b")
+    )
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    target = tmp_path / "exhausted"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local"], input="x\nx\nx\nx\n2\n"
+    )
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert combined.count("pick a model to pin by number:") == 4
+    assert "--backend local needs --local-model" in combined
+    assert (
+        f"served models at {DEFAULT_LOCAL_BASE_URL}: - qwen3:4b - gemma4:26b"
+        in combined
+    )
+    assert "Traceback" not in combined
+    assert not target.exists()
+
+
+def test_init_local_interactive_end_of_input_exits_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-D (or Ctrl-C, the same abort) at the prompt is exit 1 with the list.
+
+    Not a traceback, not typer's bare "Aborted.", and nothing written.
+    """
+    import ortus.commands.init as init_mod
+
+    monkeypatch.setattr(
+        init_mod, "list_served_models", lambda base_url, **kwargs: ("qwen3:4b", "gemma4:26b")
+    )
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    target = tmp_path / "aborted"
+    result = runner.invoke(app, ["init", str(target), "--backend", "local"], input="")
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "pick a model to pin by number:" in combined
+    assert "--backend local needs --local-model" in combined
+    assert (
+        f"served models at {DEFAULT_LOCAL_BASE_URL}: - qwen3:4b - gemma4:26b"
+        in combined
+    )
+    assert "Aborted" not in combined
+    assert "Traceback" not in combined
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("answer", ["unreachable", "auth-demanded", "empty"])
+def test_init_local_interactive_without_a_listing_keeps_the_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    """A terminal with nothing to list gets no menu: the curl line, exit 1."""
+    import ortus.commands.init as init_mod
+
+    def listing(base_url: str, **kwargs: object) -> tuple[str, ...]:
+        if answer == "empty":
+            return ()
+        raise LocalServerError(answer, "no listing", "fix the server")
+
+    monkeypatch.setattr(init_mod, "list_served_models", listing)
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    target = tmp_path / "nolisting"
+    result = runner.invoke(app, ["init", str(target), "--backend", "local"], input="1\n")
+    assert result.exit_code == 1
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "--backend local needs --local-model" in combined
+    assert "list the served ids with: curl http://127.0.0.1:8080/v1/models" in combined
+    assert "pick a model" not in combined
+    assert "Traceback" not in combined
+    assert not target.exists()
+
+
+def test_init_local_interactive_pinned_model_never_prompts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--local-model` at a terminal bypasses the listing and the menu entirely."""
+    import ortus.commands.init as init_mod
+
+    def never(base_url: str, **kwargs: object) -> tuple[str, ...]:
+        raise AssertionError("a pinned init must not list the served models")
+
+    monkeypatch.setattr(init_mod, "list_served_models", never)
+    monkeypatch.setattr(init_mod, "probe_models", lambda config, **kwargs: ("m1",))
+    monkeypatch.setattr(init_mod, "_stdin_is_interactive", lambda: True)
+    target = tmp_path / "pinned"
+    result = runner.invoke(
+        app, ["init", str(target), "--backend", "local", "--local-model", "m1"], input="2\n"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    combined = " ".join((result.stdout + result.stderr).split())
+    assert "pick a model" not in combined
+    assert tomllib.loads((target / ".ortusrc").read_text())["local"]["model"] == "m1"
+
+
 def test_init_all_renders_commented_local_block(tmp_path: Path) -> None:
     """`--backend all` keeps claude pinned and leaves [local] as a reference."""
     target = tmp_path / "everything"

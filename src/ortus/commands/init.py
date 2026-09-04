@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -231,6 +232,11 @@ LOCAL_PROBE_TIMEOUT = 3.0
 LOCAL_MODEL_REQUIRED_MESSAGE = (
     "--backend %s needs --local-model <id as GET {base_url}/models reports it>"
 )
+#: Re-prompts an answer that is not a listed number gets at the served-model
+#: menu before init gives up, lists the ids, and exits 1 as it would off a
+#: terminal. Bounded so a pseudo-terminal fed by automation cannot hold init
+#: open on a menu nobody is reading.
+LOCAL_MODEL_PROMPT_RETRIES = 3
 
 
 def _backend_cli(name: str) -> str | None:
@@ -417,8 +423,9 @@ def _resolve_local_table(
 
     Precedence per key: explicit flag, then the recorded table, then (for
     `base_url` only) the default. Under `--backend local` or `--backend
-    opencode` a missing model fails here, before anything is written, and a
-    table that breaks the config rules
+    opencode` a missing model is picked from the served list when an operator
+    is at the terminal, and otherwise fails here, before anything is written;
+    a table that breaks the config rules
     fails with the config's own message rather than being re-rendered from
     defaults. Under any other backend the flags are noted and ignored, but a
     recorded table is still validated: a re-init must never carry a broken
@@ -455,14 +462,20 @@ def _resolve_local_table(
                 raise typer.Exit(code=1)
         return table, None
     if "model" not in table:
-        output.error(
-            LOCAL_MODEL_REQUIRED_MESSAGE % run_backend,
-            hint=_served_models_hint(
-                table.get("base_url", DEFAULT_LOCAL_BASE_URL),
-                table.get("api_key_env"),
-            ),
+        base_url = table.get("base_url", DEFAULT_LOCAL_BASE_URL)
+        served = _served_models(base_url, table.get("api_key_env"))
+        chosen = (
+            _select_served_model(base_url, served)
+            if _stdin_is_interactive() and served
+            else None
         )
-        raise typer.Exit(code=1)
+        if chosen is None:
+            output.error(
+                LOCAL_MODEL_REQUIRED_MESSAGE % run_backend,
+                hint=_served_models_hint(base_url, served),
+            )
+            raise typer.Exit(code=1)
+        table["model"] = chosen
     table.setdefault("base_url", DEFAULT_LOCAL_BASE_URL)
     try:
         local = parse_local_table(table)
@@ -479,33 +492,95 @@ def _resolve_local_table(
     return rendered, local
 
 
-def _served_models_hint(base_url: Any, api_key_env: Any) -> str:
-    """The ids to pin, listed from the server, else the curl line that lists them.
+def _stdin_is_interactive() -> bool:
+    """Whether an operator is at the terminal: the gate on prompting, and a seam.
 
-    The listing is informational and runs on every unpinned init, so it is
-    best-effort on the short probe timeout: a server that is down or wants a
-    key, or a `base_url` that is not a URL, degrades to the curl line the
-    operator can run by hand, never to a traceback. The table has not been
-    validated yet (the model is checked first), so a value that is not a
-    string is left for the curl line as well. The exit code is the caller's
-    and stays 1: a model is still required, this only shows which.
+    `sys.stdin.isatty()` and nothing else, the way a shell tool decides to
+    ask. A script, a CI job, a piped or closed stdin, and every test through
+    the runner answer False and keep the list-and-exit path; a detached or
+    missing stdin is not a terminal either.
     """
-    curl_hint = f"list the served ids with: curl {base_url}/models"
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _served_models(base_url: Any, api_key_env: Any) -> tuple[str, ...] | None:
+    """The ids the server lists for an unpinned init, or None when it cannot say.
+
+    Informational and on every unpinned init, so best-effort on the short
+    probe timeout: a server that is down or wants a key, or a `base_url` that
+    is not a URL, answers None rather than a traceback. The table has not
+    been validated yet (the model is checked first), so a value that is not
+    a string answers None as well. An empty tuple is the server's own answer:
+    reachable, nothing loaded.
+    """
     if not isinstance(base_url, str) or not (
         api_key_env is None or isinstance(api_key_env, str)
     ):
-        return curl_hint
+        return None
     try:
-        served = list_served_models(
+        return list_served_models(
             base_url, api_key_env=api_key_env, timeout=LOCAL_PROBE_TIMEOUT
         )
     except LocalServerError:
+        return None
+
+
+def _served_models_hint(base_url: Any, served: tuple[str, ...] | None) -> str:
+    """The ids to pin, one per line, else the curl line that lists them.
+
+    None is a listing that could not be had, and leaves the curl line the
+    operator can run by hand. The exit code is the caller's and stays 1: a
+    model is still required, this only shows which.
+    """
+    curl_hint = f"list the served ids with: curl {base_url}/models"
+    if served is None:
         return curl_hint
     if not served:
         return f"no models served at {base_url}; {curl_hint}"
     return f"served models at {base_url}:\n" + "\n".join(
         f"- {model}" for model in served
     )
+
+
+def _select_served_model(base_url: str, served: tuple[str, ...]) -> str | None:
+    """Ask the operator at the terminal which listed id to pin; None when none is.
+
+    Reached only with stdin a terminal and at least one id served. The menu
+    and the prompt go to stderr, like the error they stand in for, so a
+    caller capturing stdout still gets nothing but the result there. A single
+    id is offered rather than pinned: Enter takes it, so the operator confirms
+    what gets written. An answer that is not a listed number is asked again
+    within `LOCAL_MODEL_PROMPT_RETRIES`; running out, end of input, and
+    Ctrl-C all answer None, and the caller's missing-model error and exit 1
+    follow, never a traceback and never a hang.
+    """
+    count = len(served)
+    output.note(f"served models at {base_url}:")
+    for index, model in enumerate(served, start=1):
+        output.note(f"  {index}) {model}")
+    default = "1" if count == 1 else ""
+    for _ in range(1 + LOCAL_MODEL_PROMPT_RETRIES):
+        try:
+            answer = typer.prompt(
+                "pick a model to pin by number",
+                default=default,
+                show_default=bool(default),
+                type=str,
+                err=True,
+            )
+        except typer.Abort:
+            # An interrupt or end of input leaves the cursor on the prompt
+            # line; the error that follows deserves a line of its own.
+            output.note("")
+            return None
+        choice = str(answer).strip()
+        if choice.isdecimal() and 1 <= int(choice) <= count:
+            return served[int(choice) - 1]
+        output.note(f"{choice!r} is not a number from 1 to {count}")
+    return None
 
 
 def _probe_local_server(local: LocalConfig) -> None:

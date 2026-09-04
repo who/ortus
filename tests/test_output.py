@@ -54,6 +54,14 @@ def test_success_prints_bracketed_text(consoles: Buffers) -> None:
     assert out.getvalue() == "✓ [profiles.codex.plan] written\n"
 
 
+def test_note_prints_bracketed_text_plainly_on_stderr(consoles: Buffers) -> None:
+    """A menu row naming a bracketed id reaches stderr whole, with no prefix."""
+    out, err = consoles
+    output.note("  1) qwen3[q4]")
+    assert err.getvalue() == "  1) qwen3[q4]\n"
+    assert out.getvalue() == ""
+
+
 def test_table_cell_keeps_bracketed_text(consoles: Buffers) -> None:
     """AC-3: a `[local]` row name and a detail naming the table both render."""
     out, _ = consoles

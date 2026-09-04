@@ -41,6 +41,15 @@ def error(message: str, *, hint: str | None = None) -> None:
         _err.print(f"       {_escape_markup(hint)}")
 
 
+def note(message: str) -> None:
+    """A plain stderr line: a menu row, a prompt's lead-in, a nudge to retry.
+
+    No prefix, because the line is not a verdict; stderr, because a caller
+    capturing stdout must find the result there and nothing else.
+    """
+    _err.print(_escape_markup(message), highlight=False)
+
+
 def progress(verb: str, phase: str) -> None:
     """Emit a per-phase progress line to stderr in the canonical CLI format.
 
