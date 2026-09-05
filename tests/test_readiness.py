@@ -12,6 +12,7 @@ from ortus.core.readiness import (
     extract_check_command,
     failed_reports,
     looks_like_command,
+    readiness_memory_text,
     spec_markdown,
     validate_issue,
     validate_issues,
@@ -395,3 +396,15 @@ def test_contradiction_guidance_must_be_actionable() -> None:
     )
     report = validate_issue(issue)
     assert "plan_gap_guidance" in {failure.code for failure in report.failures}
+
+
+def test_memory_text_names_validate_after_authoring() -> None:
+    """The seeded pointer names both verbs: `spec` to author, `validate` to check."""
+    text = readiness_memory_text()
+    spec_at = text.index("`ortus spec`")
+    validate_at = text.index("`ortus validate <repo> <id>`")
+    assert spec_at < validate_at
+    assert "grind-eligible" in text
+    # `ortus check` reads the stored memory back and accepts it only while it
+    # still names `ortus spec`; the validate step must not displace that.
+    assert text.count("`ortus spec`") == 1

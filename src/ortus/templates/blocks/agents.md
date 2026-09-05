@@ -39,6 +39,13 @@ Run `ortus spec` for the authoritative heading list and shape rules. It prints
 the contract generated from the installed Ortus, so it cannot drift from what
 grind enforces; this block only points at it.
 
+After authoring or repairing a non-epic issue, run `ortus validate <repo> <id>`
+to confirm it is grind-eligible. The verdict is READY or the exact sections
+grind would reject, so a hand-authored bead is caught at authoring time
+instead of at claim. `ortus plan` already validates every issue it writes;
+this step covers the manual-authoring path and is guidance, not a gate: grind
+still enforces readiness at claim.
+
 ### Orchestrator (ortus grind)
 
 Drive the queue to zero via Ortus's subprocess-per-task loop. Each iteration

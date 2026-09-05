@@ -1036,14 +1036,19 @@ def readiness_memory_text() -> str:
     the verb that prints the sections instead of restating them. The wording
     is an always-use instruction because harnesses without a prime hook
     (Codex, Grok) meet this text only via `bd prime`, and a session that has
-    seen an older schema would otherwise author headings from memory.
+    seen an older schema would otherwise author headings from memory. It
+    also names the verb that checks the finished issue, so a hand-authored
+    bead is validated at authoring time rather than rejected at claim.
     """
     return (
         f"Ortus readiness schema {READINESS_SCHEMA_VERSION}: whenever you "
         "author or repair a non-epic bd issue, always run `ortus spec` first "
         "and follow its output exactly. Never invent headings or copy them "
         "from memory of an earlier schema — `ortus grind` skips any issue "
-        "that does not satisfy the installed contract as unready."
+        "that does not satisfy the installed contract as unready. After "
+        "authoring or repairing it, run `ortus validate <repo> <id>` to "
+        "confirm it is grind-eligible; the verdict names the exact sections "
+        "grind would reject."
     )
 
 

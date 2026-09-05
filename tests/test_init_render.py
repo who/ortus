@@ -392,6 +392,28 @@ def test_agents_block_authoring_contract_sits_with_the_bd_guidance() -> None:
     )
 
 
+def test_agents_block_names_validate_after_authoring() -> None:
+    """A hand-authored bead is checked when written, not rejected at claim.
+
+    `ortus plan` validates every issue it writes and grind enforces at claim;
+    the manual-authoring path had no self-check until the block named the
+    verb that reports READY or the sections grind would reject.
+    """
+    text = render_block("agents")
+    section = text[
+        text.index(AUTHORING_CONTRACT_HEADING) : text.index(
+            "### Orchestrator (ortus grind)"
+        )
+    ]
+    validate_step = "`ortus validate <repo> <id>`"
+    assert section.count(validate_step) == 1
+    # The spec pointer explains the headings; the validate step checks the
+    # result, so it follows the pointer it depends on.
+    assert section.index("`ortus spec`") < section.index(validate_step)
+    # Advisory guidance, not a new gate: grind's claim-time enforcement stays.
+    assert "not a gate" in section
+
+
 def test_agents_block_names_every_plain_prompt_backend() -> None:
     """A project provisioned for any backend reads its own worker shape here.
 
@@ -463,7 +485,7 @@ def test_bd_claim_command_matches_the_bundled_goal_prompt(tmp_path: Path) -> Non
 # so editing what a block teaches without bumping its schema fails here. Bump
 # BLOCK_SCHEMAS[<block>] and re-pin the digest in the same commit.
 PINNED_BLOCK_TEMPLATES: dict[str, tuple[int, str]] = {
-    "agents": (3, "b0344c8191431c037964bfb39d0d1afa0429b1a5cef30c14fa54655b21231eda"),
+    "agents": (4, "b58c54fdcff19224e46aeb8ef63e8b101260fb57427c4599f83d1c678bd1f07c"),
     "pointer": (1, "e20aa4135de14e37eb79a5c589277750c37cfafbd16c8a4d7378a99ac606601a"),
 }
 
