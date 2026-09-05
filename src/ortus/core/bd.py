@@ -206,7 +206,15 @@ class BdClient:
         return data or []
 
     def list_open(self) -> list[dict[str, Any]]:
-        _, data = self._run("list", "--status", "open", "--json", parse_json=True)
+        """`bd list --status open --limit 0 --json` → every open issue.
+
+        ``--limit 0`` lifts bd's default cap of 50 for the same reason as
+        :meth:`open_ids`: a sweep over the open queue that silently stops at
+        the fiftieth row is an undercount, not a listing.
+        """
+        _, data = self._run(
+            "list", "--status", "open", "--limit", "0", "--json", parse_json=True
+        )
         return data or []
 
     def list_all(self) -> list[dict[str, Any]]:

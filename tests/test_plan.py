@@ -250,6 +250,11 @@ def test_plan_unready_leaf_fails_immediately(
     combined = result.stdout + result.stderr
     assert "readiness:" in combined
     assert "plan left executable issues incomplete" in combined
+    # The pointer names the exact preview command, so the repair can be
+    # checked without another plan or a grind claim. Squashed, because Rich
+    # wraps a long path across lines on a narrow console.
+    squashed = re.sub(r"\s+", "", _plain(combined))
+    assert re.sub(r"\s+", "", f"ortus validate {bd_workspace}") in squashed
     assert "single repair pass" not in combined
     assert "repairing incomplete" not in combined
 

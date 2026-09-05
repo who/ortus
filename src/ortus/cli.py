@@ -15,6 +15,7 @@ from ortus.commands.prompt import prompt_app
 from ortus.commands.spec import spec
 from ortus.commands.tail import tail
 from ortus.commands.unlock import unlock
+from ortus.commands.validate import validate
 
 app = typer.Typer(
     name="ortus",
@@ -69,6 +70,10 @@ app.command(
     name="spec",
     help="Print the readiness schema issue-authoring contract.",
 )(spec)
+app.command(
+    name="validate",
+    help="Report whether bd issues satisfy readiness schema v1 before grinding.",
+)(validate)
 app.command(
     name="dashboard",
     help="Watch one grind run in a read-only live view.",

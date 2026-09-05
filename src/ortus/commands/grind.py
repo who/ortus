@@ -1839,6 +1839,16 @@ def grind(
                                 )
                             )
                             output.error(follow_up)
+                        if unready:
+                            # One pointer for the whole listing: the verdict
+                            # above is what `ortus validate` prints without
+                            # a run, so a repair can be checked before the
+                            # next grind instead of at its claim.
+                            output.error(
+                                "readiness: re-check after repair, without a "
+                                f"run: ortus validate {target} "
+                                + " ".join(report.issue_id for report in unready)
+                            )
                         break
                     issue_id = target_issue["id"]
                     # f2he.2: grind does not claim a fresh ready issue. The

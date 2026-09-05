@@ -718,6 +718,9 @@ def test_grind_queue_blocked_exit_uses_summary(
     )
     assert re.sub(r"\s+", "", f"follow-up: bd update {issue_id}") in squashed
     assert re.sub(r"\s+", "", f"bd label remove {issue_id} human") in squashed
+    # One pointer to the preview verb, so the repair is checked before the
+    # next run rather than at its claim.
+    assert re.sub(r"\s+", "", f"ortus validate {repo} {issue_id}") in squashed
     # The enumeration's clauses stay off the console but in the log.
     assert re.sub(r"\s+", "", "description/behavioral context:") not in squashed
     assert "description/behavioral context: missing" in _grind_log(repo)

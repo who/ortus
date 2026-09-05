@@ -294,6 +294,10 @@ def plan(
         output.error(
             "plan left executable issues incomplete; no work was claimed"
         )
+        output.error(
+            "readiness: re-check after repair, without a run: ortus validate "
+            f"{target} {' '.join(report.issue_id for report in defects)}"
+        )
         raise typer.Exit(code=1)
 
     # Plan metadata travels with every implementation work spec. This remains

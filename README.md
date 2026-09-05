@@ -86,6 +86,7 @@ ortus grind . --prototype
 | `ortus human <repo>` | Render `HUMAN-TODO.md` from bd issues flagged for a human decision |
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
 | `ortus spec` | Print the readiness schema issue-authoring contract |
+| `ortus validate <repo> [<id>...]` | Report whether bd issues satisfy readiness schema v1 before grinding; no id sweeps every open issue; exit 1 when any is unready |
 | `ortus prompt` | `list`, `show`, or `eject` the bundled runtime prompts (see Runtime prompts) |
 | `ortus unlock <repo>` | Clear a stuck grind flock; optionally revert in-progress claims |
 
