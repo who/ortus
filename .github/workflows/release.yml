@@ -91,11 +91,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          notes_arg=()
+          # The release page carries only this version's CHANGELOG section:
+          # the block under `## [<version>]` up to the next `## [` heading or
+          # the link-reference footer. A tag with no section falls back to
+          # GitHub's generated notes rather than the whole file.
+          version="${tag#v}"
+          notes_file="${RUNNER_TEMP:-/tmp}/release-notes.md"
+          notes_arg=(--generate-notes)
           if [ -f CHANGELOG.md ]; then
-            notes_arg=(--notes-file CHANGELOG.md)
-          else
-            notes_arg=(--generate-notes)
+            awk -v version="$version" '
+              index($0, "## [" version "]") == 1 { capture = 1; next }
+              capture && (/^## \[/ || /^\[[^]]+\]:/) { exit }
+              capture {
+                if ($0 ~ /^[[:space:]]*$/) { pending++; next }
+                if (printed) for (; pending > 0; pending--) print ""
+                pending = 0
+                print
+                printed = 1
+              }
+            ' CHANGELOG.md > "$notes_file"
+            if [ -s "$notes_file" ]; then
+              notes_arg=(--notes-file "$notes_file")
+            fi
           fi
           # install.sh ships under install/ in 0zpx.1; tolerate either location.
           installer=""
