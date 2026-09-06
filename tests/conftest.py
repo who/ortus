@@ -474,6 +474,15 @@ def _build_bare(path: Path) -> tuple[str, ...]:
     # (ortus-6fu6) pins to the `main` integration branch. Normalized here rather
     # than at the copy so every copy inherits an already-correct branch.
     normalize_git_branch(path)
+    # The template is a read-only master, so nothing may write into it after it
+    # is built — including git itself. Background gc and the `maintenance.auto`
+    # hook fire off ordinary commands and drop `.git/objects/maintenance.lock`
+    # into the tree, which the pristine guard then reports as a modified
+    # template and fails every test that copied it (ortus-we44). Scoped to this
+    # repo's own config; the runner's global git config is left alone.
+    _git(path, "config", "gc.auto", "0")
+    _git(path, "config", "gc.autoDetach", "false")
+    _git(path, "config", "maintenance.auto", "false")
     # Ortus finalizes a verified candidate with a real `git commit`, which
     # aborts without an author identity — and `neutralized_git_identity` hides
     # the operator's global one from every test, exactly as a runner would.
@@ -630,12 +639,26 @@ def _template_path_references(template: Path, dest: Path) -> list[str]:
     ]
 
 
+def _is_transient_git_lock(relative: Path) -> bool:
+    """True for a git lock file — `.git/objects/maintenance.lock` and kin.
+
+    Git writes these to serialize its own housekeeping and removes them again,
+    so their presence says nothing about the template's content and reading one
+    can lose a race with the process deleting it.
+    """
+    return relative.suffix == ".lock" and ".git" in relative.parts
+
+
 def _digests(path: Path) -> dict[str, str]:
-    return {
-        str(child.relative_to(path)): hashlib.sha256(child.read_bytes()).hexdigest()
-        for child in sorted(path.rglob("*"))
-        if child.is_file() and not child.is_symlink()
-    }
+    digests: dict[str, str] = {}
+    for child in sorted(path.rglob("*")):
+        if not child.is_file() or child.is_symlink():
+            continue
+        relative = child.relative_to(path)
+        if _is_transient_git_lock(relative):
+            continue
+        digests[str(relative)] = hashlib.sha256(child.read_bytes()).hexdigest()
+    return digests
 
 
 def _assert_template_pristine(kind: str) -> None:
@@ -644,6 +667,8 @@ def _assert_template_pristine(kind: str) -> None:
     Content digests rather than size and mtime, so an in-place edit that
     preserves both is still caught. The copy direction has to be enforced:
     a mutated template silently changes every later test's starting state.
+    A stray git lock file is not such an edit, so `_digests` leaves those out
+    on both sides and only a real content change can fail this.
     """
     current = _digests(_TEMPLATES[kind].path)
     expected = _TEMPLATE_DIGESTS[kind]
