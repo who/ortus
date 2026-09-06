@@ -8,6 +8,7 @@ from ortus.commands.check import check
 from ortus.commands.dashboard import dashboard
 from ortus.commands.grind import grind
 from ortus.commands.human import human
+from ortus.commands.ingest import ingest
 from ortus.commands.init import init
 from ortus.commands.interview import interview
 from ortus.commands.plan import plan
@@ -78,4 +79,8 @@ app.command(
     name="dashboard",
     help="Watch one grind run in a read-only live view.",
 )(dashboard)
+app.command(
+    name="ingest",
+    help="File one readiness schema v1 bd issue from a packet directory or stdin JSON.",
+)(ingest)
 app.add_typer(prompt_app, name="prompt")

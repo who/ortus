@@ -26,6 +26,7 @@ VERBS = [
     "check",
     "spec",
     "dashboard",
+    "ingest",
     "prompt",
 ]
 
@@ -75,6 +76,7 @@ def test_help_keeps_existing_verb_order_with_new_verbs_appended() -> None:
         "unlock",
         "spec",
         "dashboard",
+        "ingest",
         "prompt",
     ]
 

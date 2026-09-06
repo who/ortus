@@ -87,6 +87,7 @@ ortus grind . --prototype
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
 | `ortus spec` | Print the readiness schema issue-authoring contract |
 | `ortus validate <repo> [<id>...]` | Report whether bd issues satisfy readiness schema v1 before grinding; no id sweeps every open issue; exit 1 when any is unready |
+| `ortus ingest <repo> --packet <dir>` | File one readiness schema v1 issue from a packet directory (or `--stdin` JSON); validates before it writes, so an unready packet creates nothing |
 | `ortus prompt` | `list`, `show`, or `eject` the bundled runtime prompts (see Runtime prompts) |
 | `ortus unlock <repo>` | Clear a stuck grind flock; optionally revert in-progress claims |
 
