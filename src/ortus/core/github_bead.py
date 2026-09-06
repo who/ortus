@@ -259,10 +259,18 @@ def assemble_issue(
                 ("Targeted tests", draft.get("targeted_tests")),
             ]
         )
-    try:
-        priority = int(draft.get("priority") or 2)
-    except (TypeError, ValueError):
+    # `0` is P0, the most urgent bead there is, so emptiness is tested rather
+    # than truthiness: a falsy-or-default reading here would file the drafted
+    # P0 at P2. Only an absent or unparseable priority falls back to the 2
+    # `BdClient.create` would have applied on its own.
+    raw_priority = draft.get("priority")
+    if raw_priority is None or raw_priority == "":
         priority = 2
+    else:
+        try:
+            priority = int(raw_priority)
+        except (TypeError, ValueError):
+            priority = 2
     return {
         "id": draft_id,
         "title": str(draft.get("title") or title_fallback).strip() or title_fallback,

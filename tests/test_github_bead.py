@@ -254,3 +254,23 @@ def test_workflow_enforces_who_allowlist_and_secret() -> None:
     # fresh-clone path (prefix ortus stays in .beads/config.yaml).
     assert "bd bootstrap --yes" in text
     assert "run: bd import .beads/issues.jsonl" not in text
+
+
+def test_assemble_issue_keeps_explicit_priority_zero() -> None:
+    for raw in (0, "0"):
+        packet = assemble_issue(
+            {"title": "Urgent", "priority": raw},
+            title_fallback="fallback",
+            draft_id="gh-2-draft",
+        )
+        assert packet["priority"] == 0
+
+
+def test_assemble_issue_defaults_absent_or_unparseable_priority() -> None:
+    for draft in ({}, {"priority": None}, {"priority": ""}, {"priority": "urgent"}):
+        packet = assemble_issue(
+            {"title": "Ordinary", **draft},
+            title_fallback="fallback",
+            draft_id="gh-3-draft",
+        )
+        assert packet["priority"] == 2
