@@ -3,12 +3,10 @@ name: release
 on:
   push:
     tags: ['v*']
+  # A manual run builds the wheel and sdist and stops there: the publish and
+  # release jobs are both gated on a v* tag. Use it to check that the package
+  # still builds, not to ship anything.
   workflow_dispatch:
-    inputs:
-      test_pypi:
-        description: 'Publish to TestPyPI instead of PyPI'
-        required: false
-        default: 'true'
 
 permissions:
   contents: write  # needed to upload release assets
@@ -53,24 +51,6 @@ jobs:
 
       - name: Publish via trusted publishing (no token needed)
         uses: pypa/gh-action-pypi-publish@release/v1
-
-  publish-test-pypi:
-    name: Publish to TestPyPI
-    needs: build
-    runs-on: ubuntu-latest
-    if: contains(github.ref, '-test') || github.event_name == 'workflow_dispatch'
-    environment: test-pypi
-    steps:
-      - name: Download dist
-        uses: actions/download-artifact@v8
-        with:
-          name: dist
-          path: dist
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
 
   github-release:
     name: GitHub release + install.sh asset
