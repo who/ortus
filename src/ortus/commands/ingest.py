@@ -176,7 +176,21 @@ def ingest(
         None, "--priority", help="bd priority 0-4. Default: 2."
     ),
 ) -> None:
-    """File one readiness schema v1 bead from a packet; unready creates nothing."""
+    """File one readiness schema v1 bead from a packet; unready creates nothing.
+
+    A packet is either a directory holding description.md, design.md, and
+    acceptance.md (acceptance_criteria.md is read as the same section), or one
+    JSON object on stdin carrying those fields. Run `ortus spec` for the
+    readiness schema contract each section must satisfy; this help names the
+    transport, not the schema.
+
+    The packet is validated before anything is written. Exit 0 means the bead
+    exists and its id is the only thing on stdout, so a caller can capture it
+    with `id=$(ortus ingest --packet ...)`. A nonzero exit means the readiness
+    gaps are named on stdout and no bead was written; repair the packet and run
+    the verb again. Agents filing work should reach here rather than for a
+    multiline bd create.
+    """
     target = resolve_repo(repo)
     if packet is None and not use_stdin:
         output.error(

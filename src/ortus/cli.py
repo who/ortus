@@ -81,6 +81,12 @@ app.command(
 )(dashboard)
 app.command(
     name="ingest",
-    help="File one readiness schema v1 bd issue from a packet directory or stdin JSON.",
+    # `short_help` rather than `help`: the commands table needs one line, while
+    # `ortus ingest --help` is the discovery surface for a sidecar agent and
+    # carries the whole packet-and-exit-code contract from the docstring.
+    short_help=(
+        "File a readiness schema v1 bead from a packet or stdin JSON — the "
+        "filing path for agents, in place of a multiline bd create."
+    ),
 )(ingest)
 app.add_typer(prompt_app, name="prompt")

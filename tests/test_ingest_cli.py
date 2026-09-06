@@ -60,6 +60,16 @@ def _open_ids(repo: Path) -> list[str]:
     return [str(item["id"]) for item in json.loads(listing or "[]")]
 
 
+def _flat(text: str) -> str:
+    """Help output with rich's line wrapping folded away.
+
+    Both panels wrap to whatever width the runner picked, so a phrase the help
+    must carry can land across two lines. Flattening asserts the wording rather
+    than the terminal width of the machine running the suite.
+    """
+    return " ".join(text.split())
+
+
 def test_ingest_help_describes_one_command_without_subcommands() -> None:
     """AC-1: ingest is a single verb, not a group with create/fill/ready."""
     result = runner.invoke(app, ["ingest", "--help"])
@@ -69,6 +79,26 @@ def test_ingest_help_describes_one_command_without_subcommands() -> None:
         assert f"ingest {absent}" not in result.stdout
     for flag in ("--packet", "--stdin", "--title", "--type", "--priority"):
         assert flag in result.stdout
+
+
+def test_top_level_help_sends_a_filing_agent_to_ingest() -> None:
+    """AC-1: `ortus --help` alone names ingest as the way to file a bead."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    flat = _flat(result.stdout)
+    assert "readiness schema v1 bead from a packet" in flat
+    assert "in place of a multiline bd create" in flat
+
+
+def test_ingest_help_documents_packet_shape_spec_and_exit_codes() -> None:
+    """AC-2: the verb's own help is the discovery surface for a sidecar."""
+    result = runner.invoke(app, ["ingest", "--help"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    flat = _flat(result.stdout)
+    for needle in ("description.md", "design.md", "acceptance.md", "ortus spec"):
+        assert needle in flat, needle
+    assert "Exit 0 means the bead exists" in flat
+    assert "nonzero exit" in flat and "no bead was written" in flat
 
 
 def test_ingest_ready_packet_creates_issue_that_validates(tmp_path: Path) -> None:
