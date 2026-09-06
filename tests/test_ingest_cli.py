@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -60,25 +61,35 @@ def _open_ids(repo: Path) -> list[str]:
     return [str(item["id"]) for item in json.loads(listing or "[]")]
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Drop CSI sequences rich injects between option glyphs on CI."""
+    return _ANSI.sub("", text)
+
+
 def _flat(text: str) -> str:
-    """Help output with rich's line wrapping folded away.
+    """Help output with rich's wrapping and colour codes folded away.
 
     Both panels wrap to whatever width the runner picked, so a phrase the help
     must carry can land across two lines. Flattening asserts the wording rather
-    than the terminal width of the machine running the suite.
+    than the terminal width of the machine running the suite. Typer also force-
+    colours when GITHUB_ACTIONS is set, splitting ``--packet`` as styled dashes.
     """
-    return " ".join(text.split())
+    return " ".join(_strip_ansi(text).split())
 
 
 def test_ingest_help_describes_one_command_without_subcommands() -> None:
     """AC-1: ingest is a single verb, not a group with create/fill/ready."""
     result = runner.invoke(app, ["ingest", "--help"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert "ortus ingest" in result.stdout
+    flat = _flat(result.stdout)
+    assert "ortus ingest" in flat
     for absent in ("create", "fill", "ready"):
-        assert f"ingest {absent}" not in result.stdout
+        assert f"ingest {absent}" not in flat
     for flag in ("--packet", "--stdin", "--title", "--type", "--priority"):
-        assert flag in result.stdout
+        assert flag in flat
 
 
 def test_top_level_help_sends_a_filing_agent_to_ingest() -> None:
