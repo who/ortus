@@ -56,13 +56,14 @@ from ortus.core.codegraph import (
     CodeGraphAdapter,
     CodeGraphMode,
     CodeGraphPhase,
-    CodeGraphProbe,
     CodeGraphUnavailable,
+    LEAVE_OPEN_FOR_VERIFICATION,
     append_normalized,
     parse_transcript,
     phase_contract,
     require_handshake,
 )
+from ortus.core.prompts import resolve_named_prompt
 from ortus.core.config import (
     DEFAULT_MERGE_GATE_TIMEOUT,
     DEFAULT_VERIFICATION_MODE,
@@ -748,6 +749,49 @@ def _compose_work_prompt(
     return compose_worker_prompt(backend, task)  # type: ignore[arg-type]
 
 
+def _stale_completion_contract_diagnostic(
+    composed: str,
+    *,
+    repo: Path,
+    home: Path | None = None,
+) -> str | None:
+    """If the worker would be told to leave the issue open, name the source.
+
+    Inspects the composed grind prompt (phase instruction plus CodeGraph
+    contract) and the resolved goal prompt the worker fetches via
+    ``ortus prompt show goal``. A repo or user override that still carries
+    the retired leave-open sentence is reported with its path so the
+    operator can rewrite or remove it; the override is never overwritten
+    in place. Stock text that still carries the sentence is reported as an
+    internal contract defect.
+    """
+    hits: list[str] = []
+    needle = LEAVE_OPEN_FOR_VERIFICATION.lower()
+    if needle in composed.lower():
+        hits.append("the composed CodeGraph implementation phase contract")
+    try:
+        goal = resolve_named_prompt("goal", repo=repo, home=home)
+    except Exception:
+        goal = None
+    if goal is not None and needle in goal.text.lower():
+        if goal.source == "bundled":
+            hits.append("the bundled goal prompt")
+        elif goal.path is not None:
+            hits.append(f"{goal.source} override {goal.path}")
+        else:
+            hits.append(f"{goal.source} override")
+    if not hits:
+        return None
+    source = " and ".join(hits)
+    return (
+        f"grind: stale completion contract in {source}: the worker is told to "
+        "leave candidate edits for an unscheduled verification phase. The "
+        "one-issue loop requires session-close. Do not overwrite a custom "
+        "override in place; rewrite or remove it (for a stamped eject, "
+        "`ortus prompt eject goal --force`), then re-run."
+    )
+
+
 def _done_bar_met(
     bd: BdClient,
     git: GitClient,
@@ -1341,13 +1385,22 @@ def grind(
         )
         output.info("--- per-iteration prompt ---")
         if harness_select:
+            dry_prompt = _compose_work_prompt(
+                work_template,
+                {"id": "<ISSUE_ID>", "title": "<ISSUE_DETAILS>"},
+                resolved_backend,
+                phase_instruction=_IMPLEMENTATION_INSTRUCTION,
+                phase_contract_text=phase_contract(
+                    CodeGraphPhase.IMPLEMENTATION, codegraph_probe
+                ),
+                verification_text=verification_text,
+            )
+            conflict = _stale_completion_contract_diagnostic(dry_prompt, repo=target)
+            if conflict:
+                output.error(conflict)
+                raise typer.Exit(code=1)
             output.info(
-                _compose_work_prompt(
-                    work_template,
-                    {"id": "<ISSUE_ID>", "title": "<ISSUE_DETAILS>"},
-                    resolved_backend,
-                    verification_text=verification_text,
-                )
+                dry_prompt
                 + "\n(the worker orients, continues leftover in_progress or "
                 "runs bd ready, and claims; grind only decides whether to spawn.)"
             )
@@ -1910,6 +1963,13 @@ def grind(
                     except BackendError as exc:
                         write_log(f"iter prep: HALT — {exc}")
                         output.error(str(exc))
+                        raise typer.Exit(code=1)
+                    conflict = _stale_completion_contract_diagnostic(
+                        iteration_prompt, repo=target
+                    )
+                    if conflict:
+                        write_log(f"iter prep: HALT — {conflict}")
+                        output.error(conflict)
                         raise typer.Exit(code=1)
                     _log_dropped_lessons(
                         iteration_lessons,

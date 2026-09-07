@@ -30,6 +30,11 @@ MAX_EVENTS = 50
 MAX_LABEL = 120
 MAX_SYMBOLS = 20
 
+#: Retired multi-phase wording. Grind's one-issue worker session-closes; a
+#: prompt that still carries this sentence is a contract defect, not a
+#: handoff to a later verification phase the loop never schedules.
+LEAVE_OPEN_FOR_VERIFICATION = "leave candidate edits for verification"
+
 
 class CodeGraphMode(str, Enum):
     OFF = "off"
@@ -356,7 +361,7 @@ def phase_contract(phase: CodeGraphPhase, probe: CodeGraphProbe) -> str:
         ),
         CodeGraphPhase.IMPLEMENTATION: (
             "Confirm the work spec against repository reality and run an impact query "
-            "before editing. Do not close the issue; leave candidate edits for verification."
+            "before editing. Session-close is still this worker's job."
         ),
         CodeGraphPhase.VERIFICATION: (
             "Independently query changed symbols, callers, callees, and impact radius. Compare "
