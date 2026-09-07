@@ -124,7 +124,7 @@ def test_ingest_ready_packet_creates_issue_that_validates(tmp_path: Path) -> Non
     assert result.exit_code == 0, result.stdout + result.stderr
     issue_id = result.stdout.strip()
     assert issue_id and issue_id in _open_ids(repo)
-    assert f"done (created {issue_id})" in result.stderr
+    assert f"done (created {issue_id})" in _flat(result.stderr)
 
     verdict = runner.invoke(app, ["validate", str(repo), issue_id])
     assert verdict.exit_code == 0, verdict.stdout + verdict.stderr
@@ -212,7 +212,7 @@ def test_ingest_missing_packet_section_errors_before_validation(tmp_path: Path) 
     )
 
     assert result.exit_code == 1, result.stdout + result.stderr
-    assert "acceptance.md or acceptance_criteria.md" in result.stderr
+    assert "acceptance.md or acceptance_criteria.md" in _flat(result.stderr)
     assert result.stdout.strip() == ""
     assert _open_ids(repo) == before
 
@@ -239,7 +239,7 @@ def test_ingest_non_json_stdin_creates_nothing(tmp_path: Path) -> None:
     result = runner.invoke(app, ["ingest", str(repo), "--stdin"], input="not json at all")
 
     assert result.exit_code == 1, result.stdout + result.stderr
-    assert "stdin is not JSON" in result.stderr
+    assert "stdin is not JSON" in _flat(result.stderr)
     assert _open_ids(repo) == before
 
 
@@ -251,7 +251,8 @@ def test_ingest_without_a_source_is_a_usage_error(tmp_path: Path) -> None:
     result = runner.invoke(app, ["ingest", str(repo), "--title", "Nothing to read"])
 
     assert result.exit_code == 2, result.stdout + result.stderr
-    assert "--packet" in result.stderr and "--stdin" in result.stderr
+    flat = _flat(result.stderr)
+    assert "--packet" in flat and "--stdin" in flat
     assert _open_ids(repo) == before
 
 
@@ -274,7 +275,7 @@ def test_ingest_refuses_an_epic(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 1, result.stdout + result.stderr
-    assert "epics are containers" in result.stderr
+    assert "epics are containers" in _flat(result.stderr)
     assert _open_ids(repo) == before
 
 
@@ -287,5 +288,5 @@ def test_ingest_without_a_title_creates_nothing(tmp_path: Path) -> None:
     result = runner.invoke(app, ["ingest", str(repo), "--packet", str(packet)])
 
     assert result.exit_code == 1, result.stdout + result.stderr
-    assert "no title" in result.stderr
+    assert "no title" in _flat(result.stderr)
     assert _open_ids(repo) == before
