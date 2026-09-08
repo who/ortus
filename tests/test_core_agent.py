@@ -119,6 +119,92 @@ def test_codex_readonly_does_not_wrap_runtime_filesystem(tmp_path: Path) -> None
     assert argv[argv.index("--sandbox") + 1] == "read-only"
 
 
+def test_codexrunner_write_session_gets_the_git_writable_roots_override(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    runner = CodexRunner()
+    argv = runner._write_argv(runner.build_argv("implement"), tmp_path)
+
+    override = "sandbox_workspace_write.writable_roots=" + json.dumps(
+        [str((tmp_path / ".git").resolve())]
+    )
+    assert override in argv
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+
+
+def test_codexrunner_readonly_sessions_never_gain_git_write(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    runner = CodexRunner()
+    verify = runner.build_argv("verify", readonly=True)
+    assert "writable_roots" not in " ".join(runner._readonly_argv(verify, tmp_path))
+
+    graph_only = CodexRunner(sandbox_mode="read-only")
+    argv = graph_only.build_argv("verify graph only")
+    assert graph_only._write_argv(argv, tmp_path) == argv
+
+
+def test_codexrunner_writable_roots_follow_a_worktree_gitdir(tmp_path: Path) -> None:
+    common = tmp_path / "main" / ".git"
+    worktree_git = common / "worktrees" / "wt"
+    worktree_git.mkdir(parents=True)
+    (worktree_git / "commondir").write_text("../..\n")
+    tree = tmp_path / "wt"
+    tree.mkdir()
+    (tree / ".git").write_text(f"gitdir: {worktree_git}\n")
+
+    runner = CodexRunner()
+    argv = runner._write_argv(runner.build_argv("implement"), tree)
+    assert json.loads(argv[-1].split("=", 1)[1]) == [
+        str(worktree_git.resolve()),
+        str(common.resolve()),
+    ]
+
+
+def test_codexrunner_without_a_git_dir_invents_no_writable_roots(
+    tmp_path: Path,
+) -> None:
+    runner = CodexRunner()
+    argv = runner.build_argv("implement")
+    assert runner._write_argv(argv, tmp_path) == argv
+
+    (tmp_path / ".git").write_text("not a gitdir pointer\n")
+    assert runner._write_argv(argv, tmp_path) == argv
+
+
+def test_codexrunner_run_launches_write_sessions_with_the_carveout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    launched: list[list[str]] = []
+
+    def fake_spawn(argv: list[str], **kwargs: object) -> int:
+        launched.append(argv)
+        return 0
+
+    monkeypatch.setattr("ortus.core.claude._spawn_logged", fake_spawn)
+    CodexRunner().run("implement", repo=tmp_path, log_path=tmp_path / "codex.jsonl")
+
+    joined = " ".join(launched[0])
+    assert "sandbox_workspace_write.writable_roots" in joined
+    assert str((tmp_path / ".git").resolve()) in joined
+
+
+def test_claude_write_sessions_add_no_writable_roots(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    runner = ClaudeRunner()
+    argv = runner.build_argv("implement")
+    assert runner._write_argv(argv, tmp_path) == argv
+
+
+def test_compose_worker_prompt_codex_drops_the_readonly_git_expectation() -> None:
+    prompt = compose_worker_prompt("codex", "close one")
+    assert "read-only" not in prompt
+    assert "Session-close per AGENTS.md" in prompt
+    assert "PLAN-GAP" in prompt
+
+
 def test_make_runner_grok_is_not_a_claude_subclass() -> None:
     runner = make_runner("grok")
     assert isinstance(runner, GrokRunner)

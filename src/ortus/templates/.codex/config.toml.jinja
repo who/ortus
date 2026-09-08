@@ -2,3 +2,9 @@
 # the user's normal CODEX_HOME; Ortus does not redirect CODEX_HOME into repos.
 sandbox_mode = "workspace-write"
 approval_policy = "never"
+
+# The git directory stays writable through a launch-time
+# sandbox_workspace_write.writable_roots override carrying its absolute
+# path, so a worker can run its own session-close commit and an already
+# provisioned project gets that without re-running init. Verify runs
+# launch read-only and never receive the carveout.

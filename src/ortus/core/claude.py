@@ -117,8 +117,11 @@ class ClaudeRunner:
         argv = self.build_argv(
             prompt, fast=fast, profile=profile, readonly=readonly, resume=resume
         )
-        if readonly:
-            argv = self._readonly_argv(argv, repo)
+        argv = (
+            self._readonly_argv(argv, repo)
+            if readonly
+            else self._write_argv(argv, repo)
+        )
         return _spawn_logged(
             argv,
             repo=repo,
@@ -135,6 +138,17 @@ class ClaudeRunner:
         """Apply the backend's OS-level read-only launch posture."""
 
         return _readonly_wrapper(argv, repo)
+
+    def _write_argv(self, argv: list[str], repo: Path) -> list[str]:
+        """Apply the backend's writable launch posture.
+
+        Claude's write sessions need no argv adjustment. A backend whose
+        sandbox has to be told which paths outside the working tree stay
+        writable overrides this; the pairing with ``_readonly_argv`` keeps
+        both postures visible at the one place ``run`` decides between them.
+        """
+
+        return argv
 
     def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
         """Assert the read-only posture can still execute a trivial command.
