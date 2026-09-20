@@ -34,8 +34,13 @@ def test_mode_parsing_and_kill_switch(tmp_path):
 
 @pytest.mark.parametrize('verdict', VERDICTS)
 @pytest.mark.parametrize('backend', ['claude', 'codex'])
-def test_shadow_matches_baseline_for_all_decisions(gate, monkeypatch, verdict, backend):
+@pytest.mark.parametrize('advice', [None, {'status': 'advisory', 'answers': None}])
+def test_shadow_matches_baseline_for_all_decisions(gate, monkeypatch, verdict, backend, advice):
     monkeypatch.setattr(grind_mod, 'resolve_backend', lambda *a, **kw: backend)
+    # Hold semantic advice fixed to isolate the pre-turn shadow decision.
+    # The kill switch normally disables both independent judge requests.
+    readiness = Mock(return_value=advice)
+    monkeypatch.setattr(grind_mod, 'evaluate_readiness', readiness)
     initial = deepcopy(gate.bd.rows)
     # Readiness filtering must keep its baseline mutations, too.
     gate.bd.rows = {'unready': dict(id='unready', status='open', labels=[], issue_type='task'),
@@ -48,6 +53,11 @@ def test_shadow_matches_baseline_for_all_decisions(gate, monkeypatch, verdict, b
         assert result.exit_code == 0, result.output + str(result.exception)
         gate.worker.run.assert_called_once()
         call = gate.worker.run.call_args
+        advice_text = grind_mod.readiness_context(advice)
+        if advice_text:
+            assert call.args[0].count(advice_text) == 1
+        else:
+            assert 'Jev semantic readiness advice' not in call.args[0]
         return (call.args[0], call.kwargs['profile'], call.kwargs['timeout'],
                 deepcopy(gate.worker.extra_env), deepcopy(gate.bd.calls), deepcopy(gate.bd.rows))
 
@@ -58,6 +68,7 @@ def test_shadow_matches_baseline_for_all_decisions(gate, monkeypatch, verdict, b
     gate.bd.calls.clear()
     gate.judge.evaluate.return_value = verdict
     assert observe() == baseline
+    assert readiness.call_count == 2
     gate.judge.evaluate.assert_called_once()
     assert not gate.bundles
     decision, outcome = gate.events()
