@@ -116,6 +116,7 @@ from ortus.core.local_backend import (
 )
 from ortus.core.repo import resolve_repo
 from ortus.core.judge import GateAction, JudgeConfig, JudgeMode, parse_judge_config
+from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
 from ortus.core.judge_hooks import HookRun, check_pre_tool
 from ortus.core.judge_log import (
@@ -912,6 +913,7 @@ def _compose_work_prompt(
     lessons_text: str = "",
     bound_issue_id: str | None = None,
     goal_template: str | None = None,
+    semantic_advice: str = "",
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
@@ -948,6 +950,8 @@ def _compose_work_prompt(
         task = phase_instruction.rstrip() + "\n\n" + task
     task += phase_contract_text + verification_text
     wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend == "claude" else None
+    if semantic_advice and (wrap_limit is None or len(task) + len(semantic_advice) <= wrap_limit):
+        task += semantic_advice
     if (
         lessons_text
         and (wrap_limit is None or len(task) + len(lessons_text) <= wrap_limit)
@@ -2211,6 +2215,9 @@ def grind(
                             f"iter prep: worker will claim {issue_id} via goal-prompt"
                         )
                     target_issue = bd.show(issue_id)
+                    semantic_advice = readiness_context(
+                        evaluate_readiness(target, target_issue, judge_config)
+                    )
                     if judge_config.enabled and judge_config.mode == JudgeMode.SHADOW:
                         shadow_decision_id = _shadow_turn(
                             packet=target_issue, repo=target, config=config,
@@ -2286,6 +2293,7 @@ def grind(
                             lessons_text=iteration_lessons_text,
                             bound_issue_id=issue_id if gate_turn else None,
                             goal_template=goal_template if gate_turn else None,
+                            semantic_advice=semantic_advice,
                         )
                     except BackendError as exc:
                         write_log(f"iter prep: HALT — {exc}")

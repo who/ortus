@@ -64,6 +64,7 @@ class JudgePhase(str, Enum):
     PRE_TURN = "pre_turn"
     PRE_TOOL = "pre_tool"
     POST_TURN = "post_turn"
+    SEMANTIC_READINESS = "semantic_readiness"
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class JudgeConfig:
         JudgeRoute.CLAUDE, JudgeRoute.CODEX, JudgeRoute.SKIP, JudgeRoute.HUMAN,
     )
     question_criteria: dict = field(default_factory=dict)
+    semantic_readiness_criteria: dict = field(default_factory=dict)
     objective_cap: int = 1024
     acceptance_cap: int = 1024
     title_cap: int = 160
@@ -128,6 +130,7 @@ class JudgeState:
     title: str = ""
     objective: str = ""
     acceptance: str = ""
+    design: str = ""
     proposed_tool: ProposedTool | None = None
     criteria_version: str = ""
     criteria_hash: str = ""
@@ -264,6 +267,7 @@ def _parse_judge_values(
         raise ProfileError("invalid judge.sensitive_paths: expected an array of nonempty paths")
     values["sensitive_paths"] = tuple(paths)
     values["question_criteria"] = validate_criteria(values["question_criteria"])
+    values["semantic_readiness_criteria"] = validate_criteria(values["semantic_readiness_criteria"])
     return JudgeConfig(**values)
 
 

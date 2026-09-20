@@ -159,6 +159,10 @@ def build_questions(config: JudgeConfig, state: JudgeState) -> dict[str, dict[st
     here without the optional extra installed, and asking all three in one
     request keeps the added latency to a single round trip.
     """
+    if state.phase.value == "semantic_readiness":
+        from ortus.core.judge_readiness import readiness_questions
+
+        return readiness_questions(config, state)
     criteria = config.question_criteria
     return {
         ROUTE: {

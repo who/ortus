@@ -45,7 +45,10 @@ class Omission:
 
 
 def _json(state: JudgeState) -> str:
-    return json.dumps(asdict(state), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    payload = asdict(state)
+    if state.phase != JudgePhase.SEMANTIC_READINESS:
+        payload.pop("design")
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -206,6 +209,11 @@ def pack_state(
             objective=next((line.strip() for line in objective.splitlines() if line.strip()), ""),
             acceptance="\n".join(first_lines),
         )
+        if phase == JudgePhase.SEMANTIC_READINESS:
+            state = replace(
+                state, objective=objective, acceptance=acceptance,
+                design=clean("design", issue.get("design", ""), config.objective_cap),
+            )
     else:
         reason = OmissionReason.PRIVATE if "judge-private" in labels else OmissionReason.TEXT_DISABLED
         omissions.append(Omission("issue_text", reason))
@@ -226,7 +234,7 @@ def pack_state(
     # Keep routing metadata longest. Each reduction drops a whole field and the
     # final check includes JSON escaping, keys, delimiters and multibyte text.
     for field, empty in (
-        ("proposed_tool", None), ("acceptance", ""), ("objective", ""),
+        ("proposed_tool", None), ("design", ""), ("acceptance", ""), ("objective", ""),
         ("title", ""), ("labels", ()), ("issue_type", ""), ("issue_id", ""),
         ("seat", ""), ("priority", None), ("backends_available", ()),
     ):

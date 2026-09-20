@@ -37,6 +37,7 @@ from ortus.core.readiness import (
     validate_issues,
 )
 from ortus.core.repo import resolve_repo
+from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 
 
 def _make_runner(backend: str = "claude", *, repo: Path | None = None) -> ClaudeRunner:
@@ -57,7 +58,12 @@ def _plan_prompt(repo: Path) -> str:
     longer enforces.
     """
     prompt = resolve_prompt("plan-prompt", repo=repo).text
-    return substitute(prompt, readiness_spec=spec_markdown())
+    return substitute(prompt, readiness_spec=spec_markdown()) + (
+        "\n\nRun ortus validate --json on the issues you author. When Jev is enabled, "
+        "semantic_readiness contains advisory answers for System Two to assess "
+        "and improve the work spec. Only readiness schema v1 is a hard gate; "
+        "low semantic confidence alone does not require human escalation.\n"
+    )
 
 
 def _decompose_prd(
@@ -304,6 +310,9 @@ def plan(
     # useful in auto/off mode because an explicit fallback is durable evidence.
     for issue_id in new_ids:
         client.add_comment(issue_id, summary.report())
+        advice = evaluate_readiness(target, client.show(issue_id))
+        if advice is not None:
+            output.progress("plan", readiness_context(advice).strip())
 
     output.progress("plan", f"done ({len(new_ids)} new issue(s) created)")
     output.success(f"plan created {len(new_ids)} issue(s) in {target}/.beads/")

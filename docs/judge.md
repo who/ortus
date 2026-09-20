@@ -494,9 +494,8 @@ Neither phase replaces worker verification or the goal/Stop judge.
 Both toggles belong to the repository's base `[judge]` table, not a pack or seat
 override. They are independent of `enabled` and `--no-judge`. To keep a seat
 fully disabled, leave both false in its repository. Do not enable them in shared
-user configuration during a per-repository rollout. Optional semantic readiness
-and a learned calibration head remain deferred; readiness schema validation
-continues to be deterministic.
+user configuration during a per-repository rollout. A learned calibration head
+remains deferred; readiness schema validation continues to be deterministic.
 
 If a seat resolves unexpectedly, inspect the alias selected by the CLI,
 `ORTUS_JUDGE_SEAT`, project TOML and user TOML in that order. A missing alias or
@@ -506,3 +505,47 @@ an inactive pre-turn gate makes no provider request or decision-log entry.
 Repair credential injection in that process rather than copying keys into
 configuration. Inspect each repository's private log independently and keep
 the logs out of version control.
+
+## Semantic readiness
+
+Readiness schema v1 is the hard structural gate. Missing or malformed sections
+fail before Jev is called. With `[judge].enabled = true`, a structurally ready
+leaf also receives semantic readiness advice in validate, ingest, plan and
+grind. Epics are exempt. This follows the diamond policy: System One supplies
+typed answers and System Two assesses the work spec. Low confidence, high
+ambiguity or a suggested human route never changes the structural result,
+adds a human label, stops a claim or selects a backend in this semantic pass.
+
+The semantic request requires `include_issue_text = true` and a screened title,
+full Objective section, acceptance text and design. A private label, sensitive
+text, empty field or size omission refuses the semantic call and reports
+`text_unavailable`. Description and design each use `objective_cap`; acceptance
+uses `acceptance_cap`; the serialized request still obeys `total_bytes_cap`.
+Increase those explicit limits for longer packets after reviewing their text.
+Do not put credentials in configuration; use the process environment or the
+existing user environment file for `TYPESAFE_API_KEY`.
+
+The Choice answer assesses actionability, Noul estimates whether material
+decisions are unspecified or contradictory, and Score measures execution risk
+from ambiguity or untestable acceptance. Scores range from zero to two.
+The existing typed names are `route`, `needs_human`, and `action_risk`, with
+their confidences. Noul confidence is derived as `max(p, 1-p)` because the
+provider returns only the probability. These are advice, not launch commands.
+Literal criteria can be rewritten under `[judge.semantic_readiness_criteria]`
+using the same three schemas as `question_criteria`; this base setting is
+separate from routing criteria. The request and log hash identify the resolved
+questions so a later rewrite can be compared with earlier decisions.
+
+`ortus validate --json` exposes the vector as `semantic_readiness` on ready
+rows. Text validate, ingest and plan emit it on stderr; ingest keeps the new id
+alone on stdout. The planner prompt directs System Two to inspect validate's
+JSON while authoring. Grind adds the issue-specific vector to worker context
+when it fits the backend prompt limit, before optional stored lessons.
+
+Semantic decisions append to `logs/jev-decisions.jsonl` with phase
+`semantic_readiness`, mode `shadow`, typed answers, confidences and criteria
+hash. Their effective action is always `baseline`. They have no worker outcome
+pair because they do not launch workers. Provider, configuration, packing or
+log failures leave the structural verdict unchanged and emit a safe diagnostic.
+Service failures are logged when the log is writable. Disabled Jev makes no
+semantic request or log entry.
