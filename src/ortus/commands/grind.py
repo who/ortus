@@ -124,6 +124,7 @@ from ortus.core.judge_log import (
     write_decision, write_outcome, write_shadow_outcome,
 )
 from ortus.core.judge_policy import decide_pre_turn
+from ortus.core.judge_post import WorkerOutcome, apply_outcome, evaluate_outcome
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePreparationError, plan_routes, prepare_route,
 )
@@ -1602,6 +1603,8 @@ def grind(
         )
         if judge_config.pre_tool:
             output.info("judge pre_tool: enabled (Claude run-scoped hook)")
+        if judge_config.post_turn:
+            output.info("judge post_turn: enabled (advisory outcome)")
         if judge_config.enabled:
             output.info(
                 "judge routes:   " + ", ".join(route.value for route in judge_config.routes)
@@ -2341,6 +2344,10 @@ def grind(
                 # Re-armed every iteration so resume-from-captured can skip a
                 # worker spawn; leftover in_progress still runs one.
                 implementation_worker_ran = True
+                worker_timed_out = False
+                post_start_tip = (
+                    git.branch_tip(integration_branch) if judge_config.post_turn else None
+                )
                 phase_offset = log.stat().st_size if log.exists() else 0
                 impl_started = time.monotonic()
                 impl_handshake_logged = False
@@ -2450,6 +2457,7 @@ def grind(
                         on_poll=_poll_impl_handshake,
                     )
                 except subprocess.TimeoutExpired:
+                    worker_timed_out = True
                     rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
                     write_log(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
@@ -2584,6 +2592,29 @@ def grind(
                     else:
                         judged_status = "open"
                         judged_id = "issue"
+                post_stop = False
+                if judge_config.post_turn and harness_select and implementation_worker_ran:
+                    try:
+                        # Attribution and the required handshake precede advisory judgment.
+                        packet = bd.show(judged_id)
+                        post_end_tip = git.branch_tip(integration_branch)
+                        observation = WorkerOutcome(
+                            exit_status=rc, watchdog=worker_timed_out,
+                            observed_status=OutcomeStatus(packet.get("status", "unknown")),
+                            branch_advanced=bool(
+                                post_start_tip
+                                and post_end_tip and post_end_tip != post_start_tip
+                            ),
+                        )
+                        verdict = evaluate_outcome(packet, observation, judge_config)
+                        post_stop = apply_outcome(
+                            bd, target, judged_id, observation, verdict,
+                            judge_config, gate_run_id,
+                        )
+                    except Exception:  # noqa: BLE001 - preserve state, never echo provider/tracker text
+                        output.progress("grind", "judge post_turn unavailable; preserving worker result")
+                        # A broken log or tracker cannot authorize another worker window.
+                        post_stop = judge_config.mode == JudgeMode.ENFORCE
                 if judged_status == "closed":
                     tasks_completed += closed_delta
                     write_log(
@@ -2642,6 +2673,8 @@ def grind(
                         f"iter {iters_run}: WARN no bd-state change "
                         f"({judged_id} is {judged_status})"
                     )
+                    if post_stop:
+                        break
                     if idle_sleep > 0:
                         time.sleep(idle_sleep)
                     else:
