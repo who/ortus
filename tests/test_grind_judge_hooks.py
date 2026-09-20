@@ -6,6 +6,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from unittest.mock import Mock
 
@@ -182,6 +183,9 @@ def test_registration_composes_settings_and_quotes_interpreter(tmp_path, monkeyp
     registration = HookRun(tmp_path, 'demo-1', JudgeConfig(pre_tool=True), 'run-1', runner)
     try:
         assert registration.directory.stat().st_mode & 0o777 == 0o700
+        assert registration.directory.is_relative_to(
+            Path(tempfile.gettempdir()).resolve())
+        assert not registration.directory.is_relative_to(tmp_path.resolve())
         for path in (registration.context_path, registration.settings_path):
             assert path.stat().st_mode & 0o777 == 0o600
             assert 'never-persist-this' not in path.read_text()
@@ -321,4 +325,15 @@ def test_preflight_import_failure_cleans_created_directory(tmp_path, monkeypatch
     with pytest.raises(BackendError, match='preflight failed'):
         HookRun(tmp_path, 'demo-1', JudgeConfig(), 'run-1', runner)
     assert len(directories) == 1 and not directories[0].exists()
+    assert runner.extra_env == {}
+
+
+def test_temporary_root_inside_repository_is_refused(tmp_path, monkeypatch):
+    runner = ClaudeRunner()
+    inside = tmp_path / 'inside-tmp'
+    inside.mkdir()
+    monkeypatch.setattr(tempfile, 'tempdir', str(inside))
+    with pytest.raises(BackendError, match='inside the repository'):
+        HookRun(tmp_path, 'demo-1', JudgeConfig(), 'run-1', runner)
+    assert list(inside.iterdir()) == []
     assert runner.extra_env == {}

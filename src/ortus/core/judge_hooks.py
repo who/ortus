@@ -71,8 +71,19 @@ class HookRun:
         self.previous_env = runner.extra_env
         self.previous_settings = runner.hook_settings
         self.previous_session = runner.hook_session_id
-        self.temporary = TemporaryDirectory(prefix="ortus-judge-hook-", dir="/tmp")
+        # tempfile resolves the platform temporary root, so a sandbox that
+        # exports TMPDIR over a read-only /tmp still gets a writable inbox.
+        self.temporary = TemporaryDirectory(prefix="ortus-judge-hook-")
         self.directory = Path(self.temporary.name).resolve()
+        # The worker owns the repository tree. A temporary root inside it would
+        # hand the worker its own context and signal inbox, so refuse the launch
+        # rather than register a hook the worker can rewrite.
+        if self.directory.is_relative_to(repo.resolve()):
+            self.temporary.cleanup()
+            raise BackendError(
+                "judge.pre_tool: temporary directory is inside the repository; "
+                "point TMPDIR outside the working tree"
+            )
         self.context_path = self.directory / "context.json"
         self.settings_path = self.directory / "settings.json"
         try:
