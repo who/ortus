@@ -282,6 +282,14 @@ def decide_tool(
         confidence = _number(risk_answer.get("confidence"), 1)
     except Exception:  # noqa: BLE001 - malformed answers cannot authorize tools
         return ToolDecision(ToolAction.HUMAN, "invalid_answer")
+    # These floors stay where the pre-turn gate's equivalents were scrapped, and
+    # they stay literals rather than becoming `[judge]` settings. A claim is
+    # recoverable: a route the judge got wrong costs one worker turn, so logging
+    # the disagreement teaches more than withholding the work. A tool call is
+    # not, and decide_pre_turn's contract says a gate authorizes a worker launch
+    # and never an irreversible tool action. An unsure or high-risk answer about
+    # an irreversible action is exactly the case an operator must see, so it
+    # hands the call over instead of spending the action to find out.
     if max(human, 1 - human) < 0.8 or confidence < 0.8:
         return ToolDecision(ToolAction.HUMAN, "low_confidence")
     if human >= 0.8 or risk >= 1.5:
