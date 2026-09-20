@@ -1,7 +1,8 @@
 # Judge rollout by seat
 
-The optional Jev gate chooses an available configured worker, `skip`, or `human` before
-grind launches a worker. It is disabled by default. Ordinary installations
+The optional Jev gate chooses an available configured worker or `skip` before
+grind launches a worker, and records every answer for offline review. It never
+holds a claim back for low confidence, human need or risk. It is disabled by default. Ordinary installations
 need neither the optional SDK nor a TypeSafe key. A key in the environment
 does not enable the gate.
 
@@ -35,7 +36,7 @@ enabled = false
 seat = "ortus"
 model = "jev-1.13.0"
 failure_mode = "open"
-include_issue_text = false
+include_issue_text = true
 ```
 
 Keep the gate off in stored configuration during the pilot. Inspect resolution
@@ -70,20 +71,21 @@ A numeric directory such as `01` needs an alias such as `ortus`.
 | `routes` | `claude`, `codex`, `skip`, `human` | Allowed choices, filtered by available workers |
 | `timeout_seconds` | `1.5` | One request deadline, SDK retries disabled |
 | `failure_mode` | `open` | Service failures use the original backend |
-| `low_confidence` | `human` | Pause uncertain answers; `skip` is also supported |
-| `route_confidence`, `noul_confidence`, `risk_confidence` | `0.8` each | Minimum confidence for applying the typed answers |
-| `human_threshold` | `0.8` | Human-need probability at or above this pauses work |
-| `risk_threshold` | `1.5` | Score at or above this pauses work; rubric scores are 0, 1, 2 |
+| `low_confidence` | `human` | Validated and inert; the pre-turn gate reads no value of it |
+| `route_confidence`, `noul_confidence`, `risk_confidence` | `0.8` each | Also inert pre-turn; confidence is recorded, not enforced |
+| `human_threshold` | `0.8` | Also inert pre-turn; human-need probability is recorded, not enforced |
+| `risk_threshold` | `1.5` | Also inert pre-turn; rubric scores are 0, 1, 2 and are recorded |
 | `seat` | `default` | Set explicitly to `ortus` for this pilot |
-| `include_issue_text`, `include_log_tail` | `false` | Issue prose is opt-in; the pre-turn packer never reads log tails |
+| `include_issue_text` | `true` | Screened title, first Objective line and AC lines travel |
+| `include_log_tail` | `false` | The pre-turn packer never reads log tails |
 | `title_cap`, `objective_cap`, `acceptance_cap`, `tool_cap` | `160`, `1024`, `1024`, `512` | Character caps; oversized source fields are omitted |
 | `total_bytes_cap` | `8192` | Serialized UTF-8 state budget |
 | `sensitive_paths` | empty | Additional literal paths to omit from text |
 
 The adapter asks Choice, Noul and Score questions in one System One request.
 Noul supplies a probability `p`, not a separate confidence field. Ortus computes
-its confidence as `max(p, 1-p)`. With the default `0.8` minimum, probabilities
-near 0.5 therefore take the low-confidence path.
+its confidence as `max(p, 1-p)`. A probability near 0.5 is recorded as an
+uncertain answer; it does not change what runs.
 
 Missing keys, missing SDKs, timeouts, service errors and malformed answers
 follow `failure_mode`. In `open` mode the original worker backend proceeds
@@ -91,10 +93,12 @@ with normal verification and closure. In `closed` mode the issue requires
 human handling. An unavailable backend is not offered; a response naming it
 is an invalid answer and follows the same failure policy.
 
-Low confidence is checked before human need and risk. Confident human routes
-or high human-need probabilities pause work, as do confident high-risk scores.
-A confident skip stops this invocation and leaves the issue available for a
-later run. A proceed decision launches a worker bound to the selected id.
+Confidence, human-need probability and risk score are recorded in the decision
+row and change nothing about what runs. A `human` route names no worker, so the
+baseline runs and the answer stays in the log. A confident skip stops this
+invocation and leaves the issue available for a later run. Every other answer
+launches a worker bound to the selected id. A `human` label, an explicit policy
+denial and a fail-closed service failure remain the only pre-turn stops.
 
 Claude, Codex, Grok and OpenCode baselines support the enabled gate.
 Optional workers without binaries or valid profiles are excluded. OpenCode
@@ -107,23 +111,25 @@ logging and configuration errors are not service outages and do not fail open.
 
 ## Privacy and authority
 
-By default the request carries bounded metadata: issue id, type, labels,
-priority, seat, phase and available backends. Title, objective and acceptance
-text are empty. Metadata can still identify work; review it before enabling a
-seat. Without prose the judge has less evidence for semantic routing.
+The request carries bounded metadata: issue id, type, labels, priority, seat,
+phase and available backends. Metadata can still identify work; review it
+before enabling a seat.
 
-After reviewing the seat's issue text, an operator may set
-`include_issue_text = true`. The packer then includes a screened title, the
-first Objective line and AC lines. A `judge-private` label always suppresses
-issue prose. Sensitive patterns, credential values and configured sensitive
-paths cause whole-field omission, as do size limits. Pattern screening cannot
-prove arbitrary prose safe; opt-in requires review. No repository files,
-attachments, raw transcripts or environment dumps enter the packed state.
+It also carries a screened title, the first Objective line and AC lines,
+because metadata alone gives the judge almost no evidence for semantic routing.
+Review the seat's issue text before enabling it. A seat whose work must stay
+local sets `include_issue_text = false` and gets the metadata-only packet
+instead. A `judge-private` label always suppresses issue prose.
+
+Sensitive patterns, credential values and configured sensitive paths cause
+whole-field omission, as do size limits. Pattern screening cannot prove
+arbitrary prose safe, so review a seat's work before enabling it. No repository
+files, attachments, raw transcripts or environment dumps enter the packed state.
 
 The policy keeps arithmetic and control flow in code. The model classifies
 meaning into typed route, probability, risk and confidence values. The adapter
 validates the model pin, answer types, ranges and offered routes; policy code
-applies thresholds. Provider explanations and exception text do not choose an
+applies the routing rules. Provider explanations and exception text do not choose an
 action. This is the ZFC audit boundary. Synthetic replay includes contradictory
 provider prose to exercise that boundary, but does not prove semantic accuracy.
 
@@ -243,7 +249,7 @@ selected seat, and finally existing environment and CLI overrides. A pack
 cannot enable a seat. Each seat can set `enabled`, `pack`, and the same safe
 overrides as a pack. `--no-judge` still wins over seat enablement.
 
-Packs can set confidence thresholds, human/risk thresholds, routes,
+Packs can set the inert confidence and human/risk thresholds, routes,
 `include_issue_text`, `sensitive_paths`, and `question_criteria`. They cannot
 change endpoints, models, hooks, execution commands or hard tool guards.
 All definitions are validated at load time, including unused packs and seats.
@@ -342,11 +348,10 @@ rollout. No replay or calibration CLI is required by this recipe.
 
 After review, change `judge.mode` to `"enforce"` in atlas's repository only and
 run the same bounded command. Leave birch false until it has its own reviewed
-shadow sample. Tune one pack at a time using observed false escalations and
-missed escalations. Raising a confidence minimum sends more uncertain answers
-to `low_confidence`; raising `human_threshold` or `risk_threshold` instead
-requires more human need or risk before escalation. Keep the model pin and
-criteria hash with each measurement so different policies are not pooled.
+shadow sample. The pre-turn gate has no escalation to tune: compare candidate
+thresholds against the recorded answers offline instead, and change routes or
+criteria one pack at a time. Keep the model pin and criteria hash with each
+measurement so different policies are not pooled.
 
 For an immediate pre-turn rollback on the next invocation:
 

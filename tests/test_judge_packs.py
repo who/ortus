@@ -28,7 +28,7 @@ from ortus.core.profiles import ProfileError
 def config_table():
     return {
         "seat": "alpha", "route_confidence": 0.6,
-        "packs": {"careful": {"route_confidence": 0.9, "include_issue_text": True,
+        "packs": {"careful": {"route_confidence": 0.9, "include_issue_text": False,
             "question_criteria": {"needs_human": {"true": ["Needs approval"], "false": ["Approved"]}}}},
         "seats": {"alpha": {"enabled": True, "pack": "careful", "route_confidence": 0.95},
                   "beta": {"enabled": False}},
@@ -79,13 +79,16 @@ def test_pack_isolation_requests_and_metadata_default():
     beta = parse(table, judge_seat="beta")
     assert alpha.route_confidence == 0.95 and beta.route_confidence == 0.6
     assert alpha.enabled and not beta.enabled
-    assert not beta.include_issue_text and not beta.question_criteria
+    # The pack's text opt-out belongs to alpha; beta keeps the default.
+    assert not alpha.include_issue_text
+    assert beta.include_issue_text and not beta.question_criteria
     request = build_questions(alpha, JudgeState("sample"))
     assert request["needs_human"]["criteria"]["true"] == ["Needs approval"]
     request["needs_human"]["criteria"]["true"].append("changed")
     assert table == original
     assert alpha.question_criteria["needs_human"]["true"] == ["Needs approval"]
-    assert not alpha.allows_issue_text(("judge-private",))
+    assert beta.allows_issue_text(("task",))
+    assert not beta.allows_issue_text(("judge-private",))
     assert parse_judge_config(Config(), environ={}) == JudgeConfig()
 
 

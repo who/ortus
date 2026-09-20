@@ -63,11 +63,20 @@ def test_shadow_matches_baseline_for_all_decisions(gate, monkeypatch, verdict, b
     decision, outcome = gate.events()
     assert decision['effective_action'] == 'baseline'
     assert decision['observed_issue_id'] == 'demo-1'
-    expected = 'human' if verdict.failure else verdict.answers.route.value
-    if verdict.answers and (verdict.answers.route_confidence < .8 or verdict.answers.action_risk >= 1.5):
-        expected = 'human'
-    assert decision['intended_action'] == ('proceed' if expected in ('claude', 'codex') else expected)
-    assert decision['backend'] == (expected if expected in ('claude', 'codex') else None)
+    # Only a fail-closed service failure and a skip route withhold a worker;
+    # confidence and risk values ride along in the answers instead.
+    expected_backend = None
+    if verdict.failure:
+        intended = 'human'
+    elif verdict.answers.route.value == 'skip':
+        intended = 'skip'
+    else:
+        intended = 'proceed'
+        route = verdict.answers.route.value
+        # A human route names no worker, so the baseline is what would run.
+        expected_backend = backend if route == 'human' else route
+    assert decision['intended_action'] == intended
+    assert decision['backend'] == expected_backend
     assert outcome['decision_id'] == decision['decision_id']
     assert outcome['actual_claimed_id'] == 'demo-1'
     assert outcome['accuracy_eligible'] is True
