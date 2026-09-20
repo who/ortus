@@ -711,13 +711,16 @@ def _compose_work_prompt(
     phase_contract_text: str = "",
     verification_text: str = "",
     lessons_text: str = "",
+    bound_issue_id: str | None = None,
+    goal_template: str | None = None,
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
     The /goal condition is ``_GOAL_POINTER`` (worker fetches the loop body
-    via ``ortus prompt show goal``). Grind does not inject a claimed id. ``template`` and
-    ``issue`` remain on the signature so existing callers keep compiling;
-    neither is substituted into the prompt.
+    via ``ortus prompt show goal``). Ordinary calls do not inject a claimed id.
+    ``template`` and ``issue`` remain for compatibility with existing callers.
+    Only an explicit ``bound_issue_id`` uses the issue, with a validated
+    ``goal_template`` that supports binding. Ungated callers ignore both.
 
     ``verification_text`` is the prototype verification section. When it is
     present the pointer carries the prototype framing — lint and syntax are
@@ -729,9 +732,19 @@ def _compose_work_prompt(
     push the Claude ``/goal`` condition past the cap it is dropped rather
     than halting the run. The 4,000-character cap is Claude-only.
     """
-    del template, issue
+    del template
 
     task = _PROTOTYPE_GOAL_POINTER if verification_text else _GOAL_POINTER
+    if bound_issue_id is not None:
+        from ortus.core.judge_claim import bound_issue_section, validate_bound_goal
+
+        validate_bound_goal(goal_template or "")
+        task = task.replace(
+            "Continue leftover in_progress, else run bd ready and claim the first non-epic.",
+            "Continue only the injected bound issue; do not select or claim another id.",
+            1,
+        )
+        task += bound_issue_section(issue, bound_issue_id)
     if phase_instruction:
         task = phase_instruction.rstrip() + "\n\n" + task
     task += phase_contract_text + verification_text
