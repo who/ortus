@@ -5,10 +5,11 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 import typer
 
+from ortus.core.judge_calibration import compare_candidates, read_candidates
 from ortus.core.judge_replay import ReplayError, join_events, read_events, read_labels, summarize
 from ortus.core.output import progress
 
@@ -77,6 +78,10 @@ def replay(
     input: Path = typer.Argument(..., help="Version-1 judge event JSONL."),
     labels: Path = typer.Option(..., "--labels", help="JSON object keyed by decision_id."),
     output: Path = typer.Option(..., "--output", help="Destination metrics JSON file."),
+    thresholds: Optional[Path] = typer.Option(
+        None, "--thresholds",
+        help="TOML with at most 20 soft candidate tables (log, flag or rewrite).",
+    ),
     force: bool = typer.Option(False, "--force", help="Replace an existing output file."),
 ) -> None:
     """Calculate accuracy, latency, coverage and measured costs without rerunning the judge.
@@ -85,13 +90,27 @@ def replay(
     and optional worker_cost_usd. Shadow accuracy uses the intended action only
     when the observed issue matches the actual worker. Percentiles use nearest
     rank. Costs remain null when no measurement is available.
+
+    With --thresholds, each candidate band is also scored against the recorded
+    answers and reported under `calibration`. Candidates are compared, never
+    applied: no configuration is read for enforcement or written back, and no
+    candidate can withhold a claim.
     """
     progress("judge", "reading events and labels (large logs may take 1-3 min)")
     try:
-        if output.resolve() in (input.resolve(), labels.resolve()):
+        inputs = (input.resolve(), labels.resolve())
+        if thresholds is not None:
+            inputs += (thresholds.resolve(),)
+        if output.resolve() in inputs:
             raise ReplayError("output must differ from inputs")
         data = _read(input)
-        metrics = summarize(data, read_labels(labels))
+        label_map = read_labels(labels)
+        metrics = summarize(data, label_map)
+        if thresholds is not None:
+            progress("judge", "comparing threshold candidates (no settings are applied)")
+            metrics["calibration"] = compare_candidates(
+                data, label_map, read_candidates(thresholds)
+            )
         progress("judge", "writing replay metrics")
         _write_atomic(output, [json.dumps(metrics, indent=2, sort_keys=True, allow_nan=False) + "\n"], force)
     except ReplayError as exc:

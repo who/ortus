@@ -241,15 +241,13 @@ def join_events(events: Iterable[dict]) -> ReplayData:
                       sum(e["event"] == "outcome" and e["decision_id"] not in paired for e in unique.values()))
 
 
-def summarize(data: ReplayData, labels: dict) -> dict:
-    """Compute nearest-rank latency and explicit denominators, never inferred cost.
+def eligible_decisions(data: ReplayData) -> tuple[list[dict], int]:
+    """Decisions that may enter a denominator, plus how many were excluded.
 
-    Cost totals cover only records carrying measured cost, with separate counts
-    showing how much is unknown. Worker cost labels override outcome cost for
-    the same decision, avoiding double counting.
+    A shadow row counts only when its outcome was attributed to the worker's
+    actual issue. Summaries and offline calibration share this definition so a
+    candidate is never scored against a denominator the metrics never used.
     """
-    decisions = [d for d, _ in data.pairs]
-    latencies = sorted(d["latency_ms"] for d in decisions)
     eligible = []
     excluded = 0
     for decision, outcome in data.pairs:
@@ -259,9 +257,26 @@ def summarize(data: ReplayData, labels: dict) -> dict:
             excluded += 1
             continue
         eligible.append(decision)
+    return eligible, excluded
+
+
+def recorded_action(decision: dict) -> str:
+    """The action the log attributes to a decision: intended under shadow."""
+    return decision["intended_action"] if decision.get("mode") == "shadow" else decision["effective_action"]
+
+
+def summarize(data: ReplayData, labels: dict) -> dict:
+    """Compute nearest-rank latency and explicit denominators, never inferred cost.
+
+    Cost totals cover only records carrying measured cost, with separate counts
+    showing how much is unknown. Worker cost labels override outcome cost for
+    the same decision, avoiding double counting.
+    """
+    decisions = [d for d, _ in data.pairs]
+    latencies = sorted(d["latency_ms"] for d in decisions)
+    eligible, excluded = eligible_decisions(data)
     labeled = [d for d in eligible if d["decision_id"] in labels]
-    def action(d: dict) -> str:
-        return d["intended_action"] if d.get("mode") == "shadow" else d["effective_action"]
+    action = recorded_action
     positives = [d for d in labeled if labels[d["decision_id"]]["needs_human"]]
     negatives = [d for d in labeled if not labels[d["decision_id"]]["needs_human"]]
     def fraction(count: int, denominator: int) -> dict:
