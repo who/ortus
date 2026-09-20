@@ -89,6 +89,19 @@ def test_low_confidence_precedes_confident_human_and_risk_fields():
     assert result == GateDecision(GateAction.SKIP, None, GateReason.LOW_CONFIDENCE)
 
 
+@pytest.mark.parametrize("route", [JudgeRoute.GROK, JudgeRoute.OPENCODE])
+@pytest.mark.parametrize("mode", list(FailureMode))
+def test_unoffered_route_preserves_valid_escalation_but_rejects_bad_payload(route, mode):
+    config = replace(CONFIG, failure_mode=mode)
+    answers = replace(ANSWERS, route=route, needs_human=1)
+    assert decide(answers, config=config) == GateDecision(
+        GateAction.HUMAN, None, GateReason.NEEDS_HUMAN,
+    )
+    malformed = decide(replace(answers, action_risk=float("nan")), config=config)
+    assert malformed.reason == GateReason.INVALID_ANSWER
+    assert malformed.action == (GateAction.PROCEED if mode == FailureMode.OPEN else GateAction.HUMAN)
+
+
 @pytest.mark.parametrize("failure", list(JudgeFailure))
 @pytest.mark.parametrize("mode", list(FailureMode))
 def test_failure_modes_use_only_baseline(failure, mode):

@@ -75,7 +75,7 @@ def decide_pre_turn(
     answers = verdict.answers if verdict is not None else None
     failure = verdict.failure if verdict is not None else JudgeFailure.INVALID_ANSWER
     if failure is None and (
-        answers is None or not _valid_answers(answers) or answers.route not in offered
+        answers is None or not _valid_answers(answers)
     ):
         failure = JudgeFailure.INVALID_ANSWER
     if failure is not None:
@@ -99,6 +99,12 @@ def decide_pre_turn(
         return GateDecision(GateAction.HUMAN, None, GateReason.NEEDS_HUMAN)
     if answers.action_risk >= config.risk_threshold:
         return GateDecision(GateAction.HUMAN, None, GateReason.HIGH_RISK)
+    # Escalation does not launch the suggested worker. Only a routing decision
+    # needs an offered route; fail-open must not erase a valid human signal.
+    if answers.route not in offered:
+        if config.failure_mode == FailureMode.OPEN:
+            return GateDecision(GateAction.PROCEED, baseline_backend, GateReason.INVALID_ANSWER)
+        return GateDecision(GateAction.HUMAN, None, GateReason.INVALID_ANSWER)
     if answers.route == JudgeRoute.SKIP:
         return GateDecision(GateAction.SKIP, None, GateReason.ROUTED)
     return GateDecision(GateAction.PROCEED, answers.route, GateReason.ROUTED)
