@@ -236,11 +236,9 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
         make_inline_python_shim(tmp_path, "claude-close-hang", _CLOSE_THEN_HANG),
     )
 
-    # Headroom: the worker runs three bd calls (ready/update/close) against
-    # dolt before it starts hanging, so the timeout must comfortably exceed
-    # that latency — otherwise the watchdog kills it mid-close and the close
-    # never lands. 60s clears it; the worker still hangs (sleep 120) well
-    # past it.
+    # Leave time for three bd calls before the hang, and for setup and
+    # assertions inside the enclosing 60-second test deadline. The worker's
+    # 120-second sleep still requires the watchdog to kill it.
     result = runner.invoke(
         app,
         [
@@ -251,7 +249,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
             "--idle-sleep",
             "0",
             "--worker-timeout",
-            "60",
+            "30",
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -260,7 +258,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
         "a close that landed before the hang must survive the watchdog kill"
     )
     log = _grind_log(repo)
-    assert "worker TIMEOUT after 60s" in log
+    assert "worker TIMEOUT after 30s" in log
     assert f"worker closed {issue_id}" in log
 
 
