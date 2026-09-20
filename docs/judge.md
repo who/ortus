@@ -1,13 +1,13 @@
-# Pre-turn judge pilot
+# Judge rollout by seat
 
 The optional Jev gate chooses an available configured worker, `skip`, or `human` before
 grind launches a worker. It is disabled by default. Ordinary installations
 need neither the optional SDK nor a TypeSafe key. A key in the environment
 does not enable the gate.
 
-This pilot covers one product seat, named `ortus`. These instructions do not
-enable it automatically. Tool hooks, post-turn classification, shadow mode,
-multi-seat rollout and learned thresholds are outside this pilot.
+Start with one seat, then review its shadow observations before enforcing
+decisions. The two-seat recipe below keeps the second seat disabled. These
+instructions do not enable any production configuration automatically.
 
 ## Install and opt in
 
@@ -65,7 +65,8 @@ A numeric directory such as `01` needs an alias such as `ortus`.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `mode` | `enforce` | Apply the pre-turn decision |
+| `mode` | `enforce` | Apply decisions; `shadow` records intended actions |
+| `pre_tool`, `post_turn` | `false` | Independent tool-hook and advisory outcome phases |
 | `routes` | `claude`, `codex`, `skip`, `human` | Allowed choices, filtered by available workers |
 | `timeout_seconds` | `1.5` | One request deadline, SDK retries disabled |
 | `failure_mode` | `open` | Service failures use the original backend |
@@ -167,8 +168,10 @@ For an immediate kill-switch on the next invocation:
 ortus grind . --no-judge --tasks 1 --iterations 1
 ```
 
-This overrides an enabled config or environment setting. For lasting rollback,
-set `enabled = false` and remove `ORTUS_JUDGE_ENABLED` from the host environment.
+This overrides pre-turn enablement from config or environment. For lasting rollback,
+set the selected seat's `enabled = false` and remove `ORTUS_JUDGE_ENABLED` from
+the host environment. Also set `judge.pre_tool = false` and
+`judge.post_turn = false` if those independent phases were enabled.
 Neither command interrupts a worker already running. Disabling the gate does
 not remove existing human labels or change claim ownership.
 
@@ -259,3 +262,132 @@ The resolved criteria enter the provider questions. Request metadata and decisio
 threshold/text policy without recording the question text. Explicit backend,
 model and effort flags still pin the baseline. With `pre_tool = true`, only
 Claude can be offered and a non-Claude baseline fails startup.
+
+## Two-seat shadow rollout
+
+Use separate repository checkouts for separate seats. For example, directories
+`01` and `02` can have explicit aliases `atlas` and `birch`. Their names have no
+effect on scheduling. Each invocation loads its target repository's `.ortusrc`
+over the shared user configuration and writes its own `logs/jev-decisions.jsonl`.
+Aliases alone do not create separate log files inside one repository.
+
+The following complete judge example can be merged into each repository's
+configuration. Set `seat = "birch"` in the second repository. Retain existing
+backend settings and replace any existing judge tables instead of duplicating
+them. The example enables only atlas's pre-turn shadow observation.
+
+<!-- BEGIN two-seat rollout example -->
+```toml
+[judge]
+enabled = false
+seat = "atlas"
+model = "jev-1.13.0"
+mode = "shadow"
+failure_mode = "open"
+include_issue_text = false
+pre_tool = false
+post_turn = false
+
+[judge.packs.atlas_review]
+route_confidence = 0.9
+routes = ["claude", "codex", "skip", "human"]
+sensitive_paths = ["atlas-private/"]
+
+[judge.packs.atlas_review.question_criteria.needs_human]
+true = ["The atlas change requires an unapproved product decision."]
+false = ["The atlas issue fully specifies an authorized repository change."]
+
+[judge.packs.birch_review]
+route_confidence = 0.95
+routes = ["claude", "skip", "human"]
+sensitive_paths = ["birch-private/"]
+
+[judge.packs.birch_review.question_criteria.needs_human]
+true = ["The birch change requires an unavailable credential."]
+false = ["The birch issue can be completed with existing credentials."]
+
+[judge.seats.atlas]
+enabled = true
+pack = "atlas_review"
+
+[judge.seats.birch]
+enabled = false
+pack = "birch_review"
+```
+<!-- END two-seat rollout example -->
+
+Inspect both seats before running atlas:
+
+```bash
+ortus grind ./01 --judge-seat atlas --dry-run
+ortus grind ./02 --judge-seat birch --dry-run
+ortus grind ./01 --judge-seat atlas --tasks 1 --iterations 1
+```
+
+Expect atlas to report enabled with `mode=shadow`, and birch disabled. Shared
+user TOML cannot override the project seat's explicit false. Environment and
+CLI enable overrides still can, so keep `ORTUS_JUDGE_ENABLED` unset and do not
+pass `--judge` when checking the disabled seat. Supply the key only to the
+intended process through the host's secret manager. Ortus does not separate
+credentials by alias or remove secrets inherited by workers; use separate
+process environments when seats require different credentials.
+
+Shadow mode still runs the baseline worker and its normal checks. It records
+the intended decision without rerouting, skipping or escalating because of that
+decision. Review atlas's decision/outcome pairs, failure counts and operator
+corrections. Exclude outcomes with `accuracy_eligible = false` from accuracy
+claims, including observations that do not match the worker's actual issue.
+Use the latency and billing measurements described above before expanding the
+rollout. No replay or calibration CLI is required by this recipe.
+
+After review, change `judge.mode` to `"enforce"` in atlas's repository only and
+run the same bounded command. Leave birch false until it has its own reviewed
+shadow sample. Tune one pack at a time using observed false escalations and
+missed escalations. Raising a confidence minimum sends more uncertain answers
+to `low_confidence`; raising `human_threshold` or `risk_threshold` instead
+requires more human need or risk before escalation. Keep the model pin and
+criteria hash with each measurement so different policies are not pooled.
+
+For an immediate pre-turn rollback on the next invocation:
+
+```bash
+ortus grind ./01 --judge-seat atlas --no-judge --tasks 1 --iterations 1
+```
+
+For persistent rollback, set `judge.seats.atlas.enabled = false`, clear any
+environment enable override, and turn off the independent phases below.
+Existing human labels require the explicit review and label-removal steps
+above. Neither rollback discards work or interrupts a running worker.
+
+## Independent phases and troubleshooting
+
+`judge.pre_tool = true` installs a private, temporary Claude PreToolUse hook
+for the run. Only Claude supports it; Codex, Grok, OpenCode and Docker launches
+fail startup with this option. Disabled Claude hooks or unreadable hook context
+also fail before launch. Existing goal hooks remain active. A human signal
+stops the worker and preserves its claim and dirty work for operator review.
+The temporary settings contain no credential and are removed after the worker
+is reaped. This supplements the existing worker trust boundary; repository
+write access is not a tamper-proof boundary.
+
+`judge.post_turn = true` independently classifies observed worker outcomes.
+Closed bd state remains authoritative. A model's `done` cannot close an open
+issue; `plan_gap`, `auth` and `needs_human` can request human handling in enforce
+mode. Shadow mode records intended handling without changing tracker state.
+Neither phase replaces worker verification or the goal/Stop judge.
+
+Both toggles belong to the repository's base `[judge]` table, not a pack or seat
+override. They are independent of `enabled` and `--no-judge`. To keep a seat
+fully disabled, leave both false in its repository. Do not enable them in shared
+user configuration during a per-repository rollout. Optional semantic readiness
+and a learned calibration head remain deferred; readiness schema validation
+continues to be deterministic.
+
+If a seat resolves unexpectedly, inspect the alias selected by the CLI,
+`ORTUS_JUDGE_SEAT`, project TOML and user TOML in that order. A missing alias or
+pack is a startup configuration error even when another seat is disabled.
+`key_missing` affects an active evaluation according to its failure mode;
+an inactive pre-turn gate makes no provider request or decision-log entry.
+Repair credential injection in that process rather than copying keys into
+configuration. Inspect each repository's private log independently and keep
+the logs out of version control.
