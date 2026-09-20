@@ -111,7 +111,7 @@ def test_invalid_boolean_values(value):
 
 @pytest.mark.parametrize("key,value", [
     ("model", "jev-latest"), ("model", "jev-1.13.x"), ("model", "jev-1.13"),
-    ("model", ""), ("model", 123), ("mode", "shadow"),
+    ("model", ""), ("model", 123), ("mode", "observe"),
     ("failure_mode", "ignore"), ("low_confidence", "proceed"),
     ("seat", "123"), ("seat", ""), ("seat", "/tmp/repo"),
     ("timeout_seconds", 0), ("timeout_seconds", -1), ("timeout_seconds", "1.5"),
