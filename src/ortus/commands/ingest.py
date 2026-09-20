@@ -26,6 +26,7 @@ import typer
 from ortus.core import output
 from ortus.core.bd import BdClient, BdError
 from ortus.core.github_bead import assemble_issue
+from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.readiness import READINESS_SCHEMA_VERSION, validate_issue
 from ortus.core.repo import resolve_repo
 
@@ -254,6 +255,10 @@ def ingest(
     except BdError as exc:
         output.error(f"ingest: bd refused the create: {_bd_reason(exc)}")
         raise typer.Exit(code=1)
+
+    advice = evaluate_readiness(target, {**candidate, "id": issue_id})
+    if advice is not None:
+        output.progress("ingest", readiness_context(advice).strip())
 
     # The id is the verb's result: bare on stdout so `id=$(ortus ingest ...)`
     # captures it without parsing.
