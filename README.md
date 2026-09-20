@@ -314,6 +314,10 @@ is slow but correct, so size `--worker-timeout` for the model, not the task.
 
 ## Configuration
 
+The optional pre-turn Jev gate is disabled by default. See the
+[single-seat judge pilot](docs/judge.md) for configuration, privacy, failure
+policy and rollback instructions.
+
 Optional `<repo>/.ortusrc` (TOML) overrides `~/.ortusrc`:
 
 ```toml
