@@ -38,6 +38,33 @@ codegraph = "{{ codegraph }}"
 # `ortus grind --prototype` sets it for one run.
 # verification = "full"
 
+# Optional judge gate. Disabled until explicitly enabled. CLI --judge/--no-judge
+# overrides ORTUS_JUDGE_ENABLED, which overrides enabled below.
+# ORTUS_JUDGE_MODEL overrides model. Keep TYPESAFE_API_KEY in the environment,
+# never in this file. Service failures follow failure_mode; invalid config fails.
+# [judge]
+# enabled = false
+# model = "jev-1.13.0"
+# mode = "enforce"
+# failure_mode = "open" # open | closed
+# low_confidence = "human" # human | skip
+# seat = "default" # explicit alias; "ortus" is an example, never inferred
+# timeout_seconds = 1.5
+# route_confidence = 0.8
+# noul_confidence = 0.8
+# risk_confidence = 0.8
+# human_threshold = 0.8 # 0..1
+# risk_threshold = 1.5 # 0..2
+# routes = ["claude", "codex", "skip", "human"]
+# objective_cap = 1024 # characters
+# acceptance_cap = 1024
+# title_cap = 160
+# tool_cap = 512
+# total_bytes_cap = 8192 # serialized UTF-8 bytes
+# include_log_tail = false
+# sensitive_paths = []
+# include_issue_text = false # judge-private always suppresses issue text
+
 {% if backend in ["local", "opencode"] -%}
 # The operator-served model `ortus grind` drives through opencode, whose
 # provider entry lives in opencode.json; backend = "local" is opencode's older
