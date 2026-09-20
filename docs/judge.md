@@ -10,6 +10,17 @@ Start with one seat, then review its shadow observations before enforcing
 decisions. The two-seat recipe below keeps the second seat disabled. These
 instructions do not enable any production configuration automatically.
 
+The diamond policy, locked 2026-09-20, is what the rest of this document
+describes. System One answers with typed probability vectors — a route and its
+confidence, a human-need probability, a risk score and its confidence — and
+those vectors travel into System Two, the worker backend, as recorded context.
+The pre-turn hard escalate is scrapped: no confidence floor, human-need
+probability or risk score withholds a claim, and no offline review can put one
+back. What remains for review is soft: bands to log, flag or rewrite a prompt
+around. The pre-tool hook described at the end of this document is a separate
+phase over irreversible tool calls, and its floors are fixed literals there —
+they are not claim gates and calibration never touches them.
+
 ## Install and opt in
 
 Install the extra into the same environment that runs the CLI:
@@ -210,6 +221,90 @@ Use actual billing and an explicit price basis for cost comparisons. Do not
 infer savings from skips alone or turn missing usage into zero cost. Review the
 pilot evidence before changing thresholds or enabling any other seat.
 
+## Threshold calibration runbook
+
+Calibration answers one question offline: if a soft band had been in place,
+what would it have said about the decisions that already happened? It reads the
+private event log and the operator's labels, writes one metrics file, and stops
+there. No provider is called, no configuration is read for enforcement or
+written back, and no candidate changes what ran or what will run.
+
+Collect a pilot sample first, as described above, and label its decisions. A
+label names `expected_action` (`proceed`, `human` or `skip`), `needs_human` as
+a boolean, and optionally `worker_cost_usd` for that decision's worker turn.
+Labels are the operator's judgement about the work, not the gate's opinion
+about itself; read the issue and the outcome before writing one. Rows recorded
+with `include_issue_text = false` were judged on screened metadata alone, so
+they measure that thinner input and are weak evidence about anything else.
+
+Then write the candidates as explicit TOML tables, at most twenty of them:
+
+```toml
+[[candidate]]
+name = "unsure-route"
+action = "flag"
+route_confidence_min = 0.8
+
+[[candidate]]
+name = "risky-and-unsure"
+action = "rewrite"
+action_risk_max = 1.0
+risk_confidence_min = 0.8
+note = "candidate rewrite trigger for the pre-turn criteria"
+```
+
+Each table needs a `name`, an `action` and at least one bound. The action is
+`log`, `flag` or `rewrite` — a report, an item for review, or a prompt change.
+A bound reads exactly one recorded answer: `route_confidence_min`,
+`noul_confidence_min` and `risk_confidence_min` fire below their value, and
+`needs_human_max` and `action_risk_max` fire above it. The pre-diamond setting
+names `route_confidence`, `noul_confidence`, `risk_confidence`,
+`human_threshold` and `risk_threshold` still parse and are read as the
+equivalent soft bound, so an older candidate file stays usable without becoming
+a gate again. A table that names an enforcement outcome instead — `escalate`,
+`block`, `blocks_claims`, `enforce`, `effective_action`, `low_confidence`,
+`mode`, `deny`, `stop`, `gate` — is refused, and so is an `action` outside the
+three soft verbs. There is no hard escalate to calibrate.
+
+Run the comparison against the same events the metrics came from:
+
+```bash
+ortus judge replay logs/jev-decisions.jsonl --labels pilot-labels.json \
+  --thresholds candidates.toml --output pilot-metrics.json
+```
+
+The report appears under `calibration` beside the usual metrics. Each candidate
+carries its bounds and four counts, all over explicit denominators: `fired` over
+the labeled decisions that had answers, `caught_needs_human` and
+`missed_needs_human` over the decisions labeled as needing a human, and
+`over_caution` over those that did not. A service failure has no vector to band
+and is counted in `unanswered` rather than scored. `recorded_actions` repeats
+the action distribution read from the log, and it is identical whatever
+candidates are supplied — that is the evidence the comparison changed nothing.
+Every candidate reports `blocks_claims: false` and `action_changes: 0` because
+neither can be otherwise. `production_soft_settings` carries the current values
+with `enforced_pre_turn: false`, so a candidate is always read next to what
+production actually holds. An unlabeled sample is an error, not an empty
+report.
+
+Judge the result against the pilot bars: added gate latency below 500 ms p50
+and 1.5 s p95, and gate cost no more than a tenth of a measured coding turn
+where billing data exists. Where it does not exist, record that it is unknown;
+`measured_cost_usd` stays null rather than becoming zero. A candidate that
+catches more labeled human-need cases is not automatically better — read its
+`over_caution` count at the same time, since under this policy a firing band
+costs review attention, never a withheld claim.
+
+Applying anything is a separate, human decision: edit the repository's
+`[judge]` table yourself after review. Calibration ranks nothing, optimizes
+nothing and learns nothing. `tests/fixtures/jev/labeled_replay.jsonl` is a
+small synthetic sample that exercises these mechanics in the test suite; it
+establishes no latency, cost or accuracy claim about a real pilot.
+
+```bash
+uv run pytest tests/test_judge_calibration.py -n auto --test-timeout=60 -q
+```
+
 ## Named packs and seat selection
 
 A seat registry selects configuration for one invocation. It does not schedule
@@ -344,13 +439,14 @@ decision. Review atlas's decision/outcome pairs, failure counts and operator
 corrections. Exclude outcomes with `accuracy_eligible = false` from accuracy
 claims, including observations that do not match the worker's actual issue.
 Use the latency and billing measurements described above before expanding the
-rollout. No replay or calibration CLI is required by this recipe.
+rollout. This recipe requires no replay or calibration run; the runbook above
+is there when you want candidate bands measured rather than guessed.
 
 After review, change `judge.mode` to `"enforce"` in atlas's repository only and
 run the same bounded command. Leave birch false until it has its own reviewed
-shadow sample. The pre-turn gate has no escalation to tune: compare candidate
-thresholds against the recorded answers offline instead, and change routes or
-criteria one pack at a time. Keep the model pin and criteria hash with each
+shadow sample. The pre-turn gate has no escalation to tune: compare soft
+candidate bands against the recorded answers offline instead, and change routes
+or criteria one pack at a time. Keep the model pin and criteria hash with each
 measurement so different policies are not pooled.
 
 For an immediate pre-turn rollback on the next invocation:
@@ -382,7 +478,9 @@ which stay inert. The difference is deliberate: a misrouted claim costs one
 worker turn and is recorded for calibration, while a tool call can be
 irreversible, so an unsure answer stops it rather than spending the action to
 find out. A malformed answer, an unsupported tool and a local policy denial
-still stop the call whatever those answers say.
+still stop the call whatever those answers say. Offline calibration cannot move
+these four numbers: they are not settings, this phase is not the claim gate,
+and a candidate band is a report either way.
 The temporary settings contain no credential and are removed after the worker
 is reaped. This supplements the existing worker trust boundary; repository
 write access is not a tamper-proof boundary.
