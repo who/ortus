@@ -38,6 +38,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Opt-in gate only. The judge extra is absent from default installs, and
+# `ortus.core.judge_typesafe` imports it lazily so an unconfigured seat never
+# pays for it.
+judge = [
+    "typesafe-sdk==0.7.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",

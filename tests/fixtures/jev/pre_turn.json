@@ -1,0 +1,571 @@
+{
+  "valid": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "no_usage": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "partial_usage": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "unpinned_model": {
+    "model": "jev-latest",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "missing_answer": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      }
+    }
+  },
+  "extra_answer": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      },
+      "readiness": {
+        "type": "noul",
+        "noul": 0.5
+      }
+    }
+  },
+  "wrong_answer_type": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "noul",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "unexpected_route": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "opencode",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "route_not_offered": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "codex",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "string_confidence": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": "0.93",
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "infinite_confidence": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": Infinity,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "bool_as_noul": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": true
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "nan_score": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": NaN,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "score_out_of_range": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 2.5,
+        "confidence": 0.88,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  },
+  "negative_confidence": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.05,
+          "skip": 0.01,
+          "human": 0.01
+        }
+      },
+      "needs_human": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "action_risk": {
+        "type": "score",
+        "score": 0.2,
+        "confidence": -0.1,
+        "legend": {
+          "0": "routine",
+          "1": "elevated",
+          "2": "dangerous"
+        },
+        "probabilities": {
+          "0": 0.85,
+          "1": 0.13,
+          "2": 0.02
+        }
+      }
+    }
+  }
+}
