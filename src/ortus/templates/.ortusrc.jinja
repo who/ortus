@@ -64,6 +64,25 @@ codegraph = "{{ codegraph }}"
 # include_log_tail = false
 # sensitive_paths = []
 # include_issue_text = false # judge-private always suppresses issue text
+# pre_tool = false # independent Claude-only hooks; not disabled by --no-judge
+# post_turn = false # independent advisory outcomes; never closes an issue
+#
+# For a shadow rollout, set mode = "shadow" above and select seat = "atlas".
+# Explicit aliases are required for numeric directories; paths select no seat.
+# Keep both phase toggles false until separately reviewed. See docs/judge.md.
+# Packs cannot enable a seat. CLI/env enable overrides still win over seat false.
+# [judge.packs.atlas_review]
+# route_confidence = 0.9
+# sensitive_paths = ["atlas-private/"]
+# [judge.packs.birch_review]
+# route_confidence = 0.95
+# sensitive_paths = ["birch-private/"]
+# [judge.seats.atlas]
+# enabled = false
+# pack = "atlas_review"
+# [judge.seats.birch]
+# enabled = false
+# pack = "birch_review"
 
 {% if backend in ["local", "opencode"] -%}
 # The operator-served model `ortus grind` drives through opencode, whose
