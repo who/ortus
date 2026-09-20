@@ -57,6 +57,8 @@ class ClaudeRunner:
 
     claude_binary: str = "claude"
     extra_env: dict[str, str] = field(default_factory=dict)
+    hook_settings: Path | None = None
+    hook_session_id: str | None = None
 
     def build_argv(
         self,
@@ -74,6 +76,11 @@ class ClaudeRunner:
             # seen its own previous attempt.
             argv.extend(["--resume", resume])
         argv.extend(STANDARD_FLAGS)
+        if self.hook_settings is not None:
+            if resume or not self.hook_session_id:
+                raise ValueError("run-scoped hooks require a fresh bound session")
+            argv.extend(["--settings", str(self.hook_settings),
+                         "--session-id", self.hook_session_id])
         if profile is not None and profile.model is not None:
             argv.extend(["--model", profile.model])
         if profile is not None and profile.reasoning_effort is not None:

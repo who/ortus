@@ -3,8 +3,8 @@
 The parent supplies ORTUS_JUDGE_HOOK_CONTEXT, an absolute path to a private
 JSON file containing version=1, repo, issue_id, session_id, judge and optional
 allowed_roots. Its directory is the run's signal inbox. The parent must keep
-this snapshot outside worker-writable paths and arrange sandbox access. File
-modes detect accidental exposure, not a hostile process running as this user.
+this snapshot private and arrange sandbox access. This is supplementary
+enforcement inside the worker trust boundary, not tamper-proof isolation.
 No project config or hook-input field supplies trusted policy. Registration
 and consumption of human-*.json signals belong to the parent launcher.
 """
@@ -62,6 +62,7 @@ class HookContext:
     directory: Path
     config: JudgeConfig
     allowed_roots: tuple[Path, ...]
+    run_id: str = ""
 
 
 def _object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -116,7 +117,7 @@ def load_context(environ: Mapping[str, str]) -> HookContext:
         body = read_object(stream)
     if type(body.get("version")) is not int or body["version"] != 1:
         raise InvalidInput
-    if set(body) - {"version", "repo", "issue_id", "session_id", "judge", "allowed_roots"}:
+    if set(body) - {"version", "repo", "issue_id", "session_id", "judge", "allowed_roots", "run_id"}:
         raise InvalidInput
     repo = Path(_text(body, "repo"))
     if not repo.is_absolute() or not repo.is_dir() or repo.resolve() != repo:
@@ -132,8 +133,9 @@ def load_context(environ: Mapping[str, str]) -> HookContext:
     if not isinstance(body.get("judge"), dict):
         raise InvalidInput
     config = parse_judge_config(Config(values={"judge": body["judge"]}), environ={})
+    run_id = _text(body, "run_id") if "run_id" in body else ""
     return HookContext(repo, issue, _text(body, "session_id"), path.parent,
-                       config, tuple(Path(root).resolve() for root in roots))
+                       config, tuple(Path(root).resolve() for root in roots), run_id)
 
 
 def parse_input(body: dict, context: HookContext) -> ToolInput:
@@ -158,6 +160,8 @@ def write_human_signal(context: HookContext) -> None:
     record = {"version": 1, "call_id": call_id, "issue_id": context.issue_id,
               "session_hash": hashlib.sha256(context.session_id.encode()).hexdigest(),
               "reason": HookReason.NEEDS_HUMAN.value}
+    if context.run_id:
+        record["run_id"] = context.run_id
     temporary = context.directory / f".human-{call_id}.tmp"
     destination = context.directory / f"human-{call_id}.json"
     try:

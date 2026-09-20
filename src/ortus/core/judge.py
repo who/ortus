@@ -84,6 +84,7 @@ class JudgeConfig:
     include_log_tail: bool = False
     sensitive_paths: tuple[str, ...] = ()
     include_issue_text: bool = False
+    pre_tool: bool = False
 
     def allows_issue_text(self, labels: tuple[str, ...]) -> bool:
         """Private issues cannot opt into sending their text."""
@@ -199,7 +200,7 @@ def parse_judge_config(
     elif "ORTUS_JUDGE_ENABLED" in env:
         values["enabled"] = env["ORTUS_JUDGE_ENABLED"]
 
-    for key in ("enabled", "include_issue_text", "include_log_tail"):
+    for key in ("enabled", "pre_tool", "include_issue_text", "include_log_tail"):
         values[key] = _boolean(key, values[key])
     for key, enum in (
         ("failure_mode", FailureMode), ("low_confidence", LowConfidence),
