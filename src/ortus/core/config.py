@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
+from ortus.core.judge import parse_judge_config
 from ortus.core.local_backend import LOCAL_TABLE_BACKENDS, parse_local_table
 from ortus.core.profiles import (
     BACKEND_NAMES_PROSE,
@@ -284,4 +285,5 @@ def load_config(
     _validate_verification(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
+    parse_judge_config(cfg, environ={})
     return cfg
