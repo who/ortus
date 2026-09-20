@@ -25,7 +25,7 @@ from uuid import UUID, uuid4
 
 from ortus.core import output
 from ortus.core.judge import (
-    GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgePhase,
+    GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgeMode, JudgePhase,
 )
 from ortus.core.judge import JudgeRoute
 from ortus.core.judge_state import StateError, sanitize_field
@@ -140,24 +140,31 @@ def _usage(usage: JudgeUsage | None) -> dict:
     }
 
 
-def _decision_payload(
-    event: DecisionEvent, config: JudgeConfig, environ: Mapping[str, str] | None,
-) -> dict:
-    if not isinstance(event, DecisionEvent) or not isinstance(event.decision, GateDecision):
-        _invalid()
+def _clean_metadata(
+    value: str, config: JudgeConfig, environ: Mapping[str, str] | None = None,
+) -> str | None:
     env = os.environ if environ is None else environ
     secrets = tuple(v for k, v in env.items() if re.search(
         r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", k, re.I,
     ) and v)
 
+    try:
+        return sanitize_field(
+            value, cap=160, secret_values=secrets,
+            sensitive_paths=config.sensitive_paths,
+        ).value
+    except StateError:
+        raise JudgeLogError(LogFailure.INVALID_EVENT) from None
+
+
+def _decision_payload(
+    event: DecisionEvent, config: JudgeConfig, environ: Mapping[str, str] | None,
+) -> dict:
+    if not isinstance(event, DecisionEvent) or not isinstance(event.decision, GateDecision):
+        _invalid()
+
     def clean(value: str) -> str | None:
-        try:
-            return sanitize_field(
-                value, cap=160, secret_values=secrets,
-                sensitive_paths=config.sensitive_paths,
-            ).value
-        except StateError:
-            raise JudgeLogError(LogFailure.INVALID_EVENT) from None
+        return _clean_metadata(value, config, environ)
 
     payload = _common("decision", event.run_id, event.decision_id)
     if not isinstance(event.model, str) or not re.fullmatch(r"jev-\d+\.\d+\.\d+", event.model):
@@ -201,6 +208,13 @@ def _decision_payload(
         "failure": _enum(event.failure, JudgeFailure) if event.failure is not None else None,
         **_usage(event.usage),
     })
+    if config.mode == JudgeMode.SHADOW:
+        payload.update({
+            "mode": "shadow",
+            "observed_issue_id": clean(event.issue_id),
+            "intended_action": action,
+            "effective_action": "baseline",
+        })
     return payload
 
 
@@ -283,4 +297,32 @@ def write_outcome(repo: Path, config: JudgeConfig, event: OutcomeEvent) -> UUID 
     _append(repo, payload)
     output.progress("grind", f"judge outcome {payload['observed_status']} "
                     f"elapsed_worker_ms={payload['elapsed_worker_ms']:.0f}")
+    return event.decision_id
+
+
+def write_shadow_outcome(
+    repo: Path, config: JudgeConfig, event: OutcomeEvent,
+    *, observed_issue_id: str, actual_claimed_id: str | None,
+) -> UUID | None:
+    """Keep unpaired observations out of accuracy data, without inventing outcomes."""
+    if not config.enabled:
+        return None
+    if not isinstance(event, OutcomeEvent):
+        _invalid()
+    status = _enum(event.observed_status, OutcomeStatus)
+    matched = actual_claimed_id is not None and actual_claimed_id == observed_issue_id
+    payload = _common("outcome", event.run_id, event.decision_id)
+    payload.update({
+        "mode": "shadow",
+        "observed_issue_id": _clean_metadata(observed_issue_id, config),
+        "actual_claimed_id": (
+            _clean_metadata(actual_claimed_id, config) if actual_claimed_id is not None else None
+        ),
+        "attribution_mismatch": actual_claimed_id is not None and not matched,
+        "accuracy_eligible": matched and event.observed_status != OutcomeStatus.UNKNOWN,
+        "observed_status": status if matched else None,
+        "elapsed_worker_ms": _number(event.elapsed_worker_ms),
+        **_usage(event.usage),
+    })
+    _append(repo, payload)
     return event.decision_id

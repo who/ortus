@@ -52,6 +52,7 @@ class LowConfidence(str, Enum):
 
 class JudgeMode(str, Enum):
     ENFORCE = "enforce"
+    SHADOW = "shadow"
 
 
 class JudgePhase(str, Enum):

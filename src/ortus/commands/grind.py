@@ -116,18 +116,77 @@ from ortus.core.local_backend import (
     resolve_opencode_binary,
 )
 from ortus.core.repo import resolve_repo
-from ortus.core.judge import GateAction, JudgeConfig, parse_judge_config
+from ortus.core.judge import GateAction, JudgeConfig, JudgeMode, parse_judge_config
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
 from ortus.core.judge_log import (
     DecisionEvent, JudgeLogError, OutcomeEvent, OutcomeStatus, elapsed_ms,
-    write_decision, write_outcome,
+    write_decision, write_outcome, write_shadow_outcome,
 )
 from ortus.core.judge_policy import decide_pre_turn
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePreparationError, plan_routes, prepare_route,
 )
 from ortus.core.judge_state import StateError, pack_state
-from ortus.core.judge_typesafe import TypeSafeJudge, build_questions
+from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
+
+
+def _shadow_turn(
+    *, packet: dict, repo: Path, config: Config, judge_config: JudgeConfig,
+    baseline: str, overrides: RouteOverrides, run_id: UUID,
+) -> UUID | None:
+    """Observe the readiness head without preparing a runner or owning its claim."""
+    try:
+        plan = plan_routes(config, judge_config, baseline, overrides=overrides)
+        packing_config = replace(
+            judge_config, routes=tuple(dict.fromkeys((*judge_config.routes, plan.baseline))),
+        )
+        state = pack_state(
+            packet, packing_config, backends_available=plan.available_workers,
+        ).state
+        started = time.monotonic()
+        try:
+            verdict = TypeSafeJudge(judge_config).evaluate(state)
+        except Exception:
+            verdict = JudgeVerdict(failure=JudgeFailure.SERVICE_ERROR)
+        decision = decide_pre_turn(
+            judge_config, state, verdict, baseline_backend=plan.baseline,
+        )
+        criteria = json.dumps(build_questions(judge_config, state), sort_keys=True)
+        return write_decision(repo, judge_config, DecisionEvent(
+            run_id=run_id, seat=state.seat, issue_id=packet["id"], phase=state.phase,
+            answers=verdict.answers, decision=decision, model=judge_config.model,
+            criteria_version="pre-turn-v1",
+            criteria_hash=hashlib.sha256(criteria.encode()).hexdigest(),
+            latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
+        ))
+    except Exception:
+        # Observation failures cannot change baseline execution. Never print
+        # exception bodies, which may carry provider or issue text.
+        output.progress("grind", "judge shadow observation unavailable; continuing baseline")
+        return None
+
+
+def _shadow_outcome(
+    *, bd: BdClient, repo: Path, config: JudgeConfig, run_id: UUID,
+    decision_id: UUID, observed_id: str, before_claims: set[str],
+    before_closed: set[str], resumed_id: str | None, worker_ms: float,
+) -> None:
+    """Attribute only a single observable claim, including a resumed worker."""
+    try:
+        current = bd.in_progress_ids(exclude_labels=())
+        closed = bd.closed_ids()
+        candidates = (current - before_claims) | (closed - before_closed)
+        if resumed_id and resumed_id in current | closed:
+            candidates.add(resumed_id)
+        actual = next(iter(candidates)) if len(candidates) == 1 else None
+        status = OutcomeStatus.UNKNOWN
+        if actual == observed_id:
+            status = OutcomeStatus(bd.show(actual).get("status"))
+        write_shadow_outcome(repo, config, OutcomeEvent(
+            run_id, decision_id, status, worker_ms,
+        ), observed_issue_id=observed_id, actual_claimed_id=actual)
+    except Exception:
+        output.progress("grind", "judge shadow outcome unavailable; continuing baseline")
 
 
 @dataclass
@@ -1434,8 +1493,9 @@ def grind(
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
         judge_config = parse_judge_config(config, judge=judge)
+        enforce_judge = judge_config.enabled and judge_config.mode == JudgeMode.ENFORCE
         goal_template = ""
-        if judge_config.enabled:
+        if enforce_judge:
             goal_template = resolve_named_prompt("goal", repo=target).text
             validate_bound_goal(goal_template, condition)
             if resolved_backend not in ("claude", "codex"):
@@ -1532,7 +1592,8 @@ def grind(
     if dry_run:
         output.info(
             f"judge:          {'enabled' if judge_config.enabled else 'disabled'} "
-            f"model={judge_config.model} failure={judge_config.failure_mode.value} "
+            f"mode={judge_config.mode.value} model={judge_config.model} "
+            f"failure={judge_config.failure_mode.value} "
             f"seat={judge_config.seat} timeout={judge_config.timeout_seconds}s"
         )
         if judge_config.enabled:
@@ -1571,7 +1632,7 @@ def grind(
         )
         output.info(
             "select:         " + (
-                "judge-bound issue" if judge_config.enabled else
+                "judge-bound issue" if enforce_judge else
                 "worker (goal-prompt claim)" if harness_select else
                 "worker (legacy --condition)"
             )
@@ -1588,8 +1649,8 @@ def grind(
                     CodeGraphPhase.IMPLEMENTATION, codegraph_probe
                 ),
                 verification_text=verification_text,
-                bound_issue_id="<ISSUE_ID>" if judge_config.enabled else None,
-                goal_template=goal_template if judge_config.enabled else None,
+                bound_issue_id="<ISSUE_ID>" if enforce_judge else None,
+                goal_template=goal_template if enforce_judge else None,
             )
             conflict = _stale_completion_contract_diagnostic(dry_prompt, repo=target)
             if conflict:
@@ -1599,7 +1660,7 @@ def grind(
                 dry_prompt
                 + (
                     "\n(grind judges and binds one owned issue before worker launch.)"
-                    if judge_config.enabled else
+                    if enforce_judge else
                     "\n(the worker orients, continues leftover in_progress or "
                     "runs bd ready, and claims; grind only decides whether to spawn.)"
                 )
@@ -1710,7 +1771,7 @@ def grind(
             # Leftover work is the leftover in_progress claim in bd plus the
             # git tree. A leftover journal is never the resume key.
             leftover_claims = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
-            if judge_config.enabled and len(leftover_claims) > 1:
+            if enforce_judge and len(leftover_claims) > 1:
                 for claimed_id in sorted(leftover_claims):
                     bd.add_label(claimed_id, "human")
                     bd.add_comment(claimed_id, "PLAN-GAP: multiple leftover claims require human handling")
@@ -1926,6 +1987,7 @@ def grind(
 
             while True:
                 gate_turn = None
+                shadow_decision_id = None
                 # Milestone rollover: an epic whose children are all closed
                 # is finished work, not a claimable unit — close it here so
                 # the next milestone's subtree unblocks and this iteration
@@ -2034,7 +2096,7 @@ def grind(
                         unready.append(report)
                         title = str(candidate.get("title") or "").strip()
                         unready_titles[report.issue_id] = title
-                        if judge_config.enabled:
+                        if enforce_judge:
                             # A ready leaf later in this queue wins without
                             # changing unrelated unready packets this iteration.
                             return
@@ -2078,7 +2140,7 @@ def grind(
                     # does either. What remains is the no-ready-issue exit
                     # when nothing at all was claimable.
                     if target_issue is None:
-                        if judge_config.enabled:
+                        if enforce_judge:
                             _flag_unready_for_human(bd, unready, write_log)
                         # Queue is non-empty (not drained) but nothing is ready —
                         # everything left is blocked or human-flagged. We hold the
@@ -2137,7 +2199,13 @@ def grind(
                             f"iter prep: worker will claim {issue_id} via goal-prompt"
                         )
                     target_issue = bd.show(issue_id)
-                    if judge_config.enabled:
+                    if judge_config.enabled and judge_config.mode == JudgeMode.SHADOW:
+                        shadow_decision_id = _shadow_turn(
+                            packet=target_issue, repo=target, config=config,
+                            judge_config=judge_config, baseline=baseline_backend,
+                            overrides=route_overrides, run_id=gate_run_id,
+                        )
+                    if enforce_judge:
                         gate_turn, bundle = _gate_turn(
                             bd=bd, issue_id=issue_id, repo=target, config=config,
                             judge_config=judge_config, baseline=baseline_backend,
@@ -2253,7 +2321,6 @@ def grind(
                 # bd state is ground truth, so a worker that closed its issue
                 # then hung still counts, and a claimed-but-unclosed issue still
                 # gets the orphan-policy treatment.
-                implementation_timed_out = False
                 # Re-armed every iteration so resume-from-captured can skip a
                 # worker spawn; leftover in_progress still runs one.
                 implementation_worker_ran = True
@@ -2359,13 +2426,21 @@ def grind(
                         on_poll=_poll_impl_handshake,
                     )
                 except subprocess.TimeoutExpired:
-                    implementation_timed_out = True
                     rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
                     write_log(
                         f"iter {iters_run}: worker TIMEOUT after {worker_timeout}s, "
                         f"killed (rc={rc})"
                     )
                 finally:
+                    if shadow_decision_id is not None:
+                        _shadow_outcome(
+                            bd=bd, repo=target, config=judge_config, run_id=gate_run_id,
+                            decision_id=shadow_decision_id, observed_id=issue_id,
+                            before_claims=before.in_progress_ids,
+                            before_closed=before_closed_ids,
+                            resumed_id=issue_id if resuming else None,
+                            worker_ms=elapsed_ms(impl_started),
+                        )
                     if gate_turn and gate_turn.launched:
                         gate_turn.record_outcome(
                             bd, target, judge_config, gate_run_id, elapsed_ms(impl_started),
