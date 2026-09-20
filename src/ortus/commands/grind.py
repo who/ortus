@@ -118,6 +118,7 @@ from ortus.core.local_backend import (
 from ortus.core.repo import resolve_repo
 from ortus.core.judge import GateAction, JudgeConfig, JudgeMode, parse_judge_config
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
+from ortus.core.judge_hooks import HookRun, check_pre_tool
 from ortus.core.judge_log import (
     DecisionEvent, JudgeLogError, OutcomeEvent, OutcomeStatus, elapsed_ms,
     write_decision, write_outcome, write_shadow_outcome,
@@ -1494,8 +1495,11 @@ def grind(
         config = load_config(repo=target)
         judge_config = parse_judge_config(config, judge=judge)
         enforce_judge = judge_config.enabled and judge_config.mode == JudgeMode.ENFORCE
+        bind_worker = enforce_judge or judge_config.pre_tool
+        if judge_config.pre_tool:
+            check_pre_tool(target, resolved_backend, docker=docker)
         goal_template = ""
-        if enforce_judge:
+        if bind_worker:
             goal_template = resolve_named_prompt("goal", repo=target).text
             validate_bound_goal(goal_template, condition)
             if resolved_backend not in ("claude", "codex"):
@@ -1596,6 +1600,8 @@ def grind(
             f"failure={judge_config.failure_mode.value} "
             f"seat={judge_config.seat} timeout={judge_config.timeout_seconds}s"
         )
+        if judge_config.pre_tool:
+            output.info("judge pre_tool: enabled (Claude run-scoped hook)")
         if judge_config.enabled:
             output.info(
                 "judge routes:   " + ", ".join(route.value for route in judge_config.routes)
@@ -1632,7 +1638,7 @@ def grind(
         )
         output.info(
             "select:         " + (
-                "judge-bound issue" if enforce_judge else
+                "judge-bound issue" if bind_worker else
                 "worker (goal-prompt claim)" if harness_select else
                 "worker (legacy --condition)"
             )
@@ -1649,8 +1655,8 @@ def grind(
                     CodeGraphPhase.IMPLEMENTATION, codegraph_probe
                 ),
                 verification_text=verification_text,
-                bound_issue_id="<ISSUE_ID>" if enforce_judge else None,
-                goal_template=goal_template if enforce_judge else None,
+                bound_issue_id="<ISSUE_ID>" if bind_worker else None,
+                goal_template=goal_template if bind_worker else None,
             )
             conflict = _stale_completion_contract_diagnostic(dry_prompt, repo=target)
             if conflict:
@@ -1661,6 +1667,8 @@ def grind(
                 + (
                     "\n(grind judges and binds one owned issue before worker launch.)"
                     if enforce_judge else
+                    "\n(grind binds one owned issue before installing tool hooks.)"
+                    if judge_config.pre_tool else
                     "\n(the worker orients, continues leftover in_progress or "
                     "runs bd ready, and claims; grind only decides whether to spawn.)"
                 )
@@ -1771,7 +1779,7 @@ def grind(
             # Leftover work is the leftover in_progress claim in bd plus the
             # git tree. A leftover journal is never the resume key.
             leftover_claims = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
-            if enforce_judge and len(leftover_claims) > 1:
+            if bind_worker and len(leftover_claims) > 1:
                 for claimed_id in sorted(leftover_claims):
                     bd.add_label(claimed_id, "human")
                     bd.add_comment(claimed_id, "PLAN-GAP: multiple leftover claims require human handling")
@@ -2223,6 +2231,15 @@ def grind(
                         verify_profile = bundle.verify_profile
                         finalize_profile = bundle.finalize_profile
                         codegraph_probe = bundle.codegraph_probe
+                    elif judge_config.pre_tool:
+                        gate_turn = _GateTurn(prepare_bound_issue(
+                            bd, issue_id, goal_template=goal_template,
+                        ))
+                        gate_cleanup.callback(gate_turn.cleanup, bd)
+                        target_issue = gate_turn.bound.issue
+                        runner.extra_env = gate_turn.bound.worker_env(runner.extra_env)
+                    if judge_config.pre_tool:
+                        check_pre_tool(target, resolved_backend, docker=docker)
                     # f2he.4: work on the primary checkout (main). Do not cut
                     # ortus/<id> or clone logs/grind-workspaces/<id>.
                     if git.has_commits():
@@ -2352,7 +2369,12 @@ def grind(
                             log, CodeGraphPhase.IMPLEMENTATION, success=True
                         )
 
+                hook_run = None
                 try:
+                    if judge_config.pre_tool:
+                        hook_run = HookRun(
+                            target, issue_id, judge_config, str(gate_run_id), runner,
+                        )
                     if implementation_probe.available:
                         write_log("implementation CodeGraph handshake requested")
                     else:
@@ -2392,6 +2414,8 @@ def grind(
                             human_open_at_start = None
 
                         def _reap_worker() -> bool:
+                            if hook_run is not None and hook_run.poll():
+                                return True
                             reason = _reap_reason(
                                 bd,
                                 git,
@@ -2432,6 +2456,12 @@ def grind(
                         f"killed (rc={rc})"
                     )
                 finally:
+                    if hook_run is not None:
+                        try:
+                            hook_run.poll()
+                            hook_run.escalate(bd)
+                        finally:
+                            hook_run.close()
                     if shadow_decision_id is not None:
                         _shadow_outcome(
                             bd=bd, repo=target, config=judge_config, run_id=gate_run_id,
@@ -2445,6 +2475,10 @@ def grind(
                         gate_turn.record_outcome(
                             bd, target, judge_config, gate_run_id, elapsed_ms(impl_started),
                         )
+                if hook_run is not None and hook_run.requested:
+                    write_log(f"iter {iters_run}: judge pre_tool human; worker reaped")
+                    output.progress("grind", f"judge requires human handling for {issue_id}: needs_human")
+                    break
                 if (
                     reap_reasons
                     and gate_turn is None

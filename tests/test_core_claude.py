@@ -79,6 +79,19 @@ def test_unset_profile_preserves_old_argv() -> None:
     assert unset == plain
 
 
+def test_private_hook_settings_bind_a_fresh_session(tmp_path: Path) -> None:
+    runner = ClaudeRunner(hook_settings=tmp_path / "settings.json",
+                          hook_session_id="f5575bfc-cc25-4274-b1a3-7a4b450c8725")
+    argv = runner.build_argv("/goal work")
+    assert argv[argv.index("--settings") + 1] == str(tmp_path / "settings.json")
+    assert argv[argv.index("--session-id") + 1] == runner.hook_session_id
+    with pytest.raises(ValueError, match="fresh bound session"):
+        runner.build_argv("work", resume="previous")
+    runner.hook_session_id = None
+    with pytest.raises(ValueError, match="fresh bound session"):
+        runner.build_argv("work")
+
+
 def test_readonly_argv_denies_provider_write_tools() -> None:
     argv = ClaudeRunner().build_argv("verify", readonly=True)
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
