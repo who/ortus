@@ -26,10 +26,14 @@ from ortus.core.codegraph import (
 )
 from ortus.core.config import Config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
-from ortus.core.judge import JudgeConfig, JudgeRoute
+from ortus.core.judge import WORKER_ROUTES, JudgeConfig, JudgeRoute
+from ortus.core.local_backend import (
+    LocalServerError, OpenCodeBinaryError, load_local_config,
+    probe_models, resolve_opencode_binary,
+)
 from ortus.core.profiles import AgentProfile, Phase, ProfileError
 
-_WORKERS = (JudgeRoute.CLAUDE, JudgeRoute.CODEX)
+_WORKERS = WORKER_ROUTES
 
 
 class RoutePreparationError(BackendError):
@@ -62,6 +66,10 @@ class RoutePlan:
     available_workers: tuple[JudgeRoute, ...]
     offered_routes: tuple[JudgeRoute, ...]
     overrides: RouteOverrides
+    baseline_backend: str = ""
+
+    def execution_backend(self, route: JudgeRoute) -> str:
+        return self.baseline_backend if route == self.baseline and self.baseline_backend else route.value
 
 
 def _profiles(
@@ -100,26 +108,34 @@ def plan_routes(
     offered route. Optional candidates with missing binaries or invalid profiles
     are excluded. The baseline itself must always be runnable.
     """
-    if baseline_backend not in _WORKERS:
+    canonical = "opencode" if baseline_backend == "local" else baseline_backend
+    if canonical not in _WORKERS:
         raise RoutePreparationError(
-            "judge routing supports only claude and codex baselines"
+            "judge baseline is not a supported worker backend"
         )
-    baseline = JudgeRoute(baseline_backend)
+    baseline = JudgeRoute(canonical)
     environment = os.environ if environ is None else environ
     pinned = overrides.pinned(environment)
+    if judge.pre_tool and baseline != JudgeRoute.CLAUDE:
+        raise RoutePreparationError("judge.pre_tool supports only Claude")
     available: list[JudgeRoute] = []
     for backend in _WORKERS:
+        if judge.pre_tool and backend != JudgeRoute.CLAUDE:
+            continue
         if backend != baseline and (pinned or backend not in judge.routes):
             continue
         try:
-            if shutil.which(backend.value, path=environment.get("PATH")) is None:
+            if backend == JudgeRoute.OPENCODE:
+                load_local_config(config)
+                resolve_opencode_binary()
+            elif shutil.which(backend.value, path=environment.get("PATH")) is None:
                 raise ProfileError(f"{backend.value} executable is not on PATH")
             _profiles(
                 config,
-                backend.value,
+                baseline_backend if backend == baseline else backend.value,
                 overrides if backend == baseline else RouteOverrides(),
             )
-        except ProfileError as exc:
+        except (ProfileError, OpenCodeBinaryError) as exc:
             if backend == baseline:
                 raise RoutePreparationError(str(exc)) from exc
             continue
@@ -131,7 +147,7 @@ def plan_routes(
         raise RoutePreparationError(
             "judge requires at least one available configured worker route"
         )
-    return RoutePlan(baseline, tuple(available), offered, overrides)
+    return RoutePlan(baseline, tuple(available), offered, overrides, baseline_backend)
 
 
 @dataclass(frozen=True)
@@ -142,6 +158,7 @@ class ExecutionBundle:
     verify_profile: AgentProfile
     finalize_profile: AgentProfile
     codegraph_probe: CodeGraphProbe
+    execution_backend: str = ""
 
     @property
     def phase_contract_text(self) -> str:
@@ -151,7 +168,7 @@ class ExecutionBundle:
     def compose_prompt(self, task: str) -> str:
         """Wrap a logical task exactly once for this backend's execution surface."""
         return compose_worker_prompt(
-            cast(Backend, self.backend.value),
+            cast(Backend, self.execution_backend or self.backend.value),
             task + self.phase_contract_text,
         )
 
@@ -174,38 +191,44 @@ def prepare_route(
     if backend not in plan.available_workers:
         raise RoutePreparationError(f"worker route {backend!r} is unavailable")
     backend = JudgeRoute(backend)
+    execution_backend = plan.execution_backend(backend)
     try:
         env = dict(extra_env or {})
-        binary = shutil.which(
-            backend.value, path=env.get("PATH", os.environ.get("PATH"))
-        )
+        if backend == JudgeRoute.OPENCODE:
+            binary = str(resolve_opencode_binary())
+            probe_models(load_local_config(config))
+        else:
+            binary = shutil.which(
+                backend.value, path=env.get("PATH", os.environ.get("PATH"))
+            )
         if binary is None:
             raise RoutePreparationError(
                 f"{backend.value} executable is no longer on PATH"
             )
         profiles = _profiles(
             config,
-            backend.value,
+            execution_backend,
             plan.overrides if backend == plan.baseline else RouteOverrides(),
         )
         if backend == JudgeRoute.CLAUDE:
             check_hooks_enabled(repo)
         probe = (adapter or CodeGraphAdapter()).probe(
-            repo, codegraph_mode, backend=backend.value
+            repo, codegraph_mode, backend=execution_backend
         )
         if codegraph_mode == CodeGraphMode.REQUIRED and not probe.available:
             raise CodeGraphUnavailable(
                 probe.reason or "required CodeGraph is unavailable"
             )
-        runner = make_runner(cast(Backend, backend.value), repo=repo)
+        runner = make_runner(cast(Backend, execution_backend), repo=repo)
         runner.claude_binary = binary
         configure = getattr(runner, "configure_codegraph", None)
         if callable(configure):
             configure(probe.capability)
         runner.extra_env.update(env)
         runner.extra_env.setdefault("BEADS_DIR", str((repo / ".beads").resolve()))
-        return ExecutionBundle(backend, runner, *profiles, probe)
-    except (BackendError, ProfileError, HookConflictError, CodeGraphUnavailable) as exc:
+        return ExecutionBundle(backend, runner, *profiles, probe, execution_backend)
+    except (BackendError, ProfileError, HookConflictError, CodeGraphUnavailable,
+            LocalServerError, OpenCodeBinaryError) as exc:
         raise RoutePreparationError(
             f"cannot prepare {backend.value} route: {exc}"
         ) from exc

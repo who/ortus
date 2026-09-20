@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from ortus.core.judge import (
+    WORKER_ROUTES,
     FailureMode,
     GateAction,
     GateDecision,
@@ -17,7 +18,7 @@ from ortus.core.judge import (
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, route_options
 from ortus.core.profiles import ProfileError
 
-_WORKERS = frozenset((JudgeRoute.CLAUDE, JudgeRoute.CODEX))
+_WORKERS = frozenset(WORKER_ROUTES)
 
 
 def _valid_answers(answers: JudgeAnswers) -> bool:

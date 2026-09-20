@@ -1,6 +1,6 @@
 # Pre-turn judge pilot
 
-The optional Jev gate chooses `claude`, `codex`, `skip`, or `human` before
+The optional Jev gate chooses an available configured worker, `skip`, or `human` before
 grind launches a worker. It is disabled by default. Ordinary installations
 need neither the optional SDK nor a TypeSafe key. A key in the environment
 does not enable the gate.
@@ -95,8 +95,11 @@ or high human-need probabilities pause work, as do confident high-risk scores.
 A confident skip stops this invocation and leaves the issue available for a
 later run. A proceed decision launches a worker bound to the selected id.
 
-Only Claude and Codex baselines support the enabled gate. Optional workers
-without binaries or valid profiles are excluded. Explicit backend/model/effort
+Claude, Codex, Grok and OpenCode baselines support the enabled gate.
+Optional workers without binaries or valid profiles are excluded. OpenCode
+also requires the existing `[local]` configuration and server preflight.
+The `local` backend uses `opencode` in judge requests while retaining its
+original backend and profile settings for execution. Explicit backend/model/effort
 overrides pin routing to the baseline. Every available route is prepared before
 claiming work; a preparation failure requires human handling. Claim ownership,
 logging and configuration errors are not service outages and do not fail open.
@@ -197,3 +200,62 @@ unknown. `measured_cost_usd` is null because no pricing measurement is available
 Use actual billing and an explicit price basis for cost comparisons. Do not
 infer savings from skips alone or turn missing usage into zero cost. Review the
 pilot evidence before changing thresholds or enabling any other seat.
+
+## Named packs and seat selection
+
+A seat registry selects configuration for one invocation. It does not schedule
+workers or discover directories. Select an alias with `--judge-seat`, then
+`ORTUS_JUDGE_SEAT`, then `judge.seat`, with `default` as the fallback. Aliases
+contain at most 64 characters. Once `[judge.seats]` exists, the selected alias
+must be defined, including `default` if no other alias is selected. Legacy
+single-seat configuration without a registry still works. Numeric directories
+need an explicit named alias.
+
+Merge these tables into the configuration, setting `judge.seat = "product"`
+in the existing `[judge]` table:
+
+```toml
+[judge.packs.reviewed]
+route_confidence = 0.9
+routes = ["claude", "codex", "grok", "opencode", "human", "skip"]
+include_issue_text = false
+sensitive_paths = ["private/"]
+
+[judge.packs.reviewed.question_criteria.route.grok]
+what = "Implementation using the configured Grok tools."
+not_for = "Work requiring tools absent from this seat."
+examples = ["Apply the bounded change described by the issue."]
+
+[judge.seats.product]
+enabled = false
+pack = "reviewed"
+route_confidence = 0.95
+
+[judge.seats.research]
+enabled = false
+```
+
+Resolution applies defaults, layered judge settings, the selected pack, the
+selected seat, and finally existing environment and CLI overrides. A pack
+cannot enable a seat. Each seat can set `enabled`, `pack`, and the same safe
+overrides as a pack. `--no-judge` still wins over seat enablement.
+
+Packs can set confidence thresholds, human/risk thresholds, routes,
+`include_issue_text`, `sensitive_paths`, and `question_criteria`. They cannot
+change endpoints, models, hooks, execution commands or hard tool guards.
+All definitions are validated at load time, including unused packs and seats.
+Unknown fields, missing references, invalid aliases, duplicate or empty routes,
+and nonfinite thresholds stop startup.
+
+`question_criteria.route.<route>` takes `what`, `not_for`, and an `examples`
+array. `question_criteria.needs_human` takes `true` and `false` arrays.
+`question_criteria.action_risk` takes three tables with `level` and `what`,
+ordered `routine`, `elevated`, `dangerous`. These are literal reviewed text;
+Ortus never evaluates them as code or opens referenced files. Omitted criteria
+retain their defaults. Keep credentials out of criteria text.
+
+The resolved criteria enter the provider questions. Request metadata and decision events record
+`pre-turn-v2` and a canonical SHA-256 hash of the offered questions and resolved
+threshold/text policy without recording the question text. Explicit backend,
+model and effort flags still pin the baseline. With `pre_tool = true`, only
+Claude can be offered and a non-Claude baseline fails startup.

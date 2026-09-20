@@ -25,6 +25,7 @@ from uuid import UUID, uuid4
 
 from ortus.core import output
 from ortus.core.judge import (
+    WORKER_ROUTES,
     GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgeMode, JudgePhase,
 )
 from ortus.core.judge import JudgeRoute
@@ -189,7 +190,7 @@ def _decision_payload(
     action = _enum(event.decision.action, GateAction)
     backend = event.decision.backend
     if (action == "proceed") != (backend is not None) or (
-        backend is not None and backend not in (JudgeRoute.CLAUDE, JudgeRoute.CODEX)
+        backend is not None and backend not in WORKER_ROUTES
     ):
         _invalid()
     payload.update({

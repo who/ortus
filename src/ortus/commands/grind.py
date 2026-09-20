@@ -35,7 +35,6 @@ New behavior:
 from __future__ import annotations
 
 import datetime as _dt
-import hashlib
 import json
 import subprocess
 import time
@@ -124,6 +123,7 @@ from ortus.core.judge_log import (
     write_decision, write_outcome, write_shadow_outcome,
 )
 from ortus.core.judge_policy import decide_pre_turn
+from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
 from ortus.core.judge_post import WorkerOutcome, apply_outcome, evaluate_outcome
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePreparationError, plan_routes, prepare_route,
@@ -153,12 +153,12 @@ def _shadow_turn(
         decision = decide_pre_turn(
             judge_config, state, verdict, baseline_backend=plan.baseline,
         )
-        criteria = json.dumps(build_questions(judge_config, state), sort_keys=True)
+        criteria = build_questions(judge_config, state)
         return write_decision(repo, judge_config, DecisionEvent(
             run_id=run_id, seat=state.seat, issue_id=packet["id"], phase=state.phase,
             answers=verdict.answers, decision=decision, model=judge_config.model,
-            criteria_version="pre-turn-v1",
-            criteria_hash=hashlib.sha256(criteria.encode()).hexdigest(),
+            criteria_version=CRITERIA_VERSION,
+            criteria_hash=criteria_hash(judge_config, criteria),
             latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
         ))
     except Exception:
@@ -288,12 +288,12 @@ def _gate_turn(
     decision = decide_pre_turn(
         judge_config, state, verdict, baseline_backend=plan.baseline,
     )
-    criteria = json.dumps(build_questions(judge_config, state), sort_keys=True)
+    criteria = build_questions(judge_config, state)
     turn.decision_id = write_decision(repo, judge_config, DecisionEvent(
         run_id=run_id, seat=state.seat, issue_id=state.issue_id, phase=state.phase,
         answers=verdict.answers, decision=decision, model=judge_config.model,
-        criteria_version="pre-turn-v1",
-        criteria_hash=hashlib.sha256(criteria.encode()).hexdigest(),
+        criteria_version=CRITERIA_VERSION,
+        criteria_hash=criteria_hash(judge_config, criteria),
         latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
     ))
     turn.current_issue(bd)
@@ -1464,6 +1464,9 @@ def grind(
     judge: Optional[bool] = typer.Option(
         None, "--judge/--no-judge", help="Enable or disable the pre-turn judge gate."
     ),
+    judge_seat: Optional[str] = typer.Option(
+        None, "--judge-seat", help="Select an explicit configured judge seat alias."
+    ),
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
@@ -1494,7 +1497,7 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
-        judge_config = parse_judge_config(config, judge=judge)
+        judge_config = parse_judge_config(config, judge=judge, judge_seat=judge_seat)
         enforce_judge = judge_config.enabled and judge_config.mode == JudgeMode.ENFORCE
         bind_worker = enforce_judge or judge_config.pre_tool
         if judge_config.pre_tool:
@@ -1503,8 +1506,6 @@ def grind(
         if bind_worker:
             goal_template = resolve_named_prompt("goal", repo=target).text
             validate_bound_goal(goal_template, condition)
-            if resolved_backend not in ("claude", "codex"):
-                raise BackendError("judge routing supports only claude and codex baselines")
         # Only the operator-served backends have a server to reach. The
         # table's rules run here so a missing [local] fails with one message
         # whether the backend came from the flag, the environment, or .ortusrc.
@@ -2229,7 +2230,7 @@ def grind(
                             break
                         target_issue = gate_turn.bound.issue
                         runner = bundle.runner
-                        resolved_backend = bundle.backend.value
+                        resolved_backend = bundle.execution_backend or bundle.backend.value
                         implement_profile = bundle.implement_profile
                         verify_profile = bundle.verify_profile
                         finalize_profile = bundle.finalize_profile
