@@ -23,7 +23,19 @@ def inspected(repo, name, **arguments):
     "rm -rf /", "rm -fr /", "rm -Rf -- /", "rm --recursive --force /",
     "rm -r /tmp/..", "rm -rf //", "rm -r '/'",
 ])
-def test_recursive_root_deletion_never_contacts_provider(repo, command):
+@pytest.mark.parametrize("macos_tmp", [False, True])
+def test_recursive_root_deletion_never_contacts_provider(repo, command, macos_tmp, monkeypatch):
+    if macos_tmp:
+        path_type = type(repo)
+        original_resolve = path_type.resolve
+
+        def resolve(path, *args, **kwargs):
+            if path == path_type("/tmp/.."):
+                return path_type("/private")
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(path_type, "resolve", resolve)
+
     def forbidden(config):
         pytest.fail("hard guards must precede client construction")
     for mode in JudgeMode:
@@ -42,9 +54,21 @@ def test_recursive_root_deletion_never_contacts_provider(repo, command):
     ("Grep", {"path": "../", "pattern": "x"}),
     ("Bash", {"command": "cat ../outside"}),
     ("Bash", {"command": "cp source ../outside"}),
+    ("Bash", {"command": "rm -r ../outside"}),
+    ("Bash", {"command": "rm -r /private"}),
+    ("Bash", {"command": "rm /tmp/.."}),
 ])
 def test_path_escapes_are_denied(repo, name, args):
-    assert inspect_tool(ToolInput(name, args), repo).decision.action == ToolAction.DENY
+    decision = inspect_tool(ToolInput(name, args), repo).decision
+    assert decision.action == ToolAction.DENY
+    assert decision.reason == "path_escape"
+
+
+def test_symlink_to_root_is_recursive_root_deletion(repo):
+    (repo / "root-alias").symlink_to("/", target_is_directory=True)
+    decision = inspected(repo, "Bash", command="rm -r root-alias").decision
+    assert decision.action == ToolAction.DENY
+    assert decision.reason == "recursive_root_deletion"
 
 
 def test_symlink_escape_and_secret_alias(repo, tmp_path):

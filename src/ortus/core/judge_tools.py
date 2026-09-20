@@ -166,8 +166,13 @@ def inspect_tool(
                 return _stop(human, "unknown_target")
             for operand in operands:
                 try:
-                    if recursive and (root / operand).resolve() == Path("/"):
-                        return _stop(deny, "recursive_root_deletion")
+                    if recursive:
+                        target = root / operand
+                        resolved = target.resolve()
+                        # Deny lexical roots too: on macOS /tmp/.. resolves
+                        # through the /tmp symlink to /private instead of /.
+                        if resolved == Path("/") or Path(os.path.normpath(target)) == Path("/"):
+                            return _stop(deny, "recursive_root_deletion")
                 except (OSError, RuntimeError, ValueError):
                     return _stop(human, "unresolved_path")
                 targets.append((operand, executable in {"cat", "head", "tail", "cp", "mv"}))
