@@ -152,8 +152,8 @@ def test_total_budget_counts_unicode_and_json_escaping(packet):
 
 def test_many_labels_cannot_escape_total_budget(packet):
     packet["labels"] = [f"label-{i}" for i in range(2000)]
-    result = pack(packet, config=JudgeConfig(total_bytes_cap=300))
-    assert len(result.to_json().encode("utf-8")) <= 300
+    result = pack(packet, config=JudgeConfig(total_bytes_cap=400))
+    assert len(result.to_json().encode("utf-8")) <= 400
     assert result.state.labels == ()
 
 

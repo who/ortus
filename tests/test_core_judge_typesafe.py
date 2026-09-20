@@ -108,7 +108,12 @@ def test_state_is_the_packed_transport_shape():
     client = FakeClient(CASES["valid"])
     judge(client).evaluate(STATE)
 
-    assert client.calls[0]["state"] == PackedState(STATE, ()).to_payload()
+    from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
+
+    expected = PackedState(STATE, ()).to_payload()
+    expected.update(criteria_version=CRITERIA_VERSION,
+                    criteria_hash=criteria_hash(JudgeConfig(), build_questions(JudgeConfig(), STATE)))
+    assert client.calls[0]["state"] == expected
     assert "ortus-1234" in json.dumps(client.calls[0]["state"])
 
 

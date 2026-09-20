@@ -18,11 +18,13 @@ a programming error and raises.
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import asyncio
 import math
 import os
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Mapping
 
@@ -80,6 +82,16 @@ _ROUTE_CRITERIA: dict[JudgeRoute, dict[str, Any]] = {
         "what": "A Codex write session on a seat that already has Codex configured.",
         "not_for": "Seats where no Codex backend is available this cycle.",
         "examples": ["apply a bounded patch the issue fully specifies"],
+    },
+    JudgeRoute.GROK: {
+        "what": "Implementation using the configured Grok worker.",
+        "not_for": "Seats without a prepared Grok backend.",
+        "examples": ["implement the issue using Grok tools"],
+    },
+    JudgeRoute.OPENCODE: {
+        "what": "Implementation using the configured operator-served model.",
+        "not_for": "Seats without a reachable configured model and OpenCode tools.",
+        "examples": ["apply the specified change using the local model"],
     },
     JudgeRoute.SKIP: {
         "what": "No worker turn is needed on this issue this cycle.",
@@ -147,24 +159,27 @@ def build_questions(config: JudgeConfig, state: JudgeState) -> dict[str, dict[st
     here without the optional extra installed, and asking all three in one
     request keeps the added latency to a single round trip.
     """
+    criteria = config.question_criteria
     return {
         ROUTE: {
             "type": "choice",
             "instructions": "Which path should handle the next turn on this issue?",
             "criteria": {
-                route.value: dict(_ROUTE_CRITERIA[route])
+                route.value: deepcopy(criteria.get(ROUTE, {}).get(route.value, _ROUTE_CRITERIA[route]))
                 for route in route_options(config, state)
             },
         },
         NEEDS_HUMAN: {
             "type": "noul",
             "instructions": "Does this step need the operator before a worker runs?",
-            "criteria": {"true": list(_NEEDS_HUMAN_TRUE), "false": list(_NEEDS_HUMAN_FALSE)},
+            "criteria": deepcopy(criteria.get(NEEDS_HUMAN, {
+                "true": list(_NEEDS_HUMAN_TRUE), "false": list(_NEEDS_HUMAN_FALSE),
+            })),
         },
         ACTION_RISK: {
             "type": "score",
             "instructions": "How risky is the action this issue asks for next?",
-            "criteria": [dict(level) for level in _RISK_LEVELS],
+            "criteria": deepcopy(criteria.get(ACTION_RISK, list(_RISK_LEVELS))),
         },
     }
 
@@ -215,7 +230,7 @@ class TypeSafeJudge:
             try:
                 response = await asyncio.wait_for(
                     client.system_one(
-                        _transport_state(state),
+                        _transport_state(state, self.config),
                         questions,
                         model=self.config.model,
                         timeout=self.config.timeout_seconds,
@@ -237,9 +252,16 @@ class _Invalid(Exception):
     """Internal control flow; it carries no provider value, only the fact."""
 
 
-def _transport_state(state: JudgeState) -> dict[str, object]:
+def _transport_state(state: JudgeState, config: JudgeConfig | None = None) -> dict[str, object]:
     # The packed transport shape belongs to judge_state, which already dropped
     # sensitive fields and fit the byte budget. Do not invent a second one.
+    if config is not None:
+        from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
+
+        state = replace(state, criteria_version=CRITERIA_VERSION,
+                        criteria_hash=criteria_hash(config, build_questions(config, state)))
+        if len(PackedState(state, ()).to_json().encode("utf-8")) > config.total_bytes_cap:
+            raise ValueError("judge state exceeds the configured byte budget")
     return PackedState(state, ()).to_payload()
 
 

@@ -116,7 +116,7 @@ def test_invalid_boolean_values(value):
     ("seat", "123"), ("seat", ""), ("seat", "/tmp/repo"),
     ("timeout_seconds", 0), ("timeout_seconds", -1), ("timeout_seconds", "1.5"),
     ("routes", []), ("routes", ["skip", "human"]),
-    ("routes", ["codex", "codex"]), ("routes", ["grok"]),
+    ("routes", ["codex", "codex"]), ("routes", ["unknown"]),
     ("routes", "claude"), ("routes", [123]),
     ("objective_cap", -1), ("acceptance_cap", 1.5), ("title_cap", True),
     ("tool_cap", "512"), ("total_bytes_cap", 0),

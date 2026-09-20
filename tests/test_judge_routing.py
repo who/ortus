@@ -156,10 +156,10 @@ def test_overrides_resolve_independently_on_baseline(setup_routes, tmp_path):
     assert bundle.finalize_profile.model == "codex-finalize"
 
 
-@pytest.mark.parametrize("backend", ["grok", "local", "opencode", "unknown"])
+@pytest.mark.parametrize("backend", ["unknown"])
 def test_unsupported_baseline_fails_before_preflights(setup_routes, backend):
     config, hooks, adapter = setup_routes
-    with pytest.raises(routing.RoutePreparationError, match="only claude and codex"):
+    with pytest.raises(routing.RoutePreparationError, match="not a supported worker"):
         routing.plan_routes(config, JudgeConfig(enabled=True), backend)
     hooks.assert_not_called()
     adapter.probe.assert_not_called()

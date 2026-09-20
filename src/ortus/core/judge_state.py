@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Mapping
 
 from ortus.core.judge import (
+    WORKER_ROUTES,
     JudgeConfig, JudgePhase, JudgeRoute, JudgeState, ProposedTool,
 )
 
@@ -173,11 +174,11 @@ def pack_state(
         return result.value or ""
 
     routes = backends_available if backends_available is not None else tuple(
-        route for route in config.routes if route in (JudgeRoute.CLAUDE, JudgeRoute.CODEX)
+        route for route in config.routes if route in WORKER_ROUTES
     )
     if not isinstance(routes, (list, tuple)) or any(
         not isinstance(route, JudgeRoute)
-        or route not in (JudgeRoute.CLAUDE, JudgeRoute.CODEX)
+        or route not in WORKER_ROUTES
         or route not in config.routes for route in routes
     ):
         raise StateError("invalid available backends")
@@ -213,6 +214,14 @@ def pack_state(
         summary = clean("tool_summary", proposed_tool.arg_summary, config.tool_cap)
         if name:
             state = replace(state, proposed_tool=ProposedTool(name, summary))
+
+    from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
+    from ortus.core.judge_typesafe import build_questions
+
+    state = replace(
+        state, criteria_version=CRITERIA_VERSION,
+        criteria_hash=criteria_hash(config, build_questions(config, state)),
+    )
 
     # Keep routing metadata longest. Each reduction drops a whole field and the
     # final check includes JSON escaping, keys, delimiters and multibyte text.

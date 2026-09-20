@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import TYPE_CHECKING, Mapping, Protocol
 
@@ -18,8 +18,13 @@ if TYPE_CHECKING:
 class JudgeRoute(str, Enum):
     CLAUDE = "claude"
     CODEX = "codex"
+    GROK = "grok"
+    OPENCODE = "opencode"
     SKIP = "skip"
     HUMAN = "human"
+
+
+WORKER_ROUTES = (JudgeRoute.CLAUDE, JudgeRoute.CODEX, JudgeRoute.GROK, JudgeRoute.OPENCODE)
 
 
 class GateAction(str, Enum):
@@ -75,7 +80,10 @@ class JudgeConfig:
     risk_confidence: float = 0.8
     human_threshold: float = 0.8
     risk_threshold: float = 1.5
-    routes: tuple[JudgeRoute, ...] = tuple(JudgeRoute)
+    routes: tuple[JudgeRoute, ...] = (
+        JudgeRoute.CLAUDE, JudgeRoute.CODEX, JudgeRoute.SKIP, JudgeRoute.HUMAN,
+    )
+    question_criteria: dict = field(default_factory=dict)
     objective_cap: int = 1024
     acceptance_cap: int = 1024
     title_cap: int = 160
@@ -115,6 +123,8 @@ class JudgeState:
     objective: str = ""
     acceptance: str = ""
     proposed_tool: ProposedTool | None = None
+    criteria_version: str = ""
+    criteria_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,9 +146,7 @@ class GateDecision:
     reason: GateReason
 
     def __post_init__(self) -> None:
-        if self.backend is not None and self.backend not in (
-            JudgeRoute.CLAUDE, JudgeRoute.CODEX,
-        ):
+        if self.backend is not None and self.backend not in WORKER_ROUTES:
             raise ValueError("gate backend must be a worker route")
         if (self.action == GateAction.PROCEED) != (self.backend is not None):
             raise ValueError("only proceed decisions require a worker backend")
@@ -173,7 +181,7 @@ def _number(key: str, value: object, maximum: float | None = None) -> float:
     return number
 
 
-def parse_judge_config(
+def _parse_judge_values(
     cfg: Config,
     *,
     judge: bool | None = None,
@@ -188,6 +196,8 @@ def parse_judge_config(
     table = cfg.get("judge", {})
     if not isinstance(table, dict):
         raise ProfileError("invalid judge configuration: expected a TOML table")
+    from ortus.core.judge_packs import validate_criteria
+
     unknown = set(table) - {item.name for item in fields(JudgeConfig)}
     if unknown:
         raise ProfileError("invalid [judge] field(s): " + ", ".join(sorted(unknown)))
@@ -217,7 +227,7 @@ def parse_judge_config(
     if not isinstance(model, str) or not re.fullmatch(r"jev-\d+\.\d+\.\d+", model):
         raise ProfileError("invalid judge.model: expected an exact version such as jev-1.13.0")
     seat = values["seat"]
-    if not isinstance(seat, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", seat):
+    if not isinstance(seat, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", seat):
         raise ProfileError("invalid judge.seat: expected an explicit named alias")
     for key in ("route_confidence", "noul_confidence", "risk_confidence", "human_threshold"):
         values[key] = _number(key, values[key], 1)
@@ -235,10 +245,10 @@ def parse_judge_config(
     try:
         routes = tuple(JudgeRoute(route) for route in routes)
     except ValueError:
-        raise ProfileError("invalid judge.routes: expected claude, codex, skip, or human") from None
+        raise ProfileError("invalid judge.routes: expected claude, codex, grok, opencode, skip, or human") from None
     if len(set(routes)) != len(routes):
         raise ProfileError("invalid judge.routes: duplicate options")
-    if not set(routes).intersection({JudgeRoute.CLAUDE, JudgeRoute.CODEX}):
+    if not set(routes).intersection(WORKER_ROUTES):
         raise ProfileError("invalid judge.routes: at least one worker backend is required")
     values["routes"] = routes
     paths = values["sensitive_paths"]
@@ -247,4 +257,15 @@ def parse_judge_config(
     ):
         raise ProfileError("invalid judge.sensitive_paths: expected an array of nonempty paths")
     values["sensitive_paths"] = tuple(paths)
+    values["question_criteria"] = validate_criteria(values["question_criteria"])
     return JudgeConfig(**values)
+
+
+def parse_judge_config(
+    cfg: Config, *, judge: bool | None = None, judge_seat: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> JudgeConfig:
+    """Resolve validated packs and one explicit seat before environment/CLI overrides."""
+    from ortus.core.judge_packs import resolve_pack
+
+    return resolve_pack(cfg, judge=judge, judge_seat=judge_seat, environ=environ)
