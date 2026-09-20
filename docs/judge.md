@@ -371,6 +371,18 @@ for the run. Only Claude supports it; Codex, Grok, OpenCode and Docker launches
 fail startup with this option. Disabled Claude hooks or unreadable hook context
 also fail before launch. Existing goal hooks remain active. A human signal
 stops the worker and preserves its claim and dirty work for operator review.
+
+Unlike the pre-turn gate, this phase does withhold on confidence and risk. An
+answer less than 0.8 confident either way about needing a human, or whose risk
+confidence is under 0.8, returns `low_confidence`; a human-need probability of
+0.8 or more, or a risk score of 1.5 or more, returns `needs_human`. Both hand
+the proposed call to a human. Those four numbers are fixed in `decide_tool` and
+are not the `human_threshold`, `risk_threshold` or `*_confidence` settings,
+which stay inert. The difference is deliberate: a misrouted claim costs one
+worker turn and is recorded for calibration, while a tool call can be
+irreversible, so an unsure answer stops it rather than spending the action to
+find out. A malformed answer, an unsupported tool and a local policy denial
+still stop the call whatever those answers say.
 The temporary settings contain no credential and are removed after the worker
 is reaped. This supplements the existing worker trust boundary; repository
 write access is not a tamper-proof boundary.
