@@ -52,7 +52,7 @@ def test_absent_defaults_do_not_import_sdk_or_read_credentials(tmp_path, monkeyp
     assert (judge.objective_cap, judge.acceptance_cap, judge.title_cap, judge.tool_cap,
             judge.total_bytes_cap) == (1024, 1024, 160, 512, 8192)
     assert not judge.include_log_tail
-    assert not judge.include_issue_text
+    assert judge.include_issue_text
     assert judge.sensitive_paths == ()
     assert "secret-must-not-be-retained" not in repr(judge)
     assert cfg.get("backend") == "claude"
@@ -174,7 +174,9 @@ def test_private_label_always_suppresses_issue_text():
     config = parse({"include_issue_text": True})
     assert config.allows_issue_text(("task",))
     assert not config.allows_issue_text(("task", "judge-private"))
-    assert not JudgeConfig().allows_issue_text(())
+    assert JudgeConfig().allows_issue_text(())
+    assert not JudgeConfig().allows_issue_text(("judge-private",))
+    assert not parse({"include_issue_text": False}).allows_issue_text(("task",))
 
 
 def test_decisions_have_worker_backends_only_for_proceed():

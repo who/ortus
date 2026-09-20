@@ -26,13 +26,23 @@ def pack(packet, **kwargs):
     return pack_state(packet, config, environ={}, **kwargs)
 
 
-def test_default_is_metadata_only(packet):
+def test_default_sends_metadata_and_reviewed_text(packet):
     result = pack(packet)
     assert result.state.issue_id == "sample-123"
     assert result.state.labels == ("middleware", "ready")
     assert result.state.priority == 1
     assert result.state.phase == JudgePhase.PRE_TURN
     assert result.state.backends_available == (JudgeRoute.CLAUDE, JudgeRoute.CODEX)
+    assert result.state.title == "Fix parser"
+    assert result.omissions == ()
+    assert "never send" not in result.to_json()
+    assert "last_log_tail" not in result.to_payload()
+
+
+def test_opting_out_of_text_leaves_metadata_only(packet):
+    result = pack(packet, config=JudgeConfig(include_issue_text=False))
+    assert result.state.issue_id == "sample-123"
+    assert result.state.labels == ("middleware", "ready")
     assert result.state.title == result.state.objective == result.state.acceptance == ""
     assert result.omissions[0].reason == OmissionReason.TEXT_DISABLED
     assert "never send" not in result.to_json()

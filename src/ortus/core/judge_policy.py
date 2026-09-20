@@ -57,6 +57,13 @@ def decide_pre_turn(
     baseline before any claim or provider request. Invalid setup raises rather
     than masquerading as a service outage. A missing enabled verdict is treated
     as an invalid answer.
+
+    There is no confidence or risk gate. A caller constraint, a configured
+    `skip` route and the fail-closed service policy are the only ways a turn is
+    withheld; every other well-formed answer proceeds and is logged for offline
+    calibration. The `route_confidence`, `noul_confidence`, `risk_confidence`,
+    `human_threshold`, `risk_threshold` and `low_confidence` settings still
+    parse so existing configuration keeps loading, but nothing here reads them.
     """
     if denied:
         return GateDecision(GateAction.SKIP, None, GateReason.POLICY_DENIED)
@@ -89,22 +96,19 @@ def decide_pre_turn(
         return GateDecision(GateAction.HUMAN, None, reason)
 
     assert answers is not None
-    if (
-        answers.route_confidence < config.route_confidence
-        or answers.noul_confidence < config.noul_confidence
-        or answers.risk_confidence < config.risk_confidence
-    ):
-        return GateDecision(GateAction(config.low_confidence.value), None, GateReason.LOW_CONFIDENCE)
-    if answers.needs_human >= config.human_threshold or answers.route == JudgeRoute.HUMAN:
-        return GateDecision(GateAction.HUMAN, None, GateReason.NEEDS_HUMAN)
-    if answers.action_risk >= config.risk_threshold:
-        return GateDecision(GateAction.HUMAN, None, GateReason.HIGH_RISK)
-    # Escalation does not launch the suggested worker. Only a routing decision
-    # needs an offered route; fail-open must not erase a valid human signal.
+    # A well-formed answer never withholds the turn. Confidence below a
+    # configured floor, a high needs_human probability and an elevated
+    # action_risk are recorded in the typed vector and proceed anyway: a logged
+    # disagreement teaches more than a stopped worker, and a soft gate that
+    # cannot be measured cannot be calibrated.
     if answers.route not in offered:
         if config.failure_mode == FailureMode.OPEN:
             return GateDecision(GateAction.PROCEED, baseline_backend, GateReason.INVALID_ANSWER)
         return GateDecision(GateAction.HUMAN, None, GateReason.INVALID_ANSWER)
     if answers.route == JudgeRoute.SKIP:
         return GateDecision(GateAction.SKIP, None, GateReason.ROUTED)
+    if answers.route not in _WORKERS:
+        # An offered `human` route names no worker to launch. The baseline runs
+        # and the answer stays in the log instead of becoming an escalation.
+        return GateDecision(GateAction.PROCEED, baseline_backend, GateReason.ROUTED)
     return GateDecision(GateAction.PROCEED, answers.route, GateReason.ROUTED)

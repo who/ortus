@@ -42,6 +42,10 @@ codegraph = "{{ codegraph }}"
 # overrides ORTUS_JUDGE_ENABLED, which overrides enabled below.
 # ORTUS_JUDGE_MODEL overrides model. Keep TYPESAFE_API_KEY in the environment,
 # never in this file. Service failures follow failure_mode; invalid config fails.
+# The gate routes and logs; it never holds a claim back for low confidence,
+# human need or risk. low_confidence, route_confidence, noul_confidence,
+# risk_confidence, human_threshold and risk_threshold are still validated so
+# existing tables load, but no value of theirs changes a pre-turn decision.
 # [judge]
 # enabled = false
 # model = "jev-1.13.0"
@@ -63,7 +67,7 @@ codegraph = "{{ codegraph }}"
 # total_bytes_cap = 8192 # serialized UTF-8 bytes
 # include_log_tail = false
 # sensitive_paths = []
-# include_issue_text = false # judge-private always suppresses issue text
+# include_issue_text = true # judge-private always suppresses issue text
 # pre_tool = false # independent Claude-only hooks; not disabled by --no-judge
 # post_turn = false # independent advisory outcomes; never closes an issue
 #

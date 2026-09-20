@@ -124,7 +124,14 @@ def test_synthetic_replay_through_adapter_and_grind(gate, monkeypatch, case):
     assert len(calls) == 1
     state, questions, request = calls[0]
     assert state["seat"] == "ortus"
-    assert state["title"] == state["objective"] == state["acceptance"] == ""
+    # Reviewed text travels by default, but only the screened first lines do.
+    assert state["title"] == ""
+    assert state["objective"] == "Ship the bounded behavior."
+    assert state["acceptance"] == (
+        "- AC-1: Preview performs no writes.\n- AC-2: Normal execution is unchanged."
+    )
+    packed = json.dumps(state)
+    assert "Behavioral context" not in packed and "Criterion checks" not in packed
     assert set(questions) == {"route", "needs_human", "action_risk"}
     offered = set(questions["route"]["criteria"])
     assert offered == set(case["available"]) | {"skip", "human"}

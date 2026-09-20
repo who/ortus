@@ -26,77 +26,84 @@ def decide(answers=ANSWERS, *, config=CONFIG, state=STATE, **kwargs):
 
 @pytest.mark.parametrize("field", ["route_confidence", "noul_confidence", "risk_confidence"])
 @pytest.mark.parametrize("threshold", [0.0, 0.8, 1.0])
-@pytest.mark.parametrize("offset", [-0.000001, 0.0, 0.000001])
+@pytest.mark.parametrize("value", [0.0, 0.5, 0.799999, 1.0])
 @pytest.mark.parametrize("action", list(LowConfidence))
-def test_confidence_boundaries(field, threshold, offset, action):
-    value = threshold + offset
-    if not 0 <= value <= 1:
-        return
+def test_confidence_floors_never_withhold_the_turn(field, threshold, value, action):
     config = replace(CONFIG, low_confidence=action, **{field: threshold})
-    result = decide(replace(ANSWERS, **{field: value}), config=config)
-    if offset < 0:
-        assert result == GateDecision(GateAction(action.value), None, GateReason.LOW_CONFIDENCE)
-    else:
-        assert result == GateDecision(GateAction.PROCEED, JudgeRoute.CODEX, GateReason.ROUTED)
+    assert decide(replace(ANSWERS, **{field: value}), config=config) == GateDecision(
+        GateAction.PROCEED, JudgeRoute.CODEX, GateReason.ROUTED,
+    )
 
 
-@pytest.mark.parametrize("field,threshold,reason", [
-    ("needs_human", 0.8, GateReason.NEEDS_HUMAN),
-    ("action_risk", 1.5, GateReason.HIGH_RISK),
+@pytest.mark.parametrize("field,value", [
+    ("needs_human", 0.8), ("needs_human", 1.0),
+    ("action_risk", 1.5), ("action_risk", 2.0),
 ])
-@pytest.mark.parametrize("offset", [-0.000001, 0.0, 0.000001])
-def test_human_and_risk_boundaries(field, threshold, reason, offset):
-    result = decide(replace(ANSWERS, **{field: threshold + offset}))
-    assert result.action == (GateAction.PROCEED if offset < 0 else GateAction.HUMAN)
-    assert result.reason == (GateReason.ROUTED if offset < 0 else reason)
+def test_human_need_and_risk_are_logged_not_escalated(field, value):
+    assert decide(replace(ANSWERS, **{field: value})) == GateDecision(
+        GateAction.PROCEED, JudgeRoute.CODEX, GateReason.ROUTED,
+    )
 
 
 @pytest.mark.parametrize("field,config_field,value", [
     ("needs_human", "human_threshold", 0.3),
     ("action_risk", "risk_threshold", 0.5),
 ])
-def test_configured_escalation_thresholds(field, config_field, value):
+def test_configured_escalation_thresholds_are_inert(field, config_field, value):
     assert decide(
         replace(ANSWERS, **{field: value}),
         config=replace(CONFIG, **{config_field: value}),
-    ).action == GateAction.HUMAN
+    ).action == GateAction.PROCEED
 
 
-@pytest.mark.parametrize("route,action,backend,reason", [
-    (JudgeRoute.CLAUDE, GateAction.PROCEED, JudgeRoute.CLAUDE, GateReason.ROUTED),
-    (JudgeRoute.CODEX, GateAction.PROCEED, JudgeRoute.CODEX, GateReason.ROUTED),
-    (JudgeRoute.SKIP, GateAction.SKIP, None, GateReason.ROUTED),
-    (JudgeRoute.HUMAN, GateAction.HUMAN, None, GateReason.NEEDS_HUMAN),
+@pytest.mark.parametrize("route,action,backend", [
+    (JudgeRoute.CLAUDE, GateAction.PROCEED, JudgeRoute.CLAUDE),
+    (JudgeRoute.CODEX, GateAction.PROCEED, JudgeRoute.CODEX),
+    (JudgeRoute.SKIP, GateAction.SKIP, None),
+    # An offered human route names no worker, so the baseline runs instead.
+    (JudgeRoute.HUMAN, GateAction.PROCEED, JudgeRoute.CLAUDE),
 ])
-def test_routes(route, action, backend, reason):
-    assert decide(replace(ANSWERS, route=route)) == GateDecision(action, backend, reason)
+def test_routes(route, action, backend):
+    assert decide(replace(ANSWERS, route=route)) == GateDecision(
+        action, backend, GateReason.ROUTED,
+    )
 
 
-@pytest.mark.parametrize("route", list(JudgeRoute))
-def test_human_then_risk_override_routing(route):
-    result = decide(replace(ANSWERS, route=route, needs_human=0.8, action_risk=2))
-    assert result == GateDecision(GateAction.HUMAN, None, GateReason.NEEDS_HUMAN)
-    result = decide(replace(ANSWERS, route=route, action_risk=2))
-    assert result.action == GateAction.HUMAN
-    assert result.reason == (GateReason.NEEDS_HUMAN if route == JudgeRoute.HUMAN else GateReason.HIGH_RISK)
+@pytest.mark.parametrize("route", list(CONFIG.routes))
+def test_routing_survives_human_need_and_risk(route):
+    expected = JudgeRoute.CLAUDE if route == JudgeRoute.HUMAN else route
+    for answers in (
+        replace(ANSWERS, route=route, needs_human=1, action_risk=2),
+        replace(ANSWERS, route=route, action_risk=2),
+    ):
+        result = decide(answers)
+        assert result.reason == GateReason.ROUTED
+        if route == JudgeRoute.SKIP:
+            assert result == GateDecision(GateAction.SKIP, None, GateReason.ROUTED)
+        else:
+            assert result == GateDecision(GateAction.PROCEED, expected, GateReason.ROUTED)
 
 
-def test_low_confidence_precedes_confident_human_and_risk_fields():
+def test_every_soft_signal_at_once_still_proceeds():
     result = decide(
-        replace(ANSWERS, route=JudgeRoute.HUMAN, risk_confidence=0.79, needs_human=1, action_risk=2),
+        replace(ANSWERS, route=JudgeRoute.HUMAN, route_confidence=0.0, noul_confidence=0.0,
+                risk_confidence=0.0, needs_human=1, action_risk=2),
         config=replace(CONFIG, low_confidence=LowConfidence.SKIP),
     )
-    assert result == GateDecision(GateAction.SKIP, None, GateReason.LOW_CONFIDENCE)
+    assert result == GateDecision(GateAction.PROCEED, JudgeRoute.CLAUDE, GateReason.ROUTED)
 
 
 @pytest.mark.parametrize("route", [JudgeRoute.GROK, JudgeRoute.OPENCODE])
 @pytest.mark.parametrize("mode", list(FailureMode))
-def test_unoffered_route_preserves_valid_escalation_but_rejects_bad_payload(route, mode):
+def test_unoffered_route_follows_failure_policy_and_rejects_bad_payload(route, mode):
     config = replace(CONFIG, failure_mode=mode)
     answers = replace(ANSWERS, route=route, needs_human=1)
-    assert decide(answers, config=config) == GateDecision(
-        GateAction.HUMAN, None, GateReason.NEEDS_HUMAN,
+    expected = (
+        GateDecision(GateAction.PROCEED, JudgeRoute.CLAUDE, GateReason.INVALID_ANSWER)
+        if mode == FailureMode.OPEN
+        else GateDecision(GateAction.HUMAN, None, GateReason.INVALID_ANSWER)
     )
+    assert decide(answers, config=config) == expected
     malformed = decide(replace(answers, action_risk=float("nan")), config=config)
     assert malformed.reason == GateReason.INVALID_ANSWER
     assert malformed.action == (GateAction.PROCEED if mode == FailureMode.OPEN else GateAction.HUMAN)

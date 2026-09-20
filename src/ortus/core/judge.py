@@ -75,6 +75,9 @@ class JudgeConfig:
     mode: JudgeMode = JudgeMode.ENFORCE
     seat: str = "default"
     timeout_seconds: float = 1.5
+    # Retained so existing tables keep loading, and still validated, but the
+    # pre-turn gate applies none of them: see decide_pre_turn. They remain the
+    # vocabulary an offline calibration pass compares candidates in.
     route_confidence: float = 0.8
     noul_confidence: float = 0.8
     risk_confidence: float = 0.8
@@ -91,7 +94,10 @@ class JudgeConfig:
     total_bytes_cap: int = 8192
     include_log_tail: bool = False
     sensitive_paths: tuple[str, ...] = ()
-    include_issue_text: bool = False
+    # Metadata alone is too thin to route on, so text is on by default. Turning
+    # it off keeps the gate running on screened metadata only, which is what
+    # the decision log will show.
+    include_issue_text: bool = True
     pre_tool: bool = False
     post_turn: bool = False
 

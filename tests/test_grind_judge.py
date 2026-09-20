@@ -167,24 +167,39 @@ def test_proceed_binds_selected_runner_and_logs_close(gate):
     assert outcome['decision_id'] == decision['decision_id']
 
 
-@pytest.mark.parametrize('route', ['skip', 'human'])
 @pytest.mark.parametrize('resumed', [False, True])
-def test_nonworker_decisions_preserve_inherited_work(gate, route, resumed):
+def test_skip_preserves_inherited_work(gate, resumed):
     if resumed:
         gate.bd.rows['demo-1'].update(status='in_progress', assignee='previous-worker')
     (gate.repo / 'candidate.py').write_text('pending work')
-    gate.judge.evaluate.return_value = answer(route)
+    gate.judge.evaluate.return_value = answer('skip')
     result = gate.invoke('--iterations', '4')
     assert result.exit_code == 0, result.output + str(result.exception)
     gate.worker.run.assert_not_called()
     row = gate.bd.rows['demo-1']
     assert row['status'] == ('in_progress' if resumed else 'open')
     assert ('release' in gate.bd.calls) == (not resumed)
-    assert ('human' in row['labels']) == (route == 'human')
-    assert sum(isinstance(c, tuple) for c in gate.bd.calls) == (route == 'human')
+    assert 'human' not in row['labels']
+    assert not any(isinstance(c, tuple) for c in gate.bd.calls)
     assert (gate.repo / 'candidate.py').read_text() == 'pending work'
     assert 'iters_run=0' in next((gate.repo / 'logs').glob('grind-*')).read_text()
     assert gate.events()[1]['observed_status'] == row['status']
+
+
+@pytest.mark.parametrize('resumed', [False, True])
+def test_human_route_runs_the_baseline_and_keeps_the_answer(gate, resumed):
+    if resumed:
+        gate.bd.rows['demo-1'].update(status='in_progress', assignee='previous-worker')
+    gate.judge.evaluate.return_value = answer('human')
+    result = gate.invoke('--tasks', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    assert gate.bundles[JudgeRoute.CLAUDE].runner.run.called
+    assert not gate.bundles[JudgeRoute.CODEX].runner.run.called
+    assert gate.bd.rows['demo-1']['labels'] == []
+    assert not any(isinstance(c, tuple) for c in gate.bd.calls)
+    decision = gate.events()[0]
+    assert (decision['intended_action'], decision['effective_action']) == ('human', 'proceed')
+    assert (decision['backend'], decision['reason']) == ('claude', 'routed')
 
 
 @pytest.mark.parametrize('failure', list(JudgeFailure))
