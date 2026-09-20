@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +124,7 @@ class BdClient:
 
     repo: Path
     binary: str = "bd"
+    _fresh_claims: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     # --- subprocess primitive -------------------------------------------
 
@@ -288,7 +289,7 @@ class BdClient:
     def show(self, issue_id: str) -> dict[str, Any]:
         """Return the issue's full JSON dict. `bd show --json` returns a list
         with one element when passed a single id; unwrap it."""
-        _, data = self._run("show", issue_id, "--json", parse_json=True)
+        _, data = self._run("show", "--json", "--", issue_id, parse_json=True)
         if not data:
             raise BdError([self.binary, "show", issue_id], 0, "empty JSON response")
         if isinstance(data, list):
@@ -381,6 +382,49 @@ class BdClient:
     def update_status(self, issue_id: str, status: str) -> None:
         """`bd update <id> --status <status>`. Used by orphan-policy=revert."""
         self._run("update", issue_id, "--status", status)
+
+    def require_atomic_claims(self) -> None:
+        """Reject older tracker CLIs before an enforced run mutates anything."""
+        update_help, _ = self._run("update", "--help")
+        release_help, _ = self._run("unclaim", "--help")
+        if "--claim" not in update_help or "--if-assignee" not in release_help:
+            raise BdError([self.binary], 1, "atomic claim/unclaim support is required")
+
+    def claim(self, issue_id: str, actor: str) -> dict[str, Any]:
+        """Acquire a fresh claim and reload its authoritative assignee/status."""
+        if not issue_id or not actor:
+            raise ValueError("claim requires an issue id and a non-empty actor")
+        self.require_atomic_claims()
+        before = self.show(issue_id)
+        if before.get("status") != "open" or "human" in (before.get("labels") or []):
+            raise BdError([self.binary, "update", issue_id], 1, "issue is not claimable")
+        self._run("--actor", actor, "update", "--claim", "--", issue_id)
+        claimed = self.show(issue_id)
+        if (
+            claimed.get("id") != issue_id
+            or claimed.get("status") != "in_progress"
+            or claimed.get("assignee") != actor
+            or "human" in (claimed.get("labels") or [])
+        ):
+            raise BdError([self.binary, "show", issue_id], 1, "claim ownership changed")
+        self._fresh_claims[issue_id] = actor
+        return claimed
+
+    def release_claim(self, issue_id: str, expected_assignee: str) -> None:
+        """Release only this client's fresh claim using the tracker's atomic guard."""
+        if not expected_assignee or self._fresh_claims.get(issue_id) != expected_assignee:
+            raise BdError([self.binary, "unclaim", issue_id], 1, "not a fresh owned claim")
+        current = self.show(issue_id)
+        if (
+            current.get("status") != "in_progress"
+            or current.get("assignee") != expected_assignee
+        ):
+            raise BdError([self.binary, "unclaim", issue_id], 1, "claim ownership changed")
+        self._run(
+            "--actor", expected_assignee, "unclaim", "--if-assignee",
+            expected_assignee, "--", issue_id,
+        )
+        del self._fresh_claims[issue_id]
 
     def add_label(self, issue_id: str, label: str) -> None:
         """`bd label add <id> <label>`. Used by orphan-policy=escalate."""
