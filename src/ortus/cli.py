@@ -11,6 +11,7 @@ from ortus.commands.human import human
 from ortus.commands.ingest import ingest
 from ortus.commands.init import init
 from ortus.commands.interview import interview
+from ortus.commands.judge import judge_app
 from ortus.commands.plan import plan
 from ortus.commands.prompt import prompt_app
 from ortus.commands.spec import spec
@@ -90,3 +91,4 @@ app.command(
     ),
 )(ingest)
 app.add_typer(prompt_app, name="prompt")
+app.add_typer(judge_app, name="judge")
