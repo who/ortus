@@ -35,6 +35,9 @@ class GateReason(str, Enum):
     NEEDS_HUMAN = "needs_human"
     HIGH_RISK = "high_risk"
     SERVICE_FAILURE = "service_failure"
+    POLICY_DENIED = "policy_denied"
+    POLICY_HUMAN = "policy_human"
+    INVALID_ANSWER = "invalid_answer"
 
 
 class FailureMode(str, Enum):
