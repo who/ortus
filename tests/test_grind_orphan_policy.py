@@ -4,7 +4,7 @@ Since the grind-roots rework the worker owns selection and lifecycle: it
 continues a leftover in_progress claim or claims from `bd ready`, and grind
 judges only observable bd status after the process exits. A claimed-but-
 unclosed issue is therefore not an orphan — it is a live claim left for the
-next context window, and the next grind invocation is that window.
+next context window, and that window is the running grind's next iteration.
 
 `--orphan-policy` still exists, but only the startup sweep consults it, and
 `revert` is coerced to `warn` there: reverting a live unfinished claim would
@@ -142,11 +142,12 @@ def _pre_claim(repo: Path, issue_id: str) -> None:
 # --- per-iteration: a claim left by the worker ends the window --------------
 
 
-def test_worker_claim_left_in_progress_ends_the_run(
+def test_worker_claim_left_in_progress_continues_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Default path: the worker claims and exits without closing. Grind judges
-    bd status, leaves the claim for the next window, and ends the run."""
+    bd status, keeps the claim, and spends its remaining iteration budget
+    resuming it in this same process (ortus-86ui)."""
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
@@ -164,9 +165,15 @@ def test_worker_claim_left_in_progress_ends_the_run(
     )
     log = _grind_log(repo)
     assert f"left {issue_id} in_progress for the next window" in log
-    # One context window per leftover claim: the run ends rather than
-    # respawning against the same claim, even with iteration budget left.
-    assert "iter 2" not in log
+    # One context window per leftover claim, and the next window is the next
+    # iteration here: the budget is spent on the claim rather than returned
+    # to the operator for another invocation.
+    assert f"iter prep: continuing leftover claim {issue_id}" in log
+    assert "iter 2: spawning" in log
+    # The claim wedges rather than progressing, so the escalation policy —
+    # not the old one-window exit — is what stops the resumes.
+    assert "human" in _bd_labels(repo, issue_id)
+    assert "escalating to the human queue" in log
 
 
 def test_legacy_condition_path_leaves_claim_for_next_window(

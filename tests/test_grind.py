@@ -681,6 +681,110 @@ def test_leftover_claim_resumes_below_threshold(
     assert "ortus-grind: no-close window 1" in _comments_blob(repo, issue_id)
 
 
+class _ClaimAndStallRunner:
+    """Claims its issue and returns: a worker window that never closes."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, host: Path, issue_id: str) -> None:
+        self.host = host
+        self.issue_id = issue_id
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        self.calls.append({"prompt": prompt, **kwargs})
+        subprocess.run(
+            ["bd", "update", self.issue_id, "--status=in_progress"],
+            cwd=self.host,
+            check=True,
+            capture_output=True,
+        )
+        return 0
+
+
+@pytest.mark.slow
+def test_leftover_claim_continues_in_the_same_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1 (ortus-86ui): a no-close worker window does not end the run. The
+    same process resumes the leftover claim on its next iteration, and the
+    caps are still what stop it."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "leftover-continues")
+    issue_id = _create_ready_issue(repo, "stalling leaf", priority="1")
+    stalling = _ClaimAndStallRunner(repo, issue_id)
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: stalling)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "2", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(stalling.calls) == 2, (
+        "a leftover in_progress claim must be resumed by this process, not "
+        "handed to the next invocation"
+    )
+    log_text = _grind_log(repo)
+    assert f"iter prep: continuing leftover claim {issue_id}" in log_text
+    assert "--iterations cap reached: 2/2" in log_text
+    assert f"continuing leftover claim \"stalling leaf\"" in _squashed_console(result)
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress"
+    assert "human" not in (shown.get("labels") or [])
+
+
+@pytest.mark.slow
+def test_leftover_claim_escalates_without_ending_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2 (ortus-86ui): the wedged-claim threshold still routes a claim to
+    the human queue, now from inside the loop that resumed it — and it takes
+    the claim's own no-close windows, no extra ones, to get there."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "leftover-wedges")
+    issue_id = _claim_with_no_close_marker(
+        repo, "wedging leaf", windows=grind_mod._WEDGED_WINDOW_THRESHOLD - 1
+    )
+    stalling = _ClaimAndStallRunner(repo, issue_id)
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: stalling)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "4", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert len(stalling.calls) == 1, (
+        "an escalated wedged claim must not get another worker window"
+    )
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "in_progress"
+    assert "human" in (shown.get("labels") or [])
+    blob = _comments_blob(repo, issue_id)
+    assert "wedged claim escalated" in blob
+    assert f"bd label remove {issue_id} human" in blob
+    log_text = _grind_log(repo)
+    assert "iter 1: wedged claim:" in log_text
+    assert "queue drained" in log_text
+
+
 @pytest.mark.slow
 def test_grind_queue_blocked_exit_uses_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
