@@ -1331,6 +1331,71 @@ def _record_no_close_window(
         )
 
 
+def _claim_excluded_labels(bd: BdClient, issue_id: str) -> list[str]:
+    """Excluded labels currently carried by a claim.
+
+    A resume names its issue directly and so bypasses the label filter every
+    snapshot gate applies; the resume decision has to ask instead. An issue
+    that cannot be read reads as unlabeled — the claim then resumes and the
+    normal gates judge it, rather than being parked on a bd hiccup.
+    """
+    try:
+        issue = bd.show(issue_id)
+    except Exception:
+        return []
+    labels = {str(label) for label in (issue.get("labels") or ())}
+    return sorted(labels & set(EXCLUDED_LABELS))
+
+
+def _escalate_wedged_claim(
+    bd: BdClient,
+    issue_id: str,
+    windows: int,
+    integration_branch: str,
+    write_log: Callable[[str], None],
+    *,
+    phase: str,
+) -> None:
+    """Hand a wedged claim to the human queue instead of resuming it again.
+
+    The label (the same convention the readiness gate uses) keeps the issue
+    out of every snapshot; the claim itself stays in_progress so the
+    worker-tree context is preserved for the operator. Either bd write may
+    fail without stopping the run: an unlabeled claim simply stays resumable
+    and burns the same counter again.
+    """
+    escalation = (
+        f"wedged claim: {issue_id} burned {windows} consecutive worker "
+        "windows that ended still in_progress with no new commits on "
+        f"{integration_branch}; escalating to the human queue instead of "
+        "resuming"
+    )
+    write_log(f"{phase}: {escalation}")
+    output.warn(escalation)
+    try:
+        bd.add_label(issue_id, "human")
+    except Exception as exc:
+        write_log(
+            f"wedged claim: could not label {issue_id} "
+            f"human ({exc}); it stays resumable next window"
+        )
+        output.warn(
+            f"could not label {issue_id} human ({exc}); "
+            "it stays resumable next window"
+        )
+    try:
+        bd.add_comment(
+            issue_id,
+            f"wedged claim escalated: {windows} consecutive worker windows "
+            "ended with this claim still in_progress and no new commits on "
+            f"{integration_branch}. The human label keeps this issue out of "
+            "grind's queue; after repairing the spec, run: bd label remove "
+            f"{issue_id} human.",
+        )
+    except Exception as exc:
+        write_log(f"wedged claim: could not comment on {issue_id} ({exc})")
+
+
 def _announce_wedged_escalation(escalated: tuple[str, int]) -> None:
     """Session-end hint naming the escalation instead of 'run grind again'."""
     issue_id, windows = escalated
@@ -1880,14 +1945,7 @@ def grind(
                 # dropped (ortus-lf02). Skip the resume loudly instead — no
                 # worker ever runs for a hidden claim; its claim stays parked
                 # and the queue continues past it.
-                try:
-                    resumed_issue = bd.show(resume_issue_id)
-                except Exception:
-                    resumed_issue = {}
-                excluded = sorted(
-                    {str(label) for label in (resumed_issue.get("labels") or ())}
-                    & set(EXCLUDED_LABELS)
-                )
+                excluded = _claim_excluded_labels(bd, resume_issue_id)
                 if excluded:
                     skip_note = (
                         f"not resuming {resume_issue_id}: it carries the "
@@ -1911,48 +1969,26 @@ def grind(
             # in_progress so the worker-tree context is preserved for the
             # operator.
             resume_no_close_count = 0
-            escalated_claim: tuple[str, int] | None = None
+            # One process now spans many windows, so more than one claim can
+            # reach the threshold before the run ends; every escalation keeps
+            # its own end-of-run hint.
+            escalated_claims: list[tuple[str, int]] = []
             if resume_issue_id is not None:
                 resume_no_close_count = _no_close_window_count(bd, resume_issue_id)
                 if resume_no_close_count >= _WEDGED_WINDOW_THRESHOLD:
-                    escalation = (
-                        f"wedged claim: {resume_issue_id} burned "
-                        f"{resume_no_close_count} consecutive worker windows "
-                        "that ended still in_progress with no new commits on "
-                        f"{integration_branch}; escalating to the human queue "
-                        "instead of resuming"
+                    _escalate_wedged_claim(
+                        bd,
+                        resume_issue_id,
+                        resume_no_close_count,
+                        integration_branch,
+                        write_log,
+                        phase="startup",
                     )
-                    write_log(f"startup: {escalation}")
-                    output.warn(escalation)
-                    try:
-                        bd.add_label(resume_issue_id, "human")
-                    except Exception as exc:
-                        write_log(
-                            f"wedged claim: could not label {resume_issue_id} "
-                            f"human ({exc}); it stays resumable next window"
-                        )
-                        output.warn(
-                            f"could not label {resume_issue_id} human ({exc}); "
-                            "it stays resumable next window"
-                        )
-                    try:
-                        bd.add_comment(
-                            resume_issue_id,
-                            f"wedged claim escalated: {resume_no_close_count} "
-                            "consecutive worker windows ended with this claim "
-                            "still in_progress and no new commits on "
-                            f"{integration_branch}. The human label keeps this "
-                            "issue out of grind's queue; after repairing the "
-                            "spec, run: bd label remove "
-                            f"{resume_issue_id} human.",
-                        )
-                    except Exception as exc:
-                        write_log(
-                            f"wedged claim: could not comment on "
-                            f"{resume_issue_id} ({exc})"
-                        )
-                    escalated_claim = (resume_issue_id, resume_no_close_count)
+                    escalated_claims.append(
+                        (resume_issue_id, resume_no_close_count)
+                    )
                     resume_issue_id = None
+                    resume_no_close_count = 0
                     # Re-snapshot so queue_drained and the loop's first
                     # `before` see post-escalation state (the human label
                     # trims the claim from the excluded counts).
@@ -1961,8 +1997,8 @@ def grind(
             if queue_drained(initial_snapshot):
                 write_log("queue already drained; nothing to do.")
                 output.progress("grind", "queue already drained; nothing to do.")
-                if escalated_claim is not None:
-                    _announce_wedged_escalation(escalated_claim)
+                for escalated in escalated_claims:
+                    _announce_wedged_escalation(escalated)
                 return
 
             # Phase 3 — cache env vars (relocate ~/.cache into project-local).
@@ -2646,8 +2682,8 @@ def grind(
                     # the integration branch (progressing — reset) or didn't
                     # (wedged — count it, so the next resume can escalate at
                     # the threshold). Fresh claims are outside the counter;
-                    # their first no-close window becomes next session's
-                    # resume.
+                    # their first no-close window is resumed by the next
+                    # iteration below, which counts from there.
                     if resuming and judged_id == resumed_claim_id:
                         head_now = git.branch_tip(integration_branch)
                         if head_now and head_now != resumed_tip:
@@ -2670,13 +2706,55 @@ def grind(
                                 f"{integration_branch} (no-close window "
                                 f"{burned} of {_WEDGED_WINDOW_THRESHOLD})"
                             )
-                    write_log(
-                        f"iter {iters_run}: left {judged_id} in_progress "
-                        "for the next window"
-                    )
-                    # One context window per leftover claim. The next grind
-                    # invocation is the next window.
-                    break
+                    if post_stop:
+                        write_log(
+                            f"iter {iters_run}: judge post_turn withheld "
+                            f"another window; {judged_id} stays in_progress"
+                        )
+                        break
+                    # A claim that outlived its window is routed here and now:
+                    # the human queue takes it at the threshold, an excluded
+                    # label parks it, and anything else is resumed by the next
+                    # iteration of this same process.
+                    pending = _no_close_window_count(bd, judged_id)
+                    blocked = _claim_excluded_labels(bd, judged_id)
+                    if pending >= _WEDGED_WINDOW_THRESHOLD:
+                        _escalate_wedged_claim(
+                            bd,
+                            judged_id,
+                            pending,
+                            integration_branch,
+                            write_log,
+                            phase=f"iter {iters_run}",
+                        )
+                        escalated_claims.append((judged_id, pending))
+                        resume_no_close_count = 0
+                    elif blocked:
+                        # Feeding an excluded issue to a worker arms the
+                        # ortus-lf02 trap: the worker runs, verification
+                        # cannot see the claim, and a finished candidate is
+                        # silently dropped. Park it and move down the queue.
+                        write_log(
+                            f"iter {iters_run}: not resuming {judged_id}: it "
+                            "carries the excluded label(s) "
+                            f"{', '.join(blocked)}, so no worker may run for "
+                            "it. Its claim and work stay parked and the queue "
+                            "continues past it"
+                        )
+                        resume_no_close_count = 0
+                    else:
+                        resume_issue_id = judged_id
+                        resume_no_close_count = pending
+                        write_log(
+                            f"iter {iters_run}: left {judged_id} in_progress "
+                            "for the next window"
+                        )
+                        # That next window is the next iteration of THIS
+                        # process, not the next invocation: control falls
+                        # through to the cap checks below and the loop keeps
+                        # going, so one grind chews the whole backlog instead
+                        # of dying on every no-close worker window
+                        # (ortus-86ui).
                 else:
                     write_log(
                         f"iter {iters_run}: WARN no bd-state change "
@@ -2716,13 +2794,15 @@ def grind(
                 f"done — {tasks_completed} landed this session, "
                 f"{leftover} in_progress, {final_snapshot.open} open",
             )
-            if escalated_claim is not None:
-                _announce_wedged_escalation(escalated_claim)
+            for escalated in escalated_claims:
+                _announce_wedged_escalation(escalated)
             if leftover:
                 output.progress(
                     "grind",
-                    "next: run `ortus grind` again; it continues leftover "
-                    "in_progress",
+                    "the leftover claim outlived this run's stop condition "
+                    "(a cap, a halt, or an escalation); resuming a leftover "
+                    "claim is an iteration of the running grind, not a "
+                    "re-invocation",
                 )
     except FlockBusy as exc:
         output.error(str(exc), hint="another `ortus grind` is already running here")
