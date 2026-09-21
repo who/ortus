@@ -228,7 +228,7 @@ def test_grind_leaves_claim_and_counter_for_next_window(gate, monkeypatch, choic
     monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
     counter = Mock()
     monkeypatch.setattr(grind_mod, '_record_no_close_window', counter)
-    result = gate.invoke('--iterations', '4')
+    result = gate.invoke('--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     gate.worker.run.assert_called_once()
     evaluate.assert_called_once()
@@ -253,7 +253,7 @@ def test_grind_watchdog_is_a_fact_and_handshake_failure_wins(gate, monkeypatch):
     gate.worker.run.side_effect = subprocess.TimeoutExpired('worker', 1)
     evaluate = Mock(return_value=OutcomeVerdict(Outcome.DONE, .99))
     monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
-    result = gate.invoke('--worker-timeout', '1')
+    result = gate.invoke('--worker-timeout', '1', '--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     facts = evaluate.call_args.args[1]
     assert facts.watchdog and facts.exit_status == 143
@@ -263,7 +263,7 @@ def test_grind_watchdog_is_a_fact_and_handshake_failure_wins(gate, monkeypatch):
     from ortus.core.codegraph import CodeGraphUnavailable
     evaluate.reset_mock()
     monkeypatch.setattr(grind_mod, 'require_handshake', Mock(side_effect=CodeGraphUnavailable('missing')))
-    result = gate.invoke('--worker-timeout', '1')
+    result = gate.invoke('--worker-timeout', '1', '--iterations', '1')
     assert result.exit_code != 0
     evaluate.assert_not_called()
 
@@ -273,7 +273,7 @@ def test_grind_shadow_preserves_baseline(gate, monkeypatch):
     gate.worker.run.side_effect = lambda *a, **kw: gate.bd.rows['demo-1'].update(status='in_progress') or 0
     monkeypatch.setattr(grind_mod, 'evaluate_outcome',
                         Mock(return_value=OutcomeVerdict(Outcome.PLAN_GAP, .99)))
-    result = gate.invoke()
+    result = gate.invoke('--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     assert gate.bd.rows['demo-1']['labels'] == []
     assert gate.events()[-1]['effective_action'] == 'baseline'
@@ -307,15 +307,23 @@ def test_open_outcome_does_not_retry_same_window(gate, monkeypatch, choice):
 
 
 @pytest.mark.parametrize('mode', ['open', 'closed'])
-def test_grind_post_service_failure_keeps_claim(gate, monkeypatch, mode):
+@pytest.mark.parametrize('iterations', [1, 0])
+def test_grind_post_service_failure_keeps_claim(gate, monkeypatch, mode, iterations):
     gate.config.values['judge'].update(post_turn=True, failure_mode=mode)
     gate.worker.run.side_effect = lambda *a, **kw: 0
     monkeypatch.setattr(grind_mod, 'evaluate_outcome',
                         Mock(return_value=OutcomeVerdict(failure=JudgeFailure.SERVICE_ERROR)))
-    result = gate.invoke()
+    result = gate.invoke('--iterations', str(iterations))
     assert result.exit_code == 0, result.output + str(result.exception)
     assert gate.bd.rows['demo-1']['status'] == 'in_progress'
-    assert ('human' in gate.bd.rows['demo-1']['labels']) == (mode == 'closed')
+    assert ('human' in gate.bd.rows['demo-1']['labels']) == (mode == 'closed' or not iterations)
+    # Fail-open resumes in this process until the persisted stall counter
+    # escalates. An iteration cap or fail-closed policy stops after one window.
+    windows = 3 if mode == 'open' and not iterations else 1
+    assert gate.worker.run.call_count == windows
+    assert gate.bd.calls.count('claim') == 1
+    if windows == 3:
+        assert grind_mod._no_close_window_count(gate.bd, 'demo-1') == 2
     assert 'release' not in gate.bd.calls
 
 
