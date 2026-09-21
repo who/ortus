@@ -1354,7 +1354,7 @@ def _escalate_wedged_claim(
     integration_branch: str,
     write_log: Callable[[str], None],
     *,
-    phase: str,
+    log_context: str,
 ) -> None:
     """Hand a wedged claim to the human queue instead of resuming it again.
 
@@ -1370,7 +1370,7 @@ def _escalate_wedged_claim(
         f"{integration_branch}; escalating to the human queue instead of "
         "resuming"
     )
-    write_log(f"{phase}: {escalation}")
+    write_log(f"{log_context}: {escalation}")
     output.warn(escalation)
     try:
         bd.add_label(issue_id, "human")
@@ -1982,7 +1982,7 @@ def grind(
                         resume_no_close_count,
                         integration_branch,
                         write_log,
-                        phase="startup",
+                        log_context="startup",
                     )
                     escalated_claims.append(
                         (resume_issue_id, resume_no_close_count)
@@ -2725,7 +2725,7 @@ def grind(
                             pending,
                             integration_branch,
                             write_log,
-                            phase=f"iter {iters_run}",
+                            log_context=f"iter {iters_run}",
                         )
                         escalated_claims.append((judged_id, pending))
                         resume_no_close_count = 0

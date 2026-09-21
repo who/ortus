@@ -25,6 +25,7 @@ class Tracker:
     def __init__(self):
         self.rows = {"demo-1": dict(ready_issue(), status="open", labels=[])}
         self.calls = []
+        self.issue_comments = {}
 
     def show(self, issue_id):
         return deepcopy(self.rows[issue_id])
@@ -68,12 +69,13 @@ class Tracker:
 
     def add_comment(self, issue_id, text):
         self.calls.append(('comment', text))
+        self.issue_comments.setdefault(issue_id, []).append({'text': text})
 
     def lessons(self, **kwargs):
         return ()
 
     def comments(self, issue_id):
-        return []
+        return deepcopy(self.issue_comments.get(issue_id, []))
 
     def open_ids(self, **kwargs):
         return set()
@@ -231,7 +233,7 @@ def test_interrupt_releases_only_unused_fresh_claim(gate, resumed):
 
 def test_timeout_preserves_consumed_claim_and_records_outcome(gate):
     gate.worker.run.side_effect = subprocess.TimeoutExpired('worker', 1)
-    result = gate.invoke('--worker-timeout', '1')
+    result = gate.invoke('--worker-timeout', '1', '--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     assert gate.bd.rows['demo-1']['status'] == 'in_progress'
     assert 'release' not in gate.bd.calls
@@ -265,7 +267,7 @@ def test_mutation_during_judgment_halts_without_overwriting(gate, change):
 def test_attribution_ignores_unrelated_close(gate):
     gate.bd.rows['other'] = dict(ready_issue('other'), status='blocked', labels=[])
     gate.worker.run.side_effect = lambda *a, **kw: gate.bd.rows['other'].update(status='closed') or 0
-    result = gate.invoke('--tasks', '1')
+    result = gate.invoke('--tasks', '1', '--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     assert gate.events()[1]['observed_status'] == 'in_progress'
     assert '0 landed' in result.output
