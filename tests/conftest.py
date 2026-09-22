@@ -188,6 +188,20 @@ def _empty_git_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolated_ortus_user_env(monkeypatch, tmp_path, request):
+    """Hermetic judges read test defaults, never the operator's credentials."""
+    if request.node.get_closest_marker("live_provider"):
+        return
+    from ortus.core import user_env
+
+    load = user_env.load_user_ortus_env
+    monkeypatch.setattr(
+        user_env, "load_user_ortus_env",
+        lambda home=None: load(home=tmp_path if home is None else home),
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolated_beads_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep test `bd` subprocesses off an inherited host tracker.
 

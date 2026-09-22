@@ -33,10 +33,17 @@ For a source checkout, use `uv sync --extra judge` and run the commands below
 through `uv run ortus`. The extra pins `typesafe-sdk==0.7.0`; the configured
 model is the exact version `jev-1.13.0`, not a floating model alias.
 
-Have the host runner or your secret manager inject `TYPESAFE_API_KEY` into
-the process environment. Do not put its value in `.ortusrc`, issue text,
-command arguments or checked-in files. Ortus has no dotenv loader and needs
-no host-shell gate script.
+Ortus loads `~/.config/ortus/.env` when a judge needs credentials. You can
+also have the host runner or secret manager inject `TYPESAFE_API_KEY` into
+the process environment. Nonempty process values win; the file fills missing
+or empty values. Keep this user file private with mode 600. Do not put the
+secret in `.ortusrc`, issue text, command arguments or checked-in files.
+
+The loader accepts `KEY=VALUE` lines, single or double quotes, blank lines and
+`#` comments outside quotes. It does not expand variables or execute shell
+commands. Malformed lines are ignored. Missing files are harmless; unreadable
+files produce a diagnostic without values or file contents. Only the user
+file is loaded, never a project `.env`.
 
 Merge this table into the product repository's `.ortusrc`, preserving its
 existing backend and profile settings. Do not add a second `[judge]` table:

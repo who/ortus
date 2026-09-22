@@ -12,6 +12,8 @@ from typing import Any, Callable, Mapping
 from uuid import UUID, uuid4
 
 from ortus.core import output
+from ortus.core.user_env import judge_environment
+
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode, JudgePhase
 from ortus.core.judge_log import (
     OutcomeStatus, _append, _clean_metadata, _common,
@@ -92,6 +94,7 @@ def evaluate_outcome(
     client_factory: Callable[[JudgeConfig], Any] = _default_client,
 ) -> OutcomeVerdict:
     """Send one bounded Choice request with sanitized state and typed facts only."""
+    environ = judge_environment(environ)
     # Reserve space for the facts as well as the issue envelope.
     facts = {"worker": observation.payload()}
     overhead = len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode())
