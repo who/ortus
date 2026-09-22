@@ -310,7 +310,7 @@ is slow but correct, so size `--worker-timeout` for the model, not the task.
 - **One install, all projects.** `uv tool install ortus` once; every repo uses the same canonical tooling. No per-repo vendor copies to chase.
 - **`bd ready` IS the queue.** No README task lists, no TodoWrite scratchpads. The queue is data.
 - **The scheduler is the loop.** Backend output is advisory; observable bd state decides whether an iteration succeeded, orphaned a claim, or made no change.
-- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; Codex workers retain `workspace-write`, Claude uses its generated sandbox policy, Grok uses its native `--sandbox workspace` (not wrapped in bwrap), and opencode workers implement under opencode's headless auto-approval and verify under a per-launch permission denial that removes the edit, write, and bash tools (see Serving a local model).
+- **Sandboxed by default.** `ortus grind` refuses to launch unless bwrap/Seatbelt is available; Codex workers bypass Codex's own sandbox so they can run the nested processes their checks need and verify read-only, Claude uses its generated sandbox policy, Grok uses its native `--sandbox workspace` (not wrapped in bwrap), and opencode workers implement under opencode's headless auto-approval and verify under a per-launch permission denial that removes the edit, write, and bash tools (see Serving a local model).
 
 ## Configuration
 

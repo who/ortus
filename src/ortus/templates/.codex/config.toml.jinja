@@ -3,8 +3,7 @@
 sandbox_mode = "workspace-write"
 approval_policy = "never"
 
-# The git directory stays writable through a launch-time
-# sandbox_workspace_write.writable_roots override carrying its absolute
-# path, so a worker can run its own session-close commit and an already
-# provisioned project gets that without re-running init. Verify runs
-# launch read-only and never receive the carveout.
+# These keys govern the operator's own interactive codex sessions. Ortus
+# states the posture on every launch it makes instead: a worker that has to
+# run its issue's checks and its own session-close commit bypasses approvals
+# and the sandbox, and a verifier launches read-only.

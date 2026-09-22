@@ -70,51 +70,6 @@ class BackendError(ValueError):
     """Raised when an unsupported backend name is configured."""
 
 
-def _git_writable_roots(repo: Path) -> list[str]:
-    """Absolute git directories a write session has to be able to modify.
-
-    The repository root is not enough. Codex mounts the git directory
-    read-only inside ``workspace-write`` unless that directory is named
-    outright, which lets a worker edit sources and then fail the commit its
-    own session-close owes. A linked worktree needs two entries: the
-    per-worktree git directory it points at, and the common directory
-    holding the objects and refs the commit actually writes.
-
-    A workspace with no resolvable git directory yields no roots. Inventing
-    a path there would widen the sandbox without making any commit possible.
-    """
-
-    dot_git = repo / ".git"
-    try:
-        if dot_git.is_dir():
-            git_dir = dot_git
-        elif dot_git.is_file():
-            pointer = dot_git.read_text(encoding="utf-8").strip()
-            if not pointer.startswith("gitdir:"):
-                return []
-            git_dir = Path(pointer.split(":", 1)[1].strip())
-            if not git_dir.is_absolute():
-                git_dir = repo / git_dir
-        else:
-            return []
-        git_dir = git_dir.resolve()
-        if not git_dir.is_dir():
-            return []
-        roots = [git_dir]
-        commondir = git_dir / "commondir"
-        if commondir.is_file():
-            common = Path(commondir.read_text(encoding="utf-8").strip())
-            if not common.is_absolute():
-                common = git_dir / common
-            common = common.resolve()
-            if common.is_dir() and common not in roots:
-                roots.append(common)
-    except OSError:
-        # An unreadable pointer file is not a licence to guess at a path.
-        return []
-    return [str(root) for root in roots]
-
-
 class CodexRunner(ClaudeRunner):
     """Run one plain, non-interactive Codex task and log its JSONL stream."""
 
@@ -161,7 +116,9 @@ class CodexRunner(ClaudeRunner):
         # issue names. The bypass is deliberate for these trusted local seats,
         # and it replaces --sandbox rather than joining it. A launch that only
         # reads keeps Codex's protection, which costs a verifier nothing;
-        # sandbox_mode survives as the way to ask for that posture.
+        # sandbox_mode survives as the way to ask for that posture. Because
+        # no launch runs under workspace-write any more, none of them needs
+        # the writable-roots carveout that once kept .git committable.
         if readonly or self.sandbox_mode == "read-only":
             posture = ["--sandbox", "read-only"]
         else:
@@ -207,29 +164,6 @@ class CodexRunner(ClaudeRunner):
         """
 
         return argv
-
-    def _write_argv(self, argv: list[str], repo: Path) -> list[str]:
-        """Carve the workspace's git directories out of the read-only mount.
-
-        Session-close belongs to the worker, so a write session that cannot
-        write ``.git`` produces edits nobody can commit. Like the CodeGraph
-        registration above, this override is a trusted launch input holding
-        only absolute paths, so it does not depend on the repository's trust
-        state. Sessions running under ``read-only`` never widen: the verifier
-        arrives through ``_readonly_argv``, and a runner configured read-only
-        for every launch is excluded here as well.
-        """
-
-        if self.sandbox_mode == "read-only":
-            return argv
-        roots = _git_writable_roots(repo)
-        if not roots:
-            return argv
-        return [
-            *argv,
-            "-c",
-            "sandbox_workspace_write.writable_roots=" + json.dumps(roots),
-        ]
 
     def preflight_readonly(self, repo: Path, *, timeout: float = 60.0) -> None:
         """No read-only posture to probe: nothing wraps the Codex process.
