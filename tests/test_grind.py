@@ -3179,6 +3179,8 @@ def _recorded_grind(
     return _grind_log(repo), worker.prompts
 
 
+# Real bd subprocesses can exceed the CI duration budget on hosted runners.
+@pytest.mark.slow
 def test_grind_start_line_records_verification_mode_from_ortusrc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
