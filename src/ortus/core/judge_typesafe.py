@@ -22,11 +22,12 @@ from copy import deepcopy
 
 import asyncio
 import math
-import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Mapping
+
+from ortus.core.user_env import judge_environment
 
 from ortus.core.judge import JudgeAnswers, JudgeConfig, JudgeRoute, JudgeState
 from ortus.core.judge_state import PackedState
@@ -191,7 +192,7 @@ def build_questions(config: JudgeConfig, state: JudgeState) -> dict[str, dict[st
 def _default_client(config: JudgeConfig) -> Any:
     """Build the official async client; imported here so a disabled gate is free.
 
-    The key is never read into Ortus: the SDK picks it up from the environment
+    The SDK picks up the key from the prepared process environment
     itself. Retries are off because the runner owns the deadline.
     """
     from typesafe_sdk import AsyncTypeSafeClient, RetryPolicy
@@ -212,7 +213,7 @@ class TypeSafeJudge:
     environ: Mapping[str, str] | None = None
 
     def evaluate(self, state: JudgeState) -> JudgeVerdict:
-        env = os.environ if self.environ is None else self.environ
+        env = judge_environment(self.environ)
         # Cheapest prerequisite first: an opted-in seat without a key is
         # reported without importing an optional dependency to find out.
         if not str(env.get(API_KEY_ENV, "")).strip():

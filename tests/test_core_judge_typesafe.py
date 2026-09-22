@@ -264,3 +264,85 @@ def test_a_verdict_is_either_answers_or_a_failure():
             answers=judge(FakeClient(CASES["valid"])).evaluate(STATE).answers,
             failure=JudgeFailure.TIMEOUT,
         )
+
+
+@pytest.fixture
+def user_env_home(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    directory = tmp_path / ".config" / "ortus"
+    directory.mkdir(parents=True)
+    return directory / ".env"
+
+
+@pytest.mark.parametrize("value", [SECRET, f"'{SECRET}'", f'"{SECRET}" # comment'])
+def test_user_env_key_reaches_judge(user_env_home, value, capsys):
+    import os
+
+    user_env_home.write_text(f"# defaults\n\nTYPESAFE_API_KEY={value}\n")
+    client = FakeClient(CASES["valid"])
+    verdict = TypeSafeJudge(JudgeConfig(), lambda cfg: client).evaluate(STATE)
+    assert verdict.failure is None
+    assert os.environ["TYPESAFE_API_KEY"] == SECRET
+    assert SECRET not in str(capsys.readouterr())
+
+
+@pytest.mark.parametrize("existing", ["process-key", ""])
+def test_user_env_process_precedence(user_env_home, monkeypatch, existing):
+    import os
+
+    from ortus.core.user_env import load_user_ortus_env
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", existing)
+    user_env_home.write_text(f"TYPESAFE_API_KEY={SECRET}\n")
+    load_user_ortus_env()
+    assert os.environ["TYPESAFE_API_KEY"] == (existing or SECRET)
+
+
+@pytest.mark.parametrize("contents", [None, "TYPESAFE_API_KEY=", 'TYPESAFE_API_KEY="bad'])
+def test_user_env_missing_or_empty_key(user_env_home, contents):
+    if contents is not None:
+        user_env_home.write_text(contents)
+    client = FakeClient(CASES["valid"])
+    verdict = TypeSafeJudge(JudgeConfig(), lambda cfg: client).evaluate(STATE)
+    assert verdict.failure is JudgeFailure.KEY_MISSING
+    assert not client.calls
+
+
+def test_user_env_explicit_environment_is_isolated(user_env_home):
+    user_env_home.write_text(f"TYPESAFE_API_KEY={SECRET}\n")
+    verdict = TypeSafeJudge(JudgeConfig(), environ={}).evaluate(STATE)
+    assert verdict.failure is JudgeFailure.KEY_MISSING
+
+
+def test_user_env_read_failure_is_safe(user_env_home, monkeypatch, capsys):
+    from ortus.core.user_env import load_user_ortus_env
+
+    def fail(*args, **kwargs):
+        raise PermissionError(SECRET)
+
+    monkeypatch.setattr(Path, "read_text", fail)
+    load_user_ortus_env()
+    output = capsys.readouterr()
+    assert "Could not read" in output.err
+    assert SECRET not in str(output)
+
+
+def test_user_env_ignores_project_file(user_env_home, tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(f"TYPESAFE_API_KEY={SECRET}\n")
+    monkeypatch.chdir(tmp_path)
+    assert TypeSafeJudge(JudgeConfig()).evaluate(STATE).failure is JudgeFailure.KEY_MISSING
+
+
+def test_user_env_empty_file_value_preserves_process_key(user_env_home, monkeypatch):
+    import os
+
+    from ortus.core.user_env import load_user_ortus_env
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", SECRET)
+    user_env_home.write_text("TYPESAFE_API_KEY=\n")
+    load_user_ortus_env()
+    assert os.environ["TYPESAFE_API_KEY"] == SECRET

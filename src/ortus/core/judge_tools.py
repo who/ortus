@@ -16,6 +16,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ortus.core.user_env import judge_environment
+
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeState
 from ortus.core.judge_state import StateError, sanitize_field
 from ortus.core.judge_typesafe import (
@@ -237,6 +239,7 @@ def decide_tool(
     Callers own opt-in and shadow observation. Neither setting can weaken a
     local denial. ALLOW means continue the existing permission flow only.
     """
+    environ = judge_environment(environ)
     inspection = inspect_tool(tool, repo, config=config, allowed_roots=allowed_roots,
                               environ=environ)
     if inspection.decision is not None:
