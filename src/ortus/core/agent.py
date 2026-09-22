@@ -155,13 +155,23 @@ class CodexRunner(ClaudeRunner):
         # `resume` is accepted for signature parity and ignored: grind never
         # captures a Codex session id, so corrections on this backend run in
         # a fresh context carrying the pipeline record (logged as degraded).
+        # Codex's own sandbox refuses the nested processes an acceptance check
+        # spawns -- npm, a shell, a test runner -- with EPERM even under
+        # workspace-write, so a write worker cannot run the very commands its
+        # issue names. The bypass is deliberate for these trusted local seats,
+        # and it replaces --sandbox rather than joining it. A launch that only
+        # reads keeps Codex's protection, which costs a verifier nothing;
+        # sandbox_mode survives as the way to ask for that posture.
+        if readonly or self.sandbox_mode == "read-only":
+            posture = ["--sandbox", "read-only"]
+        else:
+            posture = ["--dangerously-bypass-approvals-and-sandbox"]
         argv = [
             self.codex_binary,
             "exec",
             prompt,
             "--json",
-            "--sandbox",
-            "read-only" if readonly else self.sandbox_mode,
+            *posture,
             "--color",
             "never",
         ]
@@ -674,9 +684,10 @@ def compose_worker_prompt(backend: Backend, task: str) -> str:
         )
     return (
         task
-        + "\n\nCodex sandbox note: the workspace-write sandbox keeps this "
-        "repository's git directory writable, so session-close commits and "
-        "pushes run normally. Session-close per AGENTS.md. If `git commit` or "
+        + "\n\nCodex sandbox note: a write session runs with Codex's sandbox "
+        "bypassed, so session-close commits and pushes, and the nested "
+        "processes an acceptance check spawns, all run normally. "
+        "Session-close per AGENTS.md. If `git commit` or "
         "`bd close` cannot run non-interactively, that is PLAN-GAP — do not "
         "invent a substitute."
     )

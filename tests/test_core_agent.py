@@ -59,8 +59,8 @@ def test_codex_exec_gets_plain_prompt_not_slash_goal() -> None:
     assert argv[2] == prompt
     assert "/goal" not in " ".join(argv)
     assert "--json" in argv
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert "--sandbox" not in argv
 
 
 def test_claude_keeps_goal_contract() -> None:
@@ -101,6 +101,7 @@ def test_codex_codegraph_registration_supports_read_only_posture() -> None:
     )
     argv = runner.build_argv("verify graph only")
     assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
 
 
 def test_codex_readonly_is_per_verifier_invocation() -> None:
@@ -108,7 +109,9 @@ def test_codex_readonly_is_per_verifier_invocation() -> None:
     verify = runner.build_argv("verify", readonly=True)
     implement = runner.build_argv("implement")
     assert verify[verify.index("--sandbox") + 1] == "read-only"
-    assert implement[implement.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in verify
+    assert "--dangerously-bypass-approvals-and-sandbox" in implement
+    assert "--sandbox" not in implement
 
 
 def test_codex_readonly_does_not_wrap_runtime_filesystem(tmp_path: Path) -> None:
@@ -130,8 +133,8 @@ def test_codexrunner_write_session_gets_the_git_writable_roots_override(
         [str((tmp_path / ".git").resolve())]
     )
     assert override in argv
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" in argv
+    assert "--sandbox" not in argv
 
 
 def test_codexrunner_readonly_sessions_never_gain_git_write(tmp_path: Path) -> None:

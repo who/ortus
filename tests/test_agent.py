@@ -34,6 +34,7 @@ def test_readonly_verifier_postures_are_technically_enforced(
 ) -> None:
     codex_argv = CodexRunner().build_argv("verify", readonly=True)
     assert codex_argv[codex_argv.index("--sandbox") + 1] == "read-only"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex_argv
 
     claude_argv = ClaudeRunner().build_argv("verify", readonly=True)
     assert "--disallowedTools" in claude_argv
