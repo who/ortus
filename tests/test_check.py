@@ -1036,6 +1036,37 @@ def test_check_codex_uses_codex_binary_and_config(
     assert "hooks" not in result.stdout
 
 
+def test_check_codex_config_needs_no_sandbox_mode_pin(tmp_path: Path) -> None:
+    """Ortus names the posture on the launch command line, not in this file."""
+    repo = tmp_path / "codex-unpinned"
+    (repo / ".codex").mkdir(parents=True)
+    config = repo / ".codex" / "config.toml"
+
+    config.write_text('approval_policy = "never"\n')
+    row = check_mod.check_codex_settings(repo)
+    assert row.ok, row.message
+
+    # A project that kept the historical pin is equally acceptable: it governs
+    # the operator's own interactive sessions, which Ortus never launches.
+    config.write_text('sandbox_mode = "workspace-write"\napproval_policy = "never"\n')
+    assert check_mod.check_codex_settings(repo).ok
+
+    config.write_text('sandbox_mode = "read-only"\n')
+    assert check_mod.check_codex_settings(repo).ok
+
+
+def test_check_codex_config_still_fails_when_absent_or_broken(tmp_path: Path) -> None:
+    repo = tmp_path / "codex-broken"
+    (repo / ".codex").mkdir(parents=True)
+
+    missing = check_mod.check_codex_settings(repo)
+    assert not missing.ok and "missing at" in missing.message
+
+    (repo / ".codex" / "config.toml").write_text("sandbox_mode = \n")
+    broken = check_mod.check_codex_settings(repo)
+    assert not broken.ok and "unparseable" in broken.message
+
+
 # --- the [local] table -------------------------------------------------------
 #
 # `local` is opencode under its older name, so its rows are opencode's and

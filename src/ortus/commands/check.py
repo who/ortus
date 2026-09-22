@@ -263,18 +263,24 @@ def check_claude_settings(repo: Path) -> CheckResult:
 
 
 def check_codex_settings(repo: Path) -> CheckResult:
+    """Project `.codex/config.toml` exists and parses.
+
+    ``sandbox_mode`` is deliberately not required. Ortus names the posture on
+    the command line of every launch it makes — ``--sandbox read-only`` for a
+    verifier, the approvals-and-sandbox bypass for a worker that has to run
+    its issue's checks — so a pin in this file decides nothing about how a
+    grind runs and must not fail a host that has dropped it. Projects that
+    still carry the pin are equally fine: it governs the operator's own
+    interactive ``codex`` sessions, which Ortus does not launch.
+    """
     settings = repo / ".codex" / "config.toml"
     if not settings.is_file():
         return CheckResult(".codex/config.toml", False, f"missing at {settings}")
     try:
         with settings.open("rb") as fh:
-            data = tomllib.load(fh)
+            tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         return CheckResult(".codex/config.toml", False, f"unparseable: {exc}")
-    if data.get("sandbox_mode") != "workspace-write":
-        return CheckResult(
-            ".codex/config.toml", False, "sandbox_mode must be workspace-write"
-        )
     return CheckResult(".codex/config.toml", True, str(settings))
 
 

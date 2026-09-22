@@ -122,17 +122,16 @@ def test_codex_readonly_does_not_wrap_runtime_filesystem(tmp_path: Path) -> None
     assert argv[argv.index("--sandbox") + 1] == "read-only"
 
 
-def test_codexrunner_write_session_gets_the_git_writable_roots_override(
+def test_codexrunner_write_session_carries_no_workspace_write_override(
     tmp_path: Path,
 ) -> None:
+    """A bypassed write launch has no workspace-write config left to carve up."""
     (tmp_path / ".git").mkdir()
     runner = CodexRunner()
     argv = runner._write_argv(runner.build_argv("implement"), tmp_path)
 
-    override = "sandbox_workspace_write.writable_roots=" + json.dumps(
-        [str((tmp_path / ".git").resolve())]
-    )
-    assert override in argv
+    assert argv == runner.build_argv("implement")
+    assert "writable_roots" not in " ".join(argv)
     assert "--dangerously-bypass-approvals-and-sandbox" in argv
     assert "--sandbox" not in argv
 
@@ -146,37 +145,10 @@ def test_codexrunner_readonly_sessions_never_gain_git_write(tmp_path: Path) -> N
     graph_only = CodexRunner(sandbox_mode="read-only")
     argv = graph_only.build_argv("verify graph only")
     assert graph_only._write_argv(argv, tmp_path) == argv
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
 
 
-def test_codexrunner_writable_roots_follow_a_worktree_gitdir(tmp_path: Path) -> None:
-    common = tmp_path / "main" / ".git"
-    worktree_git = common / "worktrees" / "wt"
-    worktree_git.mkdir(parents=True)
-    (worktree_git / "commondir").write_text("../..\n")
-    tree = tmp_path / "wt"
-    tree.mkdir()
-    (tree / ".git").write_text(f"gitdir: {worktree_git}\n")
-
-    runner = CodexRunner()
-    argv = runner._write_argv(runner.build_argv("implement"), tree)
-    assert json.loads(argv[-1].split("=", 1)[1]) == [
-        str(worktree_git.resolve()),
-        str(common.resolve()),
-    ]
-
-
-def test_codexrunner_without_a_git_dir_invents_no_writable_roots(
-    tmp_path: Path,
-) -> None:
-    runner = CodexRunner()
-    argv = runner.build_argv("implement")
-    assert runner._write_argv(argv, tmp_path) == argv
-
-    (tmp_path / ".git").write_text("not a gitdir pointer\n")
-    assert runner._write_argv(argv, tmp_path) == argv
-
-
-def test_codexrunner_run_launches_write_sessions_with_the_carveout(
+def test_codexrunner_run_launches_write_sessions_without_a_carveout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".git").mkdir()
@@ -190,8 +162,9 @@ def test_codexrunner_run_launches_write_sessions_with_the_carveout(
     CodexRunner().run("implement", repo=tmp_path, log_path=tmp_path / "codex.jsonl")
 
     joined = " ".join(launched[0])
-    assert "sandbox_workspace_write.writable_roots" in joined
-    assert str((tmp_path / ".git").resolve()) in joined
+    assert "sandbox_workspace_write" not in joined
+    assert str((tmp_path / ".git").resolve()) not in joined
+    assert "--dangerously-bypass-approvals-and-sandbox" in joined
 
 
 def test_claude_write_sessions_add_no_writable_roots(tmp_path: Path) -> None:
