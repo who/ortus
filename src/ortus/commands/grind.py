@@ -119,19 +119,22 @@ from ortus.core.local_backend import (
 from ortus.core.repo import resolve_repo
 from ortus.core.pin_skew import tag_pin_skew_claims
 from ortus.core.worker_failure import classify_worker_window, failure_log_line
-from ortus.core.judge import GateAction, JudgeConfig, JudgeMode, parse_judge_config
+from ortus.core.judge import (
+    GateAction, JudgeAnswers, JudgeConfig, JudgeMode, JudgeState, parse_judge_config,
+)
 from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
 from ortus.core.judge_hooks import HookRun, check_pre_tool
 from ortus.core.judge_log import (
-    DecisionEvent, JudgeLogError, OutcomeEvent, OutcomeStatus, elapsed_ms,
-    write_decision, write_outcome, write_shadow_outcome,
+    DecisionEvent, JudgeLogError, ModelRouteEvent, OutcomeEvent, OutcomeStatus,
+    elapsed_ms, write_decision, write_model_route, write_outcome, write_shadow_outcome,
 )
 from ortus.core.judge_policy import decide_pre_turn
 from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
 from ortus.core.judge_post import WorkerOutcome, apply_outcome, evaluate_outcome
 from ortus.core.judge_routing import (
-    ExecutionBundle, RouteOverrides, RoutePreparationError, plan_routes, prepare_route,
+    ExecutionBundle, RouteOverrides, RoutePlan, RoutePreparationError,
+    jev_router_enabled, plan_routes, prepare_route, route_implement_profile,
 )
 from ortus.core.judge_state import StateError, pack_state
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
@@ -313,8 +316,49 @@ def _gate_turn(
         turn.record_outcome(bd, repo, judge_config, run_id, 0)
         return turn, None
     bundle = bundles[decision.backend]
+    bundle = _route_model(
+        bundle, plan,
+        repo=repo, config=config, judge_config=judge_config, state=state,
+        answers=verdict.answers, decision_id=turn.decision_id, run_id=run_id,
+    )
     bundle.runner.extra_env.update(turn.bound.worker_env(bundle.runner.extra_env))
     return turn, bundle
+
+
+def _route_model(
+    bundle: ExecutionBundle,
+    plan: RoutePlan,
+    *,
+    repo: Path,
+    config: Config,
+    judge_config: JudgeConfig,
+    state: JudgeState,
+    answers: JudgeAnswers | None,
+    decision_id: UUID | None,
+    run_id: UUID,
+) -> ExecutionBundle:
+    """Let the judge's vectors pick the implementation model for this bead.
+
+    The chosen route's own overrides apply only when it is the baseline, the
+    same rule preparation used to resolve its profiles, so a fallback backend
+    never inherits a pin meant for another one.
+    """
+    overrides = plan.overrides if bundle.backend == plan.baseline else RouteOverrides()
+    backend = bundle.execution_backend or bundle.backend.value
+    route = route_implement_profile(
+        config, backend, bundle.implement_profile, answers,
+        overrides=overrides, enabled=jev_router_enabled(config),
+    )
+    if decision_id is not None:
+        write_model_route(repo, judge_config, ModelRouteEvent(
+            run_id=run_id, decision_id=decision_id, seat=state.seat,
+            issue_id=state.issue_id, backend=backend, tier=route.tier.value,
+            reason=route.reason.value, model=route.profile.model,
+            reasoning_effort=route.profile.reasoning_effort,
+            needs_frontier=route.needs_frontier, action_risk=route.action_risk,
+            difficulty=route.difficulty,
+        ))
+    return replace(bundle, implement_profile=route.profile)
 
 
 _TRACKER_EXPORT_PATHS = frozenset(

@@ -97,6 +97,12 @@ DEFAULTS: dict[str, Any] = {
     # ordering stays the control arm; `ORTUS_STABLE_PREFIX` flips one run
     # without editing a tracked file.
     "stable_prompt_prefix": False,
+    # Whether the judge's probability vectors pick the implementation model and
+    # reasoning effort for the claimed bead, instead of every worker inheriting
+    # the pinned `[profiles.<backend>.implement]` values. Off by default so
+    # today's pinned profile stays the control arm of the A/B;
+    # `ORTUS_JEV_ROUTER` flips one run without editing a tracked file.
+    "jev_model_router": False,
     # Branch `grind` pins the working tree to and re-asserts each iteration.
     # "main" fits a fresh `ortus init`; a repo whose default branch is named
     # something else (e.g. "master") pins it here instead of passing
@@ -245,6 +251,22 @@ def _validate_stable_prompt_prefix(values: dict[str, Any]) -> None:
         )
 
 
+def _validate_jev_model_router(values: dict[str, Any]) -> None:
+    """Reject a `jev_model_router` value that is not a boolean.
+
+    The key decides whether a bead's implementation model and effort come from
+    the judge's vectors or from the pinned profile, and the A/B it exists for
+    compares cost per closed bead between those two arms. A string that merely
+    looks true would resolve to the pinned arm and spoil the comparison
+    silently, so it fails here instead.
+    """
+    value = values.get("jev_model_router", False)
+    if not isinstance(value, bool):
+        raise ProfileError(
+            f"invalid jev_model_router {value!r}; expected true or false"
+        )
+
+
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -324,6 +346,7 @@ def load_config(
     _validate_verification(cfg.values)
     _validate_prompt_audit(cfg.values)
     _validate_stable_prompt_prefix(cfg.values)
+    _validate_jev_model_router(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
     parse_judge_config(cfg, environ={})
