@@ -38,6 +38,11 @@ from pathlib import Path
 
 from ortus.core import readiness
 from ortus.core.git import GitClient
+from ortus.core.spill import (
+    default_spill_dir,
+    spill_large_output,
+    spill_output_file,
+)
 
 # The readiness grammar, shared by reference: an AC identifier, a command
 # extractor, and a kind tag mean here exactly what the validator accepted
@@ -70,14 +75,14 @@ VERDICT_BROKEN_BASE = "broken-base"
 #: Generous by default: a wedged check is reported as timed out rather than
 #: waited on forever (the ortus-xjdf lesson applied mechanically).
 DEFAULT_TIMEOUT_SECONDS = 600.0
-#: Bound applied when a command's captured output is read back for the record.
+#: Bound applied to what a command's captured output contributes to a
+#: record: output above it is kept whole on disk and referenced by path,
+#: size, and tail rather than cut down to fit.
 DEFAULT_OUTPUT_LIMIT = 4_000
 #: Sync convention for a uv-managed tree. A fresh clone has no venv, and
 #: `uv run` alone installs the project but not the test extras, so `pytest`
 #: fails to spawn without this.
 DEFAULT_SYNC_COMMAND = "uv sync --all-extras"
-
-_TRUNCATION_MARKER = "\n[... output truncated ...]\n"
 
 
 @dataclass(frozen=True)
@@ -262,15 +267,19 @@ def _execute(
     *,
     timeout_seconds: float,
     output_limit: int,
+    spill_dir: Path | None = None,
 ) -> _Execution:
-    """Run one work-spec command through the shell; file-captured, bounded read.
+    """Run one work-spec command through the shell; file-captured, never cut.
 
     The command runs exactly as written — readiness validated it, and its
     shell metacharacters are part of its meaning. Output goes to a file and
-    is bounded on read, never piped through a filter (the
-    pipeline-through-tail pathology must not be rebuilt here). On timeout the
-    whole process group is killed, so parallel test workers cannot outlive
-    the check that spawned them.
+    is never piped through a filter (the pipeline-through-tail pathology must
+    not be rebuilt here). The capture outlives the scratch tree: anything too
+    large to sit in a record is copied into `spill_dir` and represented by
+    its path, its size, and its tail, so the bytes between the ends stay
+    readable instead of being thrown away at the bound. On timeout the whole
+    process group is killed, so parallel test workers cannot outlive the
+    check that spawned them.
     """
     started = time.monotonic()
     with output_path.open("wb") as sink:
@@ -300,25 +309,13 @@ def _execute(
         exit_code=exit_code,
         timed_out=timed_out,
         duration_seconds=time.monotonic() - started,
-        output=_bounded_read(output_path, output_limit),
+        output=spill_output_file(
+            output_path,
+            spill_dir=spill_dir,
+            limit=output_limit,
+            name=output_path.stem,
+        ).render(),
     )
-
-
-def _bounded_read(path: Path, limit: int) -> str:
-    """Read captured output back, bounded, keeping the head and the tail.
-
-    Failures announce themselves at both ends — a build error up front, a
-    pytest summary at the bottom — so the bound keeps both rather than
-    truncating blindly at one.
-    """
-    try:
-        text = path.read_bytes().decode("utf-8", errors="replace")
-    except OSError:
-        return ""
-    if len(text) <= limit:
-        return text
-    half = max(limit // 2, 1)
-    return text[:half] + _TRUNCATION_MARKER + text[-half:]
 
 
 def _fold_verdicts(kind: str, base: _Execution, branch: _Execution) -> str:
@@ -363,6 +360,7 @@ def _materialize_tree(
     sync_command: str | None,
     timeout_seconds: float,
     output_limit: int,
+    spill_dir: Path | None = None,
 ) -> EnvironmentFailure | None:
     """Clone `ref` at `target` and prepare its environment; None on success.
 
@@ -386,6 +384,7 @@ def _materialize_tree(
         log_path,
         timeout_seconds=timeout_seconds,
         output_limit=output_limit,
+        spill_dir=spill_dir,
     )
     if prepared.timed_out or prepared.exit_code != 0:
         return EnvironmentFailure(
@@ -407,6 +406,7 @@ def run_checks(
     output_limit: int = DEFAULT_OUTPUT_LIMIT,
     sync_command: str | None = None,
     scratch_root: Path | None = None,
+    spill_dir: Path | None = None,
 ) -> CheckRunResult:
     """Execute a work spec's Criterion checks against `ref`, one record per AC-N.
 
@@ -415,6 +415,12 @@ def run_checks(
     a per-command timeout, and removes the scratch tree afterwards. The clone
     lives outside the repository, so accidental writes stay out of the source
     tree; one clone serves every command of the run.
+
+    Captured output outlives that scratch tree. Anything larger than
+    `output_limit` is copied into `spill_dir` — by default a directory beside
+    the grind logs — and the record carries its path, size, and tail, so a
+    failing check's full transcript is still readable when an operator opens
+    the comment it produced.
 
     When the work spec tags criteria with kinds, `base_ref` names the other end
     of the ref pair: a second shared clone is checked out once per run at the
@@ -426,6 +432,8 @@ def run_checks(
     parsed, packet_failures = parse_criterion_checks(acceptance_criteria)
     if not parsed:
         return CheckRunResult(ref=ref, packet_failures=packet_failures)
+    if spill_dir is None:
+        spill_dir = default_spill_dir(repo)
     git = GitClient(repo)
     scratch = Path(tempfile.mkdtemp(prefix="ortus-checks-", dir=scratch_root))
     try:
@@ -438,6 +446,7 @@ def run_checks(
             sync_command=sync_command,
             timeout_seconds=timeout_seconds,
             output_limit=output_limit,
+            spill_dir=spill_dir,
         )
         if environment is not None:
             return CheckRunResult(
@@ -480,6 +489,7 @@ def run_checks(
                 sync_command=sync_command,
                 timeout_seconds=timeout_seconds,
                 output_limit=output_limit,
+                spill_dir=spill_dir,
             )
             if environment is not None:
                 return CheckRunResult(
@@ -495,6 +505,7 @@ def run_checks(
                 scratch / f"{check.criterion_id}.log",
                 timeout_seconds=timeout_seconds,
                 output_limit=output_limit,
+                spill_dir=spill_dir,
             )
             if check.kind is None or base_clone is None:
                 if outcome.timed_out:
@@ -520,6 +531,7 @@ def run_checks(
                 scratch / f"{check.criterion_id}.base.log",
                 timeout_seconds=timeout_seconds,
                 output_limit=output_limit,
+                spill_dir=spill_dir,
             )
             records.append(
                 CriterionResult(
@@ -541,12 +553,38 @@ def run_checks(
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def render_tracker_comment(result: CheckRunResult) -> str:
+def _quoted(
+    output: str, *, spill_dir: Path | None, limit: int, name: str
+) -> list[str]:
+    """A fenced block for one non-passing output, referenced when oversized.
+
+    This is the boundary the comment budget belongs to. Output that arrived
+    here already spilled is a short reference and passes through untouched;
+    output assembled anywhere else is spilled now rather than pasted whole
+    into a comment that has to hold every criterion of the run. Redaction
+    happens on the way out, so a command that echoed a credential does not
+    publish it to the tracker.
+    """
+    body = (
+        spill_large_output(output, spill_dir=spill_dir, limit=limit, name=name)
+        .render()
+        .strip()
+    )
+    return ["", "```", body, "```", ""] if body else []
+
+
+def render_tracker_comment(
+    result: CheckRunResult,
+    *,
+    spill_dir: Path | None = None,
+    limit: int = DEFAULT_OUTPUT_LIMIT,
+) -> str:
     """Render a run as durable tracker-comment text: data in, prose out.
 
     Every command, verdict, and exit code appears; non-passing output is
-    quoted (already bounded at capture). An empty run is stated as
-    unverified, never as a success.
+    quoted by reference once it outgrows `limit`, so the comment names where
+    the whole transcript lives instead of carrying a body nobody can read
+    past. An empty run is stated as unverified, never as a success.
     """
     if (
         result.environment is None
@@ -565,8 +603,14 @@ def render_tracker_comment(result: CheckRunResult) -> str:
     ]
     if result.environment is not None:
         lines.append(f"- environment: {result.environment.reason}")
-        if result.environment.output.strip():
-            lines.extend(["", "```", result.environment.output.strip(), "```", ""])
+        lines.extend(
+            _quoted(
+                result.environment.output,
+                spill_dir=spill_dir,
+                limit=limit,
+                name="environment",
+            )
+        )
     lines.extend(
         f"- work-spec failure: {failure.message}" for failure in result.packet_failures
     )
@@ -579,8 +623,15 @@ def render_tracker_comment(result: CheckRunResult) -> str:
                 f"- {record.criterion_id}: {record.verdict} — {exit_text} "
                 f"in {record.duration_seconds:.1f}s — `{record.command}`"
             )
-            if record.verdict != VERDICT_PASS and record.output.strip():
-                lines.extend(["", "```", record.output.strip(), "```", ""])
+            if record.verdict != VERDICT_PASS:
+                lines.extend(
+                    _quoted(
+                        record.output,
+                        spill_dir=spill_dir,
+                        limit=limit,
+                        name=record.criterion_id,
+                    )
+                )
             continue
         base_text = (
             "no exit code"
@@ -602,6 +653,12 @@ def render_tracker_comment(result: CheckRunResult) -> str:
                 record.verdict == VERDICT_TIMEOUT and record.exit_code is not None
             )
             output = record.base_output if blames_base else record.output
-            if output.strip():
-                lines.extend(["", "```", output.strip(), "```", ""])
+            lines.extend(
+                _quoted(
+                    output,
+                    spill_dir=spill_dir,
+                    limit=limit,
+                    name=record.criterion_id,
+                )
+            )
     return "\n".join(lines).rstrip() + "\n"

@@ -18,10 +18,12 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 from importlib.resources import files
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from ortus.core.prompt_prefix import slim_issue_details
 from ortus.core.readiness import ReadinessReport, validate_issue
+from ortus.core.spill import spill_large_output
 
 
 # Per-iteration condition for the harness-selects-and-claims flow: the loop
@@ -32,6 +34,10 @@ from ortus.core.readiness import ReadinessReport, validate_issue
 WORK_ISSUE_CONDITION_FILE = "work-issue.txt"
 ISSUE_ID_PLACEHOLDER = "<ISSUE_ID>"
 ISSUE_DETAILS_PLACEHOLDER = "<ISSUE_DETAILS>"
+#: Ceiling on one packet field's contribution to a worker prompt. Authored
+#: prose never approaches it; a field this long is a pasted transcript, and
+#: pasting it back into the next window costs context the work itself needs.
+MAX_FIELD_CHARS = 8_000
 CONDITIONS_PACKAGE = "ortus.prompts.conditions"
 
 # Labels whose presence on an issue makes it un-claimable by the agent loop.
@@ -228,7 +234,7 @@ def epic_is_exhausted(
     )
 
 
-def format_issue_details(issue: dict) -> str:
+def format_issue_details(issue: dict, *, spill_dir: Path | None = None) -> str:
     """Render a ready-list/`bd show` issue dict into a compact human-readable
     block to inject into the worker prompt.
 
@@ -236,6 +242,14 @@ def format_issue_details(issue: dict) -> str:
     dropped so a sparse issue doesn't produce a wall of blank labels. The id
     is intentionally NOT formatted here — it is injected separately (and
     repeatedly) by :func:`inject_issue` so the worker can't miss it.
+
+    A field longer than :data:`MAX_FIELD_CHARS` is a transcript somebody
+    pasted into the packet, not a work spec. Injecting it whole would spend
+    the window the worker needs on output that has already been read once, so
+    it is written to `spill_dir` and named by path, size, and tail. Masking is
+    deliberately not applied: these bodies are the operator's own prose, and a
+    criterion that names a credential variable must reach the worker as
+    written.
     """
     lines: list[str] = []
     title = str(issue.get("title") or "").strip()
@@ -262,12 +276,25 @@ def format_issue_details(issue: dict) -> str:
     ):
         value = str(issue.get(field) or "").strip()
         if value:
-            lines.append(f"\n{heading}:\n{value}")
+            body = spill_large_output(
+                value,
+                spill_dir=spill_dir,
+                limit=MAX_FIELD_CHARS,
+                name=f"issue-{field}",
+                redact=False,
+            ).render()
+            lines.append(f"\n{heading}:\n{body}")
 
     return "\n".join(lines).strip()
 
 
-def inject_issue(template: str, issue: dict, *, slim: bool = False) -> str:
+def inject_issue(
+    template: str,
+    issue: dict,
+    *,
+    slim: bool = False,
+    spill_dir: Path | None = None,
+) -> str:
     """Substitute the issue id + rendered details into the work-issue template.
 
     Raises ValueError if the issue dict has no id — claiming/working an issue
@@ -282,7 +309,9 @@ def inject_issue(template: str, issue: dict, *, slim: bool = False) -> str:
     if not issue_id:
         raise ValueError("cannot inject issue with no id into work-issue prompt")
     details = (
-        slim_issue_details(issue) if slim else format_issue_details(issue)
+        slim_issue_details(issue)
+        if slim
+        else format_issue_details(issue, spill_dir=spill_dir)
     )
     return template.replace(ISSUE_ID_PLACEHOLDER, issue_id).replace(
         ISSUE_DETAILS_PLACEHOLDER, details

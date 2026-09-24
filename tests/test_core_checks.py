@@ -178,8 +178,8 @@ def test_timeout_kills_the_process_group(tmp_path: Path) -> None:
 def test_output_is_file_captured_and_bounded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-5: stdout/stderr go to a file — never a pipe or filter — and the
-    record's output is bounded on read, keeping head and tail."""
+    """AC-5: stdout/stderr go to a file — never a pipe or filter — and a
+    capture too large for the record is filed and referenced, not cut."""
     repo = _repo(tmp_path)
     sinks: list[tuple[object, object]] = []
     real_popen = subprocess.Popen
@@ -204,10 +204,13 @@ def test_output_is_file_captured_and_bounded(
 
     (record,) = result.results
     assert record.verdict == checks.VERDICT_PASS
-    assert len(record.output) <= 500 + len(checks._TRUNCATION_MARKER)
-    assert checks._TRUNCATION_MARKER.strip() in record.output
-    assert record.output.startswith("1\n"), "the head of the output survives"
-    assert record.output.rstrip().endswith("20000"), "the tail survives too"
+    assert record.output.startswith("[full output: "), "the record is a reference"
+    assert record.output.rstrip().endswith("20000"), "the tail survives in place"
+    spilled = Path(record.output.split("[full output: ", 1)[1].split(" — ", 1)[0])
+    assert spilled.parent == repo / "logs" / "ortus-output"
+    body = spilled.read_text(encoding="utf-8")
+    assert body.startswith("1\n") and body.rstrip().endswith("20000")
+    assert "\n10000\n" in body, "the middle a bound would have dropped is on disk"
     assert sinks, "the executor must have spawned through Popen"
     for stdout, stderr in sinks:
         assert stdout is not subprocess.PIPE

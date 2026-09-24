@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+from ortus.core.spill import redact_secrets, spill_large_output
 
 VERDICT_SCHEMA = 1
 VERDICT_PREFIX = "ORTUS_VERDICT:"
@@ -19,9 +20,6 @@ _MIN_ENTRY_CHARS = 120
 _ENTRY_ELLIPSIS = " …[entry truncated]"
 _TRUNCATION_MARKER = (
     "\n[report truncated; complete verdict retained in transaction artifacts]\n"
-)
-_SECRET = re.compile(
-    r"(?i)(api[_-]?key|authorization|token|secret|password)(\s*[:=]\s*)([^\r\n]+)"
 )
 #: The exact key set one criterion carries, in the order a diagnostic names them.
 CRITERION_KEYS = ("id", "status", "evidence")
@@ -311,7 +309,13 @@ def parse_verdict(
 
 
 def _clean(value: str) -> str:
-    return _SECRET.sub(r"\1\2[REDACTED]", value)
+    """Mask credentials with the pattern every rendered surface shares.
+
+    A report quotes output the check runner already masked; sharing one
+    pattern keeps a value hidden in the comment from surfacing in the report
+    that summarizes it.
+    """
+    return redact_secrets(value)
 
 
 def _entry(value: str, budget: int) -> str:
@@ -372,6 +376,7 @@ def render_report(
     issue_packet_hash: str = "",
     attempt: int | None = None,
     profiles: dict[str, str] | None = None,
+    spill_dir: Path | None = None,
 ) -> str:
     clean = _clean
 
@@ -415,7 +420,7 @@ def render_report(
     per_section = (body - body * 2 // 5) // len(sections)
     for title, values in sections:
         lines.extend(_section(title, (clean(value) for value in values), per_section))
-    return bound_report("\n".join(lines) + "\n")
+    return bound_report("\n".join(lines) + "\n", spill_dir=spill_dir)
 
 
 def render_rejection_report(
@@ -428,6 +433,7 @@ def render_rejection_report(
     issue_packet_hash: str = "",
     attempt: int | None = None,
     profiles: dict[str, str] | None = None,
+    spill_dir: Path | None = None,
 ) -> str:
     """Render a complete report even when no trustworthy envelope exists."""
 
@@ -464,19 +470,37 @@ def render_rejection_report(
             remaining // 6,
         )
     )
-    return bound_report("\n".join(lines) + "\n")
+    return bound_report("\n".join(lines) + "\n", spill_dir=spill_dir)
 
 
-def bound_report(report: str) -> str:
+def bound_report(report: str, *, spill_dir: Path | None = None) -> str:
     """Keep persisted comments bounded after all report blocks are composed.
 
     Both ends are preserved: the verdict body leads and the CodeGraph
     engagement block trails, so a front-only clip would silently drop the
     engagement evidence AC-6 requires.
+
+    With a `spill_dir`, the middle is not merely dropped — the whole report
+    is written there first and the marker names the file and its size, so the
+    comment stays inside its budget while the evidence it had to cut remains
+    readable on the same seat.
     """
 
     if len(report) <= MAX_REPORT_CHARS:
         return report
+    marker = _TRUNCATION_MARKER
+    if spill_dir is not None:
+        spilled = spill_large_output(
+            report,
+            spill_dir=spill_dir,
+            limit=MAX_REPORT_CHARS,
+            name="verifier-report",
+        )
+        if spilled.path is not None:
+            marker = (
+                f"\n[report truncated; complete verdict at {spilled.path} "
+                f"({spilled.size_bytes} bytes)]\n"
+            )
     head = MAX_REPORT_CHARS - ENGAGEMENT_RESERVE
-    tail = ENGAGEMENT_RESERVE - len(_TRUNCATION_MARKER)
-    return report[:head] + _TRUNCATION_MARKER + report[-tail:]
+    tail = ENGAGEMENT_RESERVE - len(marker)
+    return report[:head] + marker + report[-tail:]
