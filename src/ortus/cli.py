@@ -5,6 +5,7 @@ from importlib.metadata import PackageNotFoundError, version as _pkg_version
 import typer
 
 from ortus.commands.check import check
+from ortus.commands.cost import cost
 from ortus.commands.dashboard import dashboard
 from ortus.commands.grind import grind
 from ortus.commands.human import human
@@ -80,6 +81,10 @@ app.command(
     name="dashboard",
     help="Watch one grind run in a read-only live view.",
 )(dashboard)
+app.command(
+    name="cost",
+    help="Report per-bead token cost by billing bucket from grind logs.",
+)(cost)
 app.command(
     name="ingest",
     # `short_help` rather than `help`: the commands table needs one line, while
