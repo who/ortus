@@ -134,7 +134,8 @@ from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
 from ortus.core.judge_post import WorkerOutcome, apply_outcome, evaluate_outcome
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePlan, RoutePreparationError,
-    jev_router_enabled, plan_routes, prepare_route, route_implement_profile,
+    baseline_implement_profile, jev_router_enabled, plan_routes, prepare_route,
+    route_implement_profile,
 )
 from ortus.core.judge_state import StateError, pack_state
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
@@ -162,18 +163,68 @@ def _shadow_turn(
             judge_config, state, verdict, baseline_backend=plan.baseline,
         )
         criteria = build_questions(judge_config, state)
-        return write_decision(repo, judge_config, DecisionEvent(
+        decision_id = write_decision(repo, judge_config, DecisionEvent(
             run_id=run_id, seat=state.seat, issue_id=packet["id"], phase=state.phase,
             answers=verdict.answers, decision=decision, model=judge_config.model,
             criteria_version=CRITERIA_VERSION,
             criteria_hash=criteria_hash(judge_config, criteria),
             latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
         ))
+        if decision_id is not None:
+            _observe_route(
+                repo=repo, config=config, judge_config=judge_config, plan=plan,
+                state=state, answers=verdict.answers, decision_id=decision_id,
+                run_id=run_id,
+            )
+        return decision_id
     except Exception:
         # Observation failures cannot change baseline execution. Never print
         # exception bodies, which may carry provider or issue text.
         output.progress("grind", "judge shadow observation unavailable; continuing baseline")
         return None
+
+
+def _observe_route(
+    *, repo: Path, config: Config, judge_config: JudgeConfig, plan: RoutePlan,
+    state: JudgeState, answers: JudgeAnswers | None, decision_id: UUID,
+    run_id: UUID,
+) -> None:
+    """Record the tier a shadow seat would have run this bead on.
+
+    The router is asked unconditionally here rather than through the flag. A
+    shadow rollout is exactly the case where the flag is still off, and a seat
+    that logged nothing until someone turned the flag on would only ever have
+    evidence for the arm that no longer needs it. Nothing is applied: the
+    record carries ``applied=False`` and the worker keeps the pinned profile,
+    so an observation can never change what runs.
+
+    A judge that answered nothing is not observed at all. The enforcing path
+    logs those beads because its arm has to account for every bead it ran, but
+    an observation that records no tier and no vector is not evidence of
+    anything and would only dilute the rows that are.
+
+    A failure to observe is not a failure to run. The decision record is
+    already written by the time this is reached, and losing a tier line costs
+    the shadow seat one row of evidence and the bead nothing.
+    """
+    if answers is None:
+        return
+    try:
+        backend = plan.execution_backend(plan.baseline)
+        route = route_implement_profile(
+            config, backend, baseline_implement_profile(config, plan), answers,
+            overrides=plan.overrides, enabled=True,
+        )
+        write_model_route(repo, judge_config, ModelRouteEvent(
+            run_id=run_id, decision_id=decision_id, seat=state.seat,
+            issue_id=state.issue_id, backend=backend, tier=route.tier.value,
+            reason=route.reason.value, model=route.profile.model,
+            reasoning_effort=route.profile.reasoning_effort,
+            needs_frontier=route.needs_frontier, action_risk=route.action_risk,
+            difficulty=route.difficulty, applied=False,
+        ))
+    except Exception:
+        output.progress("grind", "judge shadow route unavailable; continuing baseline")
 
 
 def _shadow_outcome(
@@ -356,7 +407,7 @@ def _route_model(
             reason=route.reason.value, model=route.profile.model,
             reasoning_effort=route.profile.reasoning_effort,
             needs_frontier=route.needs_frontier, action_risk=route.action_risk,
-            difficulty=route.difficulty,
+            difficulty=route.difficulty, applied=True,
         ))
     return replace(bundle, implement_profile=route.profile)
 

@@ -97,10 +97,15 @@ class OutcomeEvent:
 class ModelRouteEvent:
     """What the vectors were and which model the bead got for them.
 
-    ``model`` and ``reasoning_effort`` are the values the worker was actually
-    launched with, including a provider default recorded as ``None``. The three
-    vector fields are ``None`` when no answers reached the router, so a
-    flag-off or judge-failure row never reads as a scored bottom of the scale.
+    ``model`` and ``reasoning_effort`` are the values the route chose, including
+    a provider default recorded as ``None``. The three vector fields are
+    ``None`` when no answers reached the router, so a flag-off or judge-failure
+    row never reads as a scored bottom of the scale.
+
+    ``applied`` separates a route the worker ran on from one only observed. A
+    shadow seat records what it would have picked while its worker keeps the
+    pinned profile, and a reader joining tiers to bead outcomes has to be able
+    to drop the rows whose tier never ran the bead.
     """
 
     run_id: UUID
@@ -115,6 +120,7 @@ class ModelRouteEvent:
     needs_frontier: float | None = None
     action_risk: float | None = None
     difficulty: float | None = None
+    applied: bool = True
 
 
 def elapsed_ms(started_at: float) -> float:
@@ -324,10 +330,16 @@ def write_model_route(
     the A/B can divide cost by closed beads per arm instead of guessing which
     beads the router touched. A model name is operator-supplied configuration
     and is screened like any other metadata before it reaches the log.
+
+    An observation carries ``applied=False`` and is the same record otherwise,
+    so a shadow seat's evidence is readable by everything that already reads
+    this log rather than needing a second format.
     """
     if not config.enabled:
         return None
     if not isinstance(event, ModelRouteEvent):
+        _invalid()
+    if type(event.applied) is not bool:
         _invalid()
 
     def clean(value: str | None) -> str | None:
@@ -342,6 +354,7 @@ def write_model_route(
         "reason": clean(event.reason),
         "model": clean(event.model),
         "reasoning_effort": clean(event.reasoning_effort),
+        "applied": event.applied,
         **{
             name: None if value is None else _number(value, 1)
             for name, value in (
@@ -355,7 +368,8 @@ def write_model_route(
     output.progress("grind", f"judge route tier={payload['tier']} "
                     f"reason={payload['reason']} "
                     f"model={payload['model'] or 'provider-default'} "
-                    f"effort={payload['reasoning_effort'] or 'provider-default'}")
+                    f"effort={payload['reasoning_effort'] or 'provider-default'} "
+                    f"applied={'yes' if event.applied else 'no'}")
     return event.decision_id
 
 

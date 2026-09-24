@@ -392,6 +392,19 @@ def _tier(difficulty: float) -> RouterTier:
     return RouterTier.BASELINE
 
 
+def baseline_implement_profile(config: Config, plan: RoutePlan) -> AgentProfile:
+    """The implementation profile the baseline worker would launch with.
+
+    Preparation resolves this while building a runner, which an observer has
+    no reason to do. Reading it straight off the plan lets a shadow seat score
+    a route against the same profile the enforcing seat would have started
+    from, instead of against a second resolution that could drift from it.
+    """
+    return _profiles(
+        config, plan.execution_backend(plan.baseline), plan.overrides
+    )[0]
+
+
 def route_implement_profile(
     config: Config,
     backend: str,

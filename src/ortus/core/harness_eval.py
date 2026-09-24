@@ -60,7 +60,7 @@ EVALPACK_PACKAGE = "ortus.evalpack"
 
 #: Bumped whenever a metric is added, renamed, or changes meaning. A reader
 #: comparing two reports checks this before comparing anything else.
-REPORT_SCHEMA = "harness-eval-report/v2"
+REPORT_SCHEMA = "harness-eval-report/v3"
 
 #: The one number the evaluation set exists to move.
 PRIMARY_METRIC = "cost_per_closed_bead"
@@ -166,6 +166,12 @@ class Treatment:
     summary: str
     #: The bd issue that consumes this arm's numbers, when one is filed.
     measured_by: str | None = None
+    #: Further `.ortusrc` lines without which the flag changes nothing. A
+    #: treatment whose code path sits behind another opt-in has to switch that
+    #: on too, or its arm silently runs the control and the cell measures the
+    #: same configuration twice. Written below the flag, so a table header here
+    #: cannot swallow it.
+    requires: tuple[str, ...] = ()
 
     @property
     def enable_line(self) -> str:
@@ -173,11 +179,18 @@ class Treatment:
 
         return f"{self.config_key} = true"
 
+    @property
+    def config_lines(self) -> tuple[str, ...]:
+        """Every `.ortusrc` line this arm appends, the flag first."""
+
+        return (self.enable_line, *self.requires)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "config_key": self.config_key,
             "enable_line": self.enable_line,
+            "config_lines": list(self.config_lines),
             "summary": self.summary,
             "measured_by": self.measured_by,
         }
@@ -203,7 +216,11 @@ TREATMENTS: tuple[Treatment, ...] = (
         key="model-router",
         config_key="jev_model_router",
         summary="Let the judge pick the per-bead worker model tier.",
-        measured_by="ortus-p810",
+        measured_by="ortus-ib1w",
+        # The router is only ever consulted from the enforcing pre-turn gate,
+        # and a fresh seat ships that gate off. Without these two lines the arm
+        # is the control arm with an unread flag in its config.
+        requires=("[judge]", "enabled = true", 'mode = "enforce"'),
     ),
 )
 
@@ -239,14 +256,15 @@ def arm_commands(
     same commands against the same PRD, which is the whole point of freezing
     the set. The treatment is applied by appending its key to the seat's
     `.ortusrc` — every treatment here is a config key rather than a grind
-    flag, so one appended line is the entire difference between arms.
+    flag, so appended config is the entire difference between arms.
     """
 
     seat = root / seat_name(fixture, arm)
     commands = [f"ortus init {seat} --backend {backend}"]
     applied = treatment(arm)
     if applied is not None:
-        commands.append(f"printf '%s\\n' '{applied.enable_line}' >> {seat}/.ortusrc")
+        lines = "' '".join(applied.config_lines)
+        commands.append(f"printf '%s\\n' '{lines}' >> {seat}/.ortusrc")
     commands.append(f"ortus plan {seat} {fixture.prd_path}")
     commands.append(f"ortus grind {seat} --tasks 0")
     return tuple(commands)
@@ -618,9 +636,12 @@ def collect_routes(root: Path, fixture: EvalFixture, arm: str) -> dict[str, str]
 
     A bead can be routed more than once, because every resumed window writes
     its own record, and the tier that last ran it is the one its outcome
-    belongs to. The log is read defensively: it is appended to by workers a
-    timeout may kill mid-line, so an undecodable line is skipped rather than
-    failing the whole report, and a seat without the log simply routes nothing.
+    belongs to. Observations are skipped: a shadow seat records the tier it
+    would have picked, and crediting a bead's outcome to a tier that never ran
+    it would read a control arm's numbers as the router's. The log is read
+    defensively: it is appended to by workers a timeout may kill mid-line, so
+    an undecodable line is skipped rather than failing the whole report, and a
+    seat without the log simply routes nothing.
     """
 
     path = root / seat_name(fixture, arm) / "logs" / ROUTE_LOG_NAME
@@ -637,11 +658,78 @@ def collect_routes(root: Path, fixture: EvalFixture, arm: str) -> dict[str, str]
             continue
         if not isinstance(record, dict):
             continue
+        if record.get("applied") is False:
+            continue
         issue_id = record.get("issue_id")
         tier = record.get("tier")
         if isinstance(issue_id, str) and issue_id and isinstance(tier, str) and tier:
             routes[issue_id] = tier
     return routes
+
+
+#: What a comparison says about the treatment cell it read.
+ADOPT = "adopt"
+KEEP_CONTROL = "keep-control"
+UNMEASURED = "unmeasured"
+
+
+@dataclass(frozen=True)
+class ArmComparison:
+    """One treatment cell read against the control cell of its own fixture.
+
+    The verdict is computed rather than argued: a treatment is worth adopting
+    when it closed at least as large a share of its beads as the control and
+    was cheaper per closed bead or finished sooner. A cell missing either close
+    rate cannot answer that question at all, and says so rather than scoring a
+    missing number as a zero and reading an arm that never ran as an arm that
+    closed nothing.
+    """
+
+    fixture: str
+    arm: str
+    control_cost_per_closed_bead: float | None = None
+    arm_cost_per_closed_bead: float | None = None
+    control_close_rate: float | None = None
+    arm_close_rate: float | None = None
+    control_wall_seconds: float | None = None
+    arm_wall_seconds: float | None = None
+
+    @property
+    def cheaper(self) -> bool:
+        return _below(self.arm_cost_per_closed_bead, self.control_cost_per_closed_bead)
+
+    @property
+    def faster(self) -> bool:
+        return _below(self.arm_wall_seconds, self.control_wall_seconds)
+
+    @property
+    def verdict(self) -> str:
+        if self.arm_close_rate is None or self.control_close_rate is None:
+            return UNMEASURED
+        if self.arm_close_rate < self.control_close_rate:
+            return KEEP_CONTROL
+        return ADOPT if (self.cheaper or self.faster) else KEEP_CONTROL
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "fixture": self.fixture,
+            "arm": self.arm,
+            "control_cost_per_closed_bead": self.control_cost_per_closed_bead,
+            "arm_cost_per_closed_bead": self.arm_cost_per_closed_bead,
+            "control_close_rate": self.control_close_rate,
+            "arm_close_rate": self.arm_close_rate,
+            "control_wall_seconds": self.control_wall_seconds,
+            "arm_wall_seconds": self.arm_wall_seconds,
+            "cheaper": self.cheaper,
+            "faster": self.faster,
+            "verdict": self.verdict,
+        }
+
+
+def _below(value: float | None, reference: float | None) -> bool:
+    """True only when both numbers were reported and the first is smaller."""
+
+    return value is not None and reference is not None and value < reference
 
 
 @dataclass(frozen=True)
@@ -660,6 +748,39 @@ class EvalReport:
             if record.fixture == fixture and record.arm == arm:
                 return record
         return None
+
+    def arm_metrics(self, fixture: str, arm: str) -> ArmMetrics | None:
+        """One cell's measured row, or None when the report has no such cell."""
+
+        for row in self.arms:
+            if row.fixture == fixture and row.arm == arm:
+                return row
+        return None
+
+    @property
+    def comparisons(self) -> tuple[ArmComparison, ...]:
+        """Every treatment cell read against its fixture's control cell."""
+
+        pairs = []
+        for fixture in FIXTURE_PACK:
+            control = self.arm_metrics(fixture.key, CONTROL_ARM)
+            for item in TREATMENTS:
+                row = self.arm_metrics(fixture.key, item.key)
+                if row is None:
+                    continue
+                pairs.append(ArmComparison(
+                    fixture=fixture.key,
+                    arm=item.key,
+                    control_cost_per_closed_bead=(
+                        control.cost_per_closed_bead if control else None
+                    ),
+                    arm_cost_per_closed_bead=row.cost_per_closed_bead,
+                    control_close_rate=control.close_rate if control else None,
+                    arm_close_rate=row.close_rate,
+                    control_wall_seconds=control.wall_seconds if control else None,
+                    arm_wall_seconds=row.wall_seconds,
+                ))
+        return tuple(pairs)
 
     @property
     def null_results(self) -> tuple[dict[str, Any], ...]:
@@ -680,6 +801,7 @@ class EvalReport:
             "fixtures": [fixture.as_dict() for fixture in FIXTURE_PACK],
             "treatments": [item.as_dict() for item in TREATMENTS],
             "arms": [arm.as_dict() for arm in self.arms],
+            "comparisons": [item.as_dict() for item in self.comparisons],
             "executions": [record.as_dict() for record in self.executions],
             "null_results": [dict(entry) for entry in self.null_results],
         }
@@ -731,13 +853,15 @@ def _status_cell(record: CellExecution | None) -> str:
 
 
 def render_report(report: EvalReport) -> str:
-    """The report as markdown: one table, the tiers, then the nulls.
+    """The report as markdown: one table, the comparison, the tiers, the nulls.
 
     A swept report gains one trailing status column. A report rebuilt from
     logs has no records to show and keeps the table it always had. The
-    per-tier section is where a threshold gets rewritten from outcomes rather
-    than from taste, so it names the arms that routed and says so plainly
-    when none did.
+    comparison block is what a default gets flipped on, so it puts each
+    treatment beside the control of its own fixture rather than leaving the
+    subtraction to a reader scanning two rows of a wide table. The per-tier
+    section is where a threshold gets rewritten from outcomes rather than from
+    taste, so it names the arms that routed and says so plainly when none did.
     """
 
     columns = ["fixture", "arm", "beads", "closed", PRIMARY_METRIC]
@@ -762,6 +886,17 @@ def render_report(report: EvalReport) -> str:
         if report.executions:
             cells.append(_status_cell(report.execution(arm.fixture, arm.arm)))
         lines.append("| " + " | ".join(cells) + " |")
+
+    lines.extend(["", "## Control versus treatment", ""])
+    for item in report.comparisons:
+        lines.append(
+            f"- {item.fixture} / {item.arm}: {PRIMARY_METRIC} "
+            f"{_cell(item.control_cost_per_closed_bead)} -> "
+            f"{_cell(item.arm_cost_per_closed_bead)}, close_rate "
+            f"{_cell(item.control_close_rate)} -> {_cell(item.arm_close_rate)}, "
+            f"wall_seconds {_cell(item.control_wall_seconds)} -> "
+            f"{_cell(item.arm_wall_seconds)} — {item.verdict}"
+        )
 
     lines.extend(["", "## Per-tier close rate", ""])
     routed = tuple(arm for arm in report.arms if arm.tiers)
