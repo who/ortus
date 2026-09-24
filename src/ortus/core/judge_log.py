@@ -35,6 +35,13 @@ from ortus.core.judge_typesafe import JudgeFailure, JudgeUsage
 MAX_EVENT_BYTES = 8192
 LOG_NAME = "jev-decisions.jsonl"
 
+#: Per-bead model-routing records. A separate file rather than a fourth event
+#: kind in LOG_NAME: the replay reader rejects any record whose event name it
+#: does not know, so mixing these in would invalidate the decision log it
+#: already validates. `run_id` and `decision_id` join a routing record back to
+#: the gate decision and its outcome.
+ROUTE_LOG_NAME = "jev-model-routes.jsonl"
+
 
 class LogFailure(str, Enum):
     INVALID_EVENT = "invalid_event"
@@ -84,6 +91,30 @@ class OutcomeEvent:
     observed_status: OutcomeStatus
     elapsed_worker_ms: float
     usage: JudgeUsage | None = None
+
+
+@dataclass(frozen=True)
+class ModelRouteEvent:
+    """What the vectors were and which model the bead got for them.
+
+    ``model`` and ``reasoning_effort`` are the values the worker was actually
+    launched with, including a provider default recorded as ``None``. The three
+    vector fields are ``None`` when no answers reached the router, so a
+    flag-off or judge-failure row never reads as a scored bottom of the scale.
+    """
+
+    run_id: UUID
+    decision_id: UUID
+    seat: str
+    issue_id: str
+    backend: str
+    tier: str
+    reason: str
+    model: str | None = None
+    reasoning_effort: str | None = None
+    needs_frontier: float | None = None
+    action_risk: float | None = None
+    difficulty: float | None = None
 
 
 def elapsed_ms(started_at: float) -> float:
@@ -219,7 +250,7 @@ def _decision_payload(
     return payload
 
 
-def _append(repo: Path, payload: dict) -> None:
+def _append(repo: Path, payload: dict, *, name: str = LOG_NAME) -> None:
     try:
         data = (json.dumps(payload, ensure_ascii=False, allow_nan=False,
                            separators=(",", ":")) + "\n").encode("utf-8")
@@ -240,7 +271,7 @@ def _append(repo: Path, payload: dict) -> None:
             except FileExistsError:
                 pass
             directory = opened("logs", os.O_RDONLY | os.O_DIRECTORY, parent=root)
-            fd = opened(LOG_NAME, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK,
+            fd = opened(name, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK,
                         parent=directory)
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -280,6 +311,51 @@ def write_decision(
     output.progress("grind", f"judge {payload['effective_action']} "
                     f"reason={payload['reason']} failure={payload['failure'] or 'none'} "
                     f"latency_ms={payload['latency_ms']:.0f}")
+    return event.decision_id
+
+
+def write_model_route(
+    repo: Path, config: JudgeConfig, event: ModelRouteEvent,
+    *, environ: Mapping[str, str] | None = None,
+) -> UUID | None:
+    """Append one bead's routing record before its worker launches.
+
+    Written for every routed bead, including the arms that changed nothing, so
+    the A/B can divide cost by closed beads per arm instead of guessing which
+    beads the router touched. A model name is operator-supplied configuration
+    and is screened like any other metadata before it reaches the log.
+    """
+    if not config.enabled:
+        return None
+    if not isinstance(event, ModelRouteEvent):
+        _invalid()
+
+    def clean(value: str | None) -> str | None:
+        return _clean_metadata(value, config, environ) if value is not None else None
+
+    payload = _common("model_route", event.run_id, event.decision_id)
+    payload.update({
+        "seat": clean(event.seat),
+        "issue_id": clean(event.issue_id),
+        "backend": clean(event.backend),
+        "tier": clean(event.tier),
+        "reason": clean(event.reason),
+        "model": clean(event.model),
+        "reasoning_effort": clean(event.reasoning_effort),
+        **{
+            name: None if value is None else _number(value, 1)
+            for name, value in (
+                ("needs_frontier", event.needs_frontier),
+                ("action_risk", event.action_risk),
+                ("difficulty", event.difficulty),
+            )
+        },
+    })
+    _append(repo, payload, name=ROUTE_LOG_NAME)
+    output.progress("grind", f"judge route tier={payload['tier']} "
+                    f"reason={payload['reason']} "
+                    f"model={payload['model'] or 'provider-default'} "
+                    f"effort={payload['reasoning_effort'] or 'provider-default'}")
     return event.decision_id
 
 
