@@ -479,7 +479,7 @@ class BdClient:
         return len(data)
 
     def in_progress_ids(self, *, exclude_labels: tuple[str, ...] = ()) -> set[str]:
-        """`bd list --status in_progress --json` → set of issue ids.
+        """`bd list --status in_progress --limit 0 --json` → set of issue ids.
 
         Mirrors :meth:`count_by_status` w.r.t. ``exclude_labels``: passing
         ``("human",)`` drops issues that have been escalated for human
@@ -488,12 +488,15 @@ class BdClient:
 
         The outer grind loop diffs this snapshot across a subprocess
         boundary to identify orphan claims (issues claimed but not closed
-        within the iteration).
+        within the iteration), and reads the queue's in_progress figure off
+        the same set. ``--limit 0`` lifts bd's default cap of 50 for the
+        reason :meth:`open_ids` gives: a claim beyond the fiftieth row is
+        still a claim, and both the diff and that figure have to see it.
         """
         args = ["list", "--status", "in_progress"]
         for label in exclude_labels:
             args.extend(["--exclude-label", label])
-        args.extend(["--json"])
+        args.extend(["--limit", "0", "--json"])
         try:
             _, data = self._run(*args, parse_json=True)
         except BdError:

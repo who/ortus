@@ -665,12 +665,21 @@ def _snapshot(bd: BdClient) -> StateSnapshot:
     `open` and `in_progress` are counted with EXCLUDED_LABELS applied so
     human-flagged issues don't keep the queue artificially non-empty;
     `closed` is reported verbatim (historical, never gates loop control).
+
+    The in_progress figure is the size of the id set, not a query of its
+    own. Both asked the tracker the same question under the same label
+    filter, and the answer to one is the answer to the other. Every bd
+    invocation is a process start — the dominant cost of a grind iteration
+    under test — so the duplicate is dropped rather than kept for symmetry.
+    A tracker error still reads as zero here, because the id set answers a
+    failed query with an empty set exactly as the count answered with 0.
     """
+    in_progress_ids = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
     return StateSnapshot.from_counts(
         closed=bd.count_by_status("closed"),
-        in_progress=bd.count_by_status("in_progress", exclude_labels=EXCLUDED_LABELS),
+        in_progress=len(in_progress_ids),
         open=bd.count_by_status("open", exclude_labels=EXCLUDED_LABELS),
-        in_progress_ids=bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS),
+        in_progress_ids=in_progress_ids,
     )
 
 

@@ -109,14 +109,29 @@ def test_default_mode_required_aborts_at_the_probe(
     assert "codegraphinit" in compact, combined
 
 
+@pytest.fixture
+def claimable_repo(tmp_path: Path) -> tuple[Path, str]:
+    """A bd workspace holding one ready issue, built during setup.
+
+    Standing this up costs a workspace copy and a `bd create`, and on the
+    first test to ask for it the session's one `bd init` as well. None of
+    that is the behavior under test, and the per-test budget bounds the
+    call, so the arrangement is paid here and the call is left holding the
+    grind iteration it exists to measure.
+    """
+    repo = _bd_repo(tmp_path, "live-handshake")
+    return repo, _create_ready_issue(repo, "close after handshake")
+
+
 @pytest.mark.slow
 @pytest.mark.codegraph_default
 def test_implementation_tool_result_is_handshake_success_before_bd_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    claimable_repo: tuple[Path, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC-2: a live CodeGraph tool_result is handshake-success before bd status."""
-    repo = _bd_repo(tmp_path, "live-handshake")
-    issue_id = _create_ready_issue(repo, "close after handshake")
+    repo, issue_id = claimable_repo
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
