@@ -473,7 +473,12 @@ def test_flagged_claim_is_reaped_within_a_poll_not_timed_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-1: a claude worker whose claim gains the human label is reaped by
-    the harness and logged as a flagged-claim reap; the watchdog never fires."""
+    the harness and logged as a flagged-claim reap; the watchdog never fires.
+
+    The window then ends on a head carrying an excluded label, so the claim
+    comes off with it: the status is back to open, the label is still there,
+    and the issue waits in the operator's queue instead of sitting in_progress
+    behind a worker no later window is allowed to spawn for it."""
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
@@ -502,8 +507,9 @@ def test_flagged_claim_is_reaped_within_a_poll_not_timed_out(
     log = _grind_log(repo)
     assert f"claim flagged human ({issue_id}); reaping worker" in log, log
     assert "TIMEOUT" not in log, log
+    assert f"released {issue_id} (claim reverted to open, label kept)" in log, log
     shown = _bd_show(repo, issue_id)
-    assert shown["status"] == "in_progress"
+    assert shown["status"] == "open"
     assert "human" in (shown.get("labels") or [])
 
 
