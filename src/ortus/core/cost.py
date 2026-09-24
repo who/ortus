@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ortus.core.profiles import Phase
 from ortus.core.worker_failure import (
     FAILURE_LINE,
     PROVIDER_DEFAULT,
@@ -74,7 +75,9 @@ _TIMEOUT = re.compile(r"^iter (?P<iter>\d+): worker TIMEOUT after ")
 _PROVIDER_DEFAULT = PROVIDER_DEFAULT
 
 #: The profile whose model and effort the single-issue worker runs under.
-_WORKER_PHASE = "implement"
+#: The marker line renders `Profile.display_name`, which spells the phase as
+#: its declared value, so the table this keys is read with that same value.
+_WORKER_PHASE = Phase.IMPLEMENT.value
 
 
 def _add(left: int | None, right: int | None) -> int | None:
