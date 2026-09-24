@@ -192,7 +192,14 @@ class GrokRunner:
     sandbox_mode: str = "workspace"
 
     def configure_codegraph(self, capability: CodeGraphCapability | None) -> None:
-        """Store the outer probe result. MCP registration is a later leaf."""
+        """Store the outer probe result; the launch grants what starts the server.
+
+        Grok's CodeGraph registration is file-backed in project
+        ``.grok/config.toml``, so the probe hands this runner no capability to
+        inject -- it passes ``None``. What a headless launch still has to
+        supply is folder trust, and ``build_argv`` supplies it unconditionally
+        rather than keying off this field.
+        """
         self.codegraph = capability
 
     def build_argv(
@@ -205,8 +212,23 @@ class GrokRunner:
         resume: str | None = None,
     ) -> list[str]:
         # `fast` is intentionally ignored. Grok has no Claude-equivalent --fast
-        # tier flag. `codegraph` is stored for later MCP wiring; this leaf does
-        # not emit grok -c / grok mcp overrides.
+        # tier flag. This leaf emits no `-c` MCP overrides, and not because it
+        # was left for later: `-c` is `--continue` on this CLI, so Codex's
+        # trust-independent `-c mcp_servers.codegraph.*` registration has no
+        # equivalent here. Project `.grok/config.toml` is the registration.
+        #
+        # Folder trust is what decides whether that registration ever starts.
+        # Grok gates repo-local MCP, hooks, project instructions and skills
+        # behind one grant, and a headless start needs `--trust` or a prior
+        # interactive grant; without it a fresh checkout refuses the server
+        # ("folder untrusted (repo-local (project-scoped) server not started
+        # for an untrusted folder)"), so a `codegraph=required` worker burns a
+        # claim failing its handshake over configuration that is present and
+        # correct. The grant is unconditional here rather than keyed to
+        # `self.codegraph`, which the probe leaves None for this backend and
+        # which would therefore never emit the flag on a real run; a readonly
+        # verifier needs the same grant to orient, and re-granting a folder
+        # already listed in `~/.grok/trusted_folders.toml` is a no-op.
         argv = [
             self.grok_binary,
             "-p",
@@ -216,6 +238,7 @@ class GrokRunner:
             "--sandbox",
             "read-only" if readonly else self.sandbox_mode,
             "--always-approve",
+            "--trust",
         ]
         if resume:
             argv.extend(["--resume", resume])
