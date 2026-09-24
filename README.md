@@ -85,6 +85,7 @@ ortus grind . --prototype
 | `ortus tail <repo>` | Follow `logs/grind-*.log` with stream-json filtering |
 | `ortus human <repo>` | Render `HUMAN-TODO.md` from bd issues flagged for a human decision |
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
+| `ortus cost <repo>` | Report what each bead cost, by billing bucket, from the grind logs already on disk |
 | `ortus spec` | Print the readiness schema issue-authoring contract |
 | `ortus validate <repo> [<id>...]` | Report whether bd issues satisfy readiness schema v1 before grinding; no id sweeps every open issue; exit 1 when any is unready |
 | `ortus ingest <repo> --packet <dir>` | File one readiness schema v1 issue from a packet directory (or `--stdin` JSON); validates before it writes, so an unready packet creates nothing |
@@ -92,6 +93,29 @@ ortus grind . --prototype
 | `ortus unlock <repo>` | Clear a stuck grind flock; optionally revert in-progress claims |
 
 Run `ortus <verb> --help` for flags. Run `ortus --version` for the installed version.
+
+### Cost telemetry
+
+`ortus cost` is offline and read-only: it re-reads `logs/grind-*.log`, so it
+costs nothing to re-run and works long after a run finished. The harness marker
+lines in that log say which bead each worker window belonged to; the worker's
+own JSON stream says what the provider billed for it.
+
+Token counts are reported in the buckets providers price separately — output,
+uncached input, cached input — normalized across backends, because the backends
+disagree about what their fields mean. Claude keeps cache reads out of
+`input_tokens`; Codex folds them in, so its uncached bucket is a subtraction.
+An unreported field stays unreported rather than becoming a zero, and the row
+is flagged `partial-usage`; dollars appear only where the provider itself
+reported a price, which today means Claude and OpenCode but not Codex.
+
+Cost per closed bead is the primary metric for the harness-efficiency
+comparisons that follow it: the judge-gated-versus-plain A/B, the work on
+choosing a model and reasoning effort per bead, and the fixed evaluation set
+that will run those comparisons on a stable workload. Each of those asks the
+same question — did this change make a bead cheaper without making it
+worse — and each reads the answer from this rollup rather than instrumenting
+the worker again. `--runs 0 --json` is the shape those comparisons consume.
 
 ### Supported platforms
 
