@@ -136,6 +136,9 @@ from ortus.core.judge_log import (
     elapsed_ms, write_decision, write_model_route, write_outcome, write_shadow_outcome,
 )
 from ortus.core.judge_policy import decide_pre_turn
+from ortus.core.judge_progress import (
+    ProgressMode, ProgressWatch, WindowOutcome, progress_interval, progress_mode,
+)
 from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
 from ortus.core.judge_post import (
     OutcomeVerdict, WorkerOutcome, apply_outcome, evaluate_outcome,
@@ -1310,6 +1313,36 @@ def _done_bar_met(
     return None
 
 
+def _claim_status(bd: BdClient, issue_id: str) -> OutcomeStatus:
+    """The claim's tracker status as a typed fact, unknown when unreadable.
+
+    Read on the reap poll's own cadence, where a tracker hiccup must cost the
+    poll a fact rather than the worker its window, so every failure — a bd
+    error, a missing field, a status this vocabulary does not know — answers
+    unknown.
+    """
+    try:
+        return OutcomeStatus(str(bd.show(issue_id).get("status") or ""))
+    except Exception:  # noqa: BLE001 - an unread status is not a verdict
+        return OutcomeStatus.UNKNOWN
+
+
+def _window_outcome(
+    status: str, *, timed_out: bool, reaped: bool
+) -> WindowOutcome:
+    """How a watched window ended, in the vocabulary the progress log scores.
+
+    Closed wins over every other fate: the done bar reaps a healthy Claude
+    worker on its way out, so a window whose claim is closed is a close however
+    the process itself was stopped. Only then does the manner of death decide.
+    """
+    if status == "closed":
+        return WindowOutcome.CLOSED
+    if timed_out:
+        return WindowOutcome.TIMEOUT
+    return WindowOutcome.REAPED if reaped else WindowOutcome.EXITED
+
+
 def _flagged_claims(bd: BdClient) -> set[str]:
     """In-progress ids that carry an excluded label, each confirmed by name.
 
@@ -1344,6 +1377,7 @@ def _reap_reason(
     flagged_at_start: frozenset[str] | None,
     integration_branch: str,
     bound_issue_id: str | None = None,
+    progress: ProgressWatch | None = None,
 ) -> str | None:
     """Why the running worker should be reaped now, or None to let it run.
 
@@ -1357,6 +1391,13 @@ def _reap_reason(
     was excluded at startup and is not this worker's. A check whose baseline
     could not be read is skipped, and a tracker or git error during the poll
     is an unanswered poll, never a reap.
+
+    A third fact describes the opposite worker: one with plenty left to say and
+    nothing left to accomplish. When an armed :class:`ProgressWatch` reads its
+    own log as a loop, this returns its reason rather than letting the window
+    burn to the watchdog. It is asked last and only on an answered poll: the
+    deterministic facts are cheaper and surer, and a tracker the poll could not
+    read is not a repository to judge a worker's progress in.
     """
 
     if baseline_closed is not None or bound_issue_id is not None:
@@ -1372,16 +1413,21 @@ def _reap_reason(
                 return f"{_FLAGGED_REASON} ({bound_issue_id})"
         except Exception:
             pass
-        return None
+        return _looping_reason(progress)
     if flagged_at_start is None:
-        return None
+        return _looping_reason(progress)
     try:
         flagged = _flagged_claims(bd) - flagged_at_start
     except Exception:
         return None
     if flagged:
         return f"{_FLAGGED_REASON} ({', '.join(sorted(flagged))})"
-    return None
+    return _looping_reason(progress)
+
+
+def _looping_reason(progress: ProgressWatch | None) -> str | None:
+    """The progress watch's reason, when one is armed for this window."""
+    return None if progress is None else progress.reason()
 
 
 def _hand_back_comment(window: int) -> str:
@@ -1981,6 +2027,26 @@ def grind(
         bind_worker = enforce_judge or judge_config.pre_tool
         if judge_config.pre_tool:
             check_pre_tool(target, resolved_backend, docker=docker)
+        # The looping-worker signal, resolved once per run. It needs the mode
+        # and the log-tail opt-in together: the tail is worker transcript text,
+        # and no vector is worth sending it without the operator having said so.
+        reaper_mode = progress_mode(config)
+        reaper_interval = progress_interval(config)
+        withheld = ""
+        if reaper_mode is not ProgressMode.OFF:
+            if not judge_config.enabled:
+                withheld = "judge is disabled"
+            elif not judge_config.include_log_tail:
+                withheld = "judge.include_log_tail is false"
+        if withheld:
+            reaper_mode = ProgressMode.OFF
+            reaper_note = f"off ({withheld})"
+        elif reaper_mode is ProgressMode.OFF:
+            reaper_note = "off"
+        else:
+            reaper_note = f"{reaper_mode.value}, every {int(reaper_interval)}s"
+            if not dry_run:
+                output.progress("grind", f"loop reaper {reaper_note}")
         prompt_audit = audit_enabled(config)
         prompt_variant_note = audit_note(config)
         stable_prefix = stable_prefix_enabled(config)
@@ -2122,6 +2188,7 @@ def grind(
         output.info(f"verify:         {verify_profile.display_name}")
         output.info(f"finalize:       {finalize_profile.display_name}")
         output.info(f"codegraph:      {codegraph_mode.value}")
+        output.info(f"loop reaper:    {reaper_note}")
         output.info(f"verification:   {verification_note}")
         output.info(f"prompt text:    {prompt_variant_note}")
         output.info(f"prefix order:   {prefix_order_note}")
@@ -2907,6 +2974,7 @@ def grind(
                         )
 
                 hook_run = None
+                progress_watch: ProgressWatch | None = None
                 try:
                     if judge_config.pre_tool:
                         hook_run = HookRun(
@@ -2949,6 +3017,20 @@ def grind(
                             )
                         except Exception:
                             human_open_at_start = None
+                        if reaper_mode is not ProgressMode.OFF:
+                            progress_watch = ProgressWatch(
+                                repo=target,
+                                config=judge_config,
+                                mode=reaper_mode,
+                                run_id=gate_run_id,
+                                issue_id=issue_id,
+                                log_path=log,
+                                head_oid=lambda: git.branch_tip(integration_branch),
+                                bead_status=lambda: _claim_status(bd, issue_id),
+                                write_log=write_log,
+                                interval=reaper_interval,
+                                start_offset=phase_offset,
+                            )
 
                         def _reap_worker() -> bool:
                             if hook_run is not None and hook_run.poll():
@@ -2960,6 +3042,7 @@ def grind(
                                 flagged_at_start=flagged_at_start,
                                 integration_branch=integration_branch,
                                 bound_issue_id=gate_turn.bound.issue["id"] if gate_turn else None,
+                                progress=progress_watch,
                             )
                             if reason is None:
                                 return False
@@ -3178,6 +3261,12 @@ def grind(
                     else:
                         judged_status = "open"
                         judged_id = "issue"
+                if progress_watch is not None:
+                    progress_watch.record_window(_window_outcome(
+                        judged_status,
+                        timed_out=worker_timed_out,
+                        reaped=bool(reap_reasons),
+                    ))
                 post_stop = False
                 # The verdict outlives `apply_outcome` because the stuck
                 # decision below reads the same answer: its confidence shapes

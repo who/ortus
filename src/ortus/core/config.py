@@ -44,6 +44,13 @@ DEFAULT_CODEGRAPH_MODE = "required"
 # Seconds. Used when `.ortusrc` omits `merge_gate_timeout`.
 DEFAULT_MERGE_GATE_TIMEOUT = 1800
 
+# The looping-worker signal's mode and cadence when `.ortusrc` omits them.
+# Spelled here rather than imported so loading a config does not pull the judge
+# transport in; `tests/test_judge_progress.py` pins both against the module
+# that owns the vocabulary.
+DEFAULT_PROGRESS_MODE = "shadow"
+DEFAULT_PROGRESS_INTERVAL = 300
+
 # The bar `ortus grind` holds each issue to before the worker may session-close
 # it. `full` is the issue's criterion-check commands; `prototype` is the
 # project's linter plus a syntax/compile gate and nothing behavioural, so an
@@ -103,6 +110,16 @@ DEFAULTS: dict[str, Any] = {
     # today's pinned profile stays the control arm of the A/B;
     # `ORTUS_JEV_ROUTER` flips one run without editing a tracked file.
     "jev_model_router": False,
+    # How much the looping-worker signal may do: `off` is today's reaper,
+    # `shadow` records the decision it would have taken, `enforce` lets it end
+    # a looping worker before the watchdog does. Shadow by default so the
+    # signal is measured before it acts, and `ORTUS_JEV_PROGRESS` flips one run
+    # without editing a tracked file. The checks also need
+    # `judge.include_log_tail`, which is what sends a worker's log text.
+    "jev_progress_reaper": DEFAULT_PROGRESS_MODE,
+    # Seconds between those checks. Long enough that a slow-but-working step is
+    # not read as a loop, short enough to save most of a worker timeout.
+    "jev_progress_interval_s": DEFAULT_PROGRESS_INTERVAL,
     # Branch `grind` pins the working tree to and re-asserts each iteration.
     # "main" fits a fresh `ortus init`; a repo whose default branch is named
     # something else (e.g. "master") pins it here instead of passing
@@ -267,6 +284,31 @@ def _validate_jev_model_router(values: dict[str, Any]) -> None:
         )
 
 
+def _validate_jev_progress(values: dict[str, Any]) -> None:
+    """Reject a progress-reaper mode or interval the run could not honor.
+
+    The mode decides whether a probability may end a live worker, so a value
+    that merely looks like a mode fails here rather than resolving to shadow
+    and leaving an operator who asked for enforcement without it. The interval
+    is a cadence in seconds: zero or negative would ask Jev about every poll.
+    """
+    from ortus.core.judge_progress import ProgressMode
+
+    mode = values.get("jev_progress_reaper", DEFAULT_PROGRESS_MODE)
+    try:
+        ProgressMode(mode)
+    except (ValueError, TypeError):
+        raise ProfileError(
+            f"invalid jev_progress_reaper {mode!r}; expected "
+            + ", ".join(item.value for item in ProgressMode)
+        ) from None
+    interval = values.get("jev_progress_interval_s", DEFAULT_PROGRESS_INTERVAL)
+    if type(interval) not in (int, float) or interval <= 0:
+        raise ProfileError(
+            f"invalid jev_progress_interval_s {interval!r}; expected seconds > 0"
+        )
+
+
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -347,6 +389,7 @@ def load_config(
     _validate_prompt_audit(cfg.values)
     _validate_stable_prompt_prefix(cfg.values)
     _validate_jev_model_router(cfg.values)
+    _validate_jev_progress(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
     parse_judge_config(cfg, environ={})
