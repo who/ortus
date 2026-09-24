@@ -2846,6 +2846,12 @@ def grind(
                                 post_start_tip
                                 and post_end_tip and post_end_tip != post_start_tip
                             ),
+                            # Named once above; the record carries that class
+                            # rather than the judge deriving a second opinion.
+                            worker_failure=(
+                                window_failure.failure
+                                if window_failure is not None else None
+                            ),
                         )
                         verdict = evaluate_outcome(packet, observation, judge_config)
                         post_stop = apply_outcome(

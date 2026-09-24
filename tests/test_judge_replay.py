@@ -17,9 +17,10 @@ from ortus.core.judge_log import (
 )
 from ortus.core.judge_post import Outcome, OutcomeVerdict, WorkerOutcome, apply_outcome
 from ortus.core.judge_replay import (
-    MAX_EVENT_BYTES, ReplayError, join_events, read_events, read_labels, summarize,
+    MAX_EVENT_BYTES, OUTCOMES, ReplayError, join_events, read_events, read_labels, summarize,
 )
 from ortus.core.judge_typesafe import JudgeFailure
+from ortus.core.worker_failure import WorkerFailure
 
 
 @pytest.fixture
@@ -308,3 +309,49 @@ def test_cli_refuses_input_replacement_and_missing_input(tmp_path, records):
     result = runner.invoke(app, ["judge", "export", str(tmp_path / "missing"), "--output", str(path), "--force"])
     assert result.exit_code == 1 and path.read_bytes() == before
     assert str(tmp_path) not in result.output
+
+
+class _OpenTracker:
+    def show(self, _):
+        return {"status": "in_progress"}
+    def add_label(self, *args):
+        pass
+    def add_comment(self, *args):
+        pass
+
+
+def _post_turn(tmp_path, failure=None):
+    apply_outcome(_OpenTracker(), tmp_path, "sample-1",
+                  WorkerOutcome(1, failure is WorkerFailure.TIMEOUT, OutcomeStatus.IN_PROGRESS,
+                                False, worker_failure=failure),
+                  OutcomeVerdict(Outcome.CONTINUE, .9), JudgeConfig(enabled=True), uuid4())
+    events = list(read_events(tmp_path / "logs" / "jev-decisions.jsonl"))
+    return [e for e in events if e["event"] == "post_turn"][-1]
+
+
+def test_post_turn_carries_the_worker_failure_class_beside_its_reason(tmp_path):
+    record = _post_turn(tmp_path, WorkerFailure.TIMEOUT)
+    assert record["worker_failure"] == "timeout"
+    assert record["reason"] == "worker_timeout"
+    assert record["outcome"] in OUTCOMES
+    assert summarize(join_events([record]), {})["post_turn_events"] == 1
+
+
+def test_post_turn_without_a_worker_failure_still_reads(tmp_path):
+    record = _post_turn(tmp_path)
+    assert record["worker_failure"] is None
+    del record["worker_failure"]
+    assert list(read_events(save(tmp_path, [record]))) == [record]
+
+
+def test_post_turn_rejects_an_unknown_worker_failure_class(tmp_path):
+    record = _post_turn(tmp_path, WorkerFailure.ENVIRONMENT)
+    assert record["worker_failure"] == "environment"
+    with pytest.raises(ReplayError):
+        list(read_events(save(tmp_path, [{**record, "worker_failure": "moon_phase"}])))
+
+
+def test_a_decision_record_may_not_carry_the_post_turn_side_field(tmp_path, records):
+    decision = records(outcome=False)[0]
+    with pytest.raises(ReplayError):
+        list(read_events(save(tmp_path, [{**decision, "worker_failure": "timeout"}])))

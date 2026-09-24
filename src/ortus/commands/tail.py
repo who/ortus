@@ -37,6 +37,7 @@ Verbosity contract (parity with legacy ortus/tail.sh; ortus-eomm):
       tools (they are the default view). --system also shows Grok plan entries.
 
     Non-JSON line colouring (mirrors bash format_line non-JSON branch):
+      - worker-failure markers        bold red, tagged "[FAILURE] <class>"
       - "===..." lines                bold cyan (preceded by a blank line)
       - "Processing:" / "Found..."    cyan
       - lines matching error|Error|ERROR     red
@@ -65,6 +66,7 @@ from ortus.core import output
 from ortus.core.agent import BackendError, resolve_backend
 from ortus.core.local_backend import LOCAL_TABLE_BACKENDS
 from ortus.core.repo import resolve_repo
+from ortus.core.worker_failure import marker_failure
 from ortus.core.runstate import (
     OPENCODE_STEP_STOP,
     _mtime,
@@ -854,6 +856,17 @@ _GRIND_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} ")
 def _render_plain(line: str, palette: _Palette) -> str:
     if not line:
         return line
+    failure = marker_failure(line)
+    if failure is not None:
+        # Ahead of the grind-line branch on purpose: the marker is a stamped
+        # ortus line, so the generic progress colour would otherwise make a
+        # window that died look like a window that was working.
+        return _wrap(
+            f"[FAILURE] {failure.value}  {line}",
+            palette.bold,
+            palette.red,
+            reset=palette.reset,
+        )
     if _GRIND_RE.match(line):
         return _wrap(line, palette.bold, palette.yellow, reset=palette.reset)
     if _BANNER_RE.search(line):

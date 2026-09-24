@@ -135,12 +135,14 @@ from ortus.core.runstate import (
     GROK_CRUMB_TYPES,
     LogEvent,
     RunSnapshot,
+    Writer,
     find_log,
     is_grok_event,
     is_opencode_event,
     read_snapshot,
     summarize_grok_tool,
 )
+from ortus.core.worker_failure import marker_failure
 
 #: Seconds between refreshes. A tick reads only the bytes the log grew by, so
 #: this is cheap even against the megabyte logs a long session produces.
@@ -174,6 +176,11 @@ TOOL_IN_FLIGHT = "in-flight"
 TOOL_DONE = "done"
 TOOL_FAIL = "fail"
 NO_CRUMBS = ""
+#: The crumb a worker-failure marker becomes. Its kind sits outside
+#: `GROK_CRUMB_TYPES` deliberately: a window that died is worth a row on any
+#: backend's run, while Grok detection stays keyed to the Grok vocabulary, so
+#: a Claude run that fails does not start being reported as a Grok run.
+CRUMB_FAILURE = "failure"
 
 #: How long an action may be the latest before it is called blocked rather than
 #: thinking. A worker issues one tool call and then goes quiet for as long as
@@ -419,8 +426,9 @@ class Frame:
     pulse: str
     #: Region key to state class, so colour tracks the run rather than layout.
     states: tuple[tuple[str, str], ...] = ()
-    #: Grok-only crumb feed. Empty on Claude/Codex so those frames stay the
-    #: pre-change sparse panel.
+    #: The crumb feed: Grok's whole stream, or the one row a failed window
+    #: earns on any backend. Empty otherwise, so a healthy Claude or Codex
+    #: frame stays the sparse panel it has always been.
     crumbs: str = ""
 
     def bodies(self) -> dict[str, str]:
@@ -598,6 +606,23 @@ def journal_backend(repo: Path) -> str:
     return named_backend(repo)
 
 
+def failure_crumbs(crumbs: tuple[Crumb, ...]) -> bool:
+    """Whether the feed holds a window this run already reported as failed."""
+
+    return any(crumb.kind == CRUMB_FAILURE for crumb in crumbs)
+
+
+def grok_crumbs(crumbs: tuple[Crumb, ...]) -> bool:
+    """Whether the feed holds a crumb from the Grok vocabulary.
+
+    The feed also carries crumbs no backend authored — a failure marker is
+    Ortus reporting on the window it ran — so presence alone can no longer
+    stand for "this is a Grok run".
+    """
+
+    return any(crumb.kind in GROK_CRUMB_TYPES for crumb in crumbs)
+
+
 def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) -> str:
     """Backend implied by parsed event types, or empty when none have spoken.
 
@@ -612,7 +637,7 @@ def log_backend(events: tuple[LogEvent, ...], crumbs: tuple[Crumb, ...] = ()) ->
     payloads = [event.payload for event in events if event.payload]
     if any(is_opencode_event(payload) for payload in payloads):
         return "opencode"
-    if crumbs or any(is_grok_event(payload) for payload in payloads):
+    if grok_crumbs(crumbs) or any(is_grok_event(payload) for payload in payloads):
         return "grok"
     kinds = {event.kind for event in events}
     if kinds & {"item.started", "item.completed", "turn.completed"}:
@@ -653,11 +678,12 @@ def is_grok_mode(
 
     Detected from parsed Grok event types or a grind log that names backend
     grok. A Claude log whose text contains the substring `thought` does not
-    trip this: detection never looks at unparsed text. An idle repository
-    stays sparse even when a caller passes journal="grok".
+    trip this: detection never looks at unparsed text, and a worker-failure
+    crumb is Ortus speaking rather than a backend. An idle repository stays
+    sparse even when a caller passes journal="grok".
     """
 
-    if crumbs:
+    if grok_crumbs(crumbs):
         return True
     if any(event.payload and is_grok_event(event.payload) for event in snapshot.events):
         return True
@@ -665,10 +691,23 @@ def is_grok_mode(
 
 
 def classify_crumb(event: LogEvent) -> Crumb | None:
-    """Turn one incremental log event into a feed crumb, or None to drop it."""
+    """Turn one incremental log event into a feed crumb, or None to drop it.
+
+    Two vocabularies reach here. A Grok event becomes the crumb its type
+    describes. An ortus line carrying the worker-failure marker becomes a
+    failure crumb naming the class the marker already holds, so a window
+    that died reads as a failure rather than as one more progress line.
+    """
 
     payload = event.payload
-    if payload is None or not is_grok_event(payload):
+    if payload is None:
+        if event.writer is not Writer.ORTUS or event.kind:
+            return None
+        failure = marker_failure(event.text)
+        if failure is None:
+            return None
+        return Crumb(kind=CRUMB_FAILURE, text=f"{CRUMB_FAILURE}  {failure.value}", at=event.at)
+    if not is_grok_event(payload):
         return None
     kind = event.kind or str(payload.get("type") or "")
     if kind not in GROK_CRUMB_TYPES:
@@ -1947,7 +1986,14 @@ def frame(
 
     state = verdict if verdict is not None else VerdictState()
     action = action_panel(snapshot, replay=replay, workspaces=workspaces)
-    feed = crumb_panel(crumbs, tools) if grok and crumbs else NO_CRUMBS
+    # Grok mode owns the feed. A failure crumb opens it for its own row on a
+    # backend that has no feed, because a window that died is the one thing
+    # worth breaking a sparse frame for rather than leaving to `ortus cost`.
+    feed = (
+        crumb_panel(crumbs, tools)
+        if crumbs and (grok or failure_crumbs(crumbs))
+        else NO_CRUMBS
+    )
     if feed:
         action = f"{action}\n\n{feed}"
     warnings = warnings_panel(snapshot)

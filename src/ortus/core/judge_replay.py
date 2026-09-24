@@ -18,6 +18,7 @@ from uuid import UUID
 from ortus.core.judge import WORKER_ROUTES, GateAction, GateReason, JudgeConfig, JudgePhase, JudgeRoute
 from ortus.core.judge_log import MAX_EVENT_BYTES, OutcomeStatus, _clean_metadata
 from ortus.core.judge_typesafe import JudgeFailure
+from ortus.core.worker_failure import WorkerFailure
 
 COMMON = {"schema_version", "event", "timestamp", "run_id", "decision_id"}
 USAGE = {"input_tokens", "output_tokens", "measured_cost_usd"}
@@ -35,6 +36,13 @@ SHADOW_OUTCOME = {
     "mode", "observed_issue_id", "actual_claimed_id", "attribution_mismatch", "accuracy_eligible",
 }
 OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
+#: The worker-failure class a post-turn record may also carry. Optional, and
+#: read beside `reason` rather than folded into `OUTCOMES`: a log written
+#: before the taxonomy existed is still a valid version-1 record, so the field
+#: widens the accepted shape instead of bumping the schema out from under the
+#: readers that already consume these files.
+POST_SIDE = {"worker_failure"}
+WORKER_FAILURES = {failure.value for failure in WorkerFailure}
 MAX_LABEL_BYTES = 16 * 1024 * 1024
 
 
@@ -92,7 +100,8 @@ def validate_event(value: object) -> dict:
               if kind == "decision" else
               OUTCOME | (SHADOW_OUTCOME if shadow else set()) if kind == "outcome" else
               POST if kind == "post_turn" else set())
-    _require(bool(fields) and set(e) == fields)
+    optional = POST_SIDE if kind == "post_turn" else set()
+    _require(bool(fields) and fields <= set(e) <= fields | optional)
     _uuid(e["run_id"])
     _uuid(e["decision_id"])
     _require(type(e["timestamp"]) is str and len(e["timestamp"]) <= 40)
@@ -156,6 +165,7 @@ def validate_event(value: object) -> dict:
         _require(_choice(e["effective_action"], {"baseline"} if shadow else {"human", "preserve"}))
         _require(_choice(e["reason"], {"classified", "tracker_closed", "worker_timeout",
                  "service_failure", "low_confidence", "closure_disagreement", "plan_gap", "auth", "needs_human"}))
+        _require(_choice(e.get("worker_failure"), WORKER_FAILURES, nullable=True))
     return e
 
 
