@@ -674,6 +674,27 @@ def _snapshot(bd: BdClient) -> StateSnapshot:
     )
 
 
+def _exit_counts(bd: BdClient, loop_view: StateSnapshot) -> tuple[int, int]:
+    """`(in_progress, open)` as the operator sees the queue, at session end.
+
+    The loop's own counts drop human-labelled issues so an escalated one
+    cannot make the orchestrator spin, and reporting that view to the
+    operator turned a queue holding parked work into a summary reading
+    `0 in_progress, 0 open`. The exit line answers a different question —
+    what is left here — so it counts every issue, label or not. Loop control,
+    orphan detection, and the log's own ended line keep the excluded view.
+
+    A count bd cannot answer comes back as 0, which is the undercount this
+    exists to fix; the loop's figure is a floor under each raw count, because
+    an unlabelled issue is in both views and the raw one can only be larger.
+    """
+
+    return (
+        max(bd.count_by_status("in_progress"), loop_view.in_progress),
+        max(bd.count_by_status("open"), loop_view.open),
+    )
+
+
 def _rollover_exhausted_epics(
     bd: BdClient, write_log: Callable[[str], None]
 ) -> None:
@@ -1251,6 +1272,57 @@ def _hand_back_misclaims(
             "at window start; claim reverted to open, label kept)"
         )
     return handed_back
+
+
+def _parked_head_comment(window: int, blocked: list[str]) -> str:
+    labels = ", ".join(sorted(blocked))
+    return (
+        f"grind: claim reverted after window {window}. This issue ended its "
+        f"window carrying the excluded label(s) {labels}, so no worker may "
+        "run for it: every snapshot gate ignores an excluded claim, and a "
+        "finished candidate would be silently dropped. The claim is reverted "
+        "to open, the label is kept, and the packet is untouched — read the "
+        "newest comment, decide, and relabel it for the queue."
+    )
+
+
+def _release_parked_head(
+    bd: BdClient,
+    issue_id: str,
+    blocked: list[str],
+    *,
+    window: int,
+    write_log: Callable[[str], None],
+) -> bool:
+    """Revert a head that ends its window excluded-labelled back to open.
+
+    The queue continues past an excluded claim, so leaving it in_progress
+    stranded it: no later window would resume it, no worker could finish it,
+    and the operator only saw it by reading bd directly. The status goes back
+    to open the way `_hand_back_misclaims` returns a mis-claim — the label
+    stays, no packet field is touched, and the readiness hash is unchanged —
+    so the issue sits in the operator's queue as what it is, unclaimed work
+    awaiting a decision.
+
+    The caller's own in_progress judgment is the guard: this runs on the
+    post-mortem state of a window whose worker is already dead, so there is
+    no live assignee to race. A tracker error is logged and the claim is left
+    as it is; the loop never crashes on a release. Returns whether the claim
+    was reverted.
+    """
+
+    try:
+        bd.update_status(issue_id, ISSUE_OPEN)
+        bd.add_comment(issue_id, _parked_head_comment(window, blocked))
+    except Exception as exc:  # noqa: BLE001 - a tracker hiccup never ends the loop
+        write_log(f"iter {window}: could not release {issue_id} ({exc})")
+        return False
+    write_log(
+        f"iter {window}: released {issue_id} (claim reverted to open, "
+        "label kept) so it is not left in_progress with no worker able to "
+        "take it"
+    )
+    return True
 
 
 def _claude_goal_rejection(log_path: Path, *, start_offset: int) -> str | None:
@@ -2857,13 +2929,22 @@ def grind(
                         # Feeding an excluded issue to a worker arms the
                         # ortus-lf02 trap: the worker runs, verification
                         # cannot see the claim, and a finished candidate is
-                        # silently dropped. Park it and move down the queue.
+                        # silently dropped. The queue continues past it — so
+                        # the claim comes off too, or the issue sits
+                        # in_progress forever with no window able to take it.
                         write_log(
                             f"iter {iters_run}: not resuming {judged_id}: it "
                             "carries the excluded label(s) "
                             f"{', '.join(blocked)}, so no worker may run for "
-                            "it. Its claim and work stay parked and the queue "
+                            "it. Its work stays as it is and the queue "
                             "continues past it"
+                        )
+                        _release_parked_head(
+                            bd,
+                            judged_id,
+                            blocked,
+                            window=iters_run,
+                            write_log=write_log,
                         )
                         resume_no_close_count = 0
                     else:
@@ -2913,10 +2994,11 @@ def grind(
                 f"iters_run={iters_run}) ==="
             )
             leftover = final_snapshot.in_progress
+            exit_in_progress, exit_open = _exit_counts(bd, final_snapshot)
             output.progress(
                 "grind",
                 f"done — {tasks_completed} landed this session, "
-                f"{leftover} in_progress, {final_snapshot.open} open",
+                f"{exit_in_progress} in_progress, {exit_open} open",
             )
             for escalated in escalated_claims:
                 _announce_wedged_escalation(escalated)

@@ -3319,3 +3319,101 @@ def test_grind_resolves_prototype_gates_by_type_and_markers(tmp_path: Path) -> N
         "python -m compileall -q .",
         "go build ./...",
     )
+
+
+# --- the exit summary counts the operator's whole queue (ortus-kehw) -------
+
+
+class _CountingBd:
+    """Tracker double over one queue of (status, labels) issues.
+
+    ``count_by_status`` and ``in_progress_ids`` are the only reads the
+    snapshot and the exit line take, and both honor ``exclude_labels`` the
+    way :class:`ortus.core.bd.BdClient` does, so a test can put a
+    human-labelled issue in the queue and watch the two views disagree.
+    """
+
+    def __init__(self, issues: dict[str, tuple[str, list[str]]]) -> None:
+        self.issues = issues
+
+    def _matching(
+        self, status: str, exclude_labels: tuple[str, ...]
+    ) -> list[str]:
+        return [
+            issue_id
+            for issue_id, (issue_status, labels) in self.issues.items()
+            if issue_status == status
+            and not any(label in exclude_labels for label in labels)
+        ]
+
+    def count_by_status(
+        self, status: str, *, exclude_labels: tuple[str, ...] = ()
+    ) -> int:
+        return len(self._matching(status, exclude_labels))
+
+    def in_progress_ids(self, *, exclude_labels: tuple[str, ...] = ()) -> set[str]:
+        return set(self._matching("in_progress", exclude_labels))
+
+
+class _BlindBd(_CountingBd):
+    """A tracker whose unfiltered counts come back empty, as a failed
+    ``bd count`` does; the filtered ones still answer."""
+
+    def count_by_status(
+        self, status: str, *, exclude_labels: tuple[str, ...] = ()
+    ) -> int:
+        if not exclude_labels:
+            return 0
+        return super().count_by_status(status, exclude_labels=exclude_labels)
+
+
+def test_exit_summary_counts_include_human_labeled_beads() -> None:
+    """ortus-kehw AC-2: a queue holding nothing but parked work used to end
+    the session claiming `0 in_progress, 0 open`, because the exit line read
+    the loop's own excluded view. It counts every issue now, label or not."""
+    bd = _CountingBd(
+        {
+            "ortus-a": ("in_progress", ["human"]),
+            "ortus-b": ("in_progress", ["human"]),
+            "ortus-c": ("open", ["human"]),
+            "ortus-d": ("open", []),
+        }
+    )
+    loop_view = grind_mod._snapshot(bd)  # type: ignore[arg-type]
+    assert (loop_view.in_progress, loop_view.open) == (0, 1)
+    assert grind_mod._exit_counts(bd, loop_view) == (2, 2)  # type: ignore[arg-type]
+
+
+def test_exit_summary_never_reads_below_the_loop_view() -> None:
+    """A raw count bd cannot answer comes back as 0 — the very undercount at
+    issue — so the loop's figure floors each one; an unlabelled issue is in
+    both views and the unfiltered count can only be the larger."""
+    bd = _BlindBd(
+        {
+            "ortus-a": ("in_progress", []),
+            "ortus-b": ("open", []),
+            "ortus-c": ("open", []),
+        }
+    )
+    loop_view = grind_mod._snapshot(bd)  # type: ignore[arg-type]
+    assert grind_mod._exit_counts(bd, loop_view) == (1, 2)  # type: ignore[arg-type]
+
+
+def test_snapshot_keeps_excluding_human_from_loop_control() -> None:
+    """ortus-kehw AC-3: splitting the exit line off left loop control alone —
+    the snapshot that gates drain, selection, and orphan detection still
+    ignores human-labelled issues so the orchestrator cannot spin on them."""
+    bd = _CountingBd(
+        {
+            "ortus-a": ("in_progress", ["human"]),
+            "ortus-b": ("in_progress", []),
+            "ortus-c": ("open", ["human"]),
+            "ortus-d": ("closed", ["human"]),
+        }
+    )
+    snapshot = grind_mod._snapshot(bd)  # type: ignore[arg-type]
+    assert snapshot.in_progress == 1
+    assert snapshot.open == 0
+    assert snapshot.in_progress_ids == frozenset({"ortus-b"})
+    # `closed` is historical and never gates the loop, so it is verbatim.
+    assert snapshot.closed == 1

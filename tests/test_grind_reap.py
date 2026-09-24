@@ -295,6 +295,48 @@ def test_misclaim_hand_back_is_a_no_op_without_operator_issues() -> None:
     assert handed_back == set()
 
 
+# --- a head left flagged at the end of its window (ortus-kehw) -------------
+
+
+def _release(bd: object, *, blocked: list[str] | None = None, window: int = 2):
+    logged: list[str] = []
+    released = grind_mod._release_parked_head(
+        bd,  # type: ignore[arg-type]
+        "ortus-h",
+        blocked if blocked is not None else ["human"],
+        window=window,
+        write_log=logged.append,
+    )
+    return released, logged
+
+
+def test_human_flagged_head_hand_back_reverts_the_parked_claim() -> None:
+    """ortus-kehw AC-1: the head ends its window labelled human, so the queue
+    continues past it — and the claim comes off with it. The status goes back
+    to open, the label stays, and one comment names the window and the label
+    that parked it. The issue is the operator's now, not a stuck claim."""
+    bd = _FakeBd({"ortus-h": ["human", "phase3"]})
+    released, logged = _release(bd)
+    assert released is True
+    assert bd.updates == [("ortus-h", "open")]
+    assert [issue for issue, _ in bd.notes] == ["ortus-h"]
+    assert "window 2" in bd.notes[0][1]
+    assert "human" in bd.notes[0][1]
+    assert any("released ortus-h" in line for line in logged)
+
+
+def test_human_flagged_head_hand_back_survives_a_tracker_error() -> None:
+    """A revert the tracker refuses is logged and left as it is: the claim
+    stays where the worker left it and the loop keeps going, because a bd
+    hiccup at the end of a window is not a reason to end the run."""
+    bd = _FakeBd({"ortus-h": ["human"]}, fail="update")
+    released, logged = _release(bd)
+    assert released is False
+    assert bd.updates == []
+    assert bd.notes == []
+    assert any("could not release ortus-h" in line for line in logged)
+
+
 # --- grind wires the reap for claude ---------------------------------------
 
 
