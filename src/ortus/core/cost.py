@@ -40,6 +40,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ortus.core.worker_failure import (
+    FAILURE_LINE,
+    PROVIDER_DEFAULT,
+    WorkerFailure,
+)
+
 #: Same glob the tail and dashboard surfaces use to find run logs.
 LOG_GLOB = "grind-*.log"
 
@@ -63,8 +69,9 @@ _SPAWN = re.compile(r"^iter (?P<iter>\d+): spawning (?P<backend>[A-Za-z0-9_-]+) 
 _CLOSED = re.compile(r"^iter (?P<iter>\d+): worker closed (?P<issue>\S+)")
 _TIMEOUT = re.compile(r"^iter (?P<iter>\d+): worker TIMEOUT after ")
 
-#: A profile marker's placeholder for "no override; the CLI picks the model".
-_PROVIDER_DEFAULT = "provider-default"
+#: The placeholder both the profile marker and the failure marker write for
+#: "no override; the CLI picks the model".
+_PROVIDER_DEFAULT = PROVIDER_DEFAULT
 
 #: The profile whose model and effort the single-issue worker runs under.
 _WORKER_PHASE = "implement"
@@ -353,6 +360,8 @@ class SessionCost:
     closed: bool = False
     incomplete: bool = False
     partial_usage: bool = False
+    #: The closed class this window failed under; None when it did not fail.
+    failure_class: str | None = None
     usage: UsageBuckets = field(default_factory=UsageBuckets)
 
     def as_dict(self) -> dict[str, Any]:
@@ -370,6 +379,7 @@ class SessionCost:
             "closed": self.closed,
             "incomplete": self.incomplete,
             "partial_usage": self.partial_usage,
+            "failure_class": self.failure_class,
             "usage": self.usage.as_dict(),
         }
 
@@ -390,6 +400,7 @@ class BeadCost:
     closed: bool = False
     incomplete: bool = False
     partial_usage: bool = False
+    failure_classes: tuple[str, ...] = ()
     usage: UsageBuckets = field(default_factory=UsageBuckets)
 
     def as_dict(self) -> dict[str, Any]:
@@ -406,6 +417,7 @@ class BeadCost:
             "closed": self.closed,
             "incomplete": self.incomplete,
             "partial_usage": self.partial_usage,
+            "failure_classes": list(self.failure_classes),
             "usage": self.usage.as_dict(),
         }
 
@@ -464,6 +476,7 @@ class _Window:
         self.incomplete = False
         self.partial_usage = False
         self.saw_usage = False
+        self.failure_class: str | None = None
 
     def absorb(self, facts: EventFacts) -> None:
         if facts.usage is not None:
@@ -505,6 +518,7 @@ class _Window:
             closed=self.closed,
             incomplete=self.incomplete,
             partial_usage=self.partial_usage,
+            failure_class=self.failure_class,
             usage=self.usage,
         )
 
@@ -601,6 +615,10 @@ def parse_grind_log(path: Path) -> RunCost:
                 if current.issue_id is None:
                     current.issue_id = closed.group("issue")
                 continue
+            failed = FAILURE_LINE.match(body)
+            if failed is not None and current is not None:
+                current.failure_class = failed.group("failure")
+                continue
             if _TIMEOUT.match(body) is not None and current is not None:
                 current.incomplete = True
             continue
@@ -660,10 +678,90 @@ def rollup_beads(sessions: tuple[SessionCost, ...]) -> tuple[BeadCost, ...]:
                 closed=any(s.closed for s in group),
                 incomplete=any(s.incomplete for s in group),
                 partial_usage=any(s.partial_usage for s in group),
+                failure_classes=tuple(
+                    dict.fromkeys(s.failure_class for s in group if s.failure_class)
+                ),
                 usage=usage,
             )
         )
     return tuple(beads)
+
+
+@dataclass(frozen=True)
+class FailureRate:
+    """How one backend/model pair's worker windows failed, and how often."""
+
+    backend: str
+    model: str | None
+    sessions: int = 0
+    failures: int = 0
+    #: Every class in the closed set, zero-filled. A class that never fires
+    #: still has to appear: a reader comparing two runs needs to see that a
+    #: bucket was empty rather than guess whether it was even counted.
+    counts: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def failure_rate(self) -> float | None:
+        """Share of this pair's windows that failed, or None with no windows."""
+
+        if self.sessions <= 0:
+            return None
+        return self.failures / self.sessions
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "model": self.model,
+            "sessions": self.sessions,
+            "failures": self.failures,
+            "failure_rate": self.failure_rate,
+            "counts": dict(self.counts),
+        }
+
+
+def failure_rates(sessions: tuple[SessionCost, ...]) -> tuple[FailureRate, ...]:
+    """Worker-failure counts per backend and model, in first-appearance order.
+
+    The denominator is every window the pair ran, not just the failed ones,
+    so the rate answers the question an operator actually asks of a backend
+    or a model: how often does working through it end badly?
+    """
+
+    order: list[tuple[str, str | None]] = []
+    grouped: dict[tuple[str, str | None], list[SessionCost]] = {}
+    for session in sessions:
+        key = (session.backend, session.model)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(session)
+
+    rates: list[FailureRate] = []
+    for backend, model in order:
+        group = grouped[(backend, model)]
+        counts = {failure.value: 0 for failure in WorkerFailure}
+        for session in group:
+            if session.failure_class is None:
+                continue
+            # A class this Ortus does not know is still a failure, and an
+            # unknown name is itself the harness bug the taxonomy exists to
+            # surface, so it lands in that bucket rather than a new key.
+            key = (
+                session.failure_class
+                if session.failure_class in counts
+                else WorkerFailure.ORTUS_HARNESS_BUG.value
+            )
+            counts[key] += 1
+        rates.append(
+            FailureRate(
+                backend=backend,
+                model=model,
+                sessions=len(group),
+                failures=sum(counts.values()),
+                counts=counts,
+            )
+        )
+    return tuple(rates)
 
 
 def find_grind_logs(repo: Path, *, newest: int = 1) -> tuple[Path, ...]:

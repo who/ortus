@@ -117,6 +117,7 @@ from ortus.core.local_backend import (
 )
 from ortus.core.repo import resolve_repo
 from ortus.core.pin_skew import tag_pin_skew_claims
+from ortus.core.worker_failure import classify_worker_window, failure_log_line
 from ortus.core.judge import GateAction, JudgeConfig, JudgeMode, parse_judge_config
 from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
@@ -2588,6 +2589,33 @@ def grind(
                             hint=rejection,
                         )
                         raise typer.Exit(code=1)
+
+                # How this window failed, named once from what the launch
+                # already reported and what the worker already logged. The
+                # marker is a plain ortus line, so every surface that reads
+                # these logs keeps rendering it as text, and `ortus cost`
+                # parses it into per-backend, per-model rates. A window that
+                # ended well is not classified at all.
+                window_failure = classify_worker_window(
+                    exit_code=rc,
+                    timed_out=worker_timed_out,
+                    log_path=log,
+                    start_offset=phase_offset,
+                )
+                if window_failure is not None:
+                    write_log(
+                        failure_log_line(
+                            window_failure,
+                            iteration=iters_run,
+                            backend=resolved_backend,
+                            model=implement_profile.model,
+                        )
+                    )
+                    if window_failure.unclassified:
+                        output.warn(
+                            f"worker window {iters_run} failed with no known "
+                            "signal; counted as an Ortus harness bug"
+                        )
 
                 # Live implementation handshake is judged here, before f2he.2
                 # reads bd status. Worker process exit is not a CodeGraph signal.

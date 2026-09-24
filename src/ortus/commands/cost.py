@@ -22,9 +22,11 @@ import typer
 from ortus.core import output
 from ortus.core.cost import (
     BeadCost,
+    FailureRate,
     RunCost,
     SessionCost,
     UsageBuckets,
+    failure_rates,
     find_grind_logs,
     parse_grind_log,
     rollup_beads,
@@ -159,6 +161,30 @@ def _print_sessions(sessions: tuple[SessionCost, ...]) -> None:
         _record(header, fields)
 
 
+def _print_failures(rates: tuple[FailureRate, ...]) -> None:
+    """Per backend and model, how its worker windows failed. Silent when none did.
+
+    Only the classes that actually fired are listed. The zero-filled buckets
+    are still in the JSON, where a reader is comparing runs; a console block
+    that printed seven zeroes per row would bury the one number that moved.
+    """
+
+    failing = [rate for rate in rates if rate.failures]
+    if not failing:
+        return
+    typer.echo("worker failures")
+    for rate in failing:
+        fired = ", ".join(
+            f"{name} {count}" for name, count in rate.counts.items() if count
+        )
+        typer.echo(
+            f"  {rate.backend}/{rate.model or _UNSET}  "
+            f"{rate.failures}/{rate.sessions} window(s) "
+            f"({_rate(rate.failure_rate)})  {fired}"
+        )
+    typer.echo("")
+
+
 def cost(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
@@ -244,6 +270,7 @@ def cost(
                     ],
                     "sessions": [s.as_dict() for s in all_sessions],
                     "beads": [b.as_dict() for b in beads],
+                    "failures": [r.as_dict() for r in failure_rates(all_sessions)],
                 },
                 indent=2,
                 sort_keys=True,
@@ -253,5 +280,6 @@ def cost(
 
     if sessions:
         _print_sessions(all_sessions)
-        return
-    _print_beads(beads)
+    else:
+        _print_beads(beads)
+    _print_failures(failure_rates(all_sessions))
