@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ortus.core.agent import make_runner
 from ortus.core.codegraph import (
     MAX_LABEL,
     MCP_ORIENT_QUERY,
@@ -180,6 +181,88 @@ def test_grok_use_tool_mcp_counts_as_handshake(tmp_path: Path) -> None:
     assert summary.events[0].success
     assert summary.events[0].query == "orient to this repository"
     require_handshake(summary)
+
+
+def test_grok_required_launch_carries_the_trust_that_starts_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A required grok run reaches the handshake instead of a folder-trust wall.
+
+    The registration grok acts on lives in project `.grok/config.toml`, so the
+    probe injects nothing and a fresh checkout is exactly the case that used to
+    fail: correct configuration, no prior interactive grant, and a repo-local
+    server grok declines to start. The launch therefore has to carry the trust
+    grant itself, on the implementation seat and on the readonly verifier that
+    orients before it judges -- and a run that still sees no CodeGraph tool
+    stays fatal under `required`, which is the failure the grant removes rather
+    than hides.
+    """
+    (tmp_path / ".codegraph").mkdir()
+    (tmp_path / ".grok").mkdir()
+    (tmp_path / ".grok" / "config.toml").write_text(
+        '[mcp_servers.codegraph]\ncommand = "codegraph"\n'
+        'args = ["serve", "--mcp"]\nenabled = true\n'
+    )
+    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
+    )
+    probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.REQUIRED, backend="grok")
+    assert probe.available and probe.capability is None
+
+    runner = make_runner("grok")
+    runner.configure_codegraph(probe.capability)
+    for argv in (
+        runner.build_argv("orient"),
+        runner.build_argv("verify", readonly=True),
+    ):
+        assert "--trust" in argv
+        assert "mcp_servers" not in " ".join(argv)
+
+    transcript = tmp_path / "grok.jsonl"
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "tool_call",
+                "toolCallId": "call-1",
+                "toolName": "use_tool",
+                "status": "pending",
+                "rawInput": {
+                    "tool_name": "codegraph__codegraph_explore",
+                    "tool_input": {"query": "orient to this repository"},
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "completed",
+                "rawOutput": {
+                    "type": "MCP",
+                    "tool_name": "codegraph_explore",
+                    "server_name": "codegraph",
+                    "output": {"text": "symbols found"},
+                },
+            }
+        )
+        + "\n"
+    )
+    summary = parse_transcript(
+        transcript, phase=CodeGraphPhase.IMPLEMENTATION, probe=probe
+    )
+    assert summary.capability_observed
+    require_handshake(summary)
+
+    silent = tmp_path / "grok-silent.jsonl"
+    silent.write_text(json.dumps({"type": "turn.completed"}) + "\n")
+    with pytest.raises(CodeGraphUnavailable, match="no CodeGraph MCP"):
+        require_handshake(
+            parse_transcript(
+                silent, phase=CodeGraphPhase.IMPLEMENTATION, probe=probe
+            )
+        )
 
 
 def test_codex_normalization_success_and_empty_result() -> None:

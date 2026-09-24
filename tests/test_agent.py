@@ -170,6 +170,14 @@ def test_grok_runner_selection_has_no_codex_else() -> None:
 
 
 def test_grok_codegraph_is_store_only() -> None:
+    """The capability is stored, never injected; the launch grants folder trust.
+
+    Grok reads its CodeGraph registration from project `.grok/config.toml`, so
+    no `-c mcp_servers.*` override is emitted. What the launch must carry is the
+    trust grant that lets a repo-local server start headlessly -- including on
+    the real path, where the probe hands this backend no capability at all, and
+    on a readonly verifier that orients before it judges.
+    """
     from ortus.core.codegraph import CodeGraphCapability
 
     runner = GrokRunner()
@@ -178,6 +186,13 @@ def test_grok_codegraph_is_store_only() -> None:
     assert "-c" not in argv
     assert "mcp_servers" not in " ".join(argv)
     assert runner.codegraph is not None
+    assert "--trust" in argv
+
+    unprobed = GrokRunner()
+    unprobed.configure_codegraph(None)
+    assert unprobed.codegraph is None
+    assert "--trust" in unprobed.build_argv("orient")
+    assert "--trust" in unprobed.build_argv("verify", readonly=True)
 
 
 def test_runner_run_accepts_resume_kwarg() -> None:
