@@ -678,12 +678,42 @@ def test_grok_raw_emits_original_json_lines(tmp_path: Path) -> None:
     assert '{"type":"available_commands"' in out
 
 
-def test_grok_default_omits_usage_and_available_commands(tmp_path: Path) -> None:
+def test_grok_usage_event_renders_input_cached_and_output(tmp_path: Path) -> None:
+    """AC-1: the golden stream's usage event becomes one [USAGE] line.
+
+    The counts are the fixture's own, unsummed: Grok reports the cached read
+    beside `input_tokens` rather than inside it.
+    """
     out = _follow_grok(tmp_path)
+    assert "  [USAGE] input=17031 cached=896 output=620" in out
+    # The event arrives mid-paragraph, so it must flush the pending text
+    # rather than print ahead of the words it billed.
+    assert out.index("  text   I'll inspect the leftover state.") < out.index("  [USAGE] ")
+
+
+def test_grok_usage_is_summarized_never_echoed(tmp_path: Path) -> None:
+    out = _follow_grok(tmp_path)
+    assert "  [USAGE] " in out
     assert "available_commands" not in out
     assert '"type":"usage"' not in out
     assert "input_tokens" not in out
     assert "cache_read_input_tokens" not in out
+
+
+def test_grok_usage_missing_counts_render_unreported() -> None:
+    """A count the event omits is shown as unreported, never as a zero."""
+    partial = _format_line(
+        '{"type":"usage","usage":{"input_tokens":12}}',
+        show_tools=False,
+        show_system=False,
+    )
+    assert partial == "  [USAGE] input=12 cached=- output=-"
+    payloadless = _format_line(
+        '{"type":"usage"}',
+        show_tools=False,
+        show_system=False,
+    )
+    assert payloadless == "  [USAGE] input=- cached=- output=-"
 
 
 def test_grok_tools_and_system_flags_do_not_hide_default_view(tmp_path: Path) -> None:
