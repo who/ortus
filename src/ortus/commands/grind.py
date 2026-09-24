@@ -80,6 +80,7 @@ from ortus.core.profiles import Phase, ProfileError
 from ortus.core.readiness import (
     READINESS_MEMORY_KEY,
     ReadinessReport,
+    spec_markdown,
 )
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
@@ -117,7 +118,12 @@ from ortus.core.local_backend import (
     resolve_opencode_binary,
 )
 from ortus.core.repo import resolve_repo
-from ortus.core.pin_skew import tag_pin_skew_claims
+from ortus.core.pin_skew import (
+    PIN_SKEW_LABEL,
+    classify_plan_gap,
+    latest_plan_gap,
+    tag_pin_skew_claims,
+)
 from ortus.core.worker_failure import classify_worker_window, failure_log_line
 from ortus.core.judge import (
     GateAction, JudgeAnswers, JudgeConfig, JudgeMode, JudgeState, parse_judge_config,
@@ -144,6 +150,9 @@ from ortus.core.judge_routing import (
     route_implement_profile,
 )
 from ortus.core.judge_state import StateError, pack_state
+from ortus.core.judge_triage import (
+    TriageClass, pin_directive_section, triage_parked_bead,
+)
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
 
 
@@ -887,6 +896,62 @@ def _lessons_section(lessons: tuple[tuple[str, str], ...]) -> str:
     return _LESSONS_HEADER + "".join(f"\n- {key}: {body}" for key, body in lessons)
 
 
+def _respec_prompt(issue_id: str) -> str:
+    """The one bounded planner turn a planner-fix triage route spends.
+
+    It re-specifies a single parked bead and nothing else: no implementation,
+    no new beads, no other id. The turn does not decide whether the repair
+    worked — it writes the packet, and `validate_issue` in the triage route
+    is the only thing that can put the bead back in the queue, so a turn that
+    talks itself into success changes nothing.
+    """
+    return (
+        f"Re-specify the bd issue {issue_id} so its work spec passes readiness "
+        "schema v1, then stop.\n\n"
+        f"Read it with: bd show {issue_id} --json. Read its comments with: "
+        f"bd comments {issue_id} --json — the newest ones say why it was "
+        "parked. Rewrite its description, design, and acceptance criteria to "
+        f"the contract below with: bd update {issue_id} --description ... "
+        "--design ... --acceptance ...\n\n"
+        "Constraints. Do not change any other issue, do not create issues, do "
+        "not implement anything, do not commit, and do not close or relabel "
+        f"{issue_id} — the harness re-validates the packet and decides. Keep "
+        "the objective the issue already has; you are repairing how it is "
+        "specified, not choosing different work. If the packet cannot be "
+        "completed without a decision only an operator can make — a missing "
+        "credential, an unmade product choice, a contradiction between the "
+        "objective and the design — leave the issue as it is and stop.\n\n"
+        f"{spec_markdown()}"
+    )
+
+
+def _pin_directive_for(
+    bd: BdClient, issue: dict, write_log: Callable[[str], None]
+) -> str:
+    """The pin directive a bead released as pin-able skew carries, or ''.
+
+    The label is the durable record of the reading, so the directive is
+    rebuilt from it every window rather than kept in process memory: a run
+    that restarts still tells the next worker what the triage decided. A
+    tracker that cannot answer costs the evidence clause, not the directive.
+    """
+
+    if PIN_SKEW_LABEL not in {str(label) for label in (issue.get("labels") or ())}:
+        return ""
+    issue_id = str(issue.get("id") or "")
+    try:
+        verdict = classify_plan_gap(latest_plan_gap(bd.comments(issue_id)))
+    except Exception as exc:  # noqa: BLE001 - the directive stands without it
+        write_log(
+            f"pin directive: could not re-read the park comment on "
+            f"{issue_id} ({exc}); composing it without the evidence"
+        )
+        return pin_directive_section("")
+    return pin_directive_section(
+        ", ".join(verdict.evidence) if verdict.pin_able else ""
+    )
+
+
 _REPLAN_HEADER = "\n\n## Re-plan directive\n"
 
 
@@ -1076,6 +1141,7 @@ def _compose_work_prompt(
     semantic_advice: str = "",
     stable_prefix: bool = False,
     replan_text: str = "",
+    pin_text: str = "",
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
@@ -1107,6 +1173,12 @@ def _compose_work_prompt(
     window differs from the one that stalled — so its length comes out of the
     cap before the optional sections are measured, and it composes behind
     them in both orderings because it describes this window, not the run.
+
+    ``pin_text`` is the pin directive a bead the triage released as pin-able
+    skew carries. It is non-droppable for the same reason: the bead is in
+    this queue at all because the harness decided the mismatch that parked it
+    is the claim's to pin, and a worker that never reads that is one that
+    parks it again.
     """
     del template
 
@@ -1133,7 +1205,7 @@ def _compose_work_prompt(
     # droppable: its length comes out of the cap before the optional sections
     # are measured against what remains.
     headroom = (
-        wrap_limit - len(bound_text) - len(replan_text)
+        wrap_limit - len(bound_text) - len(replan_text) - len(pin_text)
         if wrap_limit is not None else None
     )
     optional = (
@@ -1144,6 +1216,7 @@ def _compose_work_prompt(
     for section in optional:
         if section and (headroom is None or len(task) + len(section) <= headroom):
             task += section
+    task += pin_text
     task += replan_text
     task += bound_text
     if wrap_limit is not None and len(task) > wrap_limit:
@@ -1474,6 +1547,8 @@ def _flag_unready_for_human(
     bd: BdClient,
     reports: list[ReadinessReport],
     write_log: Callable[[str], None],
+    *,
+    triage: Callable[[str, str], None] | None = None,
 ) -> None:
     """Label each unready leaf human and comment the readiness diagnostic.
 
@@ -1483,6 +1558,12 @@ def _flag_unready_for_human(
     spec-free issue. A failed label add still warns and continues so every
     remaining id is attempted; grind never falls back to a repair worker
     from this path.
+
+    The park is applied first and `triage` is consulted after it, on the
+    diagnostic that produced it. That order is the safety property: a run
+    that dies between the two leaves the leaf parked, which is where every
+    failure in this path is supposed to end up. A run without a triage
+    callable is byte-for-byte the behaviour this function has always had.
     """
 
     for report in reports:
@@ -1511,6 +1592,8 @@ def _flag_unready_for_human(
                 f"readiness: could not comment on {report.issue_id} ({exc})"
             )
         write_log(f"readiness: flagged {report.issue_id} human")
+        if triage is not None:
+            triage(report.issue_id, diagnostic)
 
 
 #: Marker-comment prefix that persists a claim's consecutive no-close window
@@ -1938,6 +2021,10 @@ def grind(
         finalize_profile = config.resolve_profile(
             resolved_backend, Phase.FINALIZE
         )
+        # The planning profile, resolved here beside the others so a triage
+        # route that re-specifies a parked bead spends the model the operator
+        # configured for planning rather than the implementation model.
+        respec_profile = config.resolve_profile(resolved_backend, Phase.PLAN)
     except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
@@ -2376,6 +2463,36 @@ def grind(
                 "BEADS_DIR", str((target / ".beads").resolve())
             )
 
+            def respec_bead(issue_id: str) -> bool:
+                """Spend one planning-profile turn re-specifying one parked bead.
+
+                Returns only whether the turn ran; whether it repaired
+                anything is the readiness validator's call, made by the
+                triage route on the packet the turn left behind.
+                """
+                write_log(f"triage: re-specifying {issue_id} in one planner turn")
+                rc = runner.run(
+                    _respec_prompt(issue_id),
+                    repo=target,
+                    log_path=log,
+                    profile=respec_profile,
+                )
+                write_log(f"triage: the re-spec turn for {issue_id} exited {rc}")
+                return rc == 0
+
+            def triage_park(issue_id: str, evidence: str) -> None:
+                """Route one bead that has just reached the human queue."""
+                triage_parked_bead(
+                    bd,
+                    issue_id,
+                    evidence=evidence,
+                    repo=target,
+                    config=judge_config,
+                    run_id=gate_run_id,
+                    write_log=write_log,
+                    respec=respec_bead,
+                )
+
             tasks_completed = 0
             iters_run = 0
             # Console-only dedupe for readiness-skip warnings, keyed on issue
@@ -2513,7 +2630,9 @@ def grind(
                         # claimable: the worker selects from its own
                         # `bd ready`, and only the label keeps a skipped
                         # leaf out of that view (ortus-ts3z).
-                        _flag_unready_for_human(bd, [report], write_log)
+                        _flag_unready_for_human(
+                            bd, [report], write_log, triage=triage_park
+                        )
                         key = (report.issue_id, report.summary())
                         if key in warned_unready:
                             return
@@ -2545,7 +2664,9 @@ def grind(
                     # when nothing at all was claimable.
                     if target_issue is None:
                         if enforce_judge:
-                            _flag_unready_for_human(bd, unready, write_log)
+                            _flag_unready_for_human(
+                                bd, unready, write_log, triage=triage_park
+                            )
                         # Queue is non-empty (not drained) but nothing is ready —
                         # everything left is blocked or human-flagged. We hold the
                         # flock, so no other actor will unblock it; stop rather
@@ -2609,6 +2730,9 @@ def grind(
                             f"iter prep: worker will claim {issue_id} via goal-prompt"
                         )
                     target_issue = bd.show(issue_id)
+                    iteration_pin = _pin_directive_for(
+                        bd, target_issue, write_log
+                    )
                     semantic_advice = readiness_context(
                         evaluate_readiness(target, target_issue, judge_config)
                     )
@@ -2690,6 +2814,7 @@ def grind(
                             semantic_advice=semantic_advice,
                             stable_prefix=stable_prefix,
                             replan_text=iteration_replan,
+                            pin_text=iteration_pin,
                         )
                     except BackendError as exc:
                         write_log(f"iter prep: HALT — {exc}")
@@ -2922,6 +3047,21 @@ def grind(
                     tag_pin_skew_claims(
                         bd, parked, window=iters_run, write_log=write_log
                     )
+                    # The tag is an annotation; the route is the decision.
+                    # Each park is re-read through the same regex first pass
+                    # inside the triage, so a bead the tagging pass already
+                    # recognised is released without a request, and only what
+                    # the regex cannot classify reaches the judge.
+                    for parked_id in sorted(parked):
+                        try:
+                            gap = latest_plan_gap(bd.comments(parked_id))
+                        except Exception as exc:
+                            write_log(
+                                f"iter {iters_run}: triage: could not read the "
+                                f"park comment on {parked_id} ({exc})"
+                            )
+                            continue
+                        triage_park(parked_id, gap)
                 if resolved_backend == "claude":
                     rejection = _claude_goal_rejection(log, start_offset=phase_offset)
                     if rejection is not None:
