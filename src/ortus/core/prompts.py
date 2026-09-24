@@ -20,6 +20,13 @@ from string import Template
 
 PROMPT_PACKAGE = "ortus.prompts"
 
+# The audited rewrite of the worker-facing texts (goal prompt, work-issue
+# condition) lives in a subpackage rather than beside the legacy bundles:
+# `prompts_in_package()` enumerates only `*.md` directly under the package, so
+# a variant cannot ship as an unnamed fourth registry entry. `ortus.core
+# .prompt_audit` owns which variant a repository serves.
+AUDITED_PROMPT_PACKAGE = "ortus.prompts.audited"
+
 # The token the bundled plan prompt carries in place of the generated readiness
 # contract. `ortus check` reads it to spot an override copied before it existed.
 READINESS_SPEC_PLACEHOLDER = "$readiness_spec"
@@ -107,9 +114,12 @@ def resolve_named_prompt(
     *,
     repo: Path | None = None,
     home: Path | None = None,
+    audited: bool = False,
 ) -> ResolvedPrompt:
     """Thin registry-name alias for resolve_prompt (`goal` -> `goal-prompt`)."""
-    return resolve_prompt(registry_entry(name).filename, repo=repo, home=home)
+    return resolve_prompt(
+        registry_entry(name).filename, repo=repo, home=home, audited=audited
+    )
 
 
 def _repo_layer_path(repo: Path, name: str) -> Path:
@@ -125,6 +135,7 @@ def resolve_prompt(
     *,
     repo: Path | None = None,
     home: Path | None = None,
+    audited: bool = False,
 ) -> ResolvedPrompt:
     """Resolve <name>-prompt.md across the three layers.
 
@@ -132,6 +143,11 @@ def resolve_prompt(
         name: prompt basename without the .md extension (e.g., "plan-prompt").
         repo: per-repo override root. When None, the repo layer is skipped.
         home: user-wide override root (defaults to Path.home()).
+        audited: read the audited variant of the bundled layer. The override
+            layers are unaffected — an operator's copy still wins, and the
+            flag only selects which bundled default it replaces — and the
+            resolved source reads "audited" so a caller can report which
+            variant it served.
 
     Returns:
         ResolvedPrompt naming the layer that won and its content.
@@ -156,13 +172,14 @@ def resolve_prompt(
             name=name, source="user", path=candidate, text=candidate.read_text(encoding="utf-8")
         )
 
-    bundled = files(PROMPT_PACKAGE).joinpath(f"{name}.md")
+    package = AUDITED_PROMPT_PACKAGE if audited else PROMPT_PACKAGE
+    bundled = files(package).joinpath(f"{name}.md")
     if not bundled.is_file():
         raise PromptNotFound(
             f"{name}.md is not in any of: "
             f"{_repo_layer_path(repo, name) if repo else '(no repo)'}, "
             f"{_user_layer_path(home, name)}, "
-            f"bundled {PROMPT_PACKAGE}"
+            f"bundled {package}"
         )
     # importlib.resources.Traversable: read_text() works on both
     # filesystem and zip-backed packages.
@@ -176,19 +193,25 @@ def resolve_prompt(
     except (TypeError, ValueError):
         bundled_path = None
     return ResolvedPrompt(
-        name=name, source="bundled", path=bundled_path, text=bundled_text
+        name=name,
+        source="audited" if audited else "bundled",
+        path=bundled_path,
+        text=bundled_text,
     )
 
 
-def bundled_prompt_text(name: str) -> str:
+def bundled_prompt_text(name: str, *, audited: bool = False) -> str:
     """The bundled text for a prompt stem, bypassing every override layer.
 
     Eject and staleness checks both need the installed default even when a
-    repo or user override currently wins resolution (source purity).
+    repo or user override currently wins resolution (source purity). Those two
+    callers stay on the legacy bundle — it is the provenance baseline a stamp
+    records — and only a caller that asks for the audited variant gets it.
     """
-    bundled = files(PROMPT_PACKAGE).joinpath(f"{name}.md")
+    package = AUDITED_PROMPT_PACKAGE if audited else PROMPT_PACKAGE
+    bundled = files(package).joinpath(f"{name}.md")
     if not bundled.is_file():
-        raise PromptNotFound(f"{name}.md is not bundled in {PROMPT_PACKAGE}")
+        raise PromptNotFound(f"{name}.md is not bundled in {package}")
     return bundled.read_text(encoding="utf-8")
 
 

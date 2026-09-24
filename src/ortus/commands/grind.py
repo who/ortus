@@ -66,6 +66,7 @@ from ortus.core.codegraph import (
     phase_contract,
     require_handshake,
 )
+from ortus.core.prompt_audit import audit_enabled, audit_note
 from ortus.core.prompts import resolve_named_prompt
 from ortus.core.config import (
     Config,
@@ -971,12 +972,14 @@ def _stale_completion_contract_diagnostic(
     *,
     repo: Path,
     home: Path | None = None,
+    audited: bool = False,
 ) -> str | None:
     """If the worker would be told to leave the issue open, name the source.
 
     Inspects the composed grind prompt (phase instruction plus CodeGraph
     contract) and the resolved goal prompt the worker fetches via
-    ``ortus prompt show goal``. A repo or user override that still carries
+    ``ortus prompt show goal`` — the variant this run serves, so an audited
+    run is judged on the text its worker will actually read. A repo or user override that still carries
     the retired leave-open sentence is reported with its path so the
     operator can rewrite or remove it; the override is never overwritten
     in place. Stock text that still carries the sentence is reported as an
@@ -987,7 +990,7 @@ def _stale_completion_contract_diagnostic(
     if needle in composed.lower():
         hits.append("the composed CodeGraph implementation phase contract")
     try:
-        goal = resolve_named_prompt("goal", repo=repo, home=home)
+        goal = resolve_named_prompt("goal", repo=repo, home=home, audited=audited)
     except Exception:
         goal = None
     if goal is not None and needle in goal.text.lower():
@@ -1572,9 +1575,13 @@ def grind(
         bind_worker = enforce_judge or judge_config.pre_tool
         if judge_config.pre_tool:
             check_pre_tool(target, resolved_backend, docker=docker)
+        prompt_audit = audit_enabled(config)
+        prompt_variant_note = audit_note(config)
         goal_template = ""
         if bind_worker:
-            goal_template = resolve_named_prompt("goal", repo=target).text
+            goal_template = resolve_named_prompt(
+                "goal", repo=target, audited=prompt_audit
+            ).text
             validate_bound_goal(goal_template, condition)
         # Only the operator-served backends have a server to reach. The
         # table's rules run here so a missing [local] fails with one message
@@ -1663,7 +1670,9 @@ def grind(
     _ = build_condition  # re-export retained for downstream tooling/tests
 
     harness_select = condition is None
-    work_template = read_work_issue_condition() if harness_select else ""
+    work_template = (
+        read_work_issue_condition(audited=prompt_audit) if harness_select else ""
+    )
 
     if dry_run:
         output.info(
@@ -1702,6 +1711,7 @@ def grind(
         output.info(f"finalize:       {finalize_profile.display_name}")
         output.info(f"codegraph:      {codegraph_mode.value}")
         output.info(f"verification:   {verification_note}")
+        output.info(f"prompt text:    {prompt_variant_note}")
         output.info(
             "merge-gate:     "
             + (
@@ -1732,7 +1742,9 @@ def grind(
                 bound_issue_id="<ISSUE_ID>" if bind_worker else None,
                 goal_template=goal_template if bind_worker else None,
             )
-            conflict = _stale_completion_contract_diagnostic(dry_prompt, repo=target)
+            conflict = _stale_completion_contract_diagnostic(
+                dry_prompt, repo=target, audited=prompt_audit
+            )
             if conflict:
                 output.error(conflict)
                 raise typer.Exit(code=1)
@@ -1818,7 +1830,8 @@ def grind(
             write_log(
                 "=== ortus grind started "
                 f"(subprocess-per-task shape; backend={resolved_backend}; "
-                f"verification={verification_note}) ==="
+                f"verification={verification_note}; "
+                f"prompt={prompt_variant_note}) ==="
             )
             if verification_text:
                 write_log(
@@ -2337,7 +2350,7 @@ def grind(
                         output.error(str(exc))
                         raise typer.Exit(code=1)
                     conflict = _stale_completion_contract_diagnostic(
-                        iteration_prompt, repo=target
+                        iteration_prompt, repo=target, audited=prompt_audit
                     )
                     if conflict:
                         write_log(f"iter prep: HALT — {conflict}")

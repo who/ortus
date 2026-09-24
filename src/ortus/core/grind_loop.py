@@ -135,17 +135,24 @@ def queue_drained(snapshot: StateSnapshot) -> bool:
     return snapshot.open == 0 and snapshot.in_progress == 0
 
 
-def read_work_issue_condition() -> str:
+def read_work_issue_condition(*, audited: bool = False) -> str:
     """Load the per-iteration work-this-issue condition template.
 
     Issue SELECTION is done by the harness, not the worker, and the worker is
     forbidden from closing, committing, or pushing — Ortus owns every bd and
     Git mutation once a verdict passes. Still carries the two placeholders;
     call :func:`inject_issue` to fill them per iteration.
+
+    ``audited`` serves the audited variant of the same contract — the rewrite
+    the `prompt_audit` flag selects. Both variants carry the two placeholders,
+    so injection is identical either way.
     """
-    res = files(CONDITIONS_PACKAGE).joinpath(WORK_ISSUE_CONDITION_FILE)
+    from ortus.core.prompts import AUDITED_PROMPT_PACKAGE
+
+    package = AUDITED_PROMPT_PACKAGE if audited else CONDITIONS_PACKAGE
+    res = files(package).joinpath(WORK_ISSUE_CONDITION_FILE)
     if not res.is_file():
-        raise FileNotFoundError(f"work-issue condition missing in {CONDITIONS_PACKAGE}")
+        raise FileNotFoundError(f"work-issue condition missing in {package}")
     text = res.read_text(encoding="utf-8")
     if text.lstrip().startswith("TODO PLACEHOLDER"):
         raise FileNotFoundError("work-issue condition is still a TODO placeholder")

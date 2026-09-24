@@ -19,6 +19,7 @@ from tests.conftest import BdWorkspace, ci_gate_command, ci_gate_flags
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPT = REPO_ROOT / "src" / "ortus" / "prompts" / "goal-prompt.md"
+AUDITED_PROMPT = REPO_ROOT / "src" / "ortus" / "prompts" / "audited" / "goal-prompt.md"
 TESTING_GUIDE = REPO_ROOT / "docs" / "testing.md"
 
 
@@ -193,11 +194,16 @@ def test_worker_guidance_defers_to_criterion_checks() -> None:
     that file exists. The negative guards keep the deleted Ortus-specific
     pytest gate from creeping back into the bundled prompt.
     """
-    prompt = PROMPT.read_text(encoding="utf-8")
-    assert "criterion-check commands" in prompt
-    assert "only if that file exists" in prompt
-    assert "uv run pytest -m fast -n auto --test-timeout=30" not in prompt
-    assert "full local `uv run pytest`" not in prompt
+    # Both arms of the `prompt_audit` A/B answer to the same policy: the
+    # audited rewrite may restate a rule, never drop this one.
+    for name, prompt in (
+        ("bundled goal prompt", PROMPT.read_text(encoding="utf-8")),
+        ("audited goal prompt", AUDITED_PROMPT.read_text(encoding="utf-8")),
+    ):
+        assert "criterion-check commands" in prompt, name
+        assert "only if that file exists" in prompt, name
+        assert "uv run pytest -m fast -n auto --test-timeout=30" not in prompt, name
+        assert "full local `uv run pytest`" not in prompt, name
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ from ortus.core.local_backend import (
     resolve_opencode_binary,
 )
 from ortus.core.profiles import ProfileError
+from ortus.core.prompt_audit import MOVED_RULES, audit_note, unenforced_moved_rules
 from ortus.core.prompts import (
     PROMPT_REGISTRY,
     READINESS_SPEC_PLACEHOLDER,
@@ -703,6 +704,31 @@ def check_verification(repo: Path) -> CheckResult:
     )
 
 
+def check_worker_prompt(repo: Path) -> CheckResult:
+    """Report the worker-prompt variant, and hold the audit's moved rules.
+
+    The audited variant drops the rules Ortus enforces in code rather than
+    restating them at a worker, so this row fails when one of those entry
+    points no longer resolves: a rule enforced nowhere is worse than the
+    prompt line the audit deleted, and it should surface before a run rather
+    than in a transcript.
+    """
+    name = "worker prompt"
+    try:
+        note = audit_note(load_config(repo=repo))
+    except Exception as exc:
+        return CheckResult(name, False, f".ortusrc parse error: {exc}")
+    missing = unenforced_moved_rules()
+    if missing:
+        return CheckResult(
+            name,
+            False,
+            f"{note}; moved rules with no enforcement: " + ", ".join(missing),
+        )
+    enforced = ", ".join(rule.entry_point for rule in MOVED_RULES)
+    return CheckResult(name, True, f"{note}; moved rules enforced by {enforced}")
+
+
 CODEGRAPH_INSTALL_HINT = (
     "install the CodeGraph CLI (https://github.com/colbymchenry/codegraph)"
 )
@@ -1153,6 +1179,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         [
             (check_ortusrc, ".ortusrc"),
             (check_verification, "verification"),
+            (check_worker_prompt, "worker prompt"),
             (lambda r: check_codegraph(r, backend), "codegraph"),
             (check_prompt_overrides, ".ortus/prompts/"),
         ]
