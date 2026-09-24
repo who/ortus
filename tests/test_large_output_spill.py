@@ -7,14 +7,18 @@ answers no, which is why none of these assertions are satisfied by one.
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
-from ortus.core import checks
+from ortus.core import checks, spill
 from ortus.core.checks import render_tracker_comment
 from ortus.core.grind_loop import MAX_FIELD_CHARS, format_issue_details
 from ortus.core.spill import (
+    SPILL_MIN_AGE_SECONDS,
     TRUNCATION_MARKER,
     SpilledOutput,
+    prune_spill_dir,
     spill_large_output,
     spill_output_file,
 )
@@ -25,6 +29,24 @@ def _body(marker: str = "MIDDLE-EVIDENCE", size: int = 20_000) -> str:
     filler = "pytest collected a lot of output\n" * size
     half = len(filler) // 2
     return f"HEAD-EVIDENCE\n{filler[:half]}{marker}\n{filler[half:]}TAIL-EVIDENCE"
+
+
+def _stale(path: Path, *, days: float) -> Path:
+    """Backdate a capture past the age below which nothing is ever pruned."""
+    old = time.time() - SPILL_MIN_AGE_SECONDS - days * 86_400
+    os.utime(path, (old, old))
+    return path
+
+
+def _captures(spill_dir: Path, count: int, *, size: int = 1_000) -> list[Path]:
+    """`count` abandoned bodies, oldest first, as a long-lived seat leaves them."""
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for index in range(count):
+        path = spill_dir / f"old-{index:03d}.log"
+        path.write_bytes(b"x" * size)
+        written.append(_stale(path, days=count - index))
+    return written
 
 
 def test_helper_spills_an_oversized_body_and_returns_path_size_tail(
@@ -254,3 +276,57 @@ def test_small_and_redact_handles_an_empty_capture(tmp_path: Path) -> None:
 
     assert record == SpilledOutput(inline="", size_bytes=0)
     assert record.render() == ""
+
+
+def test_prune_bounds_the_directory_and_keeps_this_run_own_capture(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC-1: spilling into an over-full directory prunes it; the new body stays."""
+    monkeypatch.setattr(spill, "SPILL_RETAINED_FILES", 5)
+    spill_dir = tmp_path / "spill"
+    abandoned = _captures(spill_dir, 12)
+
+    record = spill_large_output(
+        _body(), spill_dir=spill_dir, limit=4_000, name="AC-1"
+    )
+
+    assert record.path is not None and record.path.exists(), "the run keeps its own"
+    survivors = sorted(spill_dir.iterdir())
+    assert len(survivors) == 5, "the directory is back under the file bound"
+    assert record.path in survivors
+    assert not any(path.exists() for path in abandoned[:8]), "oldest go first"
+    assert all(path.exists() for path in abandoned[8:]), "newest stale ones stay"
+
+
+def test_prune_leaves_a_concurrent_seat_live_captures_alone(tmp_path: Path) -> None:
+    """AC-1: over the bound but young is another seat's business, not ours."""
+    spill_dir = tmp_path / "spill"
+    live = _captures(spill_dir, 9)
+    now = time.time()
+    for path in live:
+        os.utime(path, (now, now))
+
+    removed = prune_spill_dir(spill_dir, max_files=2, max_bytes=1)
+
+    assert removed == ()
+    assert all(path.exists() for path in live)
+
+
+def test_prune_enforces_the_byte_budget_not_only_the_file_count(
+    tmp_path: Path,
+) -> None:
+    """AC-1: a few enormous bodies are pruned though the count is tiny."""
+    spill_dir = tmp_path / "spill"
+    heavy = _captures(spill_dir, 4, size=4_000)
+
+    removed = prune_spill_dir(spill_dir, max_files=100, max_bytes=9_000)
+
+    assert len(removed) == 2, "kept bodies fit the budget; the rest are dropped"
+    assert set(removed) == set(heavy[:2]), "the oldest two are the ones dropped"
+    assert sum(path.stat().st_size for path in spill_dir.iterdir()) <= 9_000
+
+
+def test_prune_ignores_a_directory_it_cannot_read(tmp_path: Path) -> None:
+    """AC-1: a spill directory that is not there yet prunes to nothing, quietly."""
+    assert prune_spill_dir(tmp_path / "absent") == ()
+    assert not (tmp_path / "absent").exists(), "pruning never creates the directory"

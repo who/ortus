@@ -15,6 +15,13 @@ needs the middle opens the file. Only a spill that could not be written at
 all falls back to bounded excerpts, and that fallback names itself rather
 than passing for a complete body.
 
+Spilled bodies are disposable, and the directory holding them is bounded:
+past a file count and a byte budget the oldest captures are deleted, while
+anything recent enough to belong to a live run is left where it is. A
+reference therefore names a file that may no longer exist, which is why the
+size and the tail travel inside the reference itself rather than being
+looked up from the body later.
+
 Redaction applies to what is rendered, never to what is stored. A comment
 and a prompt outlive the run and travel; the spilled file is a local
 artifact under a directory `logs/` already ignores, and an operator reading
@@ -30,6 +37,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +47,15 @@ DEFAULT_INLINE_LIMIT = 4_000
 DEFAULT_TAIL_CHARS = 1_500
 #: Spilled bodies land here, beside the grind logs when a repository is known.
 SPILL_DIRNAME = "ortus-output"
+#: How many spilled bodies a repository's spill directory keeps.
+SPILL_RETAINED_FILES = 200
+#: And how many bytes they may occupy between them.
+SPILL_RETAINED_BYTES = 256 * 1024 * 1024
+#: A capture younger than this is never pruned, whoever wrote it. It is what
+#: stands in for a lock: comfortably longer than the worker watchdog's 5400
+#: seconds, so no seat can still be writing a body another seat reads as
+#: abandoned.
+SPILL_MIN_AGE_SECONDS = 6 * 60 * 60
 #: Reached only when the body could not be written anywhere at all.
 TRUNCATION_MARKER = "\n[... output truncated ...]\n"
 
@@ -117,6 +134,79 @@ class SpilledOutput:
         )
 
 
+def prune_spill_dir(
+    spill_dir: Path,
+    *,
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+    min_age_seconds: float | None = None,
+) -> tuple[Path, ...]:
+    """Drop the oldest spilled bodies until `spill_dir` is back under bound.
+
+    Retention is newest-first, so a run keeps its own captures for free: the
+    body written a moment ago sorts to the front of both the file count and
+    the byte budget, and only what trails past them is a candidate at all. A
+    candidate younger than `min_age_seconds` is then left alone, which is the
+    whole concurrency story — two seats sharing one directory cannot tell each
+    other's live captures from abandoned ones, and age is the one signal that
+    needs no lock between them.
+
+    Returns what was removed. Every failure here is silent by design: a
+    directory that cannot be listed, a file another seat unlinked first, or a
+    stat that raced a delete all leave the bound unenforced for one more
+    capture, which is cheaper than raising into the check run that produced
+    the body.
+    """
+    files = SPILL_RETAINED_FILES if max_files is None else max_files
+    budget = SPILL_RETAINED_BYTES if max_bytes is None else max_bytes
+    grace = SPILL_MIN_AGE_SECONDS if min_age_seconds is None else min_age_seconds
+    try:
+        entries = [
+            path
+            for path in Path(spill_dir).iterdir()
+            if path.suffix == ".log" and path.is_file()
+        ]
+    except OSError:
+        return ()
+    stamped: list[tuple[float, int, Path]] = []
+    for path in entries:
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        stamped.append((info.st_mtime, info.st_size, path))
+    stamped.sort(key=lambda item: item[0], reverse=True)
+    now = time.time()
+    removed: list[Path] = []
+    kept_files = 0
+    kept_bytes = 0
+    for mtime, size, path in stamped:
+        kept_files += 1
+        kept_bytes += size
+        if kept_files <= files and kept_bytes <= budget:
+            continue
+        if now - mtime < grace:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        kept_files -= 1
+        kept_bytes -= size
+        removed.append(path)
+    return tuple(removed)
+
+
+def _prunable(target: Path) -> bool:
+    """Whether `target` is a spill directory Ortus is responsible for.
+
+    The temp-directory fallback is not: it belongs to whatever already cleans
+    the system temp dir, and a seat with no repository has no grind logs to
+    sit beside and no run of its own to protect.
+    """
+    return target != default_spill_dir()
+
+
 def _slug(name: str) -> str:
     """A file-name stem from a criterion id, field name, or command label."""
     cleaned = _NAME_JUNK.sub("-", str(name)).strip("-")
@@ -158,6 +248,8 @@ def _write(spill_dir: Path | None, name: str, body: bytes | Path) -> tuple[Path 
                 sink.write(body)
     except OSError as exc:
         return None, f"could not write under {target}: {exc}"
+    if _prunable(target):
+        prune_spill_dir(target)
     return path, ""
 
 
