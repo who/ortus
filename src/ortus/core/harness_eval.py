@@ -11,6 +11,11 @@ a treatment that halves the bill by closing half as many beads, burning twice
 the turns, or failing twice as often has not paid for itself, and the report
 puts those numbers beside the primary one rather than leaving them to memory.
 
+A treatment that picks a different model per bead is measured one level
+deeper: the tier each bead was routed to is read from the seat's own routing
+log and joined to that bead's outcome, so a tier that closes fewer beads than
+the others is visible as the place a threshold is wrong.
+
 Null is a result. A provider that never reports dollars (Codex) leaves the
 primary metric unset for its arm, and an arm whose seat was never run leaves
 every metric unset. Neither is zero-filled: a zero cost and an unreported
@@ -28,12 +33,13 @@ run, because there is only one construction path for the commands.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ortus.core import output
 from ortus.core.cost import (
@@ -45,6 +51,8 @@ from ortus.core.cost import (
     parse_grind_log,
     rollup_beads,
 )
+from ortus.core.judge_log import ROUTE_LOG_NAME
+from ortus.core.judge_routing import RouterTier
 
 #: Package holding the fixture PRDs. Installed with the wheel, so the paths
 #: the recipe hands to `ortus plan` resolve outside a checkout too.
@@ -52,7 +60,7 @@ EVALPACK_PACKAGE = "ortus.evalpack"
 
 #: Bumped whenever a metric is added, renamed, or changes meaning. A reader
 #: comparing two reports checks this before comparing anything else.
-REPORT_SCHEMA = "harness-eval-report/v1"
+REPORT_SCHEMA = "harness-eval-report/v2"
 
 #: The one number the evaluation set exists to move.
 PRIMARY_METRIC = "cost_per_closed_bead"
@@ -451,6 +459,64 @@ def run_matrix(
     return tuple(records)
 
 
+#: Tier rows print in the order the router declares them, weakest model
+#: first, so two arms' tables line up row for row.
+_TIER_ORDER: tuple[str, ...] = tuple(tier.value for tier in RouterTier)
+
+
+@dataclass(frozen=True)
+class TierMetrics:
+    """How one router tier fared in a cell: beads routed to it, beads closed."""
+
+    tier: str
+    beads: int = 0
+    closed_beads: int = 0
+    close_rate: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "tier": self.tier,
+            "beads": self.beads,
+            "closed_beads": self.closed_beads,
+            "close_rate": self.close_rate,
+        }
+
+
+def _tier_rows(
+    beads: Sequence[BeadCost], routes: Mapping[str, str]
+) -> tuple[TierMetrics, ...]:
+    """Close rate per tier, for the beads the routing log actually names.
+
+    A bead with no routing record belongs to no tier. The cell's own close
+    rate already counts it, and filing it under `baseline` would credit a
+    tier with a bead the router never sent there. A tier the log never names
+    gets no row either: an empty table says this arm routed nothing, which is
+    a different answer from every tier closing nothing.
+    """
+
+    grouped: dict[str, list[BeadCost]] = {}
+    for bead in beads:
+        tier = routes.get(bead.issue_id or "")
+        if tier is not None:
+            grouped.setdefault(tier, []).append(bead)
+
+    ordered = [tier for tier in _TIER_ORDER if tier in grouped]
+    ordered.extend(sorted(tier for tier in grouped if tier not in _TIER_ORDER))
+    rows: list[TierMetrics] = []
+    for tier in ordered:
+        group = grouped[tier]
+        closed = sum(1 for bead in group if bead.closed)
+        rows.append(
+            TierMetrics(
+                tier=tier,
+                beads=len(group),
+                closed_beads=closed,
+                close_rate=closed / len(group),
+            )
+        )
+    return tuple(rows)
+
+
 @dataclass(frozen=True)
 class ArmMetrics:
     """What one cell cost and how well it went. None means never reported."""
@@ -466,6 +532,8 @@ class ArmMetrics:
     turns: int | None = None
     wall_seconds: float | None = None
     cache_hit_rate: float | None = None
+    #: Empty when this cell's seat recorded no routing decisions.
+    tiers: tuple[TierMetrics, ...] = ()
 
     @property
     def null_metrics(self) -> tuple[str, ...]:
@@ -487,14 +555,23 @@ class ArmMetrics:
             "turns": self.turns,
             "wall_seconds": self.wall_seconds,
             "cache_hit_rate": self.cache_hit_rate,
+            "tiers": [row.as_dict() for row in self.tiers],
             "null_metrics": list(self.null_metrics),
         }
 
 
 def measure_arm(
-    fixture: EvalFixture, arm: str, runs: Sequence[RunCost]
+    fixture: EvalFixture,
+    arm: str,
+    runs: Sequence[RunCost],
+    routes: Mapping[str, str] | None = None,
 ) -> ArmMetrics:
-    """Roll one cell's grind logs into the primary metric and its guardrails."""
+    """Roll one cell's grind logs into the primary metric and its guardrails.
+
+    `routes` is that cell's bead-to-tier map. It is optional because a cell
+    whose arm never routed has none, and the metrics that do not depend on
+    routing are measured the same either way.
+    """
 
     sessions: tuple[SessionCost, ...] = tuple(
         session for run in runs for session in run.sessions
@@ -525,6 +602,7 @@ def measure_arm(
         turns=int(turns) if turns is not None else None,
         wall_seconds=wall,
         cache_hit_rate=usage.cache_hit_rate,
+        tiers=_tier_rows(beads, routes or {}),
     )
 
 
@@ -533,6 +611,37 @@ def collect_runs(root: Path, fixture: EvalFixture, arm: str) -> tuple[RunCost, .
 
     seat = root / seat_name(fixture, arm)
     return tuple(parse_grind_log(path) for path in find_grind_logs(seat, newest=0))
+
+
+def collect_routes(root: Path, fixture: EvalFixture, arm: str) -> dict[str, str]:
+    """Each bead's tier from one cell's routing log, the newest record winning.
+
+    A bead can be routed more than once, because every resumed window writes
+    its own record, and the tier that last ran it is the one its outcome
+    belongs to. The log is read defensively: it is appended to by workers a
+    timeout may kill mid-line, so an undecodable line is skipped rather than
+    failing the whole report, and a seat without the log simply routes nothing.
+    """
+
+    path = root / seat_name(fixture, arm) / "logs" / ROUTE_LOG_NAME
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+
+    routes: dict[str, str] = {}
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        issue_id = record.get("issue_id")
+        tier = record.get("tier")
+        if isinstance(issue_id, str) and issue_id and isinstance(tier, str) and tier:
+            routes[issue_id] = tier
+    return routes
 
 
 @dataclass(frozen=True)
@@ -589,7 +698,12 @@ def build_report(
     """
 
     arms = tuple(
-        measure_arm(fixture, arm, collect_runs(root, fixture, arm))
+        measure_arm(
+            fixture,
+            arm,
+            collect_runs(root, fixture, arm),
+            routes=collect_routes(root, fixture, arm),
+        )
         for fixture in FIXTURE_PACK
         for arm in ARMS
     )
@@ -617,10 +731,13 @@ def _status_cell(record: CellExecution | None) -> str:
 
 
 def render_report(report: EvalReport) -> str:
-    """The report as markdown: one table, plus the nulls named underneath.
+    """The report as markdown: one table, the tiers, then the nulls.
 
     A swept report gains one trailing status column. A report rebuilt from
-    logs has no records to show and keeps the table it always had.
+    logs has no records to show and keeps the table it always had. The
+    per-tier section is where a threshold gets rewritten from outcomes rather
+    than from taste, so it names the arms that routed and says so plainly
+    when none did.
     """
 
     columns = ["fixture", "arm", "beads", "closed", PRIMARY_METRIC]
@@ -645,6 +762,19 @@ def render_report(report: EvalReport) -> str:
         if report.executions:
             cells.append(_status_cell(report.execution(arm.fixture, arm.arm)))
         lines.append("| " + " | ".join(cells) + " |")
+
+    lines.extend(["", "## Per-tier close rate", ""])
+    routed = tuple(arm for arm in report.arms if arm.tiers)
+    if not routed:
+        lines.append("No cell recorded a routing decision.")
+    else:
+        for arm in routed:
+            for row in arm.tiers:
+                lines.append(
+                    f"- {arm.fixture} / {arm.arm} / {row.tier}: "
+                    f"{row.closed_beads}/{row.beads} closed "
+                    f"({_cell(row.close_rate)})"
+                )
 
     lines.extend(["", "## Null results", ""])
     if not report.null_results:

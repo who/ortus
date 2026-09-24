@@ -38,9 +38,16 @@ from ortus.core.harness_eval import (
     run_matrix,
     seat_name,
 )
+from ortus.core.judge_log import ROUTE_LOG_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures"
 runner = CliRunner()
+
+#: The arm whose beads carry a tier, named through the treatment rather than
+#: by position so a reordered pack cannot silently point these tests elsewhere.
+ROUTER_ARM = next(
+    item.key for item in TREATMENTS if item.config_key == "jev_model_router"
+)
 
 
 def _stream(name: str) -> list[str]:
@@ -454,3 +461,142 @@ def test_run_emits_report_when_the_sweep_finishes(
     assert again.exit_code == 0, again.output
     assert "status" in again.stdout.splitlines()[5]
     assert again.stdout.count(CELL_SKIPPED) == len(FIXTURE_PACK) * len(ARMS)
+
+
+def _routed_lines() -> list[str]:
+    """One run over two beads: the first closes, the second never does."""
+
+    return [
+        "[2026-09-24 11:00:00] === ortus grind started (subprocess-per-task "
+        "shape; backend=claude; verification=full) ===",
+        "[2026-09-24 11:00:01] iter prep: worker will claim ortus-abcd "
+        "via goal-prompt",
+        "[2026-09-24 11:00:02] iter 1: spawning claude (single-issue worker)",
+        "[2026-09-24 11:05:02] iter 1: worker closed ortus-abcd "
+        "(tasks_completed=1)",
+        "[2026-09-24 11:05:03] iter prep: worker will claim ortus-efgh "
+        "via goal-prompt",
+        "[2026-09-24 11:05:04] iter 2: spawning claude (single-issue worker)",
+        "[2026-09-24 11:12:04] iter 2: worker TIMEOUT after 420s",
+    ]
+
+
+def _seat_routes(root: Path, fixture, arm: str, records: list[str]) -> Path:
+    """Write one cell's routing log the way a worker launch appends to it."""
+
+    path = root / seat_name(fixture, arm) / "logs" / ROUTE_LOG_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    return path
+
+
+def _route(issue_id: str, tier: str) -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "event": "model_route",
+            "seat": "eval",
+            "issue_id": issue_id,
+            "backend": "claude",
+            "tier": tier,
+            "reason": "mapped",
+            "model": "claude-opus-5[1m]",
+            "reasoning_effort": "high",
+        }
+    )
+
+
+def _routed_root(tmp_path: Path) -> Path:
+    """A seat root whose router arm ran two beads on two different tiers."""
+
+    root = _seeded_root(tmp_path)
+    _seat_log(root, FIXTURE_A, ROUTER_ARM, _routed_lines())
+    _seat_routes(
+        root,
+        FIXTURE_A,
+        ROUTER_ARM,
+        [
+            _route("ortus-abcd", "cheap"),
+            # The bead was re-routed on its second window; the tier that ran
+            # it last owns its outcome.
+            _route("ortus-efgh", "baseline"),
+            _route("ortus-efgh", "frontier"),
+            "{ this line was half-written when a worker was killed",
+        ],
+    )
+    return root
+
+
+def test_per_tier_close_rate_joins_the_routing_log_to_bead_outcomes(
+    tmp_path: Path,
+) -> None:
+    """Which tier closed which bead, so a threshold is rewritten from outcomes."""
+
+    report = build_report(_routed_root(tmp_path))
+    routed = _arm(report, FIXTURE_A.key, ROUTER_ARM)
+
+    # The cell's own numbers are unchanged by the join: two beads, one closed.
+    assert (routed.beads, routed.closed_beads) == (2, 1)
+    assert routed.close_rate == pytest.approx(0.5)
+
+    # Rows come back weakest model first, and a tier nothing routed to has
+    # no row at all.
+    assert [row.tier for row in routed.tiers] == ["cheap", "frontier"]
+
+    cheap, frontier = routed.tiers
+    assert (cheap.beads, cheap.closed_beads) == (1, 1)
+    assert cheap.close_rate == pytest.approx(1.0)
+    # The tier that closed nothing is where the threshold is wrong, and a
+    # zero close rate is a measurement rather than a missing one.
+    assert (frontier.beads, frontier.closed_beads) == (1, 0)
+    assert frontier.close_rate == pytest.approx(0.0)
+
+    rendered = render_report(report)
+    assert "## Per-tier close rate" in rendered
+    assert f"{FIXTURE_A.key} / {ROUTER_ARM} / cheap: 1/1 closed" in rendered
+    assert f"{FIXTURE_A.key} / {ROUTER_ARM} / frontier: 0/1 closed" in rendered
+
+    payload = json.loads(json.dumps(report.as_dict()))
+    rows = [
+        row
+        for row in payload["arms"]
+        if row["fixture"] == FIXTURE_A.key and row["arm"] == ROUTER_ARM
+    ]
+    assert rows[0]["tiers"] == [
+        {"tier": "cheap", "beads": 1, "closed_beads": 1, "close_rate": 1.0},
+        {"tier": "frontier", "beads": 1, "closed_beads": 0, "close_rate": 0.0},
+    ]
+
+
+def test_a_cell_that_routed_nothing_reports_no_tier_rather_than_a_zero(
+    tmp_path: Path,
+) -> None:
+    """An unrouted arm is not a tier that closed nothing."""
+
+    report = build_report(_seeded_root(tmp_path))
+
+    # The control arm ran a bead and closed it, and still has no tier: its
+    # seat never recorded a routing decision.
+    control = _arm(report, FIXTURE_A.key, CONTROL_ARM)
+    assert control.closed_beads == 1
+    assert control.tiers == ()
+    assert render_report(report).count("No cell recorded a routing decision.") == 1
+
+    payload = json.loads(json.dumps(report.as_dict()))
+    assert all(row["tiers"] == [] for row in payload["arms"])
+
+
+def test_the_tier_breakdown_reaches_the_eval_verb(tmp_path: Path) -> None:
+    """The operator reads the breakdown from the CLI, not from a library call."""
+
+    result = runner.invoke(app, ["eval", str(_routed_root(tmp_path)), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    tiers = {
+        (row["fixture"], row["arm"]): row["tiers"] for row in payload["arms"]
+    }
+    assert [row["tier"] for row in tiers[(FIXTURE_A.key, ROUTER_ARM)]] == [
+        "cheap",
+        "frontier",
+    ]
