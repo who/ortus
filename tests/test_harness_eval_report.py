@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.core.harness_eval import (
+    ADOPT,
     ARMS,
     CELL_FAILED,
     CELL_RAN,
@@ -27,9 +28,11 @@ from ortus.core.harness_eval import (
     FIXTURE_B,
     FIXTURE_PACK,
     GUARDRAIL_METRICS,
+    KEEP_CONTROL,
     PRIMARY_METRIC,
     REPORT_SCHEMA,
     TREATMENTS,
+    UNMEASURED,
     arm_commands,
     build_report,
     matrix,
@@ -600,3 +603,107 @@ def test_the_tier_breakdown_reaches_the_eval_verb(tmp_path: Path) -> None:
         "cheap",
         "frontier",
     ]
+
+
+def _router_seat(root: Path, lines: list[str]) -> None:
+    """Give fixture A's router arm a cell of its own, with its tier recorded."""
+
+    _seat_log(root, FIXTURE_A, ROUTER_ARM, lines)
+    _seat_routes(root, FIXTURE_A, ROUTER_ARM, [_route("ortus-abcd", "cheap")])
+
+
+def test_model_router_is_read_against_the_control_of_its_own_fixture(
+    tmp_path: Path,
+) -> None:
+    """The comparison a default gets flipped on, computed rather than eyeballed."""
+
+    root = _seeded_root(tmp_path)
+    # Same beads, same spend, half the wall clock: the router arm wins on the
+    # one guardrail it moved and matched the control on the rest.
+    lines = _claude_lines()
+    lines[-1] = lines[-1].replace("09:10:03", "09:05:03")
+    _router_seat(root, lines)
+
+    report = build_report(root)
+    control = _arm(report, FIXTURE_A.key, CONTROL_ARM)
+    routed = _arm(report, FIXTURE_A.key, ROUTER_ARM)
+    comparison = _record(report.comparisons, FIXTURE_A.key, ROUTER_ARM)
+
+    assert comparison.control_cost_per_closed_bead == control.cost_per_closed_bead
+    assert comparison.arm_cost_per_closed_bead == routed.cost_per_closed_bead
+    assert comparison.control_close_rate == comparison.arm_close_rate == 1.0
+    assert comparison.arm_wall_seconds < comparison.control_wall_seconds
+    assert comparison.faster and not comparison.cheaper
+    assert comparison.verdict == ADOPT
+
+    rendered = render_report(report)
+    assert "## Control versus treatment" in rendered
+    assert f"{FIXTURE_A.key} / {ROUTER_ARM}: {PRIMARY_METRIC} " in rendered
+    assert f"{ROUTER_ARM}: {PRIMARY_METRIC} " in rendered
+    assert f"— {ADOPT}" in rendered
+
+
+def test_model_router_that_closed_less_loses_however_cheap_it_was(
+    tmp_path: Path,
+) -> None:
+    """Close rate is the guardrail: a cheaper arm that closes fewer beads lost."""
+
+    root = _seeded_root(tmp_path)
+    _router_seat(root, _routed_lines())
+
+    comparison = _record(
+        build_report(root).comparisons, FIXTURE_A.key, ROUTER_ARM
+    )
+
+    assert comparison.arm_close_rate == pytest.approx(0.5)
+    assert comparison.control_close_rate == pytest.approx(1.0)
+    assert comparison.verdict == KEEP_CONTROL
+
+
+def test_model_router_without_a_cell_reports_unmeasured_not_a_loss(
+    tmp_path: Path,
+) -> None:
+    """An arm that never ran has no verdict; a missing number is not a zero."""
+
+    comparison = _record(
+        build_report(_seeded_root(tmp_path)).comparisons, FIXTURE_A.key, ROUTER_ARM
+    )
+
+    assert comparison.arm_close_rate is None
+    assert comparison.verdict == UNMEASURED
+    assert not comparison.cheaper and not comparison.faster
+
+
+def test_model_router_comparison_reaches_the_eval_verb(tmp_path: Path) -> None:
+    """The operator reads the verdict from the CLI, not from a library call."""
+
+    root = _seeded_root(tmp_path)
+    _router_seat(root, _routed_lines())
+
+    result = runner.invoke(app, ["eval", str(root), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    rows = {(row["fixture"], row["arm"]): row for row in payload["comparisons"]}
+    assert rows[(FIXTURE_A.key, ROUTER_ARM)]["verdict"] == KEEP_CONTROL
+    assert set(rows) == {
+        (fixture.key, item.key) for fixture in FIXTURE_PACK for item in TREATMENTS
+    }
+
+
+def test_model_router_arm_enables_the_gate_it_is_routed_from(tmp_path: Path) -> None:
+    """The flag alone leaves the arm running the control's configuration."""
+
+    item = next(t for t in TREATMENTS if t.key == ROUTER_ARM)
+    commands = arm_commands(FIXTURE_A, ROUTER_ARM, root=Path("/seats"))
+    appended = next(command for command in commands if ".ortusrc" in command)
+
+    for line in ("jev_model_router = true", "[judge]", "enabled = true"):
+        assert line in appended
+    # The flag is a top-level key, so it has to be written above the table
+    # header or TOML swallows it into `[judge]`.
+    assert appended.index("jev_model_router") < appended.index("[judge]")
+    assert item.config_lines[0] == item.enable_line
+
+    rendered = render_matrix(matrix(root=Path("/seats")))
+    assert "jev_model_router = true" in rendered

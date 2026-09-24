@@ -17,7 +17,7 @@ import pytest
 from ortus.core import judge_log
 from ortus.core.agent import CodexRunner
 from ortus.core.claude import ClaudeRunner
-from ortus.core.config import Config, load_config
+from ortus.core.config import DEFAULTS, Config, load_config
 from ortus.core.judge import (
     GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgePhase,
     JudgeRoute,
@@ -31,10 +31,19 @@ from ortus.core.judge_routing import (
     RouteOverrides, RouteReason, RouterTier, jev_router_enabled,
     route_implement_profile,
 )
+from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict
 from ortus.core.profiles import SUPPORTED_EFFORTS, Phase
+from tests.test_grind_judge import gate as gate
 
 CONFIG = JudgeConfig(enabled=True)
 PHASES = (Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY, Phase.FINALIZE)
+
+#: The verdict recorded in this arm's `jev_router_ab` metadata. `DEFAULTS`
+#: follows this, never the other way round. It is still False because the
+#: comparison has not produced data yet, not because off was preferred: an
+#: unmeasured arm keeps the control, and flipping it is the whole job of the
+#: bead the treatment's `measured_by` names.
+MEASURED_VERDICT = False
 
 
 def config_for(*backends: str, effort: str = "medium") -> Config:
@@ -308,8 +317,10 @@ def test_logging_records_vectors_model_effort_bead_and_backend(tmp_path, capsys)
     assert set(record) == {
         "schema_version", "event", "timestamp", "run_id", "decision_id", "seat",
         "issue_id", "backend", "tier", "reason", "model", "reasoning_effort",
-        "needs_frontier", "action_risk", "difficulty",
+        "needs_frontier", "action_risk", "difficulty", "applied",
     }
+    # An enforcing launch is the applied case; a shadow seat is not.
+    assert record["applied"] is True
     assert record["event"] == "model_route"
     assert record["run_id"] == str(event.run_id)
     assert record["decision_id"] == str(event.decision_id)
@@ -418,3 +429,136 @@ def test_argv_of_a_cheap_bead_differs_from_its_pinned_baseline():
     assert pinned[pinned.index("--model") + 1] == "claude-implement"
     assert cheap[cheap.index("--model") + 1] == "claude-finalize"
     assert cheap[cheap.index("--effort") + 1] == "low"
+
+
+# --- AC-1: the default is the measured verdict, and the kill switch wins ----
+
+
+def test_default_is_the_verdict_the_ab_recorded_not_a_preference(tmp_path):
+    """An untouched repo runs the arm the recorded comparison chose.
+
+    The flag exists to be settled by measurement, so the default and the
+    verdict recorded on the bead are the same fact written twice. Pinning the
+    expectation here means a later edit to `DEFAULTS` has to argue with the
+    numbers rather than slip past them, and an arm with no numbers yet cannot
+    be flipped on by preference alone.
+    """
+    assert DEFAULTS["jev_model_router"] is MEASURED_VERDICT
+    config = load_config(repo=tmp_path, home=tmp_path)
+    assert config.get("jev_model_router") is MEASURED_VERDICT
+    assert jev_router_enabled(config, environ={}) is MEASURED_VERDICT
+
+
+def test_default_still_yields_to_the_per_run_kill_switch(tmp_path):
+    """Whatever the default becomes, one export turns the router off."""
+    config = load_config(repo=tmp_path, home=tmp_path)
+    assert jev_router_enabled(config, environ={"ORTUS_JEV_ROUTER": "0"}) is False
+    pinned = Config({"jev_model_router": True})
+    assert jev_router_enabled(pinned, environ={"ORTUS_JEV_ROUTER": "0"}) is False
+
+
+# --- AC-6: a tier boundary is not a gate ----------------------------------
+
+
+def test_no_confidence_floor_parks_or_escalates_any_bead():
+    """Every vector combination still returns a profile a worker can run."""
+    config = config_for("claude")
+    for needs_human in (0.0, 0.5, 1.0):
+        for risk in (0.0, 1.0, 2.0):
+            for confidence in (0.0, 0.5, 1.0):
+                _, routed = route(
+                    config,
+                    "claude",
+                    answers(
+                        needs_human=needs_human,
+                        noul_confidence=confidence,
+                        action_risk=risk,
+                        risk_confidence=confidence,
+                    ),
+                )
+                assert routed.tier in tuple(RouterTier)
+                assert routed.profile.model
+                assert routed.reason is RouteReason.MAPPED
+
+
+def test_no_confidence_floor_exists_in_the_routers_vocabulary():
+    """The router can only name tiers, so it cannot name a human or a park."""
+    assert {tier.value for tier in RouterTier} == {"cheap", "baseline", "frontier"}
+    reasons = {reason.value for reason in RouteReason}
+    assert not reasons & {"human", "needs_human", "skip", "park", "low_confidence"}
+    # A judge that is certain a bead needs a human buys it a bigger model and
+    # nothing else: the bead still runs, on the frontier tier.
+    config = config_for("claude")
+    _, routed = route(config, "claude", answers(needs_human=1.0))
+    assert routed.tier is RouterTier.FRONTIER
+    assert routed.profile.model == "claude-plan"
+
+
+# --- AC-2/AC-3: shadow observes, and a judge failure changes nothing -------
+
+
+def pinned_profiles() -> dict:
+    return {
+        "claude": {
+            phase.value: {
+                "model": f"claude-{phase.value}",
+                "reasoning_effort": "high" if phase is Phase.IMPLEMENT else "medium",
+            }
+            for phase in PHASES
+        }
+    }
+
+
+def test_shadow_logs_the_route_it_would_have_picked_without_applying_it(gate):
+    """A shadow seat accumulates router evidence while running the pinned model."""
+    gate.config.values["judge"].update(mode="shadow")
+    gate.config.values["profiles"] = pinned_profiles()
+
+    result = gate.invoke("--tasks", "1")
+
+    assert result.exit_code == 0, result.output + str(result.exception)
+    records = route_records(gate.repo)
+    assert len(records) == 1
+    assert records[0]["applied"] is False
+    assert records[0]["tier"] == RouterTier.CHEAP.value
+    assert records[0]["reason"] == RouteReason.MAPPED.value
+    # The would-be model is recorded, which is the whole point of observing.
+    assert records[0]["model"] == "claude-finalize"
+    # The worker still launched on the profile the operator pinned.
+    profile = gate.worker.run.call_args.kwargs["profile"]
+    assert (profile.model, profile.reasoning_effort) == ("claude-implement", "high")
+
+
+def test_shadow_observes_nothing_when_the_judge_is_unavailable(gate):
+    """No vectors is not evidence, and an unreachable judge is not a crash."""
+    gate.config.values["judge"].update(mode="shadow")
+    gate.judge.evaluate.side_effect = RuntimeError("provider down")
+
+    result = gate.invoke("--tasks", "1")
+
+    assert result.exit_code == 0, result.output + str(result.exception)
+    assert not (gate.repo / "logs" / judge_log.ROUTE_LOG_NAME).exists()
+    gate.worker.run.assert_called_once()
+
+
+def test_fail_open_keeps_the_pinned_profile_when_the_judge_times_out(gate):
+    """A judge that answered nothing costs the bead its routing and nothing else."""
+    gate.config.values["jev_model_router"] = True
+    gate.config.values["profiles"] = pinned_profiles()
+    gate.judge.evaluate.return_value = JudgeVerdict(failure=JudgeFailure.TIMEOUT)
+
+    result = gate.invoke("--tasks", "1")
+
+    assert result.exit_code == 0, result.output + str(result.exception)
+    bundle = gate.bundles[JudgeRoute.CLAUDE]
+    profile = bundle.runner.run.call_args.kwargs["profile"]
+    assert (profile.model, profile.reasoning_effort) == ("claude-implement", "high")
+    records = route_records(gate.repo)
+    assert len(records) == 1
+    assert records[0]["applied"] is True
+    assert records[0]["tier"] == RouterTier.BASELINE.value
+    assert records[0]["reason"] == RouteReason.JUDGE_UNAVAILABLE.value
+    assert records[0]["difficulty"] is None
+    # Falling open is not an escalation: the bead is neither parked nor flagged.
+    assert "human" not in gate.bd.rows["demo-1"].get("labels", [])
+    assert gate.bd.rows["demo-1"]["status"] == "closed"
