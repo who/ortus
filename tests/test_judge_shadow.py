@@ -22,6 +22,19 @@ VERDICTS += [JudgeVerdict(answers=replace(answer('codex').answers, route_confide
 VERDICTS += [JudgeVerdict(answers=replace(answer('codex').answers, action_risk=2))]
 
 
+def record(gate, kind):
+    """The window's one record of `kind`, chosen by name rather than position.
+
+    Triage and stuck decisions write their own records to the same log, so a
+    window's record count is not the contract these cases assert on. A kind
+    that is missing, or written more than once, fails here instead of quietly
+    handing back the wrong record.
+    """
+    records = [event for event in gate.events() if event['event'] == kind]
+    assert len(records) == 1, f'expected one {kind} record, found {len(records)}'
+    return records[0]
+
+
 def test_mode_parsing_and_kill_switch(tmp_path):
     (tmp_path / '.ortusrc').write_text('[judge]\nenabled=true\nmode="shadow"\n')
     cfg = load_config(repo=tmp_path, home=tmp_path / 'home')
@@ -71,7 +84,8 @@ def test_shadow_matches_baseline_for_all_decisions(gate, monkeypatch, verdict, b
     assert readiness.call_count == 2
     gate.judge.evaluate.assert_called_once()
     assert not gate.bundles
-    decision, outcome = gate.events()
+    decision = record(gate, 'decision')
+    outcome = record(gate, 'outcome')
     assert decision['effective_action'] == 'baseline'
     assert decision['observed_issue_id'] == 'demo-1'
     # Only a fail-closed service failure and a skip route withhold a worker;
@@ -113,7 +127,8 @@ def test_shadow_records_only_attributable_outcomes(gate, claim):
         gate.worker.run.side_effect = worker
     result = gate.invoke('--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
-    decision, outcome = gate.events()
+    decision = record(gate, 'decision')
+    outcome = record(gate, 'outcome')
     assert decision['observed_issue_id'] == 'demo-1'
     assert outcome['actual_claimed_id'] == {'other': 'other', 'resumed': 'demo-1'}.get(claim)
     assert outcome['attribution_mismatch'] is (claim == 'other')
@@ -151,8 +166,9 @@ def test_shadow_errors_never_stop_baseline(gate, monkeypatch, failure):
     assert gate.bd.calls == []
     assert 'private exception body' not in result.output
     if failure == 'provider':
-        assert gate.events()[0]['failure'] == 'service_error'
-        assert gate.events()[0]['effective_action'] == 'baseline'
+        decision = record(gate, 'decision')
+        assert decision['failure'] == 'service_error'
+        assert decision['effective_action'] == 'baseline'
 
 
 def test_shadow_missing_key_uses_adapter_without_enforcing(gate, monkeypatch):
@@ -161,8 +177,9 @@ def test_shadow_missing_key_uses_adapter_without_enforcing(gate, monkeypatch):
     monkeypatch.setattr(grind_mod, 'TypeSafeJudge', lambda cfg: TypeSafeJudge(cfg, environ={}))
     result = gate.invoke('--tasks', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
-    assert gate.events()[0]['failure'] == 'key_missing'
-    assert gate.events()[0]['intended_action'] == 'human'
+    decision = record(gate, 'decision')
+    assert decision['failure'] == 'key_missing'
+    assert decision['intended_action'] == 'human'
     gate.worker.run.assert_called_once()
 
 
@@ -174,7 +191,7 @@ def test_shadow_metadata_redacts_actual_claim(gate, monkeypatch):
     result = gate.invoke('--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     assert 'private-claim' not in (gate.repo / 'logs/jev-decisions.jsonl').read_text()
-    assert gate.events()[1]['accuracy_eligible'] is False
+    assert record(gate, 'outcome')['accuracy_eligible'] is False
 
 
 def test_shadow_observes_before_worker_without_claim_or_route_preparation(gate):
@@ -218,5 +235,6 @@ def test_shadow_worker_failure_records_only_observed_claim(gate, error):
     assert gate.bd.rows['demo-1']['status'] == 'in_progress'
     assert gate.bd.rows['demo-1']['assignee'] == 'worker'
     assert gate.bd.calls == []
-    assert gate.events()[1]['observed_status'] == 'in_progress'
-    assert gate.events()[1]['actual_claimed_id'] == 'demo-1'
+    outcome = record(gate, 'outcome')
+    assert outcome['observed_status'] == 'in_progress'
+    assert outcome['actual_claimed_id'] == 'demo-1'
