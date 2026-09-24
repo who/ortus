@@ -84,6 +84,20 @@ _SENSITIVE = re.compile(
 )
 
 
+def environment_secrets(environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Literal values of credential-named environment variables, for matching.
+
+    The names are matched, never recorded, and the values are only ever handed
+    to :func:`sanitize_field` as strings to look for. A caller that screens
+    text it read from disk needs the same list the packer builds for issue
+    prose, so it lives here beside the pattern that defines "credential-named".
+    """
+    env = os.environ if environ is None else environ
+    return tuple(
+        value for name, value in env.items() if value and _SECRET_NAME.search(name)
+    )
+
+
 def sanitize_field(
     value: str,
     *,

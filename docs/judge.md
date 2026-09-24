@@ -95,7 +95,7 @@ A numeric directory such as `01` needs an alias such as `ortus`.
 | `risk_threshold` | `1.5` | Also inert pre-turn; rubric scores are 0, 1, 2 and are recorded |
 | `seat` | `default` | Set explicitly to `ortus` for this pilot |
 | `include_issue_text` | `true` | Screened title, first Objective line and AC lines travel |
-| `include_log_tail` | `false` | The pre-turn packer never reads log tails |
+| `include_log_tail` | `false` | The pre-turn packer never reads log tails; true also arms the looping-worker check, the one phase that sends a screened slice of a worker's own log |
 | `title_cap`, `objective_cap`, `acceptance_cap`, `tool_cap` | `160`, `1024`, `1024`, `512` | Character caps; oversized source fields are omitted |
 | `total_bytes_cap` | `8192` | Serialized UTF-8 state budget |
 | `sensitive_paths` | empty | Additional literal paths to omit from text |
