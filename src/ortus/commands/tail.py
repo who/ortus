@@ -912,6 +912,51 @@ class _GrokCoalesce:
         return out
 
 
+#: What a token count the Grok usage event left out renders as. Zero is a
+#: count Grok reported; an absent field is one it never measured, and the cost
+#: table already spells that difference this way.
+_GROK_USAGE_UNSET = "-"
+
+
+def _grok_usage_count(usage: dict, field: str) -> str:
+    """One token count from a Grok usage payload, or the unreported mark."""
+    value = usage.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return _GROK_USAGE_UNSET
+    return str(value)
+
+
+def _render_grok_usage(
+    obj: dict,
+    *,
+    grok: _GrokCoalesce,
+    palette: _Palette,
+) -> list[str]:
+    """One `[USAGE]` line for a Grok turn, shaped like the other backends'.
+
+    The fields are the ones the cost rollup decodes, so the live view and the
+    billed numbers name the same counts. Grok's `input_tokens` excludes the
+    cached read, so the two are printed side by side and neither is folded
+    into the other.
+    """
+    out = grok.flush(palette)
+    usage = obj.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    out.append(
+        _wrap(
+            "  [USAGE] input={} cached={} output={}".format(
+                _grok_usage_count(usage, "input_tokens"),
+                _grok_usage_count(usage, "cache_read_input_tokens"),
+                _grok_usage_count(usage, "output_tokens"),
+            ),
+            palette.cyan,
+            reset=palette.reset,
+        )
+    )
+    return out
+
+
 def _render_grok_object(
     obj: dict,
     *,
@@ -921,7 +966,9 @@ def _render_grok_object(
 ) -> list[str]:
     """Render one Grok streaming-json event; may flush a pending paragraph."""
     kind = obj.get("type")
-    if kind in ("usage", "available_commands"):
+    if kind == "usage":
+        return _render_grok_usage(obj, grok=grok, palette=palette)
+    if kind == "available_commands":
         return []
     if kind in ("thought", "text"):
         data = obj.get("data")
