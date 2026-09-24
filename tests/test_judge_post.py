@@ -17,6 +17,9 @@ from ortus.core.judge_post import (
     Outcome, OutcomeVerdict, WorkerOutcome, apply_outcome,
     evaluate_outcome,
 )
+from ortus.core.judge_stuck import (
+    WEDGED_WINDOW_THRESHOLD, StuckAction, decide_stuck_claim,
+)
 from ortus.core.judge_state import StateError
 from ortus.core.judge_typesafe import JudgeFailure
 from ortus.core.profiles import ProfileError
@@ -33,6 +36,12 @@ def observation(status='in_progress', watchdog=False):
 def response(choice='continue', confidence=.9):
     return {'model': 'jev-1.13.0', 'answers': {
         'outcome': {'type': 'choice', 'choice': choice, 'confidence': confidence}}}
+
+
+def post_turn_events(gate):
+    """The post-turn records only. The stuck decision writes its own
+    record to the same log, so 'the last event' is no longer this phase."""
+    return [e for e in gate.events() if e['event'] == 'post_turn']
 
 
 def client(body, calls):
@@ -172,12 +181,67 @@ def test_failure_policy(tmp_path, failure, mode):
     assert bd.rows['demo-1']['status'] == 'open'
 
 
-@pytest.mark.parametrize('confidence,human', [(.799, True), (.8, False)])
-def test_fixed_confidence_boundary(tmp_path, confidence, human):
+@pytest.mark.parametrize('confidence', [0.0, .5, .799, .8, .99])
+def test_low_confidence_never_parks_a_bead(tmp_path, confidence):
+    """AC-2: the 0.8 floor is gone. An unsure answer about work that can
+    continue annotates nothing and leaves the bead exactly as it was."""
     bd = Tracker()
     apply_outcome(bd, tmp_path, 'demo-1', observation('open'),
                   OutcomeVerdict(Outcome.CONTINUE, confidence), JudgeConfig(), uuid4())
-    assert ('human' in bd.rows['demo-1']['labels']) == human
+    assert 'human' not in bd.rows['demo-1']['labels']
+    assert bd.calls == []
+    events = [json.loads(s) for s in
+              (tmp_path / 'logs/jev-decisions.jsonl').read_text().splitlines()]
+    assert [e['reason'] for e in events] == ['classified']
+
+
+def test_low_confidence_still_reaches_the_stuck_vector(tmp_path):
+    """The confidence the floor used to consume now shapes the decision."""
+    unsure = decide_stuck_claim(OutcomeVerdict(Outcome.NEEDS_HUMAN, 0.0), 1, False)
+    sure = decide_stuck_claim(OutcomeVerdict(Outcome.NEEDS_HUMAN, .99), 1, False)
+    assert unsure.p_escalate < sure.p_escalate
+    assert max(unsure.vector().values()) - min(unsure.vector().values()) < .2
+
+
+@pytest.mark.parametrize('choice,action', [
+    (Outcome.CONTINUE, StuckAction.CONTINUE),
+    (Outcome.FLAKE, StuckAction.CONTINUE),
+    (Outcome.DONE, StuckAction.CONTINUE),
+    (Outcome.PLAN_GAP, StuckAction.REPLAN),
+    (Outcome.AUTH, StuckAction.ESCALATE),
+    (Outcome.NEEDS_HUMAN, StuckAction.ESCALATE),
+])
+def test_decide_stuck_takes_the_argmax_after_one_window(choice, action):
+    """AC-1: one no-close window is enough to decide, and the decision is the
+    argmax of a vector that sums to one."""
+    decision = decide_stuck_claim(OutcomeVerdict(choice, .9), 1, False)
+    assert decision.action is action
+    assert not decision.fail_open and decision.windows == 1
+    assert decision.vector()[action.value] == max(decision.vector().values())
+    assert abs(sum(decision.vector().values()) - 1) < 1e-9
+
+
+def test_decide_stuck_fails_open_without_a_usable_verdict():
+    for verdict in (None, OutcomeVerdict(failure=JudgeFailure.TIMEOUT)):
+        assert decide_stuck_claim(verdict, 1, False).action is StuckAction.CONTINUE
+        below = decide_stuck_claim(verdict, WEDGED_WINDOW_THRESHOLD - 1, False)
+        at = decide_stuck_claim(verdict, WEDGED_WINDOW_THRESHOLD, False)
+        assert below.action is StuckAction.CONTINUE and below.fail_open
+        assert at.action is StuckAction.ESCALATE and at.fail_open
+
+
+def test_decide_stuck_weighs_progress_windows_and_spent_replans():
+    burning = OutcomeVerdict(Outcome.CONTINUE, .99)
+    assert decide_stuck_claim(burning, 3, False).action is StuckAction.ESCALATE
+    assert decide_stuck_claim(burning, 3, True).action is StuckAction.CONTINUE
+    gap = OutcomeVerdict(Outcome.PLAN_GAP, .9)
+    assert decide_stuck_claim(gap, 1, False, replans=0).action is StuckAction.REPLAN
+    assert decide_stuck_claim(gap, 1, False, replans=1).action is StuckAction.ESCALATE
+
+
+def test_decide_stuck_is_inert_before_the_first_window():
+    decision = decide_stuck_claim(OutcomeVerdict(Outcome.NEEDS_HUMAN, .99), 0, False)
+    assert decision.action is StuckAction.CONTINUE and not decision.fail_open
 
 
 def test_concurrent_close_overrides_human_and_timeout_overrides_model(tmp_path):
@@ -258,7 +322,7 @@ def test_grind_watchdog_is_a_fact_and_handshake_failure_wins(gate, monkeypatch):
     facts = evaluate.call_args.args[1]
     assert facts.watchdog and facts.exit_status == 143
     assert gate.bd.rows['demo-1']['status'] == 'in_progress'
-    assert gate.events()[-1]['reason'] == 'worker_timeout'
+    assert post_turn_events(gate)[-1]['reason'] == 'worker_timeout'
 
     from ortus.core.codegraph import CodeGraphUnavailable
     evaluate.reset_mock()
@@ -276,7 +340,7 @@ def test_grind_shadow_preserves_baseline(gate, monkeypatch):
     result = gate.invoke('--iterations', '1')
     assert result.exit_code == 0, result.output + str(result.exception)
     assert gate.bd.rows['demo-1']['labels'] == []
-    assert gate.events()[-1]['effective_action'] == 'baseline'
+    assert post_turn_events(gate)[-1]['effective_action'] == 'baseline'
 
 
 def test_grind_log_error_reports_without_mutation(gate, monkeypatch):

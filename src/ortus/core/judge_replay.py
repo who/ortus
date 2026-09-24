@@ -35,6 +35,15 @@ POST = COMMON | {
 SHADOW_OUTCOME = {
     "mode", "observed_issue_id", "actual_claimed_id", "attribution_mismatch", "accuracy_eligible",
 }
+#: The stuck-claim decision grind takes after a window ends without a close.
+#: It carries no provider answer of its own — the vector is derived from the
+#: post-turn record written moments earlier — so it shares none of the usage
+#: or answer fields.
+STUCK = COMMON | {
+    "phase", "mode", "issue_id", "seat", "model", "windows", "branch_advanced",
+    "fail_open", "vector", "action", "effective_action",
+}
+STUCK_ACTIONS = {"continue", "replan", "escalate"}
 OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
 #: The worker-failure class a post-turn record may also carry. Optional, and
 #: read beside `reason` rather than folded into `OUTCOMES`: a log written
@@ -99,7 +108,8 @@ def validate_event(value: object) -> dict:
     fields = (DECISION | ({"mode", "observed_issue_id"} if shadow else set())
               if kind == "decision" else
               OUTCOME | (SHADOW_OUTCOME if shadow else set()) if kind == "outcome" else
-              POST if kind == "post_turn" else set())
+              POST if kind == "post_turn" else
+              STUCK if kind == "stuck_decision" else set())
     optional = POST_SIDE if kind == "post_turn" else set()
     _require(bool(fields) and fields <= set(e) <= fields | optional)
     _uuid(e["run_id"])
@@ -109,9 +119,10 @@ def validate_event(value: object) -> dict:
     for name in ("seat", "issue_id", "criteria_version", "observed_issue_id", "actual_claimed_id"):
         if name in e:
             _metadata(e[name])
-    if kind in ("decision", "post_turn"):
+    if kind in ("decision", "post_turn", "stuck_decision"):
         _require(e["model"] is None or (type(e["model"]) is str
                  and re.fullmatch(r"jev-\d+\.\d+\.\d+", e["model"]) is not None))
+    if kind in ("decision", "post_turn"):
         _require(_choice(e["failure"], JudgeFailure, nullable=True))
     if kind in ("decision", "outcome"):
         for key in ("input_tokens", "output_tokens"):
@@ -152,6 +163,21 @@ def validate_event(value: object) -> dict:
             _require(e["attribution_mismatch"] == (e["actual_claimed_id"] is not None and not matched))
             _require(e["accuracy_eligible"] == (matched and e["observed_status"] not in (None, "unknown")))
             _require(matched == (e["observed_status"] is not None))
+    elif kind == "stuck_decision":
+        _require(e["phase"] == "stuck" and _choice(e["mode"], {"shadow", "enforce"}))
+        _require(type(e["windows"]) is int and 0 <= e["windows"] <= 2**31 - 1)
+        for key in ("branch_advanced", "fail_open"):
+            _require(type(e[key]) is bool)
+        for key in ("action", "effective_action"):
+            _require(_choice(e[key], STUCK_ACTIONS))
+        vector = e["vector"]
+        _require(type(vector) is dict and set(vector) == STUCK_ACTIONS)
+        for value in vector.values():
+            _require(_number(value, 1))
+        # Shadow records the read action and applies the fail-open baseline,
+        # so the two differ there exactly when the judge argued for something
+        # else; outside shadow the applied action is the decided one.
+        _require(shadow or e["effective_action"] == e["action"])
     else:
         _require(e["phase"] == "post_turn" and _choice(e["mode"], {"shadow", "enforce"}))
         _require(type(e["exit_status"]) is int)

@@ -131,7 +131,13 @@ from ortus.core.judge_log import (
 )
 from ortus.core.judge_policy import decide_pre_turn
 from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
-from ortus.core.judge_post import WorkerOutcome, apply_outcome, evaluate_outcome
+from ortus.core.judge_post import (
+    OutcomeVerdict, WorkerOutcome, apply_outcome, evaluate_outcome,
+)
+from ortus.core.judge_stuck import (
+    WEDGED_WINDOW_THRESHOLD, StuckAction, StuckDecision, baseline_stuck_action,
+    decide_stuck_claim, log_stuck_decision,
+)
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePlan, RoutePreparationError,
     baseline_implement_profile, jev_router_enabled, plan_routes, prepare_route,
@@ -881,6 +887,31 @@ def _lessons_section(lessons: tuple[tuple[str, str], ...]) -> str:
     return _LESSONS_HEADER + "".join(f"\n- {key}: {body}" for key, body in lessons)
 
 
+_REPLAN_HEADER = "\n\n## Re-plan directive\n"
+
+
+def _replan_section(windows: int, integration_branch: str) -> str:
+    """The directive a re-plan decision injects into the next window's prompt.
+
+    It names the stalled-window facts rather than describing them in the
+    abstract, because the worker reading it is fresh and has no memory of the
+    windows that produced it. It asks for a different route through the same
+    issue; it does not authorize abandoning the claim, and it deliberately
+    says nothing about leaving edits for a later phase.
+    """
+    return (
+        f"{_REPLAN_HEADER}"
+        f"This claim has ended {windows} worker window(s) still in_progress "
+        f"with no new commits on {integration_branch}. Do not repeat the "
+        "approach that stalled. Before editing, re-read the issue's own "
+        "comments for what was already tried, then pick a different route "
+        "through the same issue — a smaller first cut that can be verified, "
+        "or the one blocking sub-problem solved on its own. If the spec "
+        "itself is what cannot be executed, record PLAN-GAP on the issue and "
+        "flag it human instead of burning another window."
+    )
+
+
 def _selected_lessons(
     bd: BdClient, write_log: Callable[[str], None]
 ) -> tuple[tuple[str, str], ...]:
@@ -1044,6 +1075,7 @@ def _compose_work_prompt(
     goal_template: str | None = None,
     semantic_advice: str = "",
     stable_prefix: bool = False,
+    replan_text: str = "",
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
@@ -1069,6 +1101,12 @@ def _compose_work_prompt(
     move behind every segment that is identical across the beads of a run,
     so a provider prefix cache sees the same leading bytes each iteration
     instead of losing them to a bead id sitting in the middle.
+
+    ``replan_text`` is the re-plan directive a stuck decision injects. Like
+    the bound contract it is never droppable — it is the whole reason this
+    window differs from the one that stalled — so its length comes out of the
+    cap before the optional sections are measured, and it composes behind
+    them in both orderings because it describes this window, not the run.
     """
     del template
 
@@ -1094,7 +1132,10 @@ def _compose_work_prompt(
     # A bound contract names the only id the worker may touch, so it is never
     # droppable: its length comes out of the cap before the optional sections
     # are measured against what remains.
-    headroom = wrap_limit - len(bound_text) if wrap_limit is not None else None
+    headroom = (
+        wrap_limit - len(bound_text) - len(replan_text)
+        if wrap_limit is not None else None
+    )
     optional = (
         (lessons_text, semantic_advice)
         if stable_prefix
@@ -1103,6 +1144,7 @@ def _compose_work_prompt(
     for section in optional:
         if section and (headroom is None or len(task) + len(section) <= headroom):
             task += section
+    task += replan_text
     task += bound_text
     if wrap_limit is not None and len(task) > wrap_limit:
         raise BackendError(
@@ -1477,20 +1519,23 @@ def _flag_unready_for_human(
 #: because old markers are re-read by newer grinds.
 _NO_CLOSE_MARKER_PREFIX = "ortus-grind: no-close window "
 
-#: Consecutive resumed windows a leftover claim may end still in_progress with
-#: no new commits on the integration branch before grind hands it to the human
-#: queue instead of resuming it again. The field case (fh-aqi) burned exactly
-#: two workers before a human stepped in.
-_WEDGED_WINDOW_THRESHOLD = 2
+#: Marker-comment prefix for the re-plan directives a claim has already been
+#: given. Same cross-process store and same lenient parse as the no-close
+#: counter, kept separate so the older marker's format is untouched.
+_REPLAN_MARKER_PREFIX = "ortus-grind: replan window "
+
+#: The fail-open baseline's threshold, re-exported for the log lines and
+#: tests that name it. The rule itself now lives beside the decision it is
+#: the fallback for.
+_WEDGED_WINDOW_THRESHOLD = WEDGED_WINDOW_THRESHOLD
 
 
-def _no_close_window_count(bd: BdClient, issue_id: str) -> int:
-    """The claim's recorded consecutive no-close window count.
+def _marker_count(bd: BdClient, issue_id: str, prefix: str) -> int:
+    """The newest count a `<prefix><n>` marker comment records on the issue.
 
-    Read from the newest `ortus-grind: no-close window <n>` marker comment
-    on the issue. Parsed leniently: no marker, an unreadable comment list,
-    or an unparseable count (an older version's marker with the same
-    prefix) all read as zero — a fresh budget, never a spurious escalation.
+    Parsed leniently: no marker, an unreadable comment list, or an
+    unparseable count (an older version's marker with the same prefix) all
+    read as zero — a fresh budget, never a spurious escalation.
     """
     try:
         existing = bd.comments(issue_id)
@@ -1502,16 +1547,31 @@ def _no_close_window_count(bd: BdClient, issue_id: str) -> int:
             continue
         for key in ("body", "text", "comment", "content"):
             body = str(comment.get(key) or "")
-            marker = body.find(_NO_CLOSE_MARKER_PREFIX)
+            marker = body.find(prefix)
             if marker == -1:
                 continue
-            tail = body[marker + len(_NO_CLOSE_MARKER_PREFIX) :].split()
+            tail = body[marker + len(prefix) :].split()
             try:
                 count = int(tail[0]) if tail else 0
             except ValueError:
                 count = 0
             break
     return count
+
+
+def _no_close_window_count(bd: BdClient, issue_id: str) -> int:
+    """The claim's recorded consecutive no-close window count."""
+    return _marker_count(bd, issue_id, _NO_CLOSE_MARKER_PREFIX)
+
+
+def _replan_window_count(bd: BdClient, issue_id: str) -> int:
+    """How many re-plan directives this claim has already been given.
+
+    A directive that did not work the first time is weak evidence for a
+    second one, so the stuck decision reads this and shifts replan mass
+    toward escalate — a slope, never a floor.
+    """
+    return _marker_count(bd, issue_id, _REPLAN_MARKER_PREFIX)
 
 
 def _record_no_close_window(
@@ -1528,6 +1588,24 @@ def _record_no_close_window(
         write_log(
             f"wedged-claim counter: could not record no-close window {count} "
             f"on {issue_id} ({exc}); the previous count stands"
+        )
+
+
+def _record_replan_window(
+    bd: BdClient, issue_id: str, count: int, write_log: Callable[[str], None]
+) -> None:
+    """Persist how many re-plan directives this claim has been given.
+
+    A failed write warns and moves on: the decision that follows simply reads
+    a lower count and is that much readier to try another directive, which is
+    the safe direction to be wrong in.
+    """
+    try:
+        bd.add_comment(issue_id, f"{_REPLAN_MARKER_PREFIX}{count}")
+    except Exception as exc:
+        write_log(
+            f"stuck decision: could not record replan window {count} on "
+            f"{issue_id} ({exc}); the previous count stands"
         )
 
 
@@ -1594,6 +1672,55 @@ def _escalate_wedged_claim(
         )
     except Exception as exc:
         write_log(f"wedged claim: could not comment on {issue_id} ({exc})")
+
+
+def _decide_stuck(
+    bd: BdClient,
+    repo: Path,
+    config: JudgeConfig,
+    run_id: UUID,
+    issue_id: str,
+    verdict: OutcomeVerdict | None,
+    windows: int,
+    branch_advanced: bool,
+    write_log: Callable[[str], None],
+) -> tuple[StuckDecision, StuckAction]:
+    """Read what to do with a claim whose window ended without a close.
+
+    Returns the decision and the action actually applied. Shadow mode reads
+    the vector and applies the fail-open baseline, so a seat can watch the
+    decision it would have taken for a whole run before letting it move a
+    claim. Without the post-turn phase there is no verdict to read and no
+    decision log to write: the baseline runs and nothing new is recorded, so
+    a repository with Jev off keeps the run it had.
+
+    A decision log that cannot be written is not a reason to strand a claim.
+    The action stands and the failure goes to the run log, where the operator
+    is already reading.
+    """
+    decision = decide_stuck_claim(
+        verdict, windows, branch_advanced,
+        replans=_replan_window_count(bd, issue_id),
+    )
+    applied = decision.action
+    if config.mode == JudgeMode.SHADOW and not decision.fail_open:
+        applied = baseline_stuck_action(windows)
+    if config.post_turn:
+        try:
+            log_stuck_decision(repo, config, run_id, issue_id, decision, applied)
+        except Exception as exc:
+            write_log(
+                f"stuck decision: could not log the decision for {issue_id} "
+                f"({exc}); the action still stands"
+            )
+    vector = ", ".join(
+        f"{name}={value:.3f}" for name, value in decision.vector().items()
+    )
+    write_log(
+        f"stuck decision for {issue_id}: {applied.value} (windows={windows}, "
+        f"advanced={branch_advanced}, fail_open={decision.fail_open}, {vector})"
+    )
+    return decision, applied
 
 
 def _announce_wedged_escalation(escalated: tuple[str, int]) -> None:
@@ -2187,9 +2314,20 @@ def grind(
             # reach the threshold before the run ends; every escalation keeps
             # its own end-of-run hint.
             escalated_claims: list[tuple[str, int]] = []
+            #: The re-plan directive the next window's prompt carries, set by
+            #: the stuck decision that left the claim resumable. Startup has
+            #: no verdict of its own, so it never opens with one.
+            replan_directive = ""
             if resume_issue_id is not None:
                 resume_no_close_count = _no_close_window_count(bd, resume_issue_id)
-                if resume_no_close_count >= _WEDGED_WINDOW_THRESHOLD:
+                # No window has run in this process yet, so there is no
+                # verdict to read: this call always fails open to the
+                # threshold rule a leftover claim met before grind restarted.
+                _, startup_action = _decide_stuck(
+                    bd, target, judge_config, gate_run_id, resume_issue_id,
+                    None, resume_no_close_count, False, write_log,
+                )
+                if startup_action is StuckAction.ESCALATE:
                     _escalate_wedged_claim(
                         bd,
                         resume_issue_id,
@@ -2454,6 +2592,12 @@ def grind(
                     # worker claims via goal-prompt. A leftover in_progress
                     # is already claimed; spawn a new process for it.
                     resuming = resume_issue_id is not None
+                    # Consume the directive the previous window's decision
+                    # left, the same way the resume id itself is consumed: one
+                    # window carries it, and a window that is not that resume
+                    # never inherits it.
+                    iteration_replan = replan_directive if resuming else ""
+                    replan_directive = ""
                     if resuming:
                         resumed_claim_id = issue_id
                         resumed_tip = git.branch_tip(integration_branch)
@@ -2545,6 +2689,7 @@ def grind(
                             goal_template=goal_template if gate_turn else None,
                             semantic_advice=semantic_advice,
                             stable_prefix=stable_prefix,
+                            replan_text=iteration_replan,
                         )
                     except BackendError as exc:
                         write_log(f"iter prep: HALT — {exc}")
@@ -2894,6 +3039,10 @@ def grind(
                         judged_status = "open"
                         judged_id = "issue"
                 post_stop = False
+                # The verdict outlives `apply_outcome` because the stuck
+                # decision below reads the same answer: its confidence shapes
+                # a vector there rather than parking the bead here.
+                post_verdict: OutcomeVerdict | None = None
                 if judge_config.post_turn and harness_select and implementation_worker_ran:
                     try:
                         # Attribution and the required handshake precede advisory judgment.
@@ -2914,6 +3063,7 @@ def grind(
                             ),
                         )
                         verdict = evaluate_outcome(packet, observation, judge_config)
+                        post_verdict = verdict
                         post_stop = apply_outcome(
                             bd, target, judged_id, observation, verdict,
                             judge_config, gate_run_id,
@@ -2946,9 +3096,11 @@ def grind(
                     # the threshold). Fresh claims are outside the counter;
                     # their first no-close window is resumed by the next
                     # iteration below, which counts from there.
+                    window_advanced = False
                     if resuming and judged_id == resumed_claim_id:
                         head_now = git.branch_tip(integration_branch)
-                        if head_now and head_now != resumed_tip:
+                        window_advanced = bool(head_now and head_now != resumed_tip)
+                        if window_advanced:
                             if resume_no_close_count:
                                 _record_no_close_window(
                                     bd, judged_id, 0, write_log
@@ -2968,19 +3120,34 @@ def grind(
                                 f"{integration_branch} (no-close window "
                                 f"{burned} of {_WEDGED_WINDOW_THRESHOLD})"
                             )
-                    if post_stop:
-                        write_log(
-                            f"iter {iters_run}: judge post_turn withheld "
-                            f"another window; {judged_id} stays in_progress"
-                        )
-                        break
+                    elif post_start_tip is not None:
+                        # A fresh claim keeps no counter, but the decision
+                        # below still wants to know whether the window it just
+                        # spent moved the integration branch at all.
+                        end_tip = git.branch_tip(integration_branch)
+                        window_advanced = bool(end_tip and end_tip != post_start_tip)
                     # A claim that outlived its window is routed here and now:
                     # the human queue takes it at the threshold, an excluded
                     # label parks it, and anything else is resumed by the next
                     # iteration of this same process.
                     pending = _no_close_window_count(bd, judged_id)
                     blocked = _claim_excluded_labels(bd, judged_id)
-                    if pending >= _WEDGED_WINDOW_THRESHOLD:
+                    _, stuck_action = _decide_stuck(
+                        bd, target, judge_config, gate_run_id, judged_id,
+                        post_verdict, pending, window_advanced, write_log,
+                    )
+                    if post_stop:
+                        # A post-turn answer no longer halts the loop on its
+                        # own. It is one input to the decision just taken,
+                        # which has already chosen what this claim gets next —
+                        # including the human queue, when that is what the
+                        # vector argued for.
+                        write_log(
+                            f"iter {iters_run}: judge post_turn would have "
+                            "withheld another window; the stuck decision "
+                            f"({stuck_action.value}) governs {judged_id}"
+                        )
+                    if stuck_action is StuckAction.ESCALATE:
                         _escalate_wedged_claim(
                             bd,
                             judged_id,
@@ -2991,6 +3158,7 @@ def grind(
                         )
                         escalated_claims.append((judged_id, pending))
                         resume_no_close_count = 0
+                        replan_directive = ""
                     elif blocked:
                         # Feeding an excluded issue to a worker arms the
                         # ortus-lf02 trap: the worker runs, verification
@@ -3013,9 +3181,25 @@ def grind(
                             write_log=write_log,
                         )
                         resume_no_close_count = 0
+                        replan_directive = ""
                     else:
                         resume_issue_id = judged_id
                         resume_no_close_count = pending
+                        replan_directive = ""
+                        if stuck_action is StuckAction.REPLAN:
+                            # The directive is what makes the next window
+                            # different from the one that stalled; the marker
+                            # is what stops a third and fourth from being the
+                            # same bet at the same odds.
+                            spent = _replan_window_count(bd, judged_id) + 1
+                            _record_replan_window(bd, judged_id, spent, write_log)
+                            replan_directive = _replan_section(
+                                pending, integration_branch
+                            )
+                            write_log(
+                                f"iter {iters_run}: re-planning {judged_id} in "
+                                f"a fresh window (replan {spent})"
+                            )
                         write_log(
                             f"iter {iters_run}: left {judged_id} in_progress "
                             "for the next window"
