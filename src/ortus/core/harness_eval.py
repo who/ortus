@@ -18,19 +18,24 @@ cost answer the operator's question in opposite directions, so the report
 carries `None` through to JSON `null` and names every null metric explicitly
 under `null_results`.
 
-Nothing here runs an agent. The measurements come from the grind logs already
-on disk via `ortus.core.cost`, and the arm recipes are emitted as commands for
-the operator (or a shell loop) to run, which keeps this module hermetic and
-re-runnable long after the runs themselves finished.
+Measuring is hermetic and offline: the numbers come from the grind logs
+already on disk via `ortus.core.cost`, so a report can be rebuilt long after
+the runs themselves finished. Producing those logs is the sweep's job, and it
+issues the very command strings the recipe prints, through an injected
+executor — a cell someone ran by hand and a cell the sweep ran are the same
+run, because there is only one construction path for the commands.
 """
 
 from __future__ import annotations
 
+import subprocess
+import time
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
+from ortus.core import output
 from ortus.core.cost import (
     BeadCost,
     RunCost,
@@ -276,6 +281,176 @@ def matrix(*, root: Path, backend: str = "claude") -> tuple[EvalCell, ...]:
     return tuple(cells)
 
 
+#: How one recipe command gets run: the command string and the seconds left in
+#: its cell's budget, in; the command's exit status, out.
+CommandExecutor = Callable[[str, "float | None"], int]
+
+#: Recorded against a command its cell's wall clock cut short. 124 is the
+#: shell's own status for a timed-out command, so the record needs no private
+#: code for the one outcome an operator most wants to tell apart.
+TIMEOUT_STATUS = 124
+
+#: One cell plans a small PRD and grinds it to zero, so an hour is generous
+#: for the fixtures in the pack and still bounds a wedged backend.
+DEFAULT_CELL_TIMEOUT_SECONDS = 3600.0
+
+CELL_RAN = "ran"
+CELL_SKIPPED = "skipped"
+CELL_FAILED = "failed"
+
+
+def shell_executor(command: str, timeout: float | None = None) -> int:
+    """Run one recipe command through a shell and return its exit status.
+
+    A shell rather than an argv list, because the printed recipe is the
+    contract: a treatment arm applies itself with a `printf ... >> .ortusrc`
+    redirect, and re-splitting these strings would build the second
+    construction path the frozen recipe exists to prevent. The commands run in
+    the caller's working directory, which is where an operator copying the
+    same lines would have run them.
+    """
+
+    try:
+        completed = subprocess.run(command, shell=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return TIMEOUT_STATUS
+    return completed.returncode
+
+
+def cell_has_run(root: Path, cell: EvalCell) -> bool:
+    """Whether this cell's seat already holds a grind log.
+
+    The resume test: a seat with a log has an arm's numbers in it already, and
+    re-running it would spend real model budget to overwrite a measurement.
+    """
+
+    return bool(find_grind_logs(root / cell.seat, newest=1))
+
+
+@dataclass(frozen=True)
+class CellExecution:
+    """What the sweep did with one cell, and where it stopped if it stopped."""
+
+    fixture: str
+    arm: str
+    seat: str
+    status: str
+    exit_status: int | None = None
+    failed_command: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """A skipped cell is not a failure: its seat already has its run."""
+
+        return self.status != CELL_FAILED
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "fixture": self.fixture,
+            "arm": self.arm,
+            "seat": self.seat,
+            "status": self.status,
+            "exit_status": self.exit_status,
+            "failed_command": self.failed_command,
+        }
+
+
+def _announce(message: str) -> None:
+    """Default sweep narration: one progress line per cell, on stderr."""
+
+    output.progress("eval", message)
+
+
+def _run_cell(
+    cell: EvalCell,
+    *,
+    executor: CommandExecutor,
+    timeout: float | None,
+) -> CellExecution:
+    """Issue one cell's commands in order, stopping at the first that fails.
+
+    The budget is the cell's, not the command's: `ortus grind` inherits
+    whatever the seat's build and plan left of it, so a slow init cannot buy
+    the run an extra hour.
+    """
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    for command in cell.commands:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return CellExecution(
+                fixture=cell.fixture,
+                arm=cell.arm,
+                seat=cell.seat,
+                status=CELL_FAILED,
+                exit_status=TIMEOUT_STATUS,
+                failed_command=command,
+            )
+        status = executor(command, remaining)
+        if status != 0:
+            return CellExecution(
+                fixture=cell.fixture,
+                arm=cell.arm,
+                seat=cell.seat,
+                status=CELL_FAILED,
+                exit_status=status,
+                failed_command=command,
+            )
+    return CellExecution(
+        fixture=cell.fixture,
+        arm=cell.arm,
+        seat=cell.seat,
+        status=CELL_RAN,
+        exit_status=0,
+    )
+
+
+def run_matrix(
+    root: Path,
+    *,
+    backend: str = "claude",
+    executor: CommandExecutor = shell_executor,
+    timeout: float | None = DEFAULT_CELL_TIMEOUT_SECONDS,
+    announce: Callable[[str], None] = _announce,
+) -> tuple[CellExecution, ...]:
+    """Execute every cell of the matrix in order and record what each did.
+
+    One cell's failure is that cell's: the sweep keeps going, because the arms
+    that did run are still comparable and re-running them to reach the ones
+    that did not would cost the run twice.
+    """
+
+    cells = matrix(root=root, backend=backend)
+    records: list[CellExecution] = []
+    for index, cell in enumerate(cells, start=1):
+        label = f"cell {index}/{len(cells)} {cell.fixture}/{cell.arm}"
+        if cell_has_run(root, cell):
+            announce(f"{label}: skipped, {cell.seat} already holds a grind log")
+            records.append(
+                CellExecution(
+                    fixture=cell.fixture,
+                    arm=cell.arm,
+                    seat=cell.seat,
+                    status=CELL_SKIPPED,
+                )
+            )
+            continue
+        announce(
+            f"{label}: running {len(cell.commands)} commands in {cell.seat} "
+            "(a cell typically takes 10-40 min)"
+        )
+        record = _run_cell(cell, executor=executor, timeout=timeout)
+        if record.ok:
+            announce(f"{label}: done (ran)")
+        else:
+            announce(
+                f"{label}: failed (exit {record.exit_status}) on "
+                f"{record.failed_command}"
+            )
+        records.append(record)
+    return tuple(records)
+
+
 @dataclass(frozen=True)
 class ArmMetrics:
     """What one cell cost and how well it went. None means never reported."""
@@ -366,6 +541,16 @@ class EvalReport:
 
     root: Path
     arms: tuple[ArmMetrics, ...]
+    #: Empty when the report was rebuilt from logs rather than swept.
+    executions: tuple[CellExecution, ...] = ()
+
+    def execution(self, fixture: str, arm: str) -> CellExecution | None:
+        """The sweep record for one cell, or None when nothing swept it."""
+
+        for record in self.executions:
+            if record.fixture == fixture and record.arm == arm:
+                return record
+        return None
 
     @property
     def null_results(self) -> tuple[dict[str, Any], ...]:
@@ -386,16 +571,21 @@ class EvalReport:
             "fixtures": [fixture.as_dict() for fixture in FIXTURE_PACK],
             "treatments": [item.as_dict() for item in TREATMENTS],
             "arms": [arm.as_dict() for arm in self.arms],
+            "executions": [record.as_dict() for record in self.executions],
             "null_results": [dict(entry) for entry in self.null_results],
         }
 
 
-def build_report(root: Path) -> EvalReport:
+def build_report(
+    root: Path, *, executions: Sequence[CellExecution] = ()
+) -> EvalReport:
     """Measure every cell under `root`, including the ones that never ran.
 
     A cell with no seat still gets a row. Dropping it would turn "we never
     ran this arm" into "this arm has nothing to say", and those are different
-    answers to the same comparison.
+    answers to the same comparison. A sweep passes its own records in, so a
+    row whose metrics are null can be read against whether its cell failed,
+    was skipped, or ran and reported nothing.
     """
 
     arms = tuple(
@@ -403,7 +593,7 @@ def build_report(root: Path) -> EvalReport:
         for fixture in FIXTURE_PACK
         for arm in ARMS
     )
-    return EvalReport(root=root, arms=arms)
+    return EvalReport(root=root, arms=arms, executions=tuple(executions))
 
 
 def _cell(value: Any) -> str:
@@ -416,15 +606,29 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
-def render_report(report: EvalReport) -> str:
-    """The report as markdown: one table, plus the nulls named underneath."""
+def _status_cell(record: CellExecution | None) -> str:
+    """One cell's sweep outcome, with a failure's exit status kept with it."""
 
-    header = (
-        "| fixture | arm | beads | closed | "
-        + " | ".join((PRIMARY_METRIC,) + GUARDRAIL_METRICS)
-        + " |"
-    )
-    rule = "| --- " * (4 + 1 + len(GUARDRAIL_METRICS)) + "|"
+    if record is None:
+        return "not swept"
+    if record.status == CELL_FAILED:
+        return f"failed (exit {record.exit_status})"
+    return record.status
+
+
+def render_report(report: EvalReport) -> str:
+    """The report as markdown: one table, plus the nulls named underneath.
+
+    A swept report gains one trailing status column. A report rebuilt from
+    logs has no records to show and keeps the table it always had.
+    """
+
+    columns = ["fixture", "arm", "beads", "closed", PRIMARY_METRIC]
+    columns.extend(GUARDRAIL_METRICS)
+    if report.executions:
+        columns.append("status")
+    header = "| " + " | ".join(columns) + " |"
+    rule = "| --- " * len(columns) + "|"
     lines = [
         f"# Harness evaluation report ({REPORT_SCHEMA})",
         "",
@@ -438,6 +642,8 @@ def render_report(report: EvalReport) -> str:
         cells = [arm.fixture, arm.arm, str(arm.beads), str(arm.closed_beads)]
         cells.append(_cell(arm.cost_per_closed_bead))
         cells.extend(_cell(getattr(arm, name)) for name in GUARDRAIL_METRICS)
+        if report.executions:
+            cells.append(_status_cell(report.execution(arm.fixture, arm.arm)))
         lines.append("| " + " | ".join(cells) + " |")
 
     lines.extend(["", "## Null results", ""])

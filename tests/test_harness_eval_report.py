@@ -1,4 +1,4 @@
-"""The frozen evaluation set and the report it emits (ortus-4ji7).
+"""The frozen evaluation set, the report it emits, and the sweep that fills it.
 
 The seats these tests build are the real shape: the marker lines are the ones
 `ortus grind` writes and the worker streams are the golden backend fixtures
@@ -19,6 +19,9 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.core.harness_eval import (
     ARMS,
+    CELL_FAILED,
+    CELL_RAN,
+    CELL_SKIPPED,
     CONTROL_ARM,
     FIXTURE_A,
     FIXTURE_B,
@@ -32,6 +35,7 @@ from ortus.core.harness_eval import (
     matrix,
     render_matrix,
     render_report,
+    run_matrix,
     seat_name,
 )
 
@@ -85,6 +89,13 @@ def _seeded_root(tmp_path: Path) -> Path:
     _seat_log(root, FIXTURE_A, CONTROL_ARM, _claude_lines())
     _seat_log(root, FIXTURE_B, CONTROL_ARM, _codex_lines())
     return root
+
+
+def _record(records, fixture_key: str, arm: str):
+    for candidate in records:
+        if candidate.fixture == fixture_key and candidate.arm == arm:
+            return candidate
+    raise AssertionError(f"no {fixture_key}/{arm} record in the sweep")
 
 
 def _arm(report, fixture_key: str, arm: str):
@@ -299,3 +310,147 @@ def test_pack_holds_no_large_app_fixture() -> None:
     assert {
         fixture.prd_filename for fixture in FIXTURE_PACK
     } == {name for name in shipped if name.endswith(".md")}
+
+
+def _recorder(failing: str | None = None, status: int = 2):
+    """An executor that records its commands and can fail exactly one of them."""
+
+    calls: list[tuple[str, float | None]] = []
+
+    def execute(command: str, timeout: float | None = None) -> int:
+        calls.append((command, timeout))
+        return status if command == failing else 0
+
+    return calls, execute
+
+
+def _silent(message: str) -> None:
+    """Swallow the sweep's narration in tests that assert on records instead."""
+
+
+def test_run_executes_each_cell_in_matrix_order(tmp_path: Path) -> None:
+    """AC-1: the sweep issues the recipe's own commands, cell by cell, in order."""
+
+    root = tmp_path / "eval"
+    cells = matrix(root=root)
+    calls, execute = _recorder()
+    notes: list[str] = []
+
+    records = run_matrix(
+        root, executor=execute, timeout=None, announce=notes.append
+    )
+
+    # The very strings `--matrix` prints, not a second argv built beside them.
+    assert [command for command, _ in calls] == [
+        command for cell in cells for command in cell.commands
+    ]
+    assert [(record.fixture, record.arm) for record in records] == [
+        (cell.fixture, cell.arm) for cell in cells
+    ]
+    assert [record.status for record in records] == [CELL_RAN] * len(cells)
+    assert all(record.exit_status == 0 for record in records)
+    assert all(record.failed_command is None for record in records)
+
+    # A long sweep has to look alive: every cell names itself on the way past.
+    for cell in cells:
+        assert any(f"{cell.fixture}/{cell.arm}" in note for note in notes)
+
+
+def test_run_resumes_by_skipping_a_seat_that_already_has_a_log(
+    tmp_path: Path,
+) -> None:
+    """AC-2: a finished arm is not paid for twice when a sweep is resumed."""
+
+    root = tmp_path / "eval"
+    _seat_log(root, FIXTURE_A, CONTROL_ARM, _claude_lines())
+    calls, execute = _recorder()
+
+    records = run_matrix(root, executor=execute, timeout=None, announce=_silent)
+
+    resumed = _record(records, FIXTURE_A.key, CONTROL_ARM)
+    assert resumed.status == CELL_SKIPPED
+    assert resumed.exit_status is None
+    assert resumed.ok
+
+    seat = seat_name(FIXTURE_A, CONTROL_ARM)
+    assert not any(seat in command for command, _ in calls)
+    assert [command for command, _ in calls] == [
+        command
+        for cell in matrix(root=root)
+        if cell.seat != seat
+        for command in cell.commands
+    ]
+    assert [record.status for record in records].count(CELL_SKIPPED) == 1
+
+
+def test_run_cell_failure_is_recorded_and_later_cells_still_run(
+    tmp_path: Path,
+) -> None:
+    """AC-3: one broken cell costs its own remaining commands, not the sweep."""
+
+    root = tmp_path / "eval"
+    cells = matrix(root=root)
+    doomed = cells[0]
+    # The plan command, so the grind that follows it inside the same cell is
+    # the thing that must not run.
+    failing = doomed.commands[-2]
+    calls, execute = _recorder(failing=failing, status=2)
+
+    records = run_matrix(root, executor=execute, timeout=None, announce=_silent)
+
+    failed = _record(records, doomed.fixture, doomed.arm)
+    assert failed.status == CELL_FAILED
+    assert failed.exit_status == 2
+    assert failed.failed_command == failing
+    assert not failed.ok
+
+    issued = [command for command, _ in calls]
+    assert doomed.commands[-1] not in issued
+    assert [record.status for record in records[1:]] == [CELL_RAN] * (
+        len(cells) - 1
+    )
+    for cell in cells[1:]:
+        for command in cell.commands:
+            assert command in issued
+
+
+def test_run_emits_report_when_the_sweep_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4: the sweep ends in the unchanged report, with its records beside it."""
+
+    root = tmp_path / "eval"
+
+    def execute(command: str, timeout: float | None = None) -> int:
+        # Stand in for a backend: the grind of each cell leaves the log the
+        # report is measured from.
+        if command.startswith("ortus grind "):
+            seat = Path(command.split()[2])
+            log = seat / "logs" / "grind-20260924-090000.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("\n".join(_claude_lines()) + "\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr("ortus.commands.eval._make_executor", lambda: execute)
+
+    result = runner.invoke(app, ["eval", str(root), "--run", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["schema"] == REPORT_SCHEMA
+    assert payload["primary_metric"] == PRIMARY_METRIC
+    assert payload["guardrails"] == list(GUARDRAIL_METRICS)
+    assert len(payload["arms"]) == len(FIXTURE_PACK) * len(ARMS)
+    assert payload["null_results"] == []
+    for row in payload["arms"]:
+        assert row[PRIMARY_METRIC] is not None
+
+    assert len(payload["executions"]) == len(FIXTURE_PACK) * len(ARMS)
+    assert {row["status"] for row in payload["executions"]} == {CELL_RAN}
+
+    # Re-running the same root reports every cell as already run, and the
+    # markdown rendering carries that verdict next to the metrics.
+    again = runner.invoke(app, ["eval", str(root), "--run"])
+    assert again.exit_code == 0, again.output
+    assert "status" in again.stdout.splitlines()[5]
+    assert again.stdout.count(CELL_SKIPPED) == len(FIXTURE_PACK) * len(ARMS)
