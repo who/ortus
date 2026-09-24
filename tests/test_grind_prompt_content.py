@@ -838,3 +838,37 @@ def test_worker_prompt_verify_step_reads_the_composed_mode() -> None:
     assert "lint and syntax gate instead of the issue's test commands" in implement_step
     exit_step = next(line for line in body.splitlines() if line.startswith("5."))
     assert "checks you ran in step 3 are the whole verification" in exit_step
+
+
+def test_worker_ingest_gate_owns_follow_up_filing() -> None:
+    """AC-3 (ortus-04a5): every bundled worker contract — both goal-prompt
+    arms and both work-issue arms — files leftover or follow-up work through
+    the gated path, which validates before it creates, so an unready packet
+    bounces back in the same session instead of landing in the queue for an
+    operator to repair."""
+    from ortus.core.grind_loop import read_work_issue_condition
+    from ortus.core.prompts import bundled_prompt_text
+
+    gate = "`ortus ingest --stdin`"
+    goals = [
+        bundled_prompt_text("goal-prompt"),
+        bundled_prompt_text("goal-prompt", audited=True),
+    ]
+    for goal in goals:
+        implement_step = next(
+            line for line in goal.splitlines() if line.startswith("3.")
+        )
+        assert gate in implement_step
+        assert "readiness schema v1" in implement_step
+        assert "creates nothing" in implement_step
+        # The raw create is named as the thing the gate replaces, so a worker
+        # reading the step cannot take it for an equivalent route.
+        assert "`bd create`" in implement_step
+
+    for condition in (read_work_issue_condition(), read_work_issue_condition(audited=True)):
+        assert gate in condition
+        assert "creates nothing" in condition
+        follow_up = next(
+            line for line in condition.splitlines() if gate in line
+        )
+        assert "follow-up bead" in follow_up

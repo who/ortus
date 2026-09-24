@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,6 +46,18 @@ PACKET_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
 CANDIDATE_ID = "<packet>"
 
 STATUS_UNREADY = "UNREADY"
+
+#: The gated filing path an agent files through. A bare `bd create` writes
+#: whatever it is handed; this one validates the packet first.
+WORKER_GATE_COMMAND = "ortus ingest --stdin"
+
+#: What an UNREADY bounce asks for. The gap is repaired in the session that
+#: hit it: nothing was written, so no half-formed bead is waiting on anyone.
+BOUNCE_HINT = (
+    "no bead was created and nothing was labeled human; complete the named "
+    f"sections and run `{WORKER_GATE_COMMAND}` again in this session "
+    "(`ortus spec` prints the contract each section must satisfy)"
+)
 
 
 class PacketError(RuntimeError):
@@ -153,6 +166,55 @@ def _bd_reason(exc: BdError) -> str:
     return lines[-1].strip() if lines else f"bd exited {exc.returncode}"
 
 
+@dataclass(frozen=True)
+class FilingVerdict:
+    """What the shared gate did with one candidate packet, and why."""
+
+    bead_id: str | None
+    diagnostic: str
+    summary: str
+
+    @property
+    def filed(self) -> bool:
+        return self.bead_id is not None
+
+    def row(self) -> str:
+        """The refusal in the row shape `ortus validate` prints, so a bounce
+        reads the same whichever path filed the packet."""
+        return f"{STATUS_UNREADY} {self.diagnostic}"
+
+
+def file_if_ready(candidate: dict[str, Any], *, bd: BdClient) -> FilingVerdict:
+    """Validate `candidate`, and create the bead only when it is ready.
+
+    Every filing path shares this gate, a grind worker filing a mid-session
+    follow-up included. An unready packet is refused before any write, so no
+    half-formed bead reaches the claim-time gate that would label it `human`
+    and hold it out of the queue, and the diagnostic goes back to whoever
+    filed it while they still hold the context to repair it. An epic
+    validates as exempt because it is a container carrying no work spec,
+    which makes it the one candidate readiness cannot vouch for.
+    """
+    report = validate_issue(candidate)
+    if report.exempt:
+        return FilingVerdict(
+            None,
+            f"{report.issue_id}: an epic is a container and carries no work spec",
+            "epics carry no work spec",
+        )
+    if not report.ready:
+        return FilingVerdict(None, report.diagnostic(), report.summary())
+    bead_id = bd.create(
+        title=candidate["title"],
+        issue_type=candidate["issue_type"],
+        priority=int(candidate["priority"]),
+        description=candidate["description"],
+        design=candidate["design"],
+        acceptance=candidate["acceptance_criteria"],
+    )
+    return FilingVerdict(bead_id, report.diagnostic(), report.summary())
+
+
 def ingest(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
@@ -235,26 +297,19 @@ def ingest(
     output.progress(
         "ingest", f"validating {candidate['title']!r} against readiness schema {READINESS_SCHEMA_VERSION}"
     )
-    report = validate_issue(candidate)
-    if not report.ready:
-        # Same row shape `ortus validate` prints, on stdout, so the repair loop
-        # reads one diagnostic vocabulary whichever verb reported the gap.
-        typer.echo(f"{STATUS_UNREADY} {report.diagnostic()}")
-        output.progress("ingest", f"done (not created: {report.summary()})")
-        raise typer.Exit(code=1)
-
     try:
-        issue_id = _make_bd(target).create(
-            title=candidate["title"],
-            issue_type=candidate["issue_type"],
-            priority=int(candidate["priority"]),
-            description=candidate["description"],
-            design=candidate["design"],
-            acceptance=candidate["acceptance_criteria"],
-        )
+        verdict = file_if_ready(candidate, bd=_make_bd(target))
     except BdError as exc:
         output.error(f"ingest: bd refused the create: {_bd_reason(exc)}")
         raise typer.Exit(code=1)
+    if not verdict.filed:
+        # Same row shape `ortus validate` prints, on stdout, so the repair loop
+        # reads one diagnostic vocabulary whichever verb reported the gap.
+        typer.echo(verdict.row())
+        output.error(f"ingest: {BOUNCE_HINT}")
+        output.progress("ingest", f"done (not created: {verdict.summary})")
+        raise typer.Exit(code=1)
+    issue_id = verdict.bead_id
 
     advice = evaluate_readiness(target, {**candidate, "id": issue_id})
     if advice is not None:
