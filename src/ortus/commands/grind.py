@@ -67,6 +67,7 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.prompt_audit import audit_enabled, audit_note
+from ortus.core.prompt_prefix import stable_prefix_enabled, stable_prefix_note
 from ortus.core.prompts import resolve_named_prompt
 from ortus.core.config import (
     Config,
@@ -917,6 +918,7 @@ def _compose_work_prompt(
     bound_issue_id: str | None = None,
     goal_template: str | None = None,
     semantic_advice: str = "",
+    stable_prefix: bool = False,
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
@@ -935,10 +937,18 @@ def _compose_work_prompt(
     ``lessons_text`` is the one optional section: when appending it would
     push the Claude ``/goal`` condition past the cap it is dropped rather
     than halting the run. The 4,000-character cap is Claude-only.
+
+    ``stable_prefix`` selects the cache-friendly ordering. Off, the sections
+    compose in today's order byte for byte. On, the two segments that carry
+    the claimed bead — the readiness advice and the Bound issue contract —
+    move behind every segment that is identical across the beads of a run,
+    so a provider prefix cache sees the same leading bytes each iteration
+    instead of losing them to a bead id sitting in the middle.
     """
     del template
 
     task = _PROTOTYPE_GOAL_POINTER if verification_text else _GOAL_POINTER
+    bound_text = ""
     if bound_issue_id is not None:
         from ortus.core.judge_claim import bound_issue_section, validate_bound_goal
 
@@ -948,18 +958,27 @@ def _compose_work_prompt(
             "Continue only the injected bound issue; do not select or claim another id.",
             1,
         )
-        task += bound_issue_section(issue, bound_issue_id)
+        bound_text = bound_issue_section(issue, bound_issue_id)
+        if not stable_prefix:
+            task += bound_text
+            bound_text = ""
     if phase_instruction:
         task = phase_instruction.rstrip() + "\n\n" + task
     task += phase_contract_text + verification_text
     wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend == "claude" else None
-    if semantic_advice and (wrap_limit is None or len(task) + len(semantic_advice) <= wrap_limit):
-        task += semantic_advice
-    if (
-        lessons_text
-        and (wrap_limit is None or len(task) + len(lessons_text) <= wrap_limit)
-    ):
-        task += lessons_text
+    # A bound contract names the only id the worker may touch, so it is never
+    # droppable: its length comes out of the cap before the optional sections
+    # are measured against what remains.
+    headroom = wrap_limit - len(bound_text) if wrap_limit is not None else None
+    optional = (
+        (lessons_text, semantic_advice)
+        if stable_prefix
+        else (semantic_advice, lessons_text)
+    )
+    for section in optional:
+        if section and (headroom is None or len(task) + len(section) <= headroom):
+            task += section
+    task += bound_text
     if wrap_limit is not None and len(task) > wrap_limit:
         raise BackendError(
             "internal Claude /goal condition exceeds the 4,000-character limit "
@@ -1578,6 +1597,8 @@ def grind(
             check_pre_tool(target, resolved_backend, docker=docker)
         prompt_audit = audit_enabled(config)
         prompt_variant_note = audit_note(config)
+        stable_prefix = stable_prefix_enabled(config)
+        prefix_order_note = stable_prefix_note(config)
         goal_template = ""
         if bind_worker:
             goal_template = resolve_named_prompt(
@@ -1713,6 +1734,7 @@ def grind(
         output.info(f"codegraph:      {codegraph_mode.value}")
         output.info(f"verification:   {verification_note}")
         output.info(f"prompt text:    {prompt_variant_note}")
+        output.info(f"prefix order:   {prefix_order_note}")
         output.info(
             "merge-gate:     "
             + (
@@ -1742,6 +1764,7 @@ def grind(
                 verification_text=verification_text,
                 bound_issue_id="<ISSUE_ID>" if bind_worker else None,
                 goal_template=goal_template if bind_worker else None,
+                stable_prefix=stable_prefix,
             )
             conflict = _stale_completion_contract_diagnostic(
                 dry_prompt, repo=target, audited=prompt_audit
@@ -2345,6 +2368,7 @@ def grind(
                             bound_issue_id=issue_id if gate_turn else None,
                             goal_template=goal_template if gate_turn else None,
                             semantic_advice=semantic_advice,
+                            stable_prefix=stable_prefix,
                         )
                     except BackendError as exc:
                         write_log(f"iter prep: HALT — {exc}")

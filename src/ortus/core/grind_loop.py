@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import Callable, Iterable, Optional
 
+from ortus.core.prompt_prefix import slim_issue_details
 from ortus.core.readiness import ReadinessReport, validate_issue
 
 
@@ -266,17 +267,23 @@ def format_issue_details(issue: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def inject_issue(template: str, issue: dict) -> str:
+def inject_issue(template: str, issue: dict, *, slim: bool = False) -> str:
     """Substitute the issue id + rendered details into the work-issue template.
 
     Raises ValueError if the issue dict has no id — claiming/working an issue
     with no id is exactly the hallucination class this feature exists to kill,
     so we fail loud rather than emit a prompt with a dangling placeholder.
+
+    ``slim`` renders the id, the title and a pointer to the packet instead of
+    inlining the description, design and acceptance bodies verbatim. The id
+    survives either way: it is the one field the worker cannot re-fetch.
     """
     issue_id = str(issue.get("id") or "").strip()
     if not issue_id:
         raise ValueError("cannot inject issue with no id into work-issue prompt")
-    details = format_issue_details(issue)
+    details = (
+        slim_issue_details(issue) if slim else format_issue_details(issue)
+    )
     return template.replace(ISSUE_ID_PLACEHOLDER, issue_id).replace(
         ISSUE_DETAILS_PLACEHOLDER, details
     )

@@ -92,6 +92,11 @@ DEFAULTS: dict[str, Any] = {
     # text stays the control arm of the A/B; `ORTUS_PROMPT_AUDIT` flips one
     # run without editing a tracked file.
     "prompt_audit": False,
+    # Whether a worker prompt puts its per-bead segments behind every segment
+    # that is identical across the beads of a run. Off by default so today's
+    # ordering stays the control arm; `ORTUS_STABLE_PREFIX` flips one run
+    # without editing a tracked file.
+    "stable_prompt_prefix": False,
     # Branch `grind` pins the working tree to and re-asserts each iteration.
     # "main" fits a fresh `ortus init`; a repo whose default branch is named
     # something else (e.g. "master") pins it here instead of passing
@@ -225,6 +230,21 @@ def _validate_prompt_audit(values: dict[str, Any]) -> None:
         )
 
 
+def _validate_stable_prompt_prefix(values: dict[str, Any]) -> None:
+    """Reject a `stable_prompt_prefix` value that is not a boolean.
+
+    The key decides which prompt ordering every worker in the run is served,
+    and the A/B it exists for compares cache hit rates between the two
+    orderings. A string that merely looks true would resolve to the control
+    arm and spoil the comparison silently, so it fails here instead.
+    """
+    value = values.get("stable_prompt_prefix", False)
+    if not isinstance(value, bool):
+        raise ProfileError(
+            f"invalid stable_prompt_prefix {value!r}; expected true or false"
+        )
+
+
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -303,6 +323,7 @@ def load_config(
     _validate_backend(cfg.values)
     _validate_verification(cfg.values)
     _validate_prompt_audit(cfg.values)
+    _validate_stable_prompt_prefix(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
     parse_judge_config(cfg, environ={})
