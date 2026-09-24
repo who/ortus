@@ -175,6 +175,107 @@ def test_opencode_step_finish_rolls_up_the_cache_read_bucket(tmp_path: Path) -> 
     assert session.turns == 7  # one per step_finish
 
 
+def test_grok_usage_rolls_up_with_the_cached_read_outside_the_input(
+    tmp_path: Path,
+) -> None:
+    """AC-1: the golden Grok stream fills the same buckets the others do."""
+
+    log = _write_log(
+        tmp_path / "logs" / "grind-20260814-140840.log",
+        [
+            "[2026-08-14 14:08:38] === ortus grind started (subprocess-per-task "
+            "shape; backend=grok; verification=full) ===",
+            "[2026-08-14 14:08:39] iter 1: goal-prompt ready for ortus-grok (grok)",
+            # The fixture opens with its own spawn marker.
+            *_stream("grok-stream-events.jsonl"),
+            "[2026-08-14 14:12:40] iter 1: worker closed ortus-grok "
+            "(tasks_completed=1)",
+        ],
+    )
+
+    run = parse_grind_log(log)
+    assert run.backend == "grok"
+    (session,) = run.sessions
+    assert session.issue_id == "ortus-grok"
+    usage = session.usage
+    assert usage.is_empty is False
+    assert usage.uncached_input_tokens == 17031
+    assert usage.cached_input_tokens == 896
+    assert usage.output_tokens == 620
+    assert usage.input_tokens == 17031 + 896
+    assert usage.cost_usd is None  # Grok reports no dollars of its own
+    assert session.partial_usage is False
+    assert session.turns == 1  # one per usage event
+
+
+def test_repeated_grok_usage_events_sum_rather_than_overwrite(
+    tmp_path: Path,
+) -> None:
+    """Two real consecutive turns, each billing its own slice of the session.
+
+    Both are copied from a Grok run on disk, and both report fewer
+    `input_tokens` than `cache_read_input_tokens` — the shape that settles the
+    cached read as sitting outside the input count rather than inside it.
+    """
+
+    log = _write_log(
+        tmp_path / "logs" / "grind-20260814-150000.log",
+        [
+            "[2026-08-14 15:00:00] === ortus grind started (subprocess-per-task "
+            "shape; backend=grok; verification=full) ===",
+            "[2026-08-14 15:00:01] iter 1: goal-prompt ready for ortus-grok (grok)",
+            "[2026-08-14 15:00:02] iter 1: spawning grok (single-issue worker)",
+            '{"type":"usage","usage":{"input_tokens":1056,"output_tokens":255,'
+            '"cache_read_input_tokens":18432,"cache_creation_input_tokens":0,'
+            '"reasoning_tokens":78}}',
+            '{"type":"usage","usage":{"input_tokens":462,"output_tokens":170,'
+            '"cache_read_input_tokens":27520,"cache_creation_input_tokens":0,'
+            '"reasoning_tokens":167}}',
+        ],
+    )
+
+    (session,) = parse_grind_log(log).sessions
+    usage = session.usage
+    assert usage.uncached_input_tokens == 1056 + 462
+    assert usage.cached_input_tokens == 18432 + 27520
+    assert usage.output_tokens == 255 + 170
+    assert usage.reasoning_tokens == 78 + 167
+    assert usage.cache_write_tokens == 0
+    assert session.turns == 2
+    assert session.partial_usage is False
+
+
+def test_grok_usage_without_a_cache_field_leaves_that_bucket_unreported(
+    tmp_path: Path,
+) -> None:
+    """The uncached count still stands; the cache split simply goes unsaid.
+
+    Nothing is inferred either way: because Grok's input count excludes the
+    cached read, an event that omits the cache field still states the uncached
+    bucket honestly, and the missing split marks the record partial.
+    """
+
+    log = _write_log(
+        tmp_path / "logs" / "grind-20260814-160000.log",
+        [
+            "[2026-08-14 16:00:00] === ortus grind started (subprocess-per-task "
+            "shape; backend=grok; verification=full) ===",
+            "[2026-08-14 16:00:01] iter 1: goal-prompt ready for ortus-grok (grok)",
+            "[2026-08-14 16:00:02] iter 1: spawning grok (single-issue worker)",
+            '{"type":"usage","usage":{"input_tokens":2048,"output_tokens":64}}',
+        ],
+    )
+
+    (session,) = parse_grind_log(log).sessions
+    usage = session.usage
+    assert usage.uncached_input_tokens == 2048
+    assert usage.output_tokens == 64
+    assert usage.cached_input_tokens is None
+    assert usage.cache_write_tokens is None
+    assert usage.cache_hit_rate is None
+    assert session.partial_usage is True
+
+
 def test_attribution_splits_one_run_across_the_beads_it_worked(
     tmp_path: Path,
 ) -> None:

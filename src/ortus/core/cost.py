@@ -17,6 +17,9 @@ under different inclusion rules:
   the difference, not the field.
 * OpenCode ``step_finish`` — ``tokens.input`` is uncached, with the cache split
   out under ``tokens.cache.read`` / ``tokens.cache.write``.
+* Grok ``usage`` — Claude's field names, and measurement says Claude's rule
+  too: ``input_tokens`` counts only the uncached input, with
+  ``cache_read_input_tokens`` beside it rather than inside it.
 
 Normalizing those into one set of buckets is the whole point: an operator
 comparing a judge-gated run against a plain one must be comparing the same
@@ -26,9 +29,9 @@ Every bucket is ``None`` until a provider reports it. A turn that omits a field
 leaves that bucket unset rather than zero and marks its record
 ``partial_usage``; a Codex turn that reports a total input without the cached
 split is left unsplit rather than guessed. Dollars are only ever the provider's
-own number (Claude ``total_cost_usd``, OpenCode ``cost``) — Codex reports none,
-so Codex rows carry a null cost and the buckets are what a price table weights
-later.
+own number (Claude ``total_cost_usd``, OpenCode ``cost``) — neither Codex nor
+Grok reports one, so their rows carry a null cost and the buckets are what a
+price table weights later.
 """
 
 from __future__ import annotations
@@ -330,16 +333,52 @@ def _opencode_facts(obj: dict[str, Any]) -> EventFacts | None:
     )
 
 
+def _grok_facts(obj: dict[str, Any]) -> EventFacts | None:
+    """Decode one Grok ``usage`` event.
+
+    Grok borrows Claude's field names, and measurement says it borrows Claude's
+    inclusion rule with them: across the Grok streams already on disk, most
+    events report an ``input_tokens`` *below* their own
+    ``cache_read_input_tokens`` (462 against 27520 in one turn), which cannot
+    happen if the cached read sits inside the total. So ``input_tokens`` is the
+    uncached bucket as it stands, with no subtraction to do.
+
+    Each event bills one assistant turn rather than the session to date — the
+    output count rises and falls from event to event instead of climbing — so
+    the window sums them.
+    """
+
+    if obj.get("type") != "usage":
+        return None
+    usage = obj.get("usage")
+    if not isinstance(usage, dict):
+        return EventFacts(turn_delta=1, partial=True)
+    output_tokens = _as_int(usage.get("output_tokens"))
+    uncached = _as_int(usage.get("input_tokens"))
+    cached = _as_int(usage.get("cache_read_input_tokens"))
+    return EventFacts(
+        usage=UsageBuckets(
+            output_tokens=output_tokens,
+            uncached_input_tokens=uncached,
+            cached_input_tokens=cached,
+            cache_write_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+            reasoning_tokens=_as_int(usage.get("reasoning_tokens")),
+        ),
+        partial=any(value is None for value in (output_tokens, uncached, cached)),
+        turn_delta=1,
+    )
+
+
 def event_facts(obj: Any) -> EventFacts | None:
     """Decode one worker-stream event, whichever backend wrote it.
 
-    The three decoders key off disjoint ``type`` values, so the first one to
+    The four decoders key off disjoint ``type`` values, so the first one to
     claim an event owns it and order carries no meaning.
     """
 
     if not isinstance(obj, dict):
         return None
-    for decode in (_claude_facts, _codex_facts, _opencode_facts):
+    for decode in (_claude_facts, _codex_facts, _opencode_facts, _grok_facts):
         facts = decode(obj)
         if facts is not None:
             return facts
