@@ -180,3 +180,52 @@ def test_parse_eject_stamp_reads_only_the_first_line() -> None:
     stamp = eject_stamp("1.2.3", "body")
     assert parse_eject_stamp("prose above\n" + stamp + "\nbody") is None
     assert parse_eject_stamp("hand-written override, no stamp\n") is None
+
+
+# --- flag-off byte pin (ortus-xfw1) -----------------------------------------
+#
+# The `prompt_audit` flag adds a second variant of the two worker-facing
+# texts. Off is the control arm of the A/B, and an arm that drifts measures
+# nothing, so the legacy bytes are pinned by digest: a change to either file
+# has to be deliberate enough to update the hash here.
+_LEGACY_GOAL_SHA256 = (
+    "770f1cede19182f995d1a9637a9094396e98ab4ca8e9cca224b62a73a59f8167"
+)
+_LEGACY_WORK_ISSUE_SHA256 = (
+    "3f3c7ba17223b1b8a52718e561cda8f7290749286892b97fbfe38d8b378f74f8"
+)
+
+
+def test_flag_off_worker_texts_are_byte_pinned() -> None:
+    """The default arm serves the pre-flag bytes of both worker-facing texts."""
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    assert bundled_sha256(bundled_prompt_text("goal-prompt")) == _LEGACY_GOAL_SHA256
+    assert (
+        bundled_sha256(read_work_issue_condition()) == _LEGACY_WORK_ISSUE_SHA256
+    )
+
+
+def test_flag_off_resolution_reads_the_legacy_bundle(tmp_path: Path) -> None:
+    """Nothing about the audited variant is reachable without asking for it."""
+    from ortus.core.grind_loop import read_work_issue_condition
+
+    resolved = resolve_prompt("goal-prompt", repo=tmp_path, home=tmp_path / "home")
+    assert resolved.source == "bundled"
+    assert bundled_sha256(resolved.text) == _LEGACY_GOAL_SHA256
+    audited = resolve_prompt(
+        "goal-prompt", repo=tmp_path, home=tmp_path / "home", audited=True
+    )
+    assert audited.source == "audited"
+    assert audited.text != resolved.text
+    assert read_work_issue_condition(audited=True) != read_work_issue_condition()
+
+
+def test_audited_variant_is_absent_from_the_registry_package() -> None:
+    """`prompts_in_package()` sees the legacy bundles only, so the registry
+    reconciliation gate keeps naming exactly three prompts."""
+    assert prompts_in_package() == (
+        "goal-prompt",
+        "interview-prompt",
+        "plan-prompt",
+    )

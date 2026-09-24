@@ -16,7 +16,10 @@ from typing import Optional
 import typer
 
 from ortus import __version__
+from ortus.core.config import load_config
+from ortus.core.prompt_audit import audit_enabled
 from ortus.core.prompts import (
+    AUDITED_PROMPT_PACKAGE,
     PROMPT_PACKAGE,
     PROMPT_REGISTRY,
     PromptNotFound,
@@ -38,7 +41,40 @@ def _source_label(resolved: ResolvedPrompt) -> str:
     """The layer that won, phrased for an operator."""
     if resolved.source == "bundled":
         return "bundled (default)"
+    if resolved.source == "audited":
+        return "bundled (audited)"
     return f"{resolved.source} ({resolved.path})"
+
+
+def _audited(repo: Path) -> bool:
+    """Whether this repository serves the audited worker prompts.
+
+    Resolved from the same `.ortusrc` key and environment variable `grind`
+    reads, so the text a worker fetches with `ortus prompt show goal` is the
+    text the harness that launched it composed against. An unreadable config
+    is not a reason to serve a variant the operator did not pin, so it falls
+    back to the legacy bundles.
+    """
+    try:
+        return audit_enabled(load_config(repo=repo))
+    except Exception:
+        return audit_enabled()
+
+
+def _resolve(name: str, *, repo: Path, audited: bool) -> ResolvedPrompt:
+    """One prompt as this repository serves it, override layers first.
+
+    Only the worker-facing texts ship an audited variant; `plan` and
+    `interview` are never composed into a grind worker's prompt, so a name
+    with no audited bundle resolves to its single bundled default whatever the
+    flag says, instead of failing the command.
+    """
+    if audited:
+        try:
+            return resolve_named_prompt(name, repo=repo, audited=True)
+        except PromptNotFound:
+            pass
+    return resolve_named_prompt(name, repo=repo)
 
 
 @prompt_app.command("list")
@@ -50,8 +86,9 @@ def list_prompts(
 ) -> None:
     """Name, winning source, phase, and description for every prompt."""
     width = max(len(entry.name) for entry in PROMPT_REGISTRY)
+    audited = _audited(repo)
     for entry in PROMPT_REGISTRY:
-        resolved = resolve_named_prompt(entry.name, repo=repo)
+        resolved = _resolve(entry.name, repo=repo, audited=audited)
         typer.echo(
             f"{entry.name:<{width}}  {_source_label(resolved):<18}  "
             f"{entry.phase:<14}  {entry.description}"
@@ -77,11 +114,15 @@ def show_prompt(
     except PromptNotFound as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2)
-    resolved = resolve_named_prompt(entry.name, repo=repo)
+    resolved = _resolve(entry.name, repo=repo, audited=_audited(repo))
     if origin:
         if resolved.path is None:
             # Zip-backed install: no filesystem path, name the package resource.
-            typer.echo(f"bundled {PROMPT_PACKAGE}/{entry.filename}.md")
+            package = (
+                AUDITED_PROMPT_PACKAGE if resolved.source == "audited"
+                else PROMPT_PACKAGE
+            )
+            typer.echo(f"bundled {package}/{entry.filename}.md")
         else:
             typer.echo(f"{resolved.source} {resolved.path}")
         return

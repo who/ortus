@@ -87,6 +87,11 @@ DEFAULTS: dict[str, Any] = {
     # syntax gate (`prototype`). `ortus grind --prototype` overrides it for
     # one run.
     "verification": DEFAULT_VERIFICATION_MODE,
+    # Which variant of the two worker-facing prompt texts a run serves: the
+    # legacy bundles (off) or the audited rewrite. Off by default so today's
+    # text stays the control arm of the A/B; `ORTUS_PROMPT_AUDIT` flips one
+    # run without editing a tracked file.
+    "prompt_audit": False,
     # Branch `grind` pins the working tree to and re-asserts each iteration.
     # "main" fits a fresh `ortus init`; a repo whose default branch is named
     # something else (e.g. "master") pins it here instead of passing
@@ -206,6 +211,20 @@ def _validate_verification(values: dict[str, Any]) -> None:
         )
 
 
+def _validate_prompt_audit(values: dict[str, Any]) -> None:
+    """Reject a `prompt_audit` value that is not a boolean.
+
+    The key selects which prompt text every worker in the run is served, so a
+    string that merely looks true (`prompt_audit = "yes"`) fails here instead
+    of resolving to the legacy arm and quietly spoiling an A/B.
+    """
+    value = values.get("prompt_audit", False)
+    if not isinstance(value, bool):
+        raise ProfileError(
+            f"invalid prompt_audit {value!r}; expected true or false"
+        )
+
+
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -283,6 +302,7 @@ def load_config(
 
     _validate_backend(cfg.values)
     _validate_verification(cfg.values)
+    _validate_prompt_audit(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
     parse_judge_config(cfg, environ={})
