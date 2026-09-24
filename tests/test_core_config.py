@@ -389,3 +389,33 @@ def test_verification_mode_rejects_other_values(tmp_path: Path, value: str) -> N
         ProfileError, match=r"invalid verification mode .*expected full or prototype"
     ):
         load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+# --- A/B flag defaults -------------------------------------------------------
+#
+# Each flag's measurement issue checks its default with
+# `pytest tests/test_core_config.py -k <key> -q`, so the key has to appear in a
+# test name for that selector to match anything. Pinning the shipped value,
+# rather than asserting the type, is what makes the check notice a flip: the
+# arm that wins its comparison has to be turned on here as well as in DEFAULTS.
+
+
+def test_prompt_audit_default_is_off(tmp_path: Path) -> None:
+    """The legacy prompt bundles stay the control arm until an A/B says otherwise."""
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert DEFAULTS["prompt_audit"] is False
+    assert cfg.get("prompt_audit") is False
+
+
+def test_stable_prompt_prefix_default_is_off(tmp_path: Path) -> None:
+    """Today's segment ordering stays the control arm until an A/B says otherwise."""
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert DEFAULTS["stable_prompt_prefix"] is False
+    assert cfg.get("stable_prompt_prefix") is False
+
+
+def test_jev_model_router_default_is_off(tmp_path: Path) -> None:
+    """The pinned implement profile stays the control arm until an A/B says otherwise."""
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+    assert DEFAULTS["jev_model_router"] is False
+    assert cfg.get("jev_model_router") is False
