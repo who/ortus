@@ -1001,3 +1001,40 @@ def test_local_backend_uses_opencode_decoder(
     assert _OPENCODE_GOLDEN.read_text(encoding="utf-8") in local
     _, asked, _ = _tail_opencode_log(tmp_path, monkeypatch, "grok")
     assert asked == {"codex": False, "opencode": False}
+
+
+def test_tail_marks_a_worker_failure_marker_with_its_class() -> None:
+    """A window that died reads as a failure, not as one more progress line."""
+
+    rendered = _format_line(
+        "[2026-09-24 13:28:45] iter 3: worker failure class=environment "
+        "backend=claude model=provider-default detail=sandbox denied a spawn",
+        show_tools=False,
+        show_system=False,
+    )
+    assert rendered is not None
+    assert rendered.startswith("[FAILURE] environment")
+    assert "sandbox denied a spawn" in rendered
+
+
+def test_tail_reads_an_unknown_failure_class_as_the_harness_bug_bucket() -> None:
+    """A class name this Ortus does not know is itself the harness defect."""
+
+    rendered = _format_line(
+        "[2026-09-24 13:28:45] iter 4: worker failure class=moon_phase "
+        "backend=codex model=provider-default",
+        show_tools=False,
+        show_system=False,
+    )
+    assert rendered is not None
+    assert rendered.startswith("[FAILURE] ortus_harness_bug")
+
+
+def test_tail_leaves_a_grind_line_that_is_not_a_failure_marker_alone() -> None:
+    """A log with no marker renders exactly as it rendered before."""
+
+    for line in (
+        "[2026-09-24 13:28:45] iter 3: worker started",
+        "[2026-09-24 13:28:45] iter 3: worker closed ortus-yod4 (tasks_completed=1)",
+    ):
+        assert _format_line(line, show_tools=False, show_system=False) == line

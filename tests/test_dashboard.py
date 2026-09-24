@@ -2888,3 +2888,81 @@ def test_opencode_backend_conflict_named_from_the_start_line(tmp_path: Path) -> 
     app.advance()
     assert "named backend=opencode" in app.conflict
     assert "event backend=codex" in app.conflict
+
+
+# A worker window that died was already named in the log and counted by
+# `ortus cost`, but the two live surfaces rendered the marker as ordinary
+# progress text: a run killed by a sandbox refusal looked like a run still
+# working. These cover the class reaching the screen, and the Grok feed
+# staying the Grok vocabulary now that a second kind of crumb exists.
+
+_FAILURE_MARKER = (
+    "iter 3: worker failure class=environment backend=claude "
+    "model=provider-default detail=sandbox denied a spawn: EPERM"
+)
+
+
+def _ortus_event(body: str, stamp: str = "2026-08-08 22:10:05") -> LogEvent:
+    event = classify_line(_ortus_line(stamp, body))
+    assert event is not None
+    return event
+
+
+def test_worker_failure_marker_becomes_a_crumb_naming_its_class() -> None:
+    """The marker's own class reaches the feed; no surface re-derives one."""
+
+    events = (
+        _ortus_event("iter 3: worker started", "2026-08-08 22:10:00"),
+        _ortus_event(_FAILURE_MARKER),
+    )
+    crumbs, tools, arrived = dash.ingest_crumbs(events)
+
+    assert arrived == 1
+    assert [crumb.kind for crumb in crumbs] == [dash.CRUMB_FAILURE]
+    assert "environment" in dash.crumb_panel(crumbs, tools)
+
+
+def test_unknown_worker_failure_class_reads_as_the_harness_bug_bucket() -> None:
+    """An unrecognized name lands where the rollup counts it, not in a new kind."""
+
+    crumbs, tools, _ = dash.ingest_crumbs(
+        (_ortus_event("iter 3: worker failure class=moon_phase backend=codex model=x"),)
+    )
+
+    assert "ortus_harness_bug" in dash.crumb_panel(crumbs, tools)
+
+
+def test_failure_crumb_does_not_report_a_claude_run_as_grok() -> None:
+    """Presence of a crumb no longer means the Grok vocabulary was seen."""
+
+    crumbs, _, _ = dash.ingest_crumbs((_ortus_event(_FAILURE_MARKER),))
+
+    assert dash.grok_crumbs(crumbs) is False
+    assert dash.log_backend((), crumbs) == ""
+    assert dash.is_grok_mode(RunSnapshot(), crumbs=crumbs) is False
+
+
+def test_failed_claude_window_opens_the_feed_for_its_failure(tmp_path: Path) -> None:
+    """A backend with no feed of its own still shows the window that died."""
+
+    body = _grok_body(_CLAUDE_TURN) + _ortus_line("2026-08-08 22:10:05", _FAILURE_MARKER)
+    repo = _painted_repo(tmp_path, "claude-failed", body)
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+
+    assert app.grok is False
+    assert app.conflict == ""
+    assert "environment" in frame.crumbs
+    assert "environment" in frame.current_action
+
+
+def test_log_without_a_failure_marker_keeps_the_sparse_frame(tmp_path: Path) -> None:
+    """A run that reported no failed window renders as it did before."""
+
+    repo = _painted_repo(tmp_path, "claude-clean", _grok_body(_CLAUDE_TURN))
+    app = dash.DashboardApp(repo, refresh_seconds=3600)
+    frame = app.advance()
+
+    assert app.crumbs == ()
+    assert frame.crumbs == ""
+    assert app.grok is False

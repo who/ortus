@@ -280,3 +280,29 @@ def failure_log_line(
         )
     parts.append(f"detail={_clip(failure.detail) or 'none'}")
     return " ".join(parts)
+
+
+#: A line still carrying the `[timestamp] ` stamp `write_log` prepends. The
+#: surfaces read their lines at different stages — the dashboard has already
+#: split the stamp off, `ortus tail` has not — so the reader below accepts
+#: either shape rather than making each caller strip it the same way twice.
+_STAMPED = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ?")
+
+
+def marker_failure(line: str) -> WorkerFailure | None:
+    """The class a marker line names, or None when the line is not a marker.
+
+    A class name this Ortus does not know still names a window that failed,
+    and an unrecognized name is itself the defect the taxonomy exists to
+    surface, so it reads as `ORTUS_HARNESS_BUG` — the same bucket the rollup
+    counts it under. No caller re-derives a class from the worker's stream:
+    the marker grind already wrote is the single source.
+    """
+
+    match = FAILURE_LINE.match(_STAMPED.sub("", line, count=1))
+    if match is None:
+        return None
+    try:
+        return WorkerFailure(match.group("failure"))
+    except ValueError:
+        return WorkerFailure.ORTUS_HARNESS_BUG

@@ -19,6 +19,7 @@ from ortus.core.judge_log import (
     OutcomeStatus, _append, _clean_metadata, _common,
 )
 from ortus.core.judge_state import StateError, pack_state
+from ortus.core.worker_failure import WorkerFailure
 from ortus.core.judge_typesafe import (
     API_KEY_ENV, JudgeFailure, _answer, _default_client, _Invalid, _mapping, _number,
 )
@@ -39,15 +40,26 @@ class WorkerOutcome:
     watchdog: bool
     observed_status: OutcomeStatus
     branch_advanced: bool
+    #: How the window died, as the taxonomy already named it, or None when it
+    #: did not. It travels beside the outcome reason rather than inside it:
+    #: the reason is what the judge decided about the work, the class is what
+    #: killed the worker, and a replay that has to tell a sandbox refusal from
+    #: a low-confidence verdict needs both.
+    worker_failure: WorkerFailure | None = None
 
     def __post_init__(self) -> None:
         if (type(self.exit_status) is not int
                 or type(self.watchdog) is not bool
                 or type(self.branch_advanced) is not bool
-                or not isinstance(self.observed_status, OutcomeStatus)):
+                or not isinstance(self.observed_status, OutcomeStatus)
+                or not (self.worker_failure is None
+                        or isinstance(self.worker_failure, WorkerFailure))):
             raise ValueError("invalid worker outcome")
 
     def payload(self) -> dict:
+        """The typed facts the judge is asked about. The failure class is not
+        among them: it is recorded beside the verdict, never put to the model,
+        so a mechanical death cannot steer a judgment about the work."""
         return {"exit_status": self.exit_status, "watchdog": self.watchdog,
                 "observed_status": self.observed_status.value,
                 "branch_advanced": self.branch_advanced}
@@ -192,6 +204,8 @@ def apply_outcome(
         "effective_action": "baseline" if shadow else "human" if human else "preserve",
         "reason": reason,
         "disagreement": verdict.outcome == Outcome.DONE and status != OutcomeStatus.CLOSED,
+        "worker_failure": (observation.worker_failure.value
+                           if observation.worker_failure is not None else None),
     })
     _append(repo, payload)
     if human and not shadow:
