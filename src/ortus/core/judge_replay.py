@@ -43,7 +43,15 @@ STUCK = COMMON | {
     "phase", "mode", "issue_id", "seat", "model", "windows", "branch_advanced",
     "fail_open", "vector", "action", "effective_action",
 }
+#: The route grind took for a bead that reached the human queue. Like the
+#: stuck decision it carries no usage of its own: a regex hit and a disabled
+#: seat both produce a vector without a request.
+TRIAGE = COMMON | {
+    "phase", "mode", "issue_id", "seat", "model", "vector", "regex_hit",
+    "fail_open", "triage_failure", "triage_class", "effective_action",
+}
 STUCK_ACTIONS = {"continue", "replan", "escalate"}
+TRIAGE_CLASSES = {"pin_skew", "planner_fix", "needs_human"}
 OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
 #: The worker-failure class a post-turn record may also carry. Optional, and
 #: read beside `reason` rather than folded into `OUTCOMES`: a log written
@@ -109,7 +117,8 @@ def validate_event(value: object) -> dict:
               if kind == "decision" else
               OUTCOME | (SHADOW_OUTCOME if shadow else set()) if kind == "outcome" else
               POST if kind == "post_turn" else
-              STUCK if kind == "stuck_decision" else set())
+              STUCK if kind == "stuck_decision" else
+              TRIAGE if kind == "triage" else set())
     optional = POST_SIDE if kind == "post_turn" else set()
     _require(bool(fields) and fields <= set(e) <= fields | optional)
     _uuid(e["run_id"])
@@ -119,7 +128,7 @@ def validate_event(value: object) -> dict:
     for name in ("seat", "issue_id", "criteria_version", "observed_issue_id", "actual_claimed_id"):
         if name in e:
             _metadata(e[name])
-    if kind in ("decision", "post_turn", "stuck_decision"):
+    if kind in ("decision", "post_turn", "stuck_decision", "triage"):
         _require(e["model"] is None or (type(e["model"]) is str
                  and re.fullmatch(r"jev-\d+\.\d+\.\d+", e["model"]) is not None))
     if kind in ("decision", "post_turn"):
@@ -178,6 +187,22 @@ def validate_event(value: object) -> dict:
         # so the two differ there exactly when the judge argued for something
         # else; outside shadow the applied action is the decided one.
         _require(shadow or e["effective_action"] == e["action"])
+    elif kind == "triage":
+        _require(e["phase"] == "triage" and _choice(e["mode"], {"shadow", "enforce"}))
+        for key in ("regex_hit", "fail_open"):
+            _require(type(e[key]) is bool)
+        _require(_choice(e["triage_failure"], JudgeFailure, nullable=True))
+        for key in ("triage_class", "effective_action"):
+            _require(_choice(e[key], TRIAGE_CLASSES))
+        vector = e["vector"]
+        _require(type(vector) is dict and set(vector) == TRIAGE_CLASSES)
+        for value in vector.values():
+            _require(_number(value, 1))
+        # A route that could not complete falls back to the human queue, and
+        # shadow records the read class while parking the bead. Those are the
+        # only ways the applied route differs from the decided one: an
+        # automatic route can never be applied over a different decision.
+        _require(shadow or e["effective_action"] in (e["triage_class"], "needs_human"))
     else:
         _require(e["phase"] == "post_turn" and _choice(e["mode"], {"shadow", "enforce"}))
         _require(type(e["exit_status"]) is int)

@@ -430,6 +430,10 @@ class BdClient:
         """`bd label add <id> <label>`. Used by orphan-policy=escalate."""
         self._run("label", "add", issue_id, label)
 
+    def remove_label(self, issue_id: str, label: str) -> None:
+        """`bd label remove <id> <label>`. Used by the triage routes that unpark."""
+        self._run("label", "remove", issue_id, label)
+
     def count_by_status(
         self, status: str, *, exclude_labels: tuple[str, ...] = ()
     ) -> int:
