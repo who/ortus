@@ -3162,7 +3162,12 @@ def _recorded_grind(
     ortusrc: str,
     args: tuple[str, ...] = (),
 ) -> tuple[str, list[str]]:
-    """One window against a recording worker: the grind log and its prompts."""
+    """One window against a recording worker: the grind log and its prompts.
+
+    Start-line assertions below read this log. They stop at the `;` that
+    separates one start-line field from the next, never at the closing
+    `) ===`, so appending a field cannot break them again (ortus-m6cn).
+    """
     repo = _bd_repo(tmp_path, name)
     _create_ready_issue(repo, "prototype leaf")
     if ortusrc:
@@ -3193,7 +3198,7 @@ def test_grind_start_line_records_verification_mode_from_ortusrc(
         name="proto-rc",
         ortusrc='project_type = "python"\nverification = "prototype"\n',
     )
-    assert "backend=claude; verification=prototype from .ortusrc) ===" in log
+    assert "backend=claude; verification=prototype from .ortusrc;" in log
     assert (
         "verification: prototype bar — lint: ruff check .; "
         "syntax: python -m compileall -q ." in log
@@ -3217,7 +3222,7 @@ def test_grind_start_line_records_verification_mode_flag_wins(
         args=("--prototype",),
     )
     assert (
-        "verification=prototype from --prototype, .ortusrc pins full) ===" in log
+        "verification=prototype from --prototype, .ortusrc pins full;" in log
     )
     assert "verification: prototype bar — lint: golangci-lint run ./...; syntax: go build ./..." in log
     assert "`golangci-lint run ./...` and `go build ./...`" in prompts[0]
@@ -3229,7 +3234,7 @@ def test_grind_start_line_records_verification_mode_default_full(
     """AC-4: no key means full — the start line says so, no gate line is
     logged, and the worker prompt is today's criterion-check condition."""
     log, prompts = _recorded_grind(tmp_path, monkeypatch, name="full", ortusrc="")
-    assert "backend=claude; verification=full) ===" in log
+    assert "backend=claude; verification=full;" in log
     assert "verification: prototype bar" not in log
     assert "Prototype verification" not in prompts[0]
     assert "criterion-check commands already ran during implement" in prompts[0]
