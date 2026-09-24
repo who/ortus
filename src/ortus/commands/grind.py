@@ -115,6 +115,7 @@ from ortus.core.local_backend import (
     resolve_opencode_binary,
 )
 from ortus.core.repo import resolve_repo
+from ortus.core.pin_skew import tag_pin_skew_claims
 from ortus.core.judge import GateAction, JudgeConfig, JudgeMode, parse_judge_config
 from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
@@ -2534,19 +2535,33 @@ def grind(
                     break
                 if (
                     reap_reasons
-                    and gate_turn is None
                     and reap_reasons[-1].startswith(_FLAGGED_REASON)
                     and flagged_at_start is not None
                 ):
                     # The worker is dead, so bd now shows the post-mortem
                     # state: any claim it put on an issue that was the
-                    # operator's before the window began goes back.
-                    _hand_back_misclaims(
-                        bd,
-                        flagged_at_start=flagged_at_start,
-                        human_open_at_start=human_open_at_start,
-                        window=iters_run,
-                        write_log=write_log,
+                    # operator's before the window began goes back, and what
+                    # it parked on its own is read for a pin it could have
+                    # made instead.
+                    handed_back: set[str] = set()
+                    if gate_turn is None:
+                        handed_back = _hand_back_misclaims(
+                            bd,
+                            flagged_at_start=flagged_at_start,
+                            human_open_at_start=human_open_at_start,
+                            window=iters_run,
+                            write_log=write_log,
+                        )
+                    try:
+                        parked = _flagged_claims(bd) - flagged_at_start - handed_back
+                    except Exception as exc:
+                        parked = set()
+                        write_log(
+                            f"iter {iters_run}: pin-skew: could not read the "
+                            f"parked claims ({exc})"
+                        )
+                    tag_pin_skew_claims(
+                        bd, parked, window=iters_run, write_log=write_log
                     )
                 if resolved_backend == "claude":
                     rejection = _claude_goal_rejection(log, start_offset=phase_offset)

@@ -217,6 +217,61 @@ def test_worker_prompt_plan_gap_for_unrunnable_checks() -> None:
     assert "flag human" in select_step
 
 
+def test_worker_prompt_pin_dont_park_defines_pin_able_skew() -> None:
+    """AC-1 (ortus-jvpn): both bundled worker contracts define a version,
+    date, or toolchain value declared past the installed tool's ceiling as a
+    pin plus a restore follow-up, not as a park on the human label."""
+    from ortus.core.grind_loop import read_work_issue_condition
+    from ortus.core.prompts import bundled_prompt_text
+
+    implement_step = next(
+        line
+        for line in bundled_prompt_text("goal-prompt").splitlines()
+        if line.startswith("3.")
+    )
+    assert "pin-able, not a planning gap" in implement_step
+    assert "installed tool supports" in implement_step
+    assert "follow-up bead to restore it" in implement_step
+    assert "continue the claim" in implement_step
+
+    condition = read_work_issue_condition()
+    assert "is not a planning gap" in condition
+    # The class is defined by example, in the shape the transcript carried:
+    # a declared compatibility date above the runtime the test runner bundles.
+    assert "`compatibility_date`" in condition
+    assert "2026-09-01" in condition and "2026-08-22" in condition
+    assert "file a follow-up bead" in condition
+    # Pinning past the ceiling is the failure the pin is not.
+    assert "Pinning the other way" in condition
+
+
+def test_worker_prompt_pin_dont_park_leaves_true_gaps_parked() -> None:
+    """AC-2 (ortus-jvpn): the pin definition names what stays a planning gap,
+    and the PLAN-GAP paragraph beside it keeps its comment-and-flag exit."""
+    from ortus.core.grind_loop import read_work_issue_condition
+    from ortus.core.prompts import bundled_prompt_text
+
+    condition = read_work_issue_condition()
+    assert "A credential nobody supplied" in condition
+    assert "a decision nobody has made are planning gaps" in condition
+    gap = next(
+        line
+        for line in condition.splitlines()
+        if line.startswith("If repository reality contradicts")
+    )
+    assert "in a way no pin resolves" in gap
+    assert 'PLAN-GAP:' in gap
+    assert "bd human <ISSUE_ID>" in gap
+
+    implement_step = next(
+        line
+        for line in bundled_prompt_text("goal-prompt").splitlines()
+        if line.startswith("3.")
+    )
+    assert "Credential gaps, uninstalled tools, and unmade product decisions" in implement_step
+    assert "stay PLAN-GAP plus flag human" in implement_step
+
+
 def test_worker_prompt_one_issue_per_window() -> None:
     """AC-2: one issue per invocation; a second issue is forbidden."""
     body = _composed_implement_prompt()
