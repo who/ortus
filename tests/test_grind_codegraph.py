@@ -109,18 +109,38 @@ def test_default_mode_required_aborts_at_the_probe(
     assert "codegraphinit" in compact, combined
 
 
-@pytest.fixture
-def claimable_repo(tmp_path: Path) -> tuple[Path, str]:
-    """A bd workspace holding one ready issue, built during setup.
+def _claimable(tmp_path: Path, name: str, title: str) -> tuple[Path, str]:
+    """A bd workspace holding one ready issue.
 
     Standing this up costs a workspace copy and a `bd create`, and on the
     first test to ask for it the session's one `bd init` as well. None of
     that is the behavior under test, and the per-test budget bounds the
-    call, so the arrangement is paid here and the call is left holding the
-    grind iteration it exists to measure.
+    call, so every caller below is a fixture: the arrangement is paid during
+    setup and the call is left holding the grind iteration it exists to
+    measure. Each test wants its own workspace name and issue title, which
+    is why the parameters live here and the fixtures stay parameterless —
+    a factory handed to the test would put this cost back inside the call.
     """
-    repo = _bd_repo(tmp_path, "live-handshake")
-    return repo, _create_ready_issue(repo, "close after handshake")
+    repo = _bd_repo(tmp_path, name)
+    return repo, _create_ready_issue(repo, title)
+
+
+@pytest.fixture
+def claimable_repo(tmp_path: Path) -> tuple[Path, str]:
+    """The workspace the live-handshake iteration claims from."""
+    return _claimable(tmp_path, "live-handshake", "close after handshake")
+
+
+@pytest.fixture
+def silent_repo(tmp_path: Path) -> tuple[Path, str]:
+    """The workspace whose worker closes without ever querying CodeGraph."""
+    return _claimable(tmp_path, "silent-required", "close silently")
+
+
+@pytest.fixture
+def codex_repo(tmp_path: Path) -> tuple[Path, str]:
+    """The workspace the Codex-backend iteration claims from."""
+    return _claimable(tmp_path, "no-codex-handshake", "close without extra agent")
 
 
 @pytest.mark.slow
@@ -154,11 +174,10 @@ def test_implementation_tool_result_is_handshake_success_before_bd_status(
 @pytest.mark.slow
 @pytest.mark.codegraph_default
 def test_silent_required_worker_fails_handshake_even_if_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    silent_repo: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-3: no CodeGraph tool_result fails required handshake even if closed."""
-    repo = _bd_repo(tmp_path, "silent-required")
-    issue_id = _create_ready_issue(repo, "close silently")
+    repo, issue_id = silent_repo
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -177,11 +196,10 @@ def test_silent_required_worker_fails_handshake_even_if_closed(
 
 
 def test_codex_no_longer_launches_handshake_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    codex_repo: tuple[Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-4: Codex does not spawn a separate handshake agent to scrape a log."""
-    repo = _bd_repo(tmp_path, "no-codex-handshake")
-    _create_ready_issue(repo, "close without extra agent")
+    repo, _ = codex_repo
     spy = _SpyCodexRunner(repo)
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
