@@ -7,6 +7,7 @@ import typer
 from ortus.commands.check import check
 from ortus.commands.cost import cost
 from ortus.commands.dashboard import dashboard
+from ortus.commands.eval import evaluate
 from ortus.commands.grind import grind
 from ortus.commands.human import human
 from ortus.commands.ingest import ingest
@@ -85,6 +86,10 @@ app.command(
     name="cost",
     help="Report per-bead token cost by billing bucket from grind logs.",
 )(cost)
+app.command(
+    name="eval",
+    help="Run the frozen evaluation set's recipe, or report what it produced.",
+)(evaluate)
 app.command(
     name="ingest",
     # `short_help` rather than `help`: the commands table needs one line, while
