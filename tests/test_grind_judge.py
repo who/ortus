@@ -432,3 +432,101 @@ def test_claude_reaps_bound_human_without_releasing_it(gate):
     assert result.exit_code == 0, result.output + str(result.exception)
     assert gate.bd.rows['demo-1']['status'] == 'in_progress'
     assert 'release' not in gate.bd.calls
+
+
+def leftover(gate, *, windows=0):
+    """A claim grind will resume, carrying `windows` recorded no-close windows."""
+    gate.bd.rows['demo-1'].update(status='in_progress', assignee='prior')
+    if windows:
+        gate.bd.add_comment('demo-1', f'{grind_mod._NO_CLOSE_MARKER_PREFIX}{windows}')
+        gate.bd.calls.clear()
+    gate.worker.run.side_effect = lambda *a, **kw: 0
+
+
+def stuck_events(gate):
+    return [e for e in gate.events() if e['event'] == 'stuck_decision']
+
+
+@pytest.mark.parametrize('recorded,human', [(0, False), (1, True)])
+@pytest.mark.parametrize('unavailable', ['disabled', 'failing'])
+def test_stuck_fail_open_keeps_the_two_window_rule(gate, monkeypatch, recorded,
+                                                   human, unavailable):
+    """AC-3: with no usable verdict the claim escalates at the threshold and
+    resumes below it, exactly as it did before the decision existed."""
+    from ortus.core.judge_post import Outcome, OutcomeVerdict
+
+    gate.config.values['judge']['post_turn'] = unavailable == 'failing'
+    leftover(gate, windows=recorded)
+    verdict = (OutcomeVerdict(failure=JudgeFailure.TIMEOUT) if unavailable == 'failing'
+               else OutcomeVerdict(Outcome.CONTINUE, .99))
+    monkeypatch.setattr(grind_mod, 'evaluate_outcome', Mock(return_value=verdict))
+    result = gate.invoke('--iterations', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    # The window burned one more than was recorded, so `human` is exactly the
+    # threshold being met.
+    assert ('human' in gate.bd.rows['demo-1']['labels']) == human
+    assert gate.bd.rows['demo-1']['status'] == 'in_progress'
+    comments = ' '.join(c['text'] for c in gate.bd.comments('demo-1'))
+    assert ('wedged claim escalated' in comments) == human
+    assert grind_mod._REPLAN_MARKER_PREFIX not in comments
+    if unavailable == 'failing':
+        assert stuck_events(gate)[-1]['fail_open'] is True
+
+
+def test_stuck_replan_resumes_with_the_directive(gate, monkeypatch):
+    """AC-4: an unsure continue at one burned window reads as re-plan, and the
+    next window's prompt carries the directive the stalled one did not."""
+    from ortus.core.judge_post import Outcome, OutcomeVerdict
+
+    gate.config.values['judge']['post_turn'] = True
+    leftover(gate)
+    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
+                        Mock(return_value=OutcomeVerdict(Outcome.CONTINUE, .1)))
+    result = gate.invoke('--iterations', '2')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    # The startup resume logs a fail-open decision of its own; the judged one
+    # is the first with a verdict behind it.
+    judged = [e for e in stuck_events(gate) if not e['fail_open']]
+    assert judged[0]['action'] == 'replan'
+    first, second = (call.args[0] for call in gate.worker.run.call_args_list[:2])
+    assert grind_mod._REPLAN_HEADER not in first
+    assert grind_mod._REPLAN_HEADER in second
+    assert 'no new commits on main' in second
+    comments = ' '.join(c['text'] for c in gate.bd.comments('demo-1'))
+    assert f'{grind_mod._REPLAN_MARKER_PREFIX}1' in comments
+
+
+def test_stuck_decision_logged_with_vector_windows_and_fail_open(gate, monkeypatch):
+    """AC-5: every decision is replayable — vector, action, windows, fail_open."""
+    from ortus.core.judge_post import Outcome, OutcomeVerdict
+    from ortus.core.judge_replay import validate_event
+
+    gate.config.values['judge']['post_turn'] = True
+    leftover(gate)
+    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
+                        Mock(return_value=OutcomeVerdict(Outcome.NEEDS_HUMAN, .99)))
+    result = gate.invoke('--iterations', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    event = stuck_events(gate)[-1]
+    assert event['windows'] == 1 and event['fail_open'] is False
+    assert event['branch_advanced'] is False
+    assert event['action'] == 'escalate' == event['effective_action']
+    assert set(event['vector']) == {'continue', 'replan', 'escalate'}
+    assert event['vector']['escalate'] == max(event['vector'].values())
+    assert abs(sum(event['vector'].values()) - 1) < 1e-9
+    # The record joins the existing log, so replay must still accept it.
+    assert all(validate_event(e) for e in gate.events())
+
+
+def test_stuck_shadow_logs_the_read_action_and_applies_the_baseline(gate, monkeypatch):
+    from ortus.core.judge_post import Outcome, OutcomeVerdict
+
+    gate.config.values['judge'].update(post_turn=True, mode='shadow')
+    leftover(gate)
+    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
+                        Mock(return_value=OutcomeVerdict(Outcome.NEEDS_HUMAN, .99)))
+    result = gate.invoke('--iterations', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    event = stuck_events(gate)[-1]
+    assert event['action'] == 'escalate' and event['effective_action'] == 'continue'
+    assert gate.bd.rows['demo-1']['labels'] == []

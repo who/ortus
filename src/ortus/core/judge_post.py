@@ -182,9 +182,11 @@ def apply_outcome(
     elif verdict.failure is not None:
         human = config.failure_mode == FailureMode.CLOSED
         reason = "service_failure"
-    elif verdict.confidence < 0.8:
-        human = True
-        reason = "low_confidence"
+    # No confidence floor. An unsure answer is still an answer about the work,
+    # and parking a bead on it spent an operator every time the model hedged.
+    # The confidence now travels to `decide_stuck_claim`, where it shrinks the
+    # continue/replan/escalate vector toward uniform instead of picking a
+    # branch on its own.
     elif verdict.outcome == Outcome.DONE:
         reason = "closure_disagreement"
     elif verdict.outcome in (Outcome.PLAN_GAP, Outcome.AUTH, Outcome.NEEDS_HUMAN):
