@@ -110,6 +110,34 @@ def ci_gate_budget_scale() -> float:
     return float(scale.group(1))
 
 
+#: Prefix for the temporary root each spawned pytest session gets to itself.
+#: Named so an operator reading `ls /tmp` can tell whose directory it is.
+_INNER_TEMPROOT_PREFIX = "ortus-inner-pytest-"
+
+
+def inner_pytest_env(**extra: str) -> dict[str, str]:
+    """Return the environment for a pytest session this suite spawns.
+
+    A pytest session garbage-collects all but the newest few `pytest-<n>`
+    directories under the temporary root it starts against. A spawned session
+    that inherits this run's root therefore sweeps directories the running suite
+    is still using, and a test whose `tmp_path` tree lived in one of them fails
+    against a directory that silently emptied underneath it (ortus-e8hz). Point
+    every spawned session at a root of its own instead, so its sweep can only
+    reach directories it created.
+
+    That root lives under the system temporary directory, which the operating
+    system reclaims, and is removed when this process exits so a long gate run
+    does not accumulate one per spawn. `extra` adds to the inherited
+    environment; the isolated root is applied last, because a caller passing the
+    parent's own root would reintroduce exactly the sweep this prevents.
+    """
+
+    root = tempfile.mkdtemp(prefix=_INNER_TEMPROOT_PREFIX)
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    return {**os.environ, **extra, "PYTEST_DEBUG_TEMPROOT": root}
+
+
 def wall_clock_budget(seconds: float) -> float:
     """Widen a test's own elapsed-seconds bound for the workers beside it.
 
