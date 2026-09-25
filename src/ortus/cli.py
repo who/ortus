@@ -8,6 +8,7 @@ from ortus.commands.check import check
 from ortus.commands.cost import cost
 from ortus.commands.dashboard import dashboard
 from ortus.commands.eval import evaluate
+from ortus.commands.export import export
 from ortus.commands.grind import grind
 from ortus.commands.human import human
 from ortus.commands.ingest import ingest
@@ -104,5 +105,9 @@ app.command(
         "filing path for agents, in place of a multiline bd create."
     ),
 )(ingest)
+app.command(
+    name="export",
+    help="Refresh the tracked beads export, scrubbed of this clone's protected terms.",
+)(export)
 app.add_typer(prompt_app, name="prompt")
 app.add_typer(judge_app, name="judge")

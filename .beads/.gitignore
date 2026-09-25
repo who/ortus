@@ -59,6 +59,11 @@ backup/
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
+# Terms this clone removes from the export (resolved per machine by
+# `ortus export`). Local by design: a tracked copy would publish the very
+# strings it exists to keep out of the repository.
+protected-terms.txt
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*

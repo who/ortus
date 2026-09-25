@@ -6,7 +6,9 @@ combinations. Run targeted: `uv run pytest tests/test_init_flags.py`.
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -373,3 +375,32 @@ def test_help_advertises_local_flags() -> None:
     assert "--local-model" in out
     assert "--local-base-url" in out
     assert "claude|codex|grok|local" in out
+
+
+@pytest.mark.real_bd
+def test_init_installs_the_tracker_git_hooks(tmp_path: Path) -> None:
+    """A bootstrapped project can actually run the hooks beads ships.
+
+    The assertion follows `core.hooksPath` rather than assuming `.git/hooks/`:
+    with the Dolt backend the hooks live in the tracked `.beads/hooks/` and git
+    is pointed there, while a clone that carries no such setting takes them in
+    `.git/hooks/`. Either way the claim is the same one that matters — the hook
+    git will run on the next commit is on disk and executable.
+    """
+    target = tmp_path / "hooked"
+    result = runner.invoke(app, ["init", str(target), "--project-type", "python"])
+    assert result.exit_code == 0, (result.stdout or "") + (result.stderr or "")
+    configured = subprocess.run(
+        ["git", "config", "--get", "core.hooksPath"],
+        cwd=target,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    hooks_dir = Path(configured) if configured else target / ".git" / "hooks"
+    if not hooks_dir.is_absolute():
+        hooks_dir = target / hooks_dir
+    hook = hooks_dir / "pre-commit"
+    assert hook.is_file(), sorted(p.name for p in hooks_dir.iterdir())
+    assert os.access(hook, os.X_OK), "git only runs a hook it may execute"
+    assert "bd hooks run pre-commit" in hook.read_text(encoding="utf-8")
