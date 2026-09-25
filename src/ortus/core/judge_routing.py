@@ -17,12 +17,13 @@ worker between model tiers, so the router has no confidence floor and no
 needs-human gate of its own.
 
 The router is a flag, `jev_model_router` in `.ortusrc` with
-`ORTUS_JEV_ROUTER` as a per-run override, default off. Off resolves the
-pinned `[profiles.<backend>.implement]` profile exactly as before, so the A/B
-has an unchanged control arm. The arms are compared on **cost per closed
-bead** across the whole tree — planner plus every worker — with **close rate**
-as the guardrail: a cheaper arm that closes fewer beads has lost, and prompt
-or token counts settle nothing either way. Every decision is logged so the
+`ORTUS_JEV_ROUTER` as a per-run override. It defaults on, because the arms
+were run and the routed one won; off resolves the pinned
+`[profiles.<backend>.implement]` profile exactly as before, which is both the
+kill switch and the control arm the comparison ran against. The arms were
+compared on **cost per closed bead** across the whole tree — planner plus
+every worker — with **close rate** as the guardrail: a cheaper arm that closes
+fewer beads has lost, and prompt or token counts settle nothing either way. Every decision is logged so the
 tier thresholds can be rewritten from observed outcomes rather than argued
 from taste.
 """

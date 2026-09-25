@@ -39,11 +39,12 @@ CONFIG = JudgeConfig(enabled=True)
 PHASES = (Phase.PLAN, Phase.IMPLEMENT, Phase.VERIFY, Phase.FINALIZE)
 
 #: The verdict recorded in this arm's `jev_router_ab` metadata. `DEFAULTS`
-#: follows this, never the other way round. It is still False because the
-#: comparison has not produced data yet, not because off was preferred: an
-#: unmeasured arm keeps the control, and flipping it is the whole job of the
-#: bead the treatment's `measured_by` names.
-MEASURED_VERDICT = False
+#: follows this, never the other way round. It is True because the hello-world
+#: comparison returned `adopt`: the routed arm matched the control's close rate
+#: of 1.0 while spending 1.1181 against 1.6794 per closed bead. Moving it again
+#: means running the arms again, because this constant is a reading and not a
+#: preference.
+MEASURED_VERDICT = True
 
 
 def config_for(*backends: str, effort: str = "medium") -> Config:
@@ -100,7 +101,7 @@ def route_records(repo) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-# --- AC-1: the flag is off by default and off changes nothing --------------
+# --- AC-1: the flag resolves from config and off changes nothing -----------
 
 
 def test_flag_off_leaves_the_pinned_implement_profile_identical():
@@ -120,10 +121,13 @@ def test_flag_off_leaves_the_pinned_implement_profile_identical():
     )
 
 
-def test_flag_off_is_what_an_untouched_ortusrc_resolves_to(tmp_path):
+def test_an_untouched_ortusrc_resolves_to_the_adopted_router(tmp_path):
+    """The adopted verdict reaches the router through a plain config load."""
     config = load_config(repo=tmp_path, home=tmp_path)
-    assert config.get("jev_model_router") is False
-    assert jev_router_enabled(config, environ={}) is False
+    assert config.get("jev_model_router") is MEASURED_VERDICT
+    assert jev_router_enabled(config, environ={}) is MEASURED_VERDICT
+    # A caller holding no config at all still fails off. No resolved config is
+    # not the same fact as a resolved config carrying the adopted default.
     assert jev_router_enabled(None, environ={}) is False
 
 

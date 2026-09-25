@@ -414,8 +414,8 @@ def test_stable_prompt_prefix_default_is_off(tmp_path: Path) -> None:
     assert cfg.get("stable_prompt_prefix") is False
 
 
-def test_jev_model_router_default_is_off(tmp_path: Path) -> None:
-    """The pinned implement profile stays the control arm until an A/B says otherwise."""
+def test_jev_model_router_default_is_on(tmp_path: Path) -> None:
+    """The comparison adopted the router, so a fresh load resolves it on."""
     cfg = load_config(repo=tmp_path, home=tmp_path / "home")
-    assert DEFAULTS["jev_model_router"] is False
-    assert cfg.get("jev_model_router") is False
+    assert DEFAULTS["jev_model_router"] is True
+    assert cfg.get("jev_model_router") is True

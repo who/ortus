@@ -106,10 +106,13 @@ DEFAULTS: dict[str, Any] = {
     "stable_prompt_prefix": False,
     # Whether the judge's probability vectors pick the implementation model and
     # reasoning effort for the claimed bead, instead of every worker inheriting
-    # the pinned `[profiles.<backend>.implement]` values. Off by default so
-    # today's pinned profile stays the control arm of the A/B;
-    # `ORTUS_JEV_ROUTER` flips one run without editing a tracked file.
-    "jev_model_router": False,
+    # the pinned `[profiles.<backend>.implement]` values. On by default since
+    # the hello-world comparison adopted the routed arm: it held the control's
+    # close rate while spending 1.1181 against 1.6794 per closed bead. Turning
+    # it on costs an unjudged run nothing, because a bead whose vectors never
+    # arrived still resolves the pinned profile, and `ORTUS_JEV_ROUTER=0`
+    # forces it off for one run without editing a tracked file.
+    "jev_model_router": True,
     # How much the looping-worker signal may do: `off` is today's reaper,
     # `shadow` records the decision it would have taken, `enforce` lets it end
     # a looping worker before the watchdog does. Shadow by default so the
