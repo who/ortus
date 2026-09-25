@@ -1,9 +1,9 @@
 """Supplemental tool policy. An allow result still requires existing permissions.
 
-Local policy stops a short, enumerated list of clearly irreversible calls before
-any client is constructed. Everything else — compound shell, tracker and version
-control commands, test runners, search and MCP tools — becomes one bounded
-request whose typed answers are read as a probability vector over allow,
+Local policy stops a short, enumerated list of clearly irreversible calls, plus
+a tracker call whose exit status the shell would swallow, before any client is
+constructed. Everything else — compound shell, version control commands, test
+runners, search and MCP tools — becomes one bounded request whose typed answers are read as a probability vector over allow,
 deny_call and park_bead, with the argmax taken in code. There is no confidence
 floor and no human-need threshold anywhere in this module: an unsure answer
 flattens toward uniform and resolves to the class the call is already in, which
@@ -69,6 +69,13 @@ _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=", re.S)
 #: `rm -rf /` to the checks below.
 _WRAPPERS = frozenset({
     "sudo", "doas", "env", "command", "nohup", "time", "nice", "exec", "stdbuf",
+})
+
+#: Programs whose own arguments are another command line. A call handed to one
+#: of these never appears as a segment's argv[0], so their words are read again
+#: rather than taken for operands.
+_COMMAND_RUNNERS = frozenset({
+    "xargs", "bash", "sh", "zsh", "dash", "ksh", "parallel",
 })
 
 #: The `rm` flags that traverse a directory rather than unlink one entry.
@@ -259,6 +266,45 @@ def _git_reason(argv: list[str]) -> str | None:
     return None
 
 
+def _runs_bd(word: str) -> bool:
+    """Whether one word handed to a command runner is itself a `bd` line."""
+    for words in _segments(word):
+        argv = _unwrap(words)
+        if argv and PurePosixPath(argv[0]).name == "bd":
+            return True
+    return False
+
+
+def wrapped_bd_reason(command: str) -> str | None:
+    """The refusal for a tracker call that is not the whole command.
+
+    A `bd` invocation inside a pipeline, a compound line or another program
+    reports someone else's exit status: a pipeline yields its last stage's and
+    `xargs` yields its own, so a claim or close that failed reads as a success
+    to the worker that made it. The issue record is what a lost window is
+    recovered from, and a bare `bd ...` line is the only shape whose failure is
+    visible, so every other one stops here.
+
+    Leading assignments and wrappers are stripped exactly as the destructive
+    checks strip them, which makes `sudo bd close x | tee log` the same call as
+    `bd close x | tee log`.
+    """
+    segments = _segments(command)
+    for words in segments:
+        argv = _unwrap(words)
+        if not argv:
+            continue
+        executable = PurePosixPath(argv[0]).name
+        if executable == "bd":
+            if len(segments) > 1:
+                return "wrapped_bd"
+        elif executable in _COMMAND_RUNNERS and any(
+            _runs_bd(word) for word in argv[1:]
+        ):
+            return "wrapped_bd"
+    return None
+
+
 def _literal_reason(value: str, config: JudgeConfig) -> str | None:
     """Secret and configured-sensitive refusals for one literal path word."""
     if not value or "\x00" in value:
@@ -336,9 +382,10 @@ def inspect_tool(
 
     Only deletes of a root, home or somewhere outside the allowed roots,
     history-destroying git calls, configured sensitive paths, credential
-    targets and secrets in network arguments stop here. Everything else — an
-    unknown tool name, a pipeline, an argument shape this module has never
-    seen — is summarized and judged.
+    targets, secrets in network arguments and a `bd` call that is not the
+    whole command stop here. Everything else — an unknown tool name, a
+    pipeline, an argument shape this module has never seen — is summarized and
+    judged.
     """
     env = os.environ if environ is None else environ
     secrets = tuple(v for k, v in env.items() if v and _SECRET_ENV.search(k))
@@ -386,6 +433,12 @@ def inspect_tool(
                     return _stop(reason)
     for value in literals:
         reason = _literal_reason(value, config)
+        if reason is not None:
+            return _stop(reason)
+    if isinstance(command, str) and command.strip():
+        # Last of the local refusals, so a line that is both destructive and a
+        # wrapped tracker call is named by the worse of the two.
+        reason = wrapped_bd_reason(command)
         if reason is not None:
             return _stop(reason)
 
