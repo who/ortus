@@ -30,10 +30,15 @@ from ortus.core.judge import (
 )
 from ortus.core.judge import JudgeRoute
 from ortus.core.judge_state import TRUNCATABLE_FIELDS, StateError, sanitize_field
+from ortus.core.judge_tools import ToolAction
 from ortus.core.judge_typesafe import JudgeFailure, JudgeUsage
 
 MAX_EVENT_BYTES = 8192
 LOG_NAME = "jev-decisions.jsonl"
+
+#: The pre_tool outcome vocabulary, taken from the enum that produces it so a
+#: new action cannot be written here without the code that decided it.
+TOOL_ACTIONS = frozenset(action.value for action in ToolAction)
 
 #: Per-bead model-routing records. A separate file rather than a fourth event
 #: kind in LOG_NAME: the replay reader rejects any record whose event name it
@@ -336,6 +341,64 @@ def write_decision(
                     f"reason={payload['reason']} failure={payload['failure'] or 'none'} "
                     f"latency_ms={payload['latency_ms']:.0f}")
     return event.decision_id
+
+
+def _tool_vector(value: object) -> dict[str, float] | None:
+    """A three-class pre_tool vector, or None for a local-policy record."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != TOOL_ACTIONS:
+        _invalid()
+    return {str(name): _number(weight, 1) for name, weight in value.items()}
+
+
+def write_tool_decision(
+    repo: Path, config: JudgeConfig, run_id: UUID, issue_id: str,
+    record: Mapping[str, object],
+) -> UUID:
+    """Append one pre_tool outcome the hook published in its private inbox.
+
+    The hook decides inside the worker's process, which owns the repository
+    tree, so it leaves a typed record beside its park signals and the parent
+    writes it here. Every decision is recorded, including the allowed ones and
+    the ones local policy answered without a request: a phase whose refusals
+    were previously visible only in a worker transcript is a phase nobody can
+    tune. The record names the tool, its local reason or its vector, and what
+    the hook applied — never an argument, a target or a provider string.
+    """
+    if not isinstance(record, Mapping):
+        _invalid()
+    for key in ("action", "effective_action"):
+        if record.get(key) not in TOOL_ACTIONS:
+            _invalid()
+    for key in ("tool", "reason"):
+        if not isinstance(record.get(key), str):
+            _invalid()
+    failure = record.get("failure")
+    if failure is not None and failure not in {entry.value for entry in JudgeFailure}:
+        _invalid()
+    counts = (record.get("input_tokens"), record.get("output_tokens"))
+    if any(count is not None for count in counts) and any(
+        type(count) is not int or count < 0 for count in counts
+    ):
+        _invalid()
+    usage = JudgeUsage(*counts) if all(type(c) is int for c in counts) else None
+    payload = _common("tool_decision", run_id, uuid4())
+    payload.update({
+        "phase": "pre_tool", "mode": config.mode.value,
+        "issue_id": _clean_metadata(issue_id, config),
+        "seat": _clean_metadata(config.seat, config), "model": config.model,
+        "tool": _clean_metadata(str(record["tool"]), config),
+        "reason": _clean_metadata(str(record["reason"]), config),
+        "vector": _tool_vector(record.get("vector")),
+        "action": record["action"],
+        "effective_action": record["effective_action"],
+        "failure": failure,
+        "latency_ms": _number(record.get("latency_ms", 0)),
+        **_usage(usage),
+    })
+    _append(repo, payload)
+    return UUID(payload["decision_id"])
 
 
 def write_model_route(

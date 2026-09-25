@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from unittest.mock import Mock
+from uuid import uuid4
 
 import pytest
 
@@ -17,10 +18,16 @@ from ortus.core.agent import BackendError
 from ortus.core.claude import ClaudeRunner
 from ortus.core.config import Config
 from ortus.core.judge import JudgeConfig, parse_judge_config
-from ortus.core.judge_hook import CONTEXT_ENV, load_context, write_human_signal
+from ortus.core.judge_hook import (
+    CONTEXT_ENV, load_context, write_human_signal, write_tool_record,
+)
 from ortus.core.judge_hooks import HookRun, check_pre_tool
+from ortus.core.judge_replay import validate_event
+from ortus.core.judge_tools import ToolAction, ToolDecision
+from ortus.core.judge_typesafe import JudgeUsage
 from tests._shims import make_inline_python_shim
 from tests.test_grind_judge import gate, answer  # noqa: F401
+from tests.test_readiness import ready_issue
 
 
 @pytest.fixture
@@ -35,6 +42,14 @@ def publish(runner):
     context = load_context(runner.extra_env)
     write_human_signal(context)
     return context
+
+
+def decisions(repo):
+    path = repo / 'logs' / 'jev-decisions.jsonl'
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()
+            if json.loads(line)['event'] == 'tool_decision']
 
 
 @pytest.mark.parametrize('resumed', [False, True])
@@ -95,6 +110,96 @@ def test_every_worker_exit_cleans_private_files(hooks_gate, ending):
     assert len(directories) == 1
     assert not directories[0].exists()
     assert gate.bd.rows['demo-1']['status'] == 'in_progress'
+    assert gate.bd.rows['demo-1']['labels'] == []
+
+
+def test_pre_tool_park_continues_the_queue_to_the_next_ready_bead(hooks_gate):
+    gate = hooks_gate
+    gate.bd.rows['demo-2'] = dict(ready_issue('demo-2'), status='open', labels=[])
+    claimed = []
+
+    def worker(prompt, **kwargs):
+        # A parked bead keeps its claim, so this window's own id is the
+        # in_progress one nobody has flagged yet.
+        claimed.append(next(i for i, r in gate.bd.rows.items()
+                            if r['status'] == 'in_progress' and 'human' not in r['labels']))
+        if len(claimed) == 1:
+            publish(gate.worker)
+            return 143
+        gate.bd.rows[claimed[-1]].update(status='closed')
+        return 0
+
+    gate.worker.run.side_effect = worker
+    result = gate.invoke('--iterations', '4')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    # The park took one bead out of the queue, not the whole run.
+    assert claimed == ['demo-1', 'demo-2']
+    assert gate.bd.rows['demo-1']['labels'] == ['human']
+    assert gate.bd.rows['demo-1']['status'] == 'in_progress'
+    assert gate.bd.rows['demo-2']['status'] == 'closed'
+
+
+def test_pre_tool_park_still_honours_the_iteration_cap(hooks_gate):
+    gate = hooks_gate
+    gate.bd.rows['demo-2'] = dict(ready_issue('demo-2'), status='open', labels=[])
+    gate.worker.run.side_effect = lambda *a, **kw: publish(gate.worker) and 143
+
+    result = gate.invoke('--iterations', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    assert gate.worker.run.call_count == 1
+    assert gate.bd.rows['demo-2']['status'] == 'open'
+
+
+def test_tool_decision_records_reach_the_repository_log(tmp_path):
+    runner = ClaudeRunner()
+    registration = HookRun(tmp_path, 'demo-1', JudgeConfig(), str(uuid4()), runner)
+    try:
+        context = load_context(runner.extra_env)
+        write_tool_record(context, 'Bash', ToolDecision(ToolAction.DENY_CALL, 'force_push'),
+                          ToolAction.DENY_CALL)
+        write_tool_record(
+            context, 'Read',
+            ToolDecision(ToolAction.ALLOW, 'judged', 0.7, 0.2, 0.1,
+                         latency_ms=12.5, usage=JudgeUsage(11, 2)),
+            ToolAction.ALLOW,
+        )
+        # A decision record is evidence on its way to the log, never a reap.
+        assert registration.poll() is False
+        assert not registration.requested
+        records = sorted(decisions(tmp_path), key=lambda r: r['tool'])
+        assert [r['tool'] for r in records] == ['Bash', 'Read']
+        local, judged = records
+        assert local['phase'] == 'pre_tool' and local['issue_id'] == 'demo-1'
+        assert (local['reason'], local['action'], local['effective_action']) == (
+            'force_push', 'deny_call', 'deny_call')
+        assert local['vector'] is None and local['input_tokens'] is None
+        assert judged['vector'] == {'allow': 0.7, 'deny_call': 0.2, 'park_bead': 0.1}
+        assert (judged['input_tokens'], judged['output_tokens']) == (11, 2)
+        assert judged['latency_ms'] == 12.5
+        for record in records:
+            assert validate_event(record) == record
+    finally:
+        registration.close()
+
+
+def test_tool_decision_records_from_a_worker_land_in_the_run_log(hooks_gate):
+    gate = hooks_gate
+
+    def worker(prompt, **kwargs):
+        context = load_context(gate.worker.extra_env)
+        write_tool_record(context, 'Bash',
+                          ToolDecision(ToolAction.DENY_CALL, 'recursive_root_deletion'),
+                          ToolAction.DENY_CALL)
+        gate.bd.rows['demo-1'].update(status='closed')
+        return 0
+
+    gate.worker.run.side_effect = worker
+    result = gate.invoke('--iterations', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    records = decisions(gate.repo)
+    assert len(records) == 1
+    assert records[0]['reason'] == 'recursive_root_deletion'
+    assert validate_event(records[0]) == records[0]
     assert gate.bd.rows['demo-1']['labels'] == []
 
 
@@ -229,13 +334,14 @@ def test_foreign_or_malformed_signals_cannot_escalate(tmp_path, field):
         registration.close()
 
 
-@pytest.mark.parametrize('tool,arguments,expect_human', [
-    ('Bash', {'command': 'opaque | command'}, True),
-    ('Read', {'file_path': '.env'}, False),
+@pytest.mark.parametrize('tool,arguments,decision', [
+    ('Bash', {'command': 'rm -rf /'}, 'deny'),
+    ('Read', {'file_path': '.env'}, 'deny'),
+    ('Bash', {'command': 'ls && cat AGENTS.md | head -100'}, 'allow'),
 ])
-def test_fake_claude_executes_hook_and_parent_reaps(tmp_path, tool, arguments, expect_human):
+def test_fake_claude_executes_hook_without_ending_the_window(tmp_path, tool, arguments, decision):
     script = """
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys
 from pathlib import Path
 argv = sys.argv
 settings = json.loads(Path(argv[argv.index('--settings') + 1]).read_text())
@@ -245,30 +351,36 @@ body.update(hook_event_name='PreToolUse', session_id=argv[argv.index('--session-
             cwd=os.getcwd(), tool_use_id='call-1')
 result = subprocess.run(command, shell=True, input=json.dumps(body), text=True, capture_output=True)
 assert result.returncode == 0, result.stderr
-assert json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'] == 'deny'
-print('hook-denied', flush=True)
-if os.environ['TEST_WAIT'] == 'yes':
-    time.sleep(30)
+decided = (json.loads(result.stdout)['hookSpecificOutput']['permissionDecision']
+           if result.stdout else 'allow')
+assert decided == os.environ['TEST_DECISION'], result.stdout
+print('hook-' + decided, flush=True)
 """
     shim = make_inline_python_shim(tmp_path, 'hook-claude', script)
     runner = ClaudeRunner(claude_binary=str(shim), extra_env={
         'TEST_TOOL': json.dumps({'tool_name': tool, 'tool_input': arguments}),
-        'TEST_WAIT': 'yes' if expect_human else 'no',
+        'TEST_DECISION': decision,
     })
-    registration = HookRun(tmp_path, 'demo-1', JudgeConfig(pre_tool=True), 'run-1', runner)
+    run_id = str(uuid4())
+    registration = HookRun(tmp_path, 'demo-1', JudgeConfig(pre_tool=True), run_id, runner)
     started = time.monotonic()
     try:
         rc = runner.run('/goal work', repo=tmp_path, log_path=tmp_path / 'worker.log',
                         timeout=10, reap_when=registration.poll, reap_poll=.05)
         registration.poll()
         assert time.monotonic() - started < 5
-        assert (rc != 0) == expect_human
-        assert registration.requested == expect_human
-        if not expect_human:
-            assert 'hook-denied' in (tmp_path / 'worker.log').read_text()
+        # Neither outcome reaps the worker or touches the bead: with no
+        # provider reachable, nothing in this phase parks any more.
+        assert rc == 0
+        assert registration.requested is False
+        assert 'hook-' + decision in (tmp_path / 'worker.log').read_text()
         bd = Mock()
         registration.escalate(bd)
-        assert bd.add_label.call_count == int(expect_human)
+        bd.add_label.assert_not_called()
+        record = decisions(tmp_path)[0]
+        assert record['tool'] == tool
+        assert record['effective_action'] == (
+            'deny_call' if decision == 'deny' else 'allow')
     finally:
         registration.close()
 

@@ -18,8 +18,9 @@ The pre-turn hard escalate is scrapped: no confidence floor, human-need
 probability or risk score withholds a claim, and no offline review can put one
 back. What remains for review is soft: bands to log, flag or rewrite a prompt
 around. The pre-tool hook described at the end of this document is a separate
-phase over irreversible tool calls, and its floors are fixed literals there —
-they are not claim gates and calibration never touches them.
+phase over irreversible tool calls, and it follows the same policy: its answers
+become a probability vector and code takes the argmax, with no floor and no
+threshold of its own.
 
 ## Install and opt in
 
@@ -516,22 +517,59 @@ above. Neither rollback discards work or interrupts a running worker.
 `judge.pre_tool = true` installs a private, temporary Claude PreToolUse hook
 for the run. Only Claude supports it; Codex, Grok, OpenCode and Docker launches
 fail startup with this option. Disabled Claude hooks or unreadable hook context
-also fail before launch. Existing goal hooks remain active. A human signal
-stops the worker and preserves its claim and dirty work for operator review.
+also fail before launch. Existing goal hooks remain active. A park signal stops
+the worker and preserves its claim and dirty work for operator review; a denied
+call stops nothing but that call.
 
-Unlike the pre-turn gate, this phase does withhold on confidence and risk. An
-answer less than 0.8 confident either way about needing a human, or whose risk
-confidence is under 0.8, returns `low_confidence`; a human-need probability of
-0.8 or more, or a risk score of 1.5 or more, returns `needs_human`. Both hand
-the proposed call to a human. Those four numbers are fixed in `decide_tool` and
-are not the `human_threshold`, `risk_threshold` or `*_confidence` settings,
-which stay inert. The difference is deliberate: a misrouted claim costs one
-worker turn and is recorded for calibration, while a tool call can be
-irreversible, so an unsure answer stops it rather than spending the action to
-find out. A malformed answer, an unsupported tool and a local policy denial
-still stop the call whatever those answers say. Offline calibration cannot move
-these four numbers: they are not settings, this phase is not the claim gate,
-and a candidate band is a report either way.
+Local policy in `inspect_tool` stops a short, enumerated list of calls before
+any client is built: a recursive delete of the filesystem root, the repository
+root, the home directory or anything outside the allowed roots; any delete
+whose target lies outside those roots; `git push --force`, `--force-with-lease`
+or `-f`; `git reset --hard`; a read or write of a credential path or of a
+configured `sensitive_paths` fragment; and a secret environment value appearing
+in a network argument. Wrappers and pipelines do not hide a match — `sudo`,
+`env`, a leading `NAME=value` and each segment of a compound line are read
+separately. Every other call is summarized and judged, including compound
+shell, `bd`, ordinary version control, test runners, search and MCP tools.
+Unfamiliar is not irreversible, and the previous allowlist treated it as though
+it were: it refused every call it did not recognise, which ended whole runs on
+their first tool use.
+
+What reaches the provider is the tool's name and a screened argument summary,
+bounded by `tool_cap`. Payload-bearing argument names are described by shape
+rather than content, longer values are replaced by their length, absolute paths
+become their repository-relative form or `[outside-roots]`, and any value
+carrying a secret or a `sensitive_paths` fragment is omitted whole. Set
+`sensitive_paths` for anything else a request must never name.
+
+The answers become a probability vector over `allow`, `deny_call` and
+`park_bead`, and `decide_tool` takes the argmax with no confidence floor and no
+human-need threshold. The risk score is read as the fraction of its scale that
+argues against the call; the human-need noul reports no confidence of its own,
+so only its lean past the coin flip claims mass, and an answer at 0.5 argues for
+nothing. Confidence shrinks the whole vector toward uniform, so an unsure answer
+lands nearer the middle and a zero-confidence one is uniform — which the tie
+rule, ordered least drastic first, reads as `allow`. The `human_threshold`,
+`risk_threshold` and `*_confidence` settings stay inert here as they are
+pre-turn, and offline calibration has nothing in this phase to move.
+
+`deny_call` refuses that one call and returns `denied_call`; the worker keeps
+its claim, its window and its next attempt. A local policy match refuses the
+call the same way and returns `policy_denied`. Only `park_bead` writes the
+human signal: grind then reaps that worker, labels that one bead `human` with a
+typed comment, and continues to the next ready bead instead of ending the run.
+A service failure follows `failure_mode` — open allows, closed denies the call
+— and a malformed answer denies the call, because neither says anything about
+the bead. Shadow mode records the vector and applies `allow` to model
+decisions; it never weakens a local denial.
+
+Every decision is recorded. The hook cannot write the repository's log, since
+the worker owns that tree, so it publishes one typed record per decision into
+its private inbox and the parent appends each as a `tool_decision` event in
+`logs/jev-decisions.jsonl` — phase, tool name, the local reason or the vector,
+the applied action, any failure, latency and reported token usage, and no part
+of the call's arguments. `ortus judge export` and `replay` accept the event, and
+logs written before it existed still load.
 The temporary settings contain no credential and are removed after the worker
 is reaped. This supplements the existing worker trust boundary; repository
 write access is not a tamper-proof boundary.
