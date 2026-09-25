@@ -16,7 +16,7 @@ from ortus.core.judge import (
     JudgeRoute, JudgeState, WORKER_ROUTES, parse_judge_config,
 )
 from ortus.core.judge_log import DecisionEvent, elapsed_ms, write_decision
-from ortus.core.judge_state import pack_state
+from ortus.core.judge_state import OmissionReason, pack_state
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, route_options
 from ortus.core.readiness import validate_issue
 
@@ -77,7 +77,14 @@ def evaluate_readiness(
             return None
         # Semantic advice is observational even when pre-turn routing enforces.
         config = replace(config, mode=JudgeMode.SHADOW)
-        state = pack_state(issue, config, phase=JudgePhase.SEMANTIC_READINESS).state
+        packed = pack_state(issue, config, phase=JudgePhase.SEMANTIC_READINESS)
+        state = packed.state
+        # Length alone no longer silences the judge: an oversized field arrives
+        # shortened. Empty, private and sensitive text still leave nothing to ask about.
+        truncated = tuple(sorted(
+            omission.field for omission in packed.omissions
+            if omission.reason is OmissionReason.TRUNCATED
+        ))
         if not all((state.title.strip(), state.objective.strip(), state.acceptance.strip(), state.design.strip())):
             output.progress("validate", "semantic readiness unavailable: issue text omitted; schema result unchanged")
             return {"status": "text_unavailable", "answers": None}
@@ -93,13 +100,14 @@ def evaluate_readiness(
             answers=verdict.answers, decision=GateDecision(GateAction.PROCEED, baseline, reason),
             model=config.model, criteria_version=state.criteria_version,
             criteria_hash=state.criteria_hash, latency_ms=elapsed_ms(started),
-            failure=verdict.failure, usage=verdict.usage,
+            failure=verdict.failure, usage=verdict.usage, truncated_fields=truncated,
         ))
         return {
             "issue_id": state.issue_id,
             "status": verdict.failure.value if verdict.failure else "advisory",
             "answers": asdict(verdict.answers) if verdict.answers else None,
             "decision_id": str(decision_id),
+            "truncated_fields": list(truncated),
         }
     except Exception:
         # Configuration, packing and logging failures also preserve the schema

@@ -27,6 +27,7 @@ class StateError(ValueError):
 class OmissionReason(str, Enum):
     SENSITIVE = "sensitive"
     OVERSIZE = "oversize"
+    TRUNCATED = "truncated"
     TEXT_DISABLED = "text_disabled"
     PRIVATE = "private"
     TOTAL_BUDGET = "total_budget"
@@ -98,14 +99,15 @@ def environment_secrets(environ: Mapping[str, str] | None = None) -> tuple[str, 
     )
 
 
-def sanitize_field(
-    value: str,
-    *,
-    cap: int,
-    secret_values: tuple[str, ...] = (),
-    sensitive_paths: tuple[str, ...] = (),
-) -> SanitizedField:
-    """Inspect the entire string before applying a character cap; never truncate."""
+def _screen(
+    value: str, cap: int, secret_values: tuple[str, ...], sensitive_paths: tuple[str, ...],
+) -> bool:
+    """Whether the whole field must be dropped, after inspecting every character.
+
+    Shared by the omitting and the truncating path so both answer "is this
+    field safe at all" identically, and so nothing a cap would later cut away
+    can decide the answer. Unusable input raises rather than returning a value.
+    """
     if not isinstance(value, str) or type(cap) is not int or cap < 0:
         raise StateError("invalid field or cap")
     if any(not isinstance(item, str) for item in (*secret_values, *sensitive_paths)):
@@ -113,20 +115,123 @@ def sanitize_field(
     if _SENSITIVE.search(value) or any(
         literal and literal in value for literal in (*secret_values, *sensitive_paths)
     ):
-        return SanitizedField(None, OmissionReason.SENSITIVE)
+        return True
     # Surrogates cannot be serialized as UTF-8. Do not echo encoding errors.
     if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
         raise StateError("invalid text encoding")
+    return False
+
+
+def sanitize_field(
+    value: str,
+    *,
+    cap: int,
+    secret_values: tuple[str, ...] = (),
+    sensitive_paths: tuple[str, ...] = (),
+) -> SanitizedField:
+    """Inspect the entire string before applying a character cap; never truncate.
+
+    This is the contract for metadata, tool names and anything that is not
+    issue prose: a value too long to send is a value the judge does not get.
+    Issue text goes through :func:`truncate_field` instead.
+    """
+    if _screen(value, cap, secret_values, sensitive_paths):
+        return SanitizedField(None, OmissionReason.SENSITIVE)
     if len(value) > cap:
         return SanitizedField(None, OmissionReason.OVERSIZE)
     return SanitizedField(value)
+
+
+#: Closes a field the packer had to shorten, so a reader never mistakes a cut
+#: field for a short one. It is text like any other and is counted against the
+#: cap it is announcing.
+TRUNCATION_MARKER = "[... truncated]"
+
+#: The issue-text fields the packer shortens rather than drops, each with the
+#: sections it keeps first. A heading named here is worth more to a judge than
+#: whatever a planner wrote after it; a heading not named keeps its place in
+#: the field's own order, so a bead written to some other shape still packs.
+SECTION_PRIORITY: dict[str, tuple[str, ...]] = {
+    "objective": ("Objective", "Behavioral context"),
+    "design": ("Scope", "Concrete locations", "Resolved decisions"),
+    "acceptance": ("Observable criteria",),
+}
+TRUNCATABLE_FIELDS: tuple[str, ...] = tuple(SECTION_PRIORITY)
+
+_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
+
+
+def _blocks(text: str) -> list[tuple[str, list[str]]]:
+    """The field split into heading-led blocks, any preamble first under ``""``."""
+    blocks: list[tuple[str, list[str]]] = [("", [])]
+    for line in text.splitlines():
+        match = _HEADING.match(line)
+        if match:
+            blocks.append((match.group(1).strip(), [line]))
+        else:
+            blocks[-1][1].append(line)
+    return [block for block in blocks if any(line.strip() for line in block[1])]
+
+
+def _priority_lines(text: str, priority: tuple[str, ...]) -> list[str]:
+    """Every line of the field, the sections a judge needs first.
+
+    Each block keeps its heading and its internal order, so any prefix of this
+    list still reads as the sections it came from. The sort is stable, so a
+    heading the priority list does not name follows in the order it was written.
+    """
+    order = {name.casefold(): index for index, name in enumerate(priority)}
+    blocks = sorted(
+        _blocks(text), key=lambda block: order.get(block[0].casefold(), len(order))
+    )
+    return [line for _, lines in blocks for line in lines]
+
+
+def truncate_field(
+    value: str,
+    *,
+    cap: int,
+    field: str = "",
+    secret_values: tuple[str, ...] = (),
+    sensitive_paths: tuple[str, ...] = (),
+) -> SanitizedField:
+    """Screen the whole field, then keep a bounded, section-aware slice of it.
+
+    Screening still reads every character, so a secret past the cap boundary
+    omits the field exactly as it always has. What survives an oversized field
+    is whole lines drawn from its most useful sections first, closed by
+    :data:`TRUNCATION_MARKER`: a planner-sized bead is judged on its objective
+    and its criteria instead of vanishing from the request altogether.
+    """
+    if _screen(value, cap, secret_values, sensitive_paths):
+        return SanitizedField(None, OmissionReason.SENSITIVE)
+    if len(value) <= cap:
+        return SanitizedField(value)
+    budget = cap - len(TRUNCATION_MARKER) - 1
+    if budget <= 0:
+        # Too small to admit that anything was cut; the cap is the whole slice.
+        return SanitizedField(value[:cap], OmissionReason.TRUNCATED)
+    kept: list[str] = []
+    used = 0
+    for line in _priority_lines(value, SECTION_PRIORITY.get(field, ())):
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > budget:
+            break
+        kept.append(line)
+        used += cost
+    if not kept:
+        # A single line longer than the budget: cut it rather than send nothing.
+        kept = [value[:budget]]
+    return SanitizedField(
+        "\n".join(kept) + "\n" + TRUNCATION_MARKER, OmissionReason.TRUNCATED
+    )
 
 
 def _section(text: str, heading: str) -> str:
     lines: list[str] = []
     active = False
     for line in text.splitlines():
-        match = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", line)
+        match = _HEADING.match(line)
         if match:
             if active:
                 break
@@ -151,7 +256,9 @@ def pack_state(
     The caller can supply an environment snapshot for a fully pure operation.
     No logs, attachments, case evidence, paths or transcript files are opened.
     Metadata uses the title cap; tool names and summaries use the tool cap.
-    Full source fields are screened before Objective/AC first-line extraction.
+    Full source fields are screened before Objective/AC first-line extraction,
+    and an oversized one is truncated rather than dropped, so a long work spec
+    is judged on the sections a reader needs instead of on metadata alone.
     """
     if not isinstance(issue, Mapping):
         raise StateError("invalid issue packet")
@@ -190,6 +297,17 @@ def pack_state(
                 omissions.append(item)
         return result.value or ""
 
+    def clean_text(field: str, value: str, cap: int) -> str:
+        result = truncate_field(
+            value, cap=cap, field=field, secret_values=secrets,
+            sensitive_paths=config.sensitive_paths,
+        )
+        if result.reason is not None:
+            item = Omission(field, result.reason)
+            if item not in omissions:
+                omissions.append(item)
+        return result.value or ""
+
     routes = backends_available if backends_available is not None else tuple(
         route for route in config.routes if route in WORKER_ROUTES
     )
@@ -211,10 +329,11 @@ def pack_state(
     )
     if config.allows_issue_text(tuple(labels)):
         title = clean("title", issue.get("title", ""), config.title_cap)
-        # Scan and cap the source before extracting a safe first line. A secret
-        # on a later line must suppress the whole field, not disappear in slicing.
-        description = clean("objective", issue.get("description", ""), config.objective_cap)
-        acceptance = clean("acceptance", issue.get("acceptance_criteria", ""), config.acceptance_cap)
+        # Scan the whole source before extracting a safe first line. A secret
+        # on a later line must suppress the whole field, not disappear in
+        # slicing; a source that is merely long is shortened, not discarded.
+        description = clean_text("objective", issue.get("description", ""), config.objective_cap)
+        acceptance = clean_text("acceptance", issue.get("acceptance_criteria", ""), config.acceptance_cap)
         objective = _section(description, "Objective")
         criteria = _section(acceptance, "Observable criteria") or acceptance
         first_lines = [line for line in criteria.splitlines() if re.match(r"^\s*(?:[-*]\s*)?AC-\d+\b", line)]
@@ -226,7 +345,7 @@ def pack_state(
         if phase == JudgePhase.SEMANTIC_READINESS:
             state = replace(
                 state, objective=objective, acceptance=acceptance,
-                design=clean("design", issue.get("design", ""), config.objective_cap),
+                design=clean_text("design", issue.get("design", ""), config.objective_cap),
             )
     else:
         reason = OmissionReason.PRIVATE if "judge-private" in labels else OmissionReason.TEXT_DISABLED

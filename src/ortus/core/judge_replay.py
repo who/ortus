@@ -17,6 +17,7 @@ from uuid import UUID
 
 from ortus.core.judge import WORKER_ROUTES, GateAction, GateReason, JudgeConfig, JudgePhase, JudgeRoute
 from ortus.core.judge_log import MAX_EVENT_BYTES, OutcomeStatus, _clean_metadata
+from ortus.core.judge_state import TRUNCATABLE_FIELDS
 from ortus.core.judge_typesafe import JudgeFailure
 from ortus.core.worker_failure import WorkerFailure
 
@@ -59,6 +60,10 @@ OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
 #: widens the accepted shape instead of bumping the schema out from under the
 #: readers that already consume these files.
 POST_SIDE = {"worker_failure"}
+#: The issue-text fields the packer shortened for this request. Optional for
+#: the same reason: a decision written before truncation existed carries no
+#: such list and is still a valid version-1 record.
+DECISION_SIDE = {"truncated_fields"}
 WORKER_FAILURES = {failure.value for failure in WorkerFailure}
 MAX_LABEL_BYTES = 16 * 1024 * 1024
 
@@ -119,7 +124,8 @@ def validate_event(value: object) -> dict:
               POST if kind == "post_turn" else
               STUCK if kind == "stuck_decision" else
               TRIAGE if kind == "triage" else set())
-    optional = POST_SIDE if kind == "post_turn" else set()
+    optional = (POST_SIDE if kind == "post_turn"
+                else DECISION_SIDE if kind == "decision" else set())
     _require(bool(fields) and fields <= set(e) <= fields | optional)
     _uuid(e["run_id"])
     _uuid(e["decision_id"])
@@ -144,6 +150,12 @@ def validate_event(value: object) -> dict:
         _require(e["criteria_hash"] is None or (type(e["criteria_hash"]) is str
                  and re.fullmatch(r"[a-f0-9]{64}", e["criteria_hash"]) is not None))
         _require(_number(e["latency_ms"]))
+        names = e.get("truncated_fields", [])
+        # Every element is proved a known name before the duplicate check, so an
+        # unhashable value is a rejected record rather than a reader crash.
+        _require(type(names) is list)
+        _require(all(_choice(name, TRUNCATABLE_FIELDS) for name in names))
+        _require(len(set(names)) == len(names))
         _require(_choice(e["backend"], WORKER_ROUTES, nullable=True))
         answers = e["answers"]
         _require((answers is None) != (e["failure"] is None))

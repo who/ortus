@@ -96,8 +96,8 @@ A numeric directory such as `01` needs an alias such as `ortus`.
 | `seat` | `default` | Set explicitly to `ortus` for this pilot |
 | `include_issue_text` | `true` | Screened title, first Objective line and AC lines travel |
 | `include_log_tail` | `false` | The pre-turn packer never reads log tails; true also arms the looping-worker check, the one phase that sends a screened slice of a worker's own log |
-| `title_cap`, `objective_cap`, `acceptance_cap`, `tool_cap` | `160`, `1024`, `1024`, `512` | Character caps; oversized source fields are omitted |
-| `total_bytes_cap` | `8192` | Serialized UTF-8 state budget |
+| `title_cap`, `objective_cap`, `acceptance_cap`, `tool_cap` | `160`, `4096`, `4096`, `512` | Character caps; oversized issue text is truncated, oversized metadata omitted |
+| `total_bytes_cap` | `16384` | Serialized UTF-8 state budget |
 | `sensitive_paths` | empty | Additional literal paths to omit from text |
 
 The adapter asks Choice, Noul and Score questions in one System One request.
@@ -569,9 +569,17 @@ adds a human label, stops a claim or selects a backend in this semantic pass.
 
 The semantic request requires `include_issue_text = true` and a screened title,
 full Objective section, acceptance text and design. A private label, sensitive
-text, empty field or size omission refuses the semantic call and reports
-`text_unavailable`. Description and design each use `objective_cap`; acceptance
-uses `acceptance_cap`; the serialized request still obeys `total_bytes_cap`.
+text or an empty field refuses the semantic call and reports `text_unavailable`.
+Length alone does not: a field longer than its cap is screened in full and then
+cut to whole lines, its most useful sections first — Objective and Behavioral
+context for the description, Scope, Concrete locations and Resolved decisions
+for the design, Observable criteria for the acceptance — and closed with a
+`[... truncated]` marker. A secret anywhere in the field, including past the
+cap boundary, still omits the whole field; truncation never decides what is
+safe. Each cut field is named in the decision row's `truncated_fields`, so a
+replay can tell a full-text judgment from a shortened one. Description and
+design each use `objective_cap`; acceptance uses `acceptance_cap`; the
+serialized request still obeys `total_bytes_cap`.
 Increase those explicit limits for longer packets after reviewing their text.
 Do not put credentials in configuration; use the process environment or the
 existing user environment file for `TYPESAFE_API_KEY`.

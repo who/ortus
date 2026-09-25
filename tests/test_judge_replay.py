@@ -49,6 +49,19 @@ def records(tmp_path):
     return make
 
 
+def test_truncated_fields_are_accepted_and_bounded(records, tmp_path):
+    """Rows written before truncation existed stay valid; invented names do not."""
+    decision = records(outcome=False)[0]
+    assert decision["truncated_fields"] == []
+    for names in ([], ["design"], ["acceptance", "design", "objective"]):
+        assert list(read_events(save(tmp_path, [{**decision, "truncated_fields": names}])))
+    assert list(read_events(save(tmp_path, [{k: v for k, v in decision.items()
+                                             if k != "truncated_fields"}])))
+    for names in (["last_log_tail"], ["design", "design"], "design", [None], [["design"]]):
+        with pytest.raises(ReplayError):
+            list(read_events(save(tmp_path, [{**decision, "truncated_fields": names}])))
+
+
 def save(tmp_path, values, suffix=b""):
     path = tmp_path / "events.jsonl"
     path.write_bytes(b"".join(json.dumps(v).encode() + b"\n" for v in values) + suffix)

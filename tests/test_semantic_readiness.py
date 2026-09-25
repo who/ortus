@@ -17,7 +17,7 @@ from ortus.core import judge_readiness as semantic
 from ortus.core.judge_replay import read_events
 from ortus.core.judge_state import pack_state
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, build_questions
-from tests.test_readiness import ready_issue
+from tests.test_readiness import planner_sized_issue, ready_issue
 
 
 @pytest.fixture
@@ -73,6 +73,19 @@ def test_semantic_readiness_requires_all_screened_text(tmp_path, packet, judge, 
     assert advice["status"] == "text_unavailable"
     assert not judge
     assert not (tmp_path / "logs").exists()
+
+
+def test_planner_sized_issue_is_judged_rather_than_reported_unavailable(tmp_path, judge):
+    """The size a planner writes used to leave the judge with nothing to read."""
+    issue = {**planner_sized_issue(), "title": "Ship the preview flag"}
+    advice = semantic.evaluate_readiness(tmp_path, issue, JudgeConfig(enabled=True))
+    assert advice["status"] == "advisory"
+    assert advice["truncated_fields"] == ["acceptance", "design", "objective"]
+    assert len(judge) == 1
+    assert judge[0].objective and judge[0].acceptance and judge[0].design
+    event, = read_events(tmp_path / "logs/jev-decisions.jsonl")
+    assert event["phase"] == "semantic_readiness"
+    assert event["truncated_fields"] == ["acceptance", "design", "objective"]
 
 
 def test_semantic_readiness_disabled_has_no_observation(tmp_path, packet, judge):
