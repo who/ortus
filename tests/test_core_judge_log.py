@@ -22,8 +22,19 @@ from ortus.core.judge_log import (
     elapsed_ms, write_decision, write_outcome,
 )
 from ortus.core.judge_typesafe import JudgeFailure, JudgeUsage
+from tests.conftest import wall_clock_budget
 
 CONFIG = JudgeConfig(enabled=True)
+
+#: How long a spawned child gets to reach its start event. A `spawn` child
+#: re-imports the interpreter, so its startup time scales with the workers
+#: competing for the machine rather than with anything the lock does, and
+#: `-n auto` across dozens of cores is exactly that contention (ortus-uvn2).
+#: The ceiling keeps the bound derived rather than open-ended: a child that
+#: never starts has to fail the probe rather than hang it, however wide the
+#: environment claims the session is.
+_START_WAIT_SECONDS = 5.0
+_START_WAIT_CEILING = 60.0
 
 
 def decision(**changes):
@@ -256,6 +267,7 @@ def test_process_appends_take_the_lock_and_remain_complete(tmp_path):
     write_decision(tmp_path, CONFIG, event)
     ctx = multiprocessing.get_context("spawn")
     processes = []
+    start_wait = min(wall_clock_budget(_START_WAIT_SECONDS), _START_WAIT_CEILING)
     with (tmp_path / "logs" / judge_log.LOG_NAME).open("rb") as locked:
         fcntl.flock(locked, fcntl.LOCK_EX)
         try:
@@ -265,7 +277,7 @@ def test_process_appends_take_the_lock_and_remain_complete(tmp_path):
                                       args=(tmp_path, event, started, finished))
                 process.start()
                 processes.append(process)
-                assert started.wait(5)
+                assert started.wait(start_wait)
                 assert not finished.wait(.05)
             assert len(records(tmp_path)) == 1
         finally:
