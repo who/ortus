@@ -1,35 +1,126 @@
 """Integration tests for core/bd.py.
 
-Per Testing Strategy: bd is NEVER mocked. Each test gets its own tmp
-workspace via `bd init`. Marked `integration` so it can be deselected
-in fast-unit-test runs.
+Per Testing Strategy: bd is NEVER mocked here. This is the file that owns
+the real-binary contract, and `tests/test_fake_bd_contract.py` is what holds
+the in-memory stand-in used elsewhere to it.
+
+Two shapes of workspace, because two shapes of test. A test that writes —
+creating, closing, commenting — takes its own copy of the session's bare
+template, which costs about 25ms against the ~4.5s a per-test `bd init`
+used to cost. A test that only queries shares one workspace seeded once for
+the whole module, so the issues those queries read across are created once
+rather than once per test; `_seeded_state` proves at teardown that none of
+them wrote into it. Marked `integration` so it can be deselected in
+fast-unit-test runs.
 """
 
 from __future__ import annotations
 
-import shutil
-import subprocess
+import json
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from ortus.core.bd import BdClient, BdError
+from tests.conftest import copy_bd_workspace, run_bd
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture()
 def bd_workspace(tmp_path: Path) -> Path:
-    """Fresh `bd init` workspace, per-test."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd binary not on PATH; cannot run integration tests")
-    subprocess.run(
-        ["bd", "init"],
-        cwd=str(tmp_path),
-        check=True,
-        capture_output=True,
+    """A writable bd workspace of this test's own, from the session template."""
+    return copy_bd_workspace(tmp_path / "workspace", "bare").path
+
+
+# ---------------------------------------------------------------------------
+# One seeded workspace for the read-only query tests
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Seeded:
+    """The shared workspace and the issues baked into it.
+
+    One of each shape the label and status filters have to tell apart: an
+    unlabelled open issue, a human-flagged open one, a claim of each kind,
+    and something closed.
+    """
+
+    path: Path
+    plain: str
+    flagged: str
+    working: str
+    escalated: str
+    landed: str
+
+
+#: The memories the lessons test selects over, ordered as its assertion
+#: expects them: two selectable keys and one the caller excludes.
+_SEEDED_MEMORIES = (
+    ("sandbox-sweep", "copy the tree before sweeping it"),
+    ("stale-scheduler", "the scheduler holds the code it started with " * 20),
+    ("readiness-pointer", "pointer to the readiness contract"),
+)
+
+
+def _seeded_state(path: Path) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Every issue's status and labels — the state a reader must not change."""
+    rows = json.loads(run_bd(path, "list", "--all", "--limit", "0", "--json", "--brief"))
+    return {
+        row["id"]: (row["status"], tuple(sorted(row.get("labels") or [])))
+        for row in rows
+    }
+
+
+@pytest.fixture(scope="module")
+def query_workspace(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Seeded]:
+    """A workspace seeded once and only read from.
+
+    Seeding goes through `run_bd` rather than `BdClient`: a module-scoped
+    fixture is built before the function-scoped `isolated_beads_tracker`
+    runs, so this is the one place in the file that has to scrub BEADS_DIR
+    for itself.
+    """
+    path = copy_bd_workspace(tmp_path_factory.mktemp("bd-queries") / "shared", "bare").path
+
+    def create(title: str, *extra: str) -> str:
+        return run_bd(
+            path, "create", "--silent", "--title", title,
+            "--type", "task", "--priority", "2", *extra,
+        )
+
+    plain = create("plain open")
+    flagged = create("needs a human", "--labels", "human")
+    working = create("plain in progress")
+    escalated = create("escalated to human", "--labels", "human")
+    landed = create("landed")
+    run_bd(path, "update", working, "--status", "in_progress")
+    run_bd(path, "update", escalated, "--status", "in_progress")
+    run_bd(path, "close", landed)
+    for key, body in _SEEDED_MEMORIES:
+        run_bd(path, "remember", body, "--key", key)
+
+    before = _seeded_state(path)
+    yield _Seeded(path, plain, flagged, working, escalated, landed)
+    after = _seeded_state(path)
+    assert after == before, (
+        "a test sharing the read-only bd workspace wrote into it: "
+        f"{sorted(set(after.items()) ^ set(before.items()))}. A test that "
+        f"mutates the tracker must request `bd_workspace` and get its own copy."
     )
-    return tmp_path
+
+
+@pytest.fixture()
+def query_client(query_workspace: _Seeded) -> BdClient:
+    return BdClient(query_workspace.path)
+
+
+# ---------------------------------------------------------------------------
+# Writing tests — each with a workspace of its own
+# ---------------------------------------------------------------------------
 
 
 def test_list_ready_returns_empty_for_fresh_workspace(bd_workspace: Path) -> None:
@@ -58,22 +149,6 @@ def test_list_ready_includes_new_issue(bd_workspace: Path) -> None:
     assert any(i["id"] == issue_id for i in ready)
 
 
-def test_list_ready_exclude_labels_filters_human(bd_workspace: Path) -> None:
-    """The grind harness selects from `bd ready --exclude-label human`; a
-    human-flagged issue must be dropped from the result."""
-    client = BdClient(bd_workspace)
-    plain = client.create(title="plain work", issue_type="task", priority=2)
-    flagged = client.create(
-        title="needs a human", issue_type="task", priority=2, labels=["human"]
-    )
-    filtered = client.list_ready(exclude_labels=("human",))
-    ids = {i["id"] for i in filtered}
-    assert plain in ids
-    assert flagged not in ids
-    # Without the filter the flagged issue is still ready.
-    assert flagged in {i["id"] for i in client.list_ready()}
-
-
 def test_close_marks_issue_closed(bd_workspace: Path) -> None:
     client = BdClient(bd_workspace)
     issue_id = client.create(title="to be closed", issue_type="task", priority=2)
@@ -86,130 +161,16 @@ def test_children_includes_closed_kids(bd_workspace: Path) -> None:
     """Rollover needs closed children; bd show no longer embeds them."""
     client = BdClient(bd_workspace)
     epic = client.create(title="container", issue_type="epic", priority=2)
-    proc = subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            "kid",
-            "--type",
-            "task",
-            "--parent",
-            epic,
-        ],
-        cwd=bd_workspace,
-        check=True,
-        capture_output=True,
-        text=True,
+    kid = run_bd(
+        bd_workspace,
+        "create", "--silent", "--title", "kid", "--type", "task", "--parent", epic,
     )
-    kid = proc.stdout.strip()
     assert client.children(epic)
     assert {row["id"] for row in client.children(epic)} == {kid}
     client.close(kid)
     kids = client.children(epic)
     assert len(kids) == 1
     assert kids[0]["status"] == "closed"
-
-
-def test_list_all_includes_open_and_closed_without_status_filter(
-    bd_workspace: Path,
-) -> None:
-    client = BdClient(bd_workspace)
-    open_id = client.create(title="open packet", issue_type="task")
-    closed_id = client.create(title="closed packet", issue_type="task")
-    client.close(closed_id)
-    assert {open_id, closed_id} <= {issue["id"] for issue in client.list_all()}
-
-
-def test_bd_error_carries_stderr_verbatim(bd_workspace: Path) -> None:
-    """Acceptance #3: BdError.stderr is bd's stderr verbatim."""
-    client = BdClient(bd_workspace)
-    with pytest.raises(BdError) as exc:
-        client.show("ortus-no-such-issue-id-anywhere")
-    assert exc.value.returncode != 0
-    # bd's error message should appear in stderr (exact text varies by bd
-    # version, but the issue id we asked about should be referenced).
-    assert exc.value.stderr  # non-empty
-
-
-def test_list_open_returns_open_issues(bd_workspace: Path) -> None:
-    client = BdClient(bd_workspace)
-    a = client.create(title="open 1", issue_type="task", priority=2)
-    b = client.create(title="open 2", issue_type="task", priority=2)
-    client.close(b)
-    opens = client.list_open()
-    ids = {i["id"] for i in opens}
-    assert a in ids
-    assert b not in ids
-
-
-def test_count_by_status_honors_exclude_labels(bd_workspace: Path) -> None:
-    """Issues bearing any excluded label drop out of the count (ortus-9db5).
-
-    Without the filter the orchestrator would spin on a queue of only
-    human-flagged issues; with it, the count goes to zero and queue_drained()
-    returns True.
-    """
-    client = BdClient(bd_workspace)
-    plain = client.create(title="plain open", issue_type="task", priority=2)
-    human = client.create(
-        title="needs human", issue_type="task", priority=2, labels=["human"]
-    )
-    # Sanity: both visible without filter.
-    assert client.count_by_status("open") == 2
-    # With the filter the human-flagged one disappears.
-    assert client.count_by_status("open", exclude_labels=("human",)) == 1
-    # Sanity: the remaining id is the plain one (not the human-flagged one).
-    opens = client.list_open()
-    assert plain in {i["id"] for i in opens}
-    assert human in {i["id"] for i in opens}
-
-
-def test_in_progress_ids_honors_exclude_labels(bd_workspace: Path) -> None:
-    """in_progress issues with the excluded label drop out of the id set.
-
-    Mirrors the count-side filter so the grind orphan-detection diff
-    doesn't keep re-flagging human-escalated claims.
-    """
-    client = BdClient(bd_workspace)
-    plain = client.create(title="plain in progress", issue_type="task", priority=2)
-    escalated = client.create(title="escalated to human", issue_type="task", priority=2)
-    client.update_status(plain, "in_progress")
-    client.update_status(escalated, "in_progress")
-    client.add_label(escalated, "human")
-    # Without the filter both ids appear.
-    assert client.in_progress_ids() == {plain, escalated}
-    # With the filter the escalated one disappears.
-    assert client.in_progress_ids(exclude_labels=("human",)) == {plain}
-
-
-def test_open_ids_filters_by_any_label(bd_workspace: Path) -> None:
-    """open_ids narrows to open issues carrying any of the labels, so grind
-    can remember the operator's open issues at window start and hand back a
-    claim a worker puts on one of them."""
-    client = BdClient(bd_workspace)
-    plain = client.create(title="plain open", issue_type="task", priority=2)
-    escalated = client.create(title="escalated to human", issue_type="task", priority=2)
-    claimed = client.create(title="claimed and escalated", issue_type="task", priority=2)
-    client.add_label(escalated, "human")
-    client.add_label(claimed, "human")
-    client.update_status(claimed, "in_progress")
-    assert client.open_ids() == {plain, escalated}
-    assert client.open_ids(labels=("human",)) == {escalated}
-    assert client.open_ids(labels=("nobody",)) == set()
-
-
-def test_closed_ids_names_only_closed_issues(bd_workspace: Path) -> None:
-    """closed_ids returns exactly the closed set, so grind's attribution
-    diff can name a claim that closed within one worker window."""
-    client = BdClient(bd_workspace)
-    landed = client.create(title="landed", issue_type="task", priority=2)
-    still_open = client.create(title="still open", issue_type="task", priority=2)
-    client.close(landed)
-    ids = client.closed_ids()
-    assert landed in ids
-    assert still_open not in ids
 
 
 def test_status_tracks_the_lifecycle_and_is_empty_when_unreadable(
@@ -277,34 +238,123 @@ def test_create_with_all_optional_fields(bd_workspace: Path) -> None:
     assert set(detail["labels"]) == {"alpha", "beta"}
 
 
-def _remember(workspace: Path, text: str, key: str) -> None:
-    subprocess.run(
-        ["bd", "remember", text, "--key", key],
-        cwd=str(workspace),
-        check=True,
-        capture_output=True,
-    )
+# ---------------------------------------------------------------------------
+# Query tests — all reading the one seeded workspace
+# ---------------------------------------------------------------------------
 
 
-def test_memories_round_trip_and_lessons_are_bounded(bd_workspace: Path) -> None:
+def test_list_ready_exclude_labels_filters_human(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    """The grind harness selects from `bd ready --exclude-label human`; a
+    human-flagged issue must be dropped from the result."""
+    filtered = query_client.list_ready(exclude_labels=("human",))
+    ids = {i["id"] for i in filtered}
+    assert query_workspace.plain in ids
+    assert query_workspace.flagged not in ids
+    # Without the filter the flagged issue is still ready.
+    assert query_workspace.flagged in {i["id"] for i in query_client.list_ready()}
+
+
+def test_list_all_includes_open_and_closed_without_status_filter(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    assert {query_workspace.plain, query_workspace.landed} <= {
+        issue["id"] for issue in query_client.list_all()
+    }
+
+
+def test_bd_error_carries_stderr_verbatim(query_client: BdClient) -> None:
+    """Acceptance #3: BdError.stderr is bd's stderr verbatim."""
+    with pytest.raises(BdError) as exc:
+        query_client.show("ortus-no-such-issue-id-anywhere")
+    assert exc.value.returncode != 0
+    # bd's error message should appear in stderr (exact text varies by bd
+    # version, but the issue id we asked about should be referenced).
+    assert exc.value.stderr  # non-empty
+
+
+def test_list_open_returns_open_issues(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    ids = {i["id"] for i in query_client.list_open()}
+    assert query_workspace.plain in ids
+    assert query_workspace.landed not in ids
+
+
+def test_count_by_status_honors_exclude_labels(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    """Issues bearing any excluded label drop out of the count (ortus-9db5).
+
+    Without the filter the orchestrator would spin on a queue of only
+    human-flagged issues; with it, the count goes to zero and queue_drained()
+    returns True.
+    """
+    # Sanity: both open issues are visible without the filter.
+    assert query_client.count_by_status("open") == 2
+    # With the filter the human-flagged one disappears.
+    assert query_client.count_by_status("open", exclude_labels=("human",)) == 1
+    # Sanity: the remaining id is the plain one (not the human-flagged one).
+    opens = query_client.list_open()
+    assert query_workspace.plain in {i["id"] for i in opens}
+    assert query_workspace.flagged in {i["id"] for i in opens}
+
+
+def test_in_progress_ids_honors_exclude_labels(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    """in_progress issues with the excluded label drop out of the id set.
+
+    Mirrors the count-side filter so the grind orphan-detection diff
+    doesn't keep re-flagging human-escalated claims.
+    """
+    # Without the filter both ids appear.
+    assert query_client.in_progress_ids() == {
+        query_workspace.working,
+        query_workspace.escalated,
+    }
+    # With the filter the escalated one disappears.
+    assert query_client.in_progress_ids(exclude_labels=("human",)) == {
+        query_workspace.working
+    }
+
+
+def test_open_ids_filters_by_any_label(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    """open_ids narrows to open issues carrying any of the labels, so grind
+    can remember the operator's open issues at window start and hand back a
+    claim a worker puts on one of them."""
+    assert query_client.open_ids() == {query_workspace.plain, query_workspace.flagged}
+    assert query_client.open_ids(labels=("human",)) == {query_workspace.flagged}
+    assert query_client.open_ids(labels=("nobody",)) == set()
+
+
+def test_closed_ids_names_only_closed_issues(
+    query_client: BdClient, query_workspace: _Seeded
+) -> None:
+    """closed_ids returns exactly the closed set, so grind's attribution
+    diff can name a claim that closed within one worker window."""
+    ids = query_client.closed_ids()
+    assert query_workspace.landed in ids
+    assert query_workspace.plain not in ids
+
+
+def test_memories_round_trip_and_lessons_are_bounded(query_client: BdClient) -> None:
     """`memories()` reads what `bd remember` stored; `lessons()` selects
     deterministically, excludes the given keys, and clips each body."""
-    client = BdClient(bd_workspace)
-    _remember(bd_workspace, "copy the tree before sweeping it", "sandbox-sweep")
-    _remember(bd_workspace, "the scheduler holds the code it started with " * 20, "stale-scheduler")
-    _remember(bd_workspace, "pointer to the readiness contract", "readiness-pointer")
-
-    memories = client.memories()
+    memories = query_client.memories()
     assert memories["sandbox-sweep"] == "copy the tree before sweeping it"
 
-    lessons = client.lessons(
+    lessons = query_client.lessons(
         exclude_keys=frozenset({"readiness-pointer"}), limit=2, max_chars=60
     )
     assert [key for key, _ in lessons] == ["sandbox-sweep", "stale-scheduler"]
     assert all(len(body) <= 60 + len(" […]") for _, body in lessons)
     assert dict(lessons)["stale-scheduler"].endswith(" […]")
     # Two reads of the same store select the same lessons.
-    assert lessons == client.lessons(
+    assert lessons == query_client.lessons(
         exclude_keys=frozenset({"readiness-pointer"}), limit=2, max_chars=60
     )
 
