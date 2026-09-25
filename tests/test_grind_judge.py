@@ -530,3 +530,25 @@ def test_stuck_shadow_logs_the_read_action_and_applies_the_baseline(gate, monkey
     event = stuck_events(gate)[-1]
     assert event['action'] == 'escalate' and event['effective_action'] == 'continue'
     assert gate.bd.rows['demo-1']['labels'] == []
+
+
+@pytest.mark.parametrize('shadow', [False, True])
+@pytest.mark.parametrize('oversized', [False, True])
+def test_pre_turn_row_names_the_truncated_issue_fields(gate, shadow, oversized):
+    """Both pre-turn writes say whether they judged full text or a slice."""
+    from ortus.core.judge_replay import validate_event
+
+    if shadow:
+        gate.config.values['judge']['mode'] = 'shadow'
+    if oversized:
+        row = gate.bd.rows['demo-1']
+        row['description'] += '\n\n## Filler\n' + 'x' * 5000
+        row['acceptance_criteria'] += '\n\n## Filler\n' + 'y' * 5000
+    result = gate.invoke('--tasks', '1')
+    assert result.exit_code == 0, result.output + str(result.exception)
+    rows = [e for e in gate.events() if e.get('phase') == 'pre_turn']
+    assert rows, gate.events()
+    assert rows[0]['truncated_fields'] == (
+        ['acceptance', 'objective'] if oversized else []
+    )
+    assert all(validate_event(e) for e in gate.events())
