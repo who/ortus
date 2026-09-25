@@ -50,7 +50,7 @@ def test_absent_defaults_do_not_import_sdk_or_read_credentials(tmp_path, monkeyp
     assert (judge.route_confidence, judge.noul_confidence, judge.risk_confidence) == (0.8,) * 3
     assert (judge.human_threshold, judge.risk_threshold) == (0.8, 1.5)
     assert (judge.objective_cap, judge.acceptance_cap, judge.title_cap, judge.tool_cap,
-            judge.total_bytes_cap) == (1024, 1024, 160, 512, 8192)
+            judge.total_bytes_cap) == (4096, 4096, 160, 512, 16384)
     assert not judge.include_log_tail
     assert judge.include_issue_text
     assert judge.sensitive_paths == ()
@@ -58,6 +58,13 @@ def test_absent_defaults_do_not_import_sdk_or_read_credentials(tmp_path, monkeyp
     assert cfg.get("backend") == "claude"
     assert cfg.get("verification") == "full"
     assert "judge" not in cfg.values
+
+
+def test_text_caps_and_the_total_budget_that_carries_them_rise_together():
+    """Semantic readiness sends description, design and acceptance at once."""
+    config = JudgeConfig()
+    assert config.objective_cap == config.acceptance_cap == 4096
+    assert config.objective_cap * 2 + config.acceptance_cap <= config.total_bytes_cap
 
 
 def test_layers_and_environment_and_flag_precedence(tmp_path):

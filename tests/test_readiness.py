@@ -71,6 +71,22 @@ Run `uv run pytest tests/test_demo.py -q`.""",
     }
 
 
+def planner_sized_issue(issue_id: str = "demo-2") -> dict:
+    """A ready bead at the size a planner actually writes: kilobytes per field.
+
+    Every section keeps its schema v1 shape and carries nothing the judge
+    packer screens, so a test that packs this is measuring length alone.
+    """
+    issue = ready_issue(issue_id)
+    filler = "\n".join(
+        f"Paragraph {n} of the prose a planner wrote out in full rather than in summary."
+        for n in range(64)
+    )
+    for field in ("description", "design", "acceptance_criteria"):
+        issue[field] += "\n" + filler
+    return issue
+
+
 def test_complete_leaf_is_ready() -> None:
     report = validate_issue(ready_issue())
     assert report.ready

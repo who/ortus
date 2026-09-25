@@ -89,11 +89,14 @@ class JudgeConfig:
     )
     question_criteria: dict = field(default_factory=dict)
     semantic_readiness_criteria: dict = field(default_factory=dict)
-    objective_cap: int = 1024
-    acceptance_cap: int = 1024
+    # Sized so a planner-written work spec's key sections survive the packer.
+    # At the old 1024 the description, design or acceptance of an ordinary bead
+    # was routinely longer than its cap, and the judge saw none of it.
+    objective_cap: int = 4096
+    acceptance_cap: int = 4096
     title_cap: int = 160
     tool_cap: int = 512
-    total_bytes_cap: int = 8192
+    total_bytes_cap: int = 16384
     include_log_tail: bool = False
     sensitive_paths: tuple[str, ...] = ()
     # Metadata alone is too thin to route on, so text is on by default. Turning

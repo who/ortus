@@ -29,7 +29,7 @@ from ortus.core.judge import (
     GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgeMode, JudgePhase,
 )
 from ortus.core.judge import JudgeRoute
-from ortus.core.judge_state import StateError, sanitize_field
+from ortus.core.judge_state import TRUNCATABLE_FIELDS, StateError, sanitize_field
 from ortus.core.judge_typesafe import JudgeFailure, JudgeUsage
 
 MAX_EVENT_BYTES = 8192
@@ -81,6 +81,7 @@ class DecisionEvent:
     latency_ms: float
     failure: JudgeFailure | None = None
     usage: JudgeUsage | None = None
+    truncated_fields: tuple[str, ...] = ()
     decision_id: UUID = field(default_factory=uuid4)
 
 
@@ -195,6 +196,22 @@ def _clean_metadata(
         raise JudgeLogError(LogFailure.INVALID_EVENT) from None
 
 
+def _truncated_fields(value: object) -> list[str]:
+    """The issue-text fields the packer shortened, as a bounded sorted list.
+
+    Only the packer's own field names are accepted, so this stays a fixed
+    vocabulary rather than one more place a caller could put free text.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) > len(TRUNCATABLE_FIELDS) or any(
+        not isinstance(name, str) for name in value
+    ):
+        _invalid()
+    names = sorted(value)
+    if len(set(names)) != len(names) or any(name not in TRUNCATABLE_FIELDS for name in names):
+        _invalid()
+    return names
+
+
 def _decision_payload(
     event: DecisionEvent, config: JudgeConfig, environ: Mapping[str, str] | None,
 ) -> dict:
@@ -244,6 +261,7 @@ def _decision_payload(
         "criteria_hash": clean(event.criteria_hash),
         "latency_ms": _number(event.latency_ms),
         "failure": _enum(event.failure, JudgeFailure) if event.failure is not None else None,
+        "truncated_fields": _truncated_fields(event.truncated_fields),
         **_usage(event.usage),
     })
     if config.mode == JudgeMode.SHADOW:

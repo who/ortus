@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from ortus.core.judge import JudgeConfig, JudgePhase, JudgeRoute, ProposedTool
-from ortus.core.judge_state import OmissionReason, StateError, pack_state, sanitize_field
+from ortus.core.judge_state import (
+    TRUNCATION_MARKER, Omission, OmissionReason, StateError, pack_state, sanitize_field,
+    truncate_field,
+)
+from tests.test_readiness import planner_sized_issue
 
 
 @pytest.fixture
@@ -134,13 +138,77 @@ def test_source_field_is_not_truncated_to_hide_later_secret(packet):
     assert result.state.objective == ""
 
 
-def test_oversize_sources_and_metadata_are_omitted(packet):
-    packet.update(id="x" * 161, title="y" * 161, description="z" * 1025)
+def test_oversize_metadata_is_omitted_and_oversize_text_is_truncated(packet):
+    packet.update(id="x" * 161, title="y" * 161)
+    packet["description"] = "## Objective\n\nKeep the objective.\n" + "z" * 5000
     packet["labels"].append("w" * 161)
     result = pack(packet, config=JudgeConfig(include_issue_text=True))
-    assert result.state.issue_id == result.state.title == result.state.objective == ""
+    assert result.state.issue_id == result.state.title == ""
     assert "w" * 161 not in result.to_json()
-    assert all(item.reason == OmissionReason.OVERSIZE for item in result.omissions)
+    assert result.state.objective == "Keep the objective."
+    reasons = {item.field: item.reason for item in result.omissions}
+    assert reasons["objective"] == OmissionReason.TRUNCATED
+    assert {reasons["issue_id"], reasons["title"], reasons["labels"]} == {
+        OmissionReason.OVERSIZE
+    }
+
+
+def test_truncation_keeps_priority_sections_and_marks_the_cut():
+    text = "## Ordered steps\n" + "A step a planner wrote out.\n" * 200 + "## Scope\nJust the packer.\n"
+    result = truncate_field(text, cap=1024, field="design")
+    assert result.reason == OmissionReason.TRUNCATED
+    assert len(result.value) <= 1024
+    assert result.value.startswith("## Scope\nJust the packer.")
+    assert result.value.endswith(TRUNCATION_MARKER)
+    assert "A step a planner wrote out." in result.value
+
+
+def test_a_field_with_no_known_section_truncates_on_line_boundaries():
+    result = truncate_field("line one.\nline two.\n" * 200, cap=200)
+    assert result.reason == OmissionReason.TRUNCATED
+    assert set(result.value.splitlines()) == {"line one.", "line two.", TRUNCATION_MARKER}
+
+
+def test_one_line_longer_than_the_cap_is_cut_at_the_cap_with_the_marker():
+    result = truncate_field("z" * 5000, cap=100)
+    assert result.reason == OmissionReason.TRUNCATED
+    assert len(result.value) == 100
+    assert result.value == "z" * 84 + "\n" + TRUNCATION_MARKER
+
+
+def test_a_cap_too_small_for_the_marker_still_bounds_the_field():
+    result = truncate_field("z" * 50, cap=10)
+    assert (result.value, result.reason) == ("z" * 10, OmissionReason.TRUNCATED)
+
+
+def test_a_field_inside_its_cap_is_returned_whole_and_unmarked():
+    text = "## Objective\nShort enough."
+    assert truncate_field(text, cap=1024, field="objective") == sanitize_field(text, cap=1024)
+
+
+def test_secret_past_the_cap_omits_the_field_instead_of_truncating_it():
+    text = "## Objective\nSafe.\n" + "filler.\n" * 500 + "password=opaque\n"
+    result = truncate_field(text, cap=256, field="objective")
+    assert (result.value, result.reason) == (None, OmissionReason.SENSITIVE)
+
+
+def test_secret_value_past_the_cap_is_found_before_any_truncation():
+    result = truncate_field("x" * 5000 + "opaque", cap=64, secret_values=("opaque",))
+    assert (result.value, result.reason) == (None, OmissionReason.SENSITIVE)
+
+
+def test_planner_sized_packet_stays_within_the_total_budget():
+    config = JudgeConfig(include_issue_text=True)
+    result = pack_state(
+        {**planner_sized_issue(), "title": "Ship the preview flag"}, config,
+        environ={}, phase=JudgePhase.SEMANTIC_READINESS,
+    )
+    assert len(result.to_json().encode("utf-8")) <= config.total_bytes_cap
+    assert set(result.omissions) == {
+        Omission(field, OmissionReason.TRUNCATED)
+        for field in ("objective", "acceptance", "design")
+    }
+    assert result.state.objective and result.state.acceptance and result.state.design
 
 
 def test_empty_objective_is_safe(packet):

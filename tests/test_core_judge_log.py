@@ -52,7 +52,8 @@ def test_complete_decision_and_correlated_outcome(tmp_path, capsys):
         "schema_version", "event", "timestamp", "run_id", "decision_id", "seat",
         "issue_id", "phase", "answers", "intended_action", "effective_action",
         "backend", "reason", "model", "criteria_version", "criteria_hash",
-        "latency_ms", "failure", "input_tokens", "output_tokens", "measured_cost_usd",
+        "latency_ms", "failure", "truncated_fields", "input_tokens", "output_tokens",
+        "measured_cost_usd",
     }
     assert logged["schema_version"] == 1
     assert logged["timestamp"].endswith("+00:00")
@@ -72,6 +73,7 @@ def test_complete_decision_and_correlated_outcome(tmp_path, capsys):
     assert logged["output_tokens"] == 11
     assert logged["measured_cost_usd"] is None
     assert logged["latency_ms"] == 12.5
+    assert logged["truncated_fields"] == []
     assert finished["event"] == "outcome"
     assert finished["run_id"] == logged["run_id"] == str(event.run_id)
     assert finished["decision_id"] == logged["decision_id"] == str(event.decision_id)
@@ -141,6 +143,8 @@ def test_sensitive_and_oversize_metadata_are_omitted(tmp_path, capsys, field, va
     {"answers": JudgeAnswers(JudgeRoute.CODEX, float("nan"), .1, .9, 0, .9)},
     {"answers": JudgeAnswers("secret route", .9, .1, .9, 0, .9)},
     {"usage": JudgeUsage(-1, 1)}, {"usage": JudgeUsage(True, 1)},
+    {"truncated_fields": ("objective", "objective")},
+    {"truncated_fields": ("last_log_tail",)}, {"truncated_fields": "objective"},
 ])
 def test_invalid_events_fail_before_creating_a_log(tmp_path, changes):
     with pytest.raises(JudgeLogError) as exc:
