@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ortus.cli import app
+from ortus.core.config import DEFAULTS
 from ortus.core.harness_eval import (
     ADOPT,
     ARMS,
@@ -273,9 +274,11 @@ def test_treatments_are_documented_with_one_recipe_each() -> None:
             assert any(command.startswith("ortus plan ") for command in commands)
             assert any(command.startswith("ortus grind ") for command in commands)
 
-    # The control arm is the same recipe minus the one config line.
+    # The control arm is the same recipe with every treatment pinned off.
     control = arm_commands(FIXTURE_A, CONTROL_ARM, root=Path("/seats"))
-    assert not any(".ortusrc" in command for command in control)
+    assert any(".ortusrc" in command for command in control)
+    for item in TREATMENTS:
+        assert not any(item.enable_line in command for command in control)
 
     rendered = render_matrix(cells)
     for item in TREATMENTS:
@@ -285,6 +288,55 @@ def test_treatments_are_documented_with_one_recipe_each() -> None:
         # reader can get from a row to the decision it feeds.
         assert item.measured_by
         assert item.measured_by in rendered
+
+
+def _appended_lines(fixture, arm: str) -> list[str]:
+    """The `.ortusrc` lines one cell appends, in the order it writes them."""
+
+    command = next(
+        item
+        for item in arm_commands(fixture, arm, root=Path("/seats"))
+        if ".ortusrc" in item
+    )
+    body = command.split("printf '%s\\n' ", 1)[1].split(" >> ", 1)[0]
+    return body.strip("'").split("' '")
+
+
+def test_control_cell_pins_every_treatment_key_off() -> None:
+    """AC-1: the control states its configuration instead of inheriting it."""
+
+    lines = _appended_lines(FIXTURE_A, CONTROL_ARM)
+
+    assert lines == [f"{item.config_key} = false" for item in TREATMENTS]
+    for item in TREATMENTS:
+        assert item.enable_line not in lines
+
+
+def test_adopted_default_arm_is_not_a_second_control_arm() -> None:
+    """AC-2: an arm whose key now ships on still differs from the control."""
+
+    adopted = [item for item in TREATMENTS if DEFAULTS.get(item.config_key) is True]
+    assert adopted, "the collapse this guards against needs an adopted default"
+
+    control = _appended_lines(FIXTURE_A, CONTROL_ARM)
+    for item in adopted:
+        lines = _appended_lines(FIXTURE_A, item.key)
+
+        assert lines != control
+        assert item.enable_line in lines
+        # The arm's key is the whole difference: it is the one pin the
+        # control writes off that this cell does not.
+        assert set(control) - set(lines) == {f"{item.config_key} = false"}
+
+        pinned = []
+        for line in lines:
+            if line.startswith("["):
+                break
+            pinned.append(line.split("=", 1)[0].strip())
+        # TOML rejects a repeated key outright, so a pin cannot be written
+        # twice and left to the later line to win.
+        assert len(pinned) == len(set(pinned))
+        assert set(pinned) == {other.config_key for other in TREATMENTS}
 
 
 def test_treatments_render_through_the_eval_verb() -> None:
