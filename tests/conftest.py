@@ -22,13 +22,22 @@ import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import pytest
 
 from tests._shims import normalize_git_branch, ready_issue_args, shim_path
 
 _DEPENDENCY_MARKERS = ("fast", "integration", "network", "live_provider")
+#: Console width for the whole test session. Rich wraps at 80 columns when
+#: stdout is not a terminal, and the parallel runner inserts a `popen-gwN`
+#: segment that lengthens a temporary log path by about ten characters — enough
+#: to move that wrap into the middle of a token an assertion matches on, so
+#: `.../logs/plan-20260925-101038.log` arrives split after `plan` and a
+#: substring check fails on the runner while passing on a shorter local path
+#: (ortus-v8qt). A width no ortus message reaches keeps such a check
+#: independent of where Rich chose to break a line.
+_TEST_CONSOLE_WIDTH = 200
 _HERMETIC_TEST_BUDGET_SECONDS = 5.0
 #: Multiplier applied to that budget, so neither a slow machine nor a busy one
 #: can redden a healthy build. Hosted runners vary by roughly 3x run to run —
@@ -235,6 +244,30 @@ def isolated_ortus_user_env(monkeypatch, tmp_path, request):
         user_env, "load_user_ortus_env",
         lambda home=None: load(home=tmp_path if home is None else home),
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def wide_test_console() -> Iterator[None]:
+    """Render ortus CLI output unwrapped for every test in the session.
+
+    `COLUMNS` covers each console built from here on, including one a
+    subprocess builds. Rich also pins a console's width at construction when
+    `COLUMNS` is already set, and the two module-level consoles in
+    `ortus.core.output` are built when that module is first imported, which is
+    before any fixture runs — so they are widened on the instance as well.
+    Session-scoped, because the width has to be in place before the first
+    render rather than per test, and autouse so a new test cannot inherit the
+    narrow width by omission. Nothing an operator sees changes: the pin is
+    undone when the session ends, and a real terminal still wraps to its own
+    width.
+    """
+    from ortus.core import output
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("COLUMNS", str(_TEST_CONSOLE_WIDTH))
+        patch.setattr(output._out, "width", _TEST_CONSOLE_WIDTH)
+        patch.setattr(output._err, "width", _TEST_CONSOLE_WIDTH)
+        yield
 
 
 @pytest.fixture(autouse=True)

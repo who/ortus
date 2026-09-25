@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 import shlex
 import shutil
@@ -9,11 +10,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import plan as plan_mod
 from ortus.core.claude import ClaudeRunner
+from ortus.core import output
 from ortus.core.profiles import AgentProfile, Phase
 from ortus.core.prompts import READINESS_SPEC_PLACEHOLDER, resolve_prompt
 from ortus.core.readiness import spec_markdown, validate_issue
@@ -235,6 +238,38 @@ def test_plan_zero_issues_exits_one(
     assert "no issues" in combined
     # The message must point at the log so the real cause is one `cat` away.
     assert "plan-" in combined and ".log" in combined
+
+
+def test_zero_issue_message_survives_a_wrapped_log_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ortus-v8qt: the pointer above stays matchable however long the path is.
+
+    The parallel runner puts a `popen-gwN` segment in every temporary path,
+    which on a narrow console moves Rich's line break inside
+    `plan-<stamp>.log` and leaves the test above asserting on a token that is
+    no longer there. The control render at 80 columns pins that this path is
+    long enough to be split, so this guard cannot pass vacuously if the
+    session-wide console width is ever taken away.
+    """
+    log_path = (
+        "/tmp/pytest-of-user/pytest-0/popen-gw3/"
+        "test_plan_zero_issues_exits_one0/logs/plan-20260925-101038.log"
+    )
+    # The shape plan() emits when the decomposition session created nothing.
+    message = (
+        "plan produced no issues; the decomposition session exited 0 but "
+        f"created nothing. Inspect {log_path} for failed tool calls."
+    )
+
+    output.error(message)
+    rendered = _plain(capsys.readouterr().err)
+    assert "plan-" in rendered and ".log" in rendered
+    assert log_path in rendered
+
+    narrow = io.StringIO()
+    Console(file=narrow, width=80).print(message)
+    assert "plan-" not in narrow.getvalue()
 
 
 def test_plan_unready_leaf_fails_immediately(
