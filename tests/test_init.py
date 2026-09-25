@@ -19,6 +19,7 @@ from ortus.cli import app
 from ortus.core.agent_files import BLOCK_SCHEMAS, MANAGED_FILES, read_block
 from ortus.core.local_backend import DEFAULT_LOCAL_BASE_URL, LocalServerError
 from ortus.core.readiness import READINESS_MEMORY_KEY
+from tests.conftest import wall_clock_budget
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -463,11 +464,14 @@ def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
     """ortus-btt3: end-to-end check that `ortus init` completes promptly when
     invoked via a real subprocess with stdin=/dev/null (proxy for a terminal
     operator who never types anything). Regression guard for the bd-init prompt
-    hang. Budget: 10s.
+    hang. Budget: 10s, widened by the workers sharing the host, since a real
+    `bd init` behind a dozen contending ones is slow for reasons that say
+    nothing about stdin.
     """
     if shutil.which("ortus") is None:
         pytest.skip("ortus binary not on PATH")
     target = tmp_path / "closedstdin"
+    budget = wall_clock_budget(10.0)
     t0 = time.monotonic()
     proc = subprocess.run(
         # `--codegraph off` and a concrete backend keep this about stdin: the
@@ -477,11 +481,14 @@ def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=budget + 5.0,
     )
     elapsed = time.monotonic() - t0
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert elapsed < 10.0, f"ortus init took {elapsed:.2f}s with closed stdin (budget 10s)"
+    assert elapsed < budget, (
+        f"ortus init took {elapsed:.2f}s with closed stdin "
+        f"(budget {budget:.0f}s)"
+    )
     assert (target / ".beads").is_dir()
 
 

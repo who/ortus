@@ -48,10 +48,12 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=5.0.0",
     "pytest-subprocess>=1.5.0",
-    # Worker and verifier sweeps run with `-n auto`. Most of a grind-family
-    # test's wall clock is spent waiting on bd subprocesses, so distributing
-    # them across cores is nearly all upside. Not in `addopts`: contention
-    # inflates individual durations, which would break the CI duration budget.
+    # Worker sweeps, verifier sweeps and the CI gate all run with `-n auto`.
+    # Most of a grind-family test's wall clock is spent waiting on bd
+    # subprocesses, so distributing them across cores is nearly all upside; CI
+    # pays for the contention that adds with a scaled duration budget. Still
+    # not in `addopts`, so the inner pytest sessions the policy tests spawn
+    # stay single-process and measure one test at a time.
     "pytest-xdist>=3.5.0",
     "build>=1.2.0",
 ]

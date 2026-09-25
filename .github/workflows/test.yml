@@ -110,13 +110,14 @@ jobs:
       - name: Run comprehensive hermetic pytest gate
         timeout-minutes: 30
         env:
-          # Hosted runners vary by ~3x run to run, so the tight local duration
-          # budget measures the machine here rather than the test. The guard
-          # stays on — a pathological test still trips 15s — without a healthy
-          # one reddening main because the runner was slow.
-          ORTUS_TEST_BUDGET_SCALE: '3'
+          # Two things inflate a duration here. Hosted runners vary by ~3x run
+          # to run, and the gate now distributes its tests, so each one is
+          # measured while three others compete for a 3-4 core runner. The
+          # guard stays on — a pathological test still trips 25s — without a
+          # healthy one reddening main for having shared a core.
+          ORTUS_TEST_BUDGET_SCALE: '5'
         run: |
-          uv run pytest -m "fast or integration" \
+          uv run pytest -m "fast or integration" -n auto \
             --test-timeout=180 --enforce-duration-budget --durations=20 \
             --junitxml=junit.xml \
             --cov=ortus --cov-report=xml --cov-report=term
