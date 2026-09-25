@@ -61,7 +61,10 @@ is the only tracker file a commit carries. Two things keep it honest:
   at all (which is how this repo's export drifted by 139 records). The install
   lands them in `.git/hooks/` for such a clone; `git config core.hooksPath
   .beads/hooks` is the equivalent one-liner. `ortus init --force` does it for
-  you, and a fresh `ortus init` has it from the start.
+  you, and a fresh `ortus init` has it from the start. A clone that skipped the
+  install is told rather than left to find out: `ortus check` resolves the hooks
+  directory git will actually use and warns, with this command, when the
+  tracker's `pre-commit` is not installed there.
 - `ortus export` — regenerates the export from the tracker, atomically, with
   every term in `.beads/protected-terms.txt` removed first. That file is
   resolved per machine and gitignored: it lists this clone's host identity

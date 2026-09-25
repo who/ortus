@@ -370,6 +370,84 @@ def test_check_reports_missing_beads_dir(
     assert ".beads/" in result.stdout
 
 
+def _clone_shaped_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A real checkout carrying the tracked hooks and none of the wiring.
+
+    This is the shape a fresh clone arrives in, which is the whole subject of
+    the row. The git config files of whichever machine runs the suite are
+    pushed out of the way: a developer with a global `core.hooksPath` would
+    otherwise decide what this checkout resolves.
+    """
+    import subprocess
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "absent-gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    repo = tmp_path / "clone"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True)
+    (repo / ".beads" / "hooks").mkdir(parents=True)
+    return repo
+
+
+def _write_hook(path: Path, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def test_tracker_hooks_row_passes_for_a_wired_hooks_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row follows `core.hooksPath`, where the tracker's hooks live."""
+    import subprocess
+
+    repo = _clone_shaped_checkout(tmp_path, monkeypatch)
+    hook = repo / ".beads" / "hooks" / "pre-commit"
+    _write_hook(hook, "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v1.0.0 ---\n")
+    subprocess.run(
+        ["git", "config", "core.hooksPath", ".beads/hooks"], cwd=repo, check=True
+    )
+    row = check_mod.check_tracker_hooks(repo)
+    assert row.ok, row.message
+    assert str(hook) in row.message
+
+
+def test_tracker_hooks_row_names_the_install_for_an_unwired_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No wiring and no installed hook: a warning carrying its own fix."""
+    repo = _clone_shaped_checkout(tmp_path, monkeypatch)
+    _write_hook(
+        repo / ".beads" / "hooks" / "pre-commit",
+        "#!/bin/sh\n# --- BEGIN BEADS INTEGRATION v1.0.0 ---\n",
+    )
+    row = check_mod.check_tracker_hooks(repo)
+    assert not row.ok
+    assert row.level == "info"
+    assert "bd hooks install" in row.message
+
+
+def test_tracker_hooks_row_rejects_a_foreign_pre_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project's own hook is not the tracker's, so the row still warns."""
+    repo = _clone_shaped_checkout(tmp_path, monkeypatch)
+    _write_hook(repo / ".git" / "hooks" / "pre-commit", "#!/bin/sh\nexec make lint\n")
+    row = check_mod.check_tracker_hooks(repo)
+    assert not row.ok
+    assert "bd hooks install" in row.message
+
+
+def test_tracker_hooks_row_passes_where_there_is_no_git_at_all(
+    tmp_path: Path,
+) -> None:
+    """A bd-only fixture cannot be missing a hook it could never have had."""
+    repo = tmp_path / "not-a-checkout"
+    (repo / ".beads").mkdir(parents=True)
+    row = check_mod.check_tracker_hooks(repo)
+    assert row.ok
+    assert "not a git checkout" in row.message
+
+
 def test_check_reports_prompt_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -941,7 +1019,7 @@ def test_check_grok_binary(
     assert "claude" not in seen
     assert ".grok/config.toml" in result.stdout
     assert ".claude/settings.json" not in result.stdout
-    assert "hooks" not in result.stdout
+    assert "disableAllHooks" not in _compact(result.stdout)
     compact = "".join(result.stdout.split())
     assert "CLI=ok" in compact
     assert "index=present" in compact
@@ -1033,7 +1111,7 @@ def test_check_codex_uses_codex_binary_and_config(
     assert "codex" in seen
     assert "claude" not in seen
     assert ".codex/config.toml" in result.stdout
-    assert "hooks" not in result.stdout
+    assert "disableAllHooks" not in _compact(result.stdout)
 
 
 def test_check_codex_config_needs_no_sandbox_mode_pin(tmp_path: Path) -> None:

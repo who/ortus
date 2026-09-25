@@ -204,6 +204,31 @@ class GitClient:
         proc = self._run("rev-parse", "--is-inside-work-tree")
         return proc.returncode == 0 and proc.stdout.strip() == "true"
 
+    def hooks_dir(self) -> Path | None:
+        """The directory git will look in for this repository's hooks.
+
+        ``core.hooksPath`` wins wherever it is set, because that is how git
+        itself decides: with the tracker's hooks the setting legitimately
+        points outside the git directory, at a tracked ``.beads/hooks/``. A
+        relative value resolves against the repository, as git resolves it.
+        Otherwise the git directory's own ``hooks/``, asked of git rather than
+        assumed to be ``.git/hooks`` so a linked worktree answers with the
+        directory it actually shares. None when git resolves nothing at all —
+        the same conservative answer every read here gives a directory that is
+        not a checkout.
+        """
+        configured = self.config_value("core.hooksPath")
+        if configured:
+            return self._against_repo(Path(configured))
+        proc = self._run("rev-parse", "--git-path", "hooks")
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        return self._against_repo(Path(proc.stdout.strip()))
+
+    def _against_repo(self, path: Path) -> Path:
+        """`path` as git reads it: absolute as given, relative to the repo."""
+        return path if path.is_absolute() else self.repo / path
+
     def has_commits(self) -> bool:
         """True when HEAD resolves to a commit.
 
