@@ -121,27 +121,37 @@ _CLAIM_THEN_HANG = textwrap.dedent(
     """
 )
 
+# The id case 2 works on, handed to the shim through the environment. The
+# watchdog has to wait out every bd round-trip the shim makes before the close
+# lands, so the shim is told which issue to close instead of spending a `bd
+# ready` discovering it. Selection is already proved by case 1 above.
+_CLOSE_HANG_ISSUE_ENV = "ORTUS_TEST_CLOSE_HANG_ISSUE"
+
+# How long the watchdog waits in case 2. Two bd calls against dolt measure
+# ~1.8s together on a developer machine; case 1 already clears two calls — one
+# of them the heavier `bd ready` — inside 5s on both CI runners, so this leaves
+# headroom for a slow runner under xdist contention while still killing the
+# worker long before its 120-second sleep could end. Both the flag and the log
+# assertion read it, so the two can never disagree.
+_CLOSE_HANG_TIMEOUT_S = 6
+
 # A worker that CLAIMS and CLOSES its issue, then hangs (case 2:
-# hung-after-close). Under the on-main contract the worker owns the claim,
-# so the shim walks the same path goal-prompt prescribes: `bd ready`, claim,
-# close, and only then wedges.
+# hung-after-close). Under the on-main contract the worker owns the claim, so
+# the shim claims and closes exactly as goal-prompt prescribes, and only then
+# wedges.
 _CLOSE_THEN_HANG = textwrap.dedent(
-    """\
-    import json, subprocess, time
-    ready = json.loads(subprocess.run(
-        ["bd", "ready", "--json"], check=True, capture_output=True, text=True
-    ).stdout)
-    first = next((i["id"] for i in ready if i.get("issue_type") != "epic"), None)
-    if first:
-        subprocess.run(
-            ["bd", "update", first, "--status", "in_progress"],
-            check=True, stdout=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["bd", "close", first, "--reason", "shipped before hanging"],
-            check=True, stdout=subprocess.DEVNULL,
-        )
-        print(f"closed {first}, now hanging", flush=True)
+    f"""\
+    import os, subprocess, time
+    issue = os.environ["{_CLOSE_HANG_ISSUE_ENV}"]
+    subprocess.run(
+        ["bd", "update", issue, "--status", "in_progress"],
+        check=True, stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["bd", "close", issue, "--reason", "shipped before hanging"],
+        check=True, stdout=subprocess.DEVNULL,
+    )
+    print(f"closed {{issue}}, now hanging", flush=True)
     time.sleep(120)
     """
 )
@@ -231,14 +241,12 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
+    monkeypatch.setenv(_CLOSE_HANG_ISSUE_ENV, issue_id)
     _install_shim(
         monkeypatch,
         make_inline_python_shim(tmp_path, "claude-close-hang", _CLOSE_THEN_HANG),
     )
 
-    # Leave time for three bd calls before the hang, and for setup and
-    # assertions inside the enclosing 60-second test deadline. The worker's
-    # 120-second sleep still requires the watchdog to kill it.
     result = runner.invoke(
         app,
         [
@@ -249,7 +257,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
             "--idle-sleep",
             "0",
             "--worker-timeout",
-            "30",
+            str(_CLOSE_HANG_TIMEOUT_S),
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
@@ -258,7 +266,7 @@ def test_worker_timeout_counts_close_when_worker_hangs_after_closing(
         "a close that landed before the hang must survive the watchdog kill"
     )
     log = _grind_log(repo)
-    assert "worker TIMEOUT after 30s" in log
+    assert f"worker TIMEOUT after {_CLOSE_HANG_TIMEOUT_S}s" in log
     assert f"worker closed {issue_id}" in log
 
 
