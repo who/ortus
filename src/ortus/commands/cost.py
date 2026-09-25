@@ -21,14 +21,19 @@ import typer
 
 from ortus.core import output
 from ortus.core.cost import (
+    COST_ESTIMATED,
+    COST_PROVIDER,
+    PRICE_TABLE_VERSION,
     BeadCost,
     FailureRate,
     RunCost,
     SessionCost,
+    TreeCost,
     UsageBuckets,
     failure_rates,
     find_grind_logs,
     parse_grind_log,
+    parse_tree,
     rollup_beads,
 )
 from ortus.core.repo import resolve_repo
@@ -96,7 +101,24 @@ def _record(title: str, fields: list[tuple[str, str]]) -> None:
     typer.echo("")
 
 
-def _usage_fields(usage: UsageBuckets) -> list[tuple[str, str]]:
+def _cost_basis(cost_source: str | None) -> str:
+    """How a row's dollars were arrived at, spelled out beside them.
+
+    An estimate and a provider figure must never read alike: one is a bill and
+    the other is this repository's price table applied to the tokens a reaped
+    window managed to report.
+    """
+
+    if cost_source == COST_ESTIMATED:
+        return f"estimated (price table {PRICE_TABLE_VERSION})"
+    if cost_source == COST_PROVIDER:
+        return "provider-reported"
+    return "basis unknown"
+
+
+def _usage_fields(
+    usage: UsageBuckets, cost_source: str | None = None
+) -> list[tuple[str, str]]:
     fields = [
         ("output", _tokens(usage.output_tokens)),
         ("input", _input_line(usage)),
@@ -106,7 +128,9 @@ def _usage_fields(usage: UsageBuckets) -> list[tuple[str, str]]:
     fields.append(
         (
             "cost",
-            _UNSET if usage.cost_usd is None else f"{_usd(usage.cost_usd)} (provider-reported)",
+            _UNSET
+            if usage.cost_usd is None
+            else f"{_usd(usage.cost_usd)} ({_cost_basis(cost_source)})",
         )
     )
     return fields
@@ -123,7 +147,7 @@ def _print_beads(beads: tuple[BeadCost, ...]) -> None:
             ("model", _joined(bead.models)),
             ("effort", _joined(bead.efforts)),
         ]
-        fields.extend(_usage_fields(bead.usage))
+        fields.extend(_usage_fields(bead.usage, bead.cost_source))
         fields.append(
             (
                 "run",
@@ -150,7 +174,7 @@ def _print_sessions(sessions: tuple[SessionCost, ...]) -> None:
             ("effort", session.effort or _UNSET),
             ("session", session.session_id or _UNSET),
         ]
-        fields.extend(_usage_fields(session.usage))
+        fields.extend(_usage_fields(session.usage, session.cost_source))
         fields.append(
             (
                 "run",
@@ -185,6 +209,65 @@ def _print_failures(rates: tuple[FailureRate, ...]) -> None:
     typer.echo("")
 
 
+def _print_tree(tree: TreeCost) -> None:
+    """The whole tree: what planning cost, what the workers cost, per closed bead.
+
+    Cost per closed bead is the figure the harness A/Bs compare, and it is
+    printed as `n/a` rather than as a number when nothing closed — an arm that
+    finished no bead has no price per bead, and a zero there would read as the
+    cheapest arm in the comparison.
+    """
+
+    counts = tree.source_counts()
+    _record(
+        f"tree  [{len(tree.planner)} planner + {len(tree.workers)} worker window(s)]",
+        [
+            ("planner", _usd(tree.planner_usd)),
+            ("workers", _usd(tree.worker_usd)),
+            ("total", _usd(tree.total_usd)),
+            ("closed", f"{tree.closed_beads} bead(s) of {len(tree.beads)}"),
+            (
+                "per bead",
+                "n/a"
+                if tree.usd_per_closed_bead is None
+                else _usd(tree.usd_per_closed_bead),
+            ),
+            (
+                "basis",
+                f"{counts[COST_PROVIDER]} provider-reported, "
+                f"{counts[COST_ESTIMATED]} estimated (price table "
+                f"{PRICE_TABLE_VERSION}), {counts['unpriced']} unpriced",
+            ),
+        ],
+    )
+
+
+def _report_tree(target: Path, *, runs: int, json_out: bool) -> None:
+    """The whole-tree rollup, as data or as a block. Empty logs are an error.
+
+    A repository with no log at all cannot be answered with zeroes: the
+    question is what the work cost, and "nothing was recorded" is a different
+    answer from "it was free".
+    """
+
+    rollup = parse_tree(target, runs=runs)
+    if not rollup.planner and not rollup.workers:
+        output.error(
+            f"no plan or grind logs under {target / 'logs'}",
+            hint="run ortus plan or ortus grind first",
+        )
+        raise typer.Exit(code=1)
+    output.progress(
+        "cost",
+        f"rolling up {len(rollup.planner)} planner and "
+        f"{len(rollup.workers)} worker window(s)",
+    )
+    if json_out:
+        typer.echo(json.dumps(rollup.as_dict(), indent=2, sort_keys=True))
+        return
+    _print_tree(rollup)
+
+
 def cost(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
@@ -208,6 +291,14 @@ def cost(
         "--sessions",
         help="One row per worker window instead of one per bead.",
     ),
+    tree: bool = typer.Option(
+        False,
+        "--tree",
+        help=(
+            "Roll up planning and worker windows together and report cost per "
+            "closed bead for the whole tree."
+        ),
+    ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit the rollup as JSON on stdout."
     ),
@@ -216,11 +307,22 @@ def cost(
 
     Token counts are split into the buckets providers bill separately — output,
     uncached input, cached input — and normalized so a Claude run and a Codex
-    run report the same quantity under the same name. Dollars appear only when
-    the provider reported them; nothing here applies a price table of its own.
+    run report the same quantity under the same name. Dollars are the provider's
+    own figure wherever it reported one; a Claude window that was reaped before
+    it could report is weighted by this repository's price table and labelled
+    estimated.
     """
 
     target = resolve_repo(repo)
+    if tree:
+        if log is not None:
+            output.error(
+                "--tree reads the repository's logs, so it cannot take --log",
+                hint="drop --log, or drop --tree to roll up one file",
+            )
+            raise typer.Exit(code=1)
+        _report_tree(target, runs=runs, json_out=json_out)
+        return
     if log is not None:
         paths: tuple[Path, ...] = (log,)
         if not log.is_file():

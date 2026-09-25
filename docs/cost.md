@@ -30,13 +30,54 @@ uncached input, cached input — normalized across backends, because the backend
 disagree about what their fields mean. Claude keeps cache reads out of
 `input_tokens`; Codex folds them in, so its uncached bucket is a subtraction.
 An unreported field stays unreported rather than becoming a zero, and the row
-is flagged `partial-usage`; dollars appear only where the provider itself
-reported a price, which today means Claude and OpenCode but not Codex.
+is flagged `partial-usage`.
 
 `--runs N` widens the window from the newest log to the newest N, and `--runs 0`
 reads every log the repository has. `--issue` narrows to one bead, `--sessions`
-reports one row per worker window instead of one per bead, and `--json` emits
-the rollup for a program rather than a reader.
+reports one row per worker window instead of one per bead, `--tree` rolls
+planning and worker windows up together, and `--json` emits the rollup for a
+program rather than a reader.
+
+## Where a window's dollars come from
+
+Every row says which of three things its dollar figure is, under `cost_source`:
+
+- `provider` — the provider's own number, from Claude's `result.total_cost_usd`
+  or OpenCode's per-step `cost`. Always preferred where it exists.
+- `estimated` — the versioned price table in `ortus.core.cost` applied to the
+  window's token buckets, because no provider figure was written.
+- null — the tokens are known and the price is not, so the dollars stay unset.
+
+The estimate exists because of how a Claude window ends. Grind reaps a worker
+as soon as its bead is closed and pushed, since the `/goal` Stop hook would
+otherwise hold the session open indefinitely — so the `result` event carrying
+the session totals is never written, and those windows used to report null
+usage and null dollars even though they were the ones that did the work. Each
+`assistant` event also states its own message's usage, repeated on every
+content block of that message, so deduplicating by message id and summing
+across ids rebuilds the window's billing. Measured against windows that did
+write a `result`, the input buckets come out exactly equal; only the output
+count runs low, because each message reports what it had produced so far. An
+estimate is therefore a floor, and grind gives a worker that met the done bar a
+short bounded grace to flush its `result` line before the reap signal so the
+provider's figure is used wherever it can be.
+
+The price table is keyed by model family, versioned, and refuses to guess: a
+context marker (`claude-opus-5[1m]`) or a dated snapshot suffix resolves to its
+family, while a model the table does not name — including the stream's
+`<synthetic>` placeholder — leaves the dollars null and marks the row partial.
+Codex and Grok report no dollars of their own and are not priced here.
+
+## `ortus cost --tree`
+
+`--tree` answers what the whole tree cost: the `logs/plan-*.log` sessions as a
+planner phase, every grind log as worker windows, and the total over the beads
+actually closed. A planning session owns no bead of its own, so it is reported
+as its own figure rather than attributed to one, and a bead no planner wrote
+would not exist to close — a comparison that counted only worker windows would
+flatter every arm by the same invisible amount. Cost per closed bead is `n/a`
+rather than a number when nothing closed, and the report names how many windows
+the provider priced, how many this table priced, and how many went unpriced.
 
 ## `ortus eval`
 

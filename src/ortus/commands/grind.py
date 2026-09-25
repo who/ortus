@@ -1366,6 +1366,21 @@ def _flagged_claims(bd: BdClient) -> set[str]:
 
 _FLAGGED_REASON = "claim flagged human"
 
+#: How a done-bar reap reason opens, so the grace below can recognize one.
+_DONE_BAR_REASON = "done bar met"
+
+#: How long a worker that met the done bar gets to finish its stream before the
+#: reap signal. The `result` event it would write carries the session's usage
+#: totals and the provider's own dollar figure, and killing the worker first is
+#: why those windows report nothing (ortus-fva5). The wait is a short constant
+#: and cannot be spent twice, so a hung worker still meets the watchdog on
+#: schedule; under the /goal Stop hook the line usually never comes, which is
+#: why `ortus cost` also estimates from the per-message usage.
+_RESULT_GRACE_S = 5.0
+
+#: How often the grace re-reads the log while it waits.
+_RESULT_POLL_S = 0.5
+
 
 def _reap_reason(
     bd: BdClient,
@@ -1403,7 +1418,7 @@ def _reap_reason(
             bd, git, baseline_closed or 0, integration_branch, bound_issue_id,
         )
         if label:
-            return f"done bar met ({label}, in sync)"
+            return f"{_DONE_BAR_REASON} ({label}, in sync)"
     if bound_issue_id is not None:
         try:
             issue = bd.show(bound_issue_id)
@@ -1848,6 +1863,63 @@ def _decide_stuck(
         f"advanced={branch_advanced}, fail_open={decision.fail_open}, {vector})"
     )
     return decision, applied
+
+
+def _scan_for_result(log_path: Path, offset: int) -> tuple[int, bool]:
+    """Read the log from `offset`; report where reading stopped and whether a
+    stream-ending `result` event was among the whole lines it found.
+
+    Only complete lines are parsed: the worker is still writing, so the last
+    line can be half a JSON object, and the offset returned stops short of it
+    for the next read to pick up.
+    """
+
+    try:
+        with open(log_path, "rb") as handle:
+            handle.seek(offset)
+            data = handle.read()
+    except OSError:
+        return offset, False
+    cut = data.rfind(b"\n") + 1
+    if cut <= 0:
+        return offset, False
+    for raw in data[:cut].splitlines():
+        try:
+            event = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            return offset + cut, True
+    return offset + cut, False
+
+
+def _await_result_line(
+    log_path: Path,
+    *,
+    start_offset: int,
+    grace: float = _RESULT_GRACE_S,
+    poll: float = _RESULT_POLL_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Wait a bounded moment for this window's `result` event, and say if it came.
+
+    A worker that met the done bar has finished its work and is only being held
+    open by the Stop hook, so the one thing worth waiting for is the line that
+    states what the window cost. The wait returns the instant that line lands
+    and expires on a constant otherwise; either way the reap follows.
+    """
+
+    deadline = clock() + grace
+    offset = start_offset
+    while True:
+        offset, found = _scan_for_result(log_path, offset)
+        if found:
+            return True
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return False
+        sleep(min(poll, remaining))
 
 
 def _announce_wedged_escalation(escalated: tuple[str, int]) -> None:
@@ -3044,6 +3116,18 @@ def grind(
                             )
                             if reason is None:
                                 return False
+                            if reason.startswith(_DONE_BAR_REASON):
+                                flushed = _await_result_line(
+                                    log, start_offset=phase_offset
+                                )
+                                write_log(
+                                    f"iter {iters_run}: done bar met; result line "
+                                    + (
+                                        "flushed"
+                                        if flushed
+                                        else f"not written within {_RESULT_GRACE_S:g}s"
+                                    )
+                                )
                             write_log(f"iter {iters_run}: {reason}; reaping worker")
                             reap_reasons.append(reason)
                             return True
