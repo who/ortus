@@ -613,6 +613,74 @@ def test_an_unknown_model_leaves_dollars_null_and_flags_the_row_partial(
     assert model_price("some-unlisted-model-7") is None
 
 
+def _ttl_log(tmp_path: Path) -> Path:
+    """A reaped window whose two messages wrote cache under different TTLs."""
+
+    return _write_log(
+        tmp_path / "logs" / "grind-20260924-130000.log",
+        [
+            "[2026-09-24 13:00:00] === ortus grind started (subprocess-per-task "
+            "shape; backend=claude; verification=full) ===",
+            "[2026-09-24 13:00:00] profile: claude/implement "
+            "(model=claude-opus-5, effort=high)",
+            "[2026-09-24 13:00:01] iter 1: goal-prompt ready for ortus-ttl (claude)",
+            "[2026-09-24 13:00:02] iter 1: spawning claude (single-issue worker)",
+            '{"type":"system","subtype":"init","session_id":"ttl-1","model":'
+            '"claude-opus-5"}',
+            '{"type":"assistant","message":{"id":"msg_01FiveMinuteWrite","role":'
+            '"assistant","model":"claude-opus-5","content":[],"usage":'
+            '{"input_tokens":10,"cache_creation_input_tokens":100000,'
+            '"cache_read_input_tokens":0,"output_tokens":20,"cache_creation":'
+            '{"ephemeral_5m_input_tokens":100000,'
+            '"ephemeral_1h_input_tokens":0}}}}',
+            '{"type":"assistant","message":{"id":"msg_01OneHourWrite","role":'
+            '"assistant","model":"claude-opus-5","content":[],"usage":'
+            '{"input_tokens":10,"cache_creation_input_tokens":100000,'
+            '"cache_read_input_tokens":0,"output_tokens":20,"cache_creation":'
+            '{"ephemeral_5m_input_tokens":0,'
+            '"ephemeral_1h_input_tokens":100000}}}}',
+            "[2026-09-24 13:12:00] iter 1: worker closed ortus-ttl "
+            "(tasks_completed=1)",
+        ],
+    )
+
+
+def test_cache_write_ttl_is_priced_at_the_rate_it_was_billed(
+    tmp_path: Path,
+) -> None:
+    """AC-1: a five-minute write costs 1.25x input, a one-hour write 2x.
+
+    Both messages wrote the same number of tokens, so the dollars are the only
+    thing that can tell the two TTLs apart. Weighting both at the one-hour
+    rate, as this table did before the split, overstates the cheaper write by
+    60% and says nothing about having done so.
+    """
+
+    (session,) = parse_grind_log(_ttl_log(tmp_path)).sessions
+
+    usage = session.usage
+    assert usage.cache_write_5m_tokens == 100000
+    assert usage.cache_write_1h_tokens == 100000
+    # AC-2: the flat bucket every other reader asks for is still the total.
+    assert usage.cache_write_tokens == 200000
+    assert session.cost_source == COST_ESTIMATED
+    assert usage.cost_usd == pytest.approx(
+        (20 * 5.0 + 100000 * 6.25 + 100000 * 10.0 + 40 * 25.0) / 1_000_000
+    )
+
+
+def test_cache_write_ttl_left_unstated_keeps_the_one_hour_rate() -> None:
+    """A write no `cache_creation` object splits is priced as it always was."""
+
+    unstated = UsageBuckets(cache_write_tokens=1_000_000)
+    assert estimate_cost(unstated, "claude-opus-5") == pytest.approx(10.0)
+
+    split = UsageBuckets(
+        cache_write_tokens=1_000_000, cache_write_5m_tokens=1_000_000
+    )
+    assert estimate_cost(split, "claude-opus-5") == pytest.approx(6.25)
+
+
 def test_the_price_table_reads_a_context_marker_as_the_same_family() -> None:
     """`claude-opus-5[1m]` is one model id for one priced family, not two."""
 
