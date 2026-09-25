@@ -30,11 +30,13 @@ from tests._shims import normalize_git_branch, ready_issue_args, shim_path
 
 _DEPENDENCY_MARKERS = ("fast", "integration", "network", "live_provider")
 _HERMETIC_TEST_BUDGET_SECONDS = 5.0
-#: Multiplier applied to that budget, so a slow machine cannot redden a healthy
-#: build. Hosted runners vary by roughly 3x run to run — the same commit on the
-#: same leg has taken 706s and 2232s — and an absolute budget measures the
-#: runner rather than the test. CI raises this; a developer machine is stable
-#: enough to keep the tight number that makes the guard useful.
+#: Multiplier applied to that budget, so neither a slow machine nor a busy one
+#: can redden a healthy build. Hosted runners vary by roughly 3x run to run —
+#: the same commit on the same leg has taken 706s and 2232s — and the CI gate
+#: distributes its tests, so a duration measured there also carries the
+#: contention of the workers sharing the runner. CI raises this; a developer
+#: machine running one test at a time is stable enough to keep the tight
+#: number that makes the guard useful.
 _DURATION_BUDGET_SCALE = float(os.environ.get("ORTUS_TEST_BUDGET_SCALE", "1") or "1")
 _DURATION_BUDGET = _HERMETIC_TEST_BUDGET_SECONDS * _DURATION_BUDGET_SCALE
 _CI_GATE_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "test.yml"
@@ -42,6 +44,8 @@ _CI_GATE_WORKFLOW = Path(__file__).parent.parent / ".github" / "workflows" / "te
 _CI_GATE_COMMAND_RE = re.compile(
     r'uv run pytest -m "fast or integration"(?:[^\n]*\\\n)*[^\n]*'
 )
+# The budget multiplier the gate step exports, as a quoted YAML scalar.
+_CI_GATE_BUDGET_SCALE_RE = re.compile(r"ORTUS_TEST_BUDGET_SCALE: '([\d.]+)'")
 
 
 def ci_gate_command() -> str:
@@ -64,10 +68,11 @@ def ci_gate_flags() -> tuple[str, ...]:
 
     The per-test timeout is reproduced by every worker and verifier sweep, so a
     hung test is caught before main (ortus-q3lh). The duration budget is
-    deliberately *not*: those sweeps run with `-n auto`, and contending workers
-    inflate durations enough to manufacture breaches, so CI stays the single
-    authority on how fast a test is (ortus-3ehq). Both flags are still parsed
-    out of the workflow, so a change to the gate cannot silently desync them.
+    deliberately *not*: a sweep runs at the unscaled budget, where the
+    contention of its own workers manufactures breaches, so CI — which pairs
+    the same distribution with a scaled cap — stays the single authority on how
+    fast a test is (ortus-3ehq). Both flags are still parsed out of the
+    workflow, so a change to the gate cannot silently desync them.
     """
     command = ci_gate_command()
     timeout = re.search(r"--test-timeout=\d+", command)
@@ -77,6 +82,37 @@ def ci_gate_flags() -> tuple[str, ...]:
             f"the duration budget: {command!r}"
         )
     return (timeout.group(0), "--enforce-duration-budget")
+
+
+def ci_gate_budget_scale() -> float:
+    """Return the duration-budget multiplier the comprehensive CI gate sets.
+
+    Read out of the workflow for the same reason the command is. The gate runs
+    its tests distributed, so this multiplier is the whole difference between a
+    budget that judges a test and one that judges how busy the runner was.
+    """
+    body = _CI_GATE_WORKFLOW.read_text(encoding="utf-8")
+    scale = _CI_GATE_BUDGET_SCALE_RE.search(body)
+    if scale is None:
+        raise RuntimeError(
+            f"the CI gate no longer sets ORTUS_TEST_BUDGET_SCALE: "
+            f"{_CI_GATE_WORKFLOW}"
+        )
+    return float(scale.group(1))
+
+
+def wall_clock_budget(seconds: float) -> float:
+    """Widen a test's own elapsed-seconds bound for the workers beside it.
+
+    A test that asserts on wall clock measures the machine as much as the code.
+    The CI gate distributes across a runner's three to four cores, which is the
+    load those bounds are written for, so a serial run and a four-worker run
+    both get exactly the seconds the test stated. A developer host running
+    `-n auto` across dozens of cores gets proportionally more, rather than an
+    assertion deleted for being inconvenient there.
+    """
+    workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1") or "1")
+    return seconds * max(1.0, workers / 4.0)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

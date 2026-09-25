@@ -14,7 +14,12 @@ from typing import Callable
 import pytest
 
 from tests import conftest
-from tests.conftest import BdWorkspace, ci_gate_command, ci_gate_flags
+from tests.conftest import (
+    BdWorkspace,
+    ci_gate_budget_scale,
+    ci_gate_command,
+    ci_gate_flags,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -207,24 +212,30 @@ def test_worker_guidance_defers_to_criterion_checks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Workers parallelise, CI does not (ortus-3ehq).
+# Everything parallelises; CI pays for it with a scaled budget (ortus-3ehq).
 # ---------------------------------------------------------------------------
 
 
-def test_ci_gate_stays_serial() -> None:
-    """AC-3: the comprehensive gate must keep running one test at a time.
+def test_ci_gate_distributes_under_a_scaled_budget() -> None:
+    """The gate must run distributed and still judge how long a test took.
 
-    The duration budget is a claim about a test on a quiet machine. Adding
-    xdist workers to this command would make every measured duration a function
-    of how many other tests happened to be running, which is why parallelism
-    lives in the worker and verifier commands instead of here (and never in
-    `addopts`, which this command inherits).
+    Either half alone is a regression. Without the workers the gate goes back
+    to waiting on one bd subprocess at a time for most of its wall clock; with
+    them but without the raised budget, every measured duration becomes a
+    function of how many other tests happened to be running, and the guard
+    starts reporting contention as a test that got slower. `addopts` still
+    carries neither, so the inner pytest sessions this module spawns — which
+    this command also inherits — keep measuring one test at a time.
     """
     command = ci_gate_command()
     assert "--enforce-duration-budget" in command, command
-    assert not re.search(r"(?:^|\s)(?:-n|--numprocesses)(?:[=\s]|$)", command), (
-        f"the CI gate acquired parallel workers, so its duration budget now "
-        f"measures contention rather than the test: {command!r}"
+    assert re.search(r"(?:^|\s)-n auto(?:\s|\\|$)", command), (
+        f"the CI gate stopped distributing its tests, so the suite is back on "
+        f"its serial wall clock: {command!r}"
+    )
+    assert ci_gate_budget_scale() == 5.0, (
+        f"the gate's duration budget must absorb the contention its own "
+        f"workers add; scale is {ci_gate_budget_scale()}"
     )
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -233,7 +244,7 @@ def test_ci_gate_stays_serial() -> None:
     assert not re.search(
         r"(?:^|\s)(?:-n|--numprocesses)(?:[=\s]|$)", addopts.group(1)
     ), (
-        f"shared addopts must not force parallelism onto the CI gate: "
+        f"shared addopts must not force parallelism onto every inner session: "
         f"{addopts.group(1)!r}"
     )
 
@@ -247,19 +258,23 @@ def test_parallel_sweeps_have_their_dependency() -> None:
     )
 
 
-def test_testing_guide_documents_parallel_split() -> None:
-    """AC-4: the guide records the split and why the two cannot be combined."""
+def test_testing_guide_documents_the_parallel_gate() -> None:
+    """AC-4: the guide records what CI runs and what it costs to run it."""
     guide = TESTING_GUIDE.read_text(encoding="utf-8")
 
     assert "-n auto" in guide
     assert "pytest-xdist" in guide
-    # The split itself: parallel for workers, serial-with-budget for CI.
-    assert "single-threaded" in guide
+    # The rule itself: everything distributes, and CI names the scale that
+    # keeps its budget about the test rather than about the runner.
+    scale = ci_gate_budget_scale()
+    assert f"`ORTUS_TEST_BUDGET_SCALE` to `{scale:g}`" in guide, (
+        f"docs/testing.md does not name the gate's budget scale {scale:g}"
+    )
     for flag in ci_gate_flags():
         assert flag in guide, f"docs/testing.md does not name the CI gate flag {flag!r}"
     # The reason, not just the rule — an editor who only reads the rule will
-    # eventually "simplify" it by putting `-n auto` in addopts.
-    assert "mutually exclusive" in guide
+    # eventually "simplify" it by putting `-n auto` in addopts, or by dropping
+    # the scale that makes the budget survivable next to it.
     assert "quiet machine" in guide
 
 

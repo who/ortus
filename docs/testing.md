@@ -28,29 +28,32 @@ uv run pytest <expansion> -n auto --test-timeout=180
 Fresh verifiers expand from the changed paths and risk. They do not run
 `network` or `live_provider` locally unless the issue explicitly requires it.
 
-**Workers parallelise; CI enforces the budget serially.** Most of this suite's
-wall clock is subprocess wait rather than computation — a grind-family test
-drives eight to twelve `bd` invocations at roughly a second each — so `-n auto`
-(pytest-xdist) returns the same answer several times sooner. It is not in
-`addopts`, because parallelism and the duration budget are mutually exclusive:
-contending workers make each individual test slower even as wall clock falls,
-so the same `fast or integration` gate run at `-n 16` reported 15 duration
-breaches that a serial run did not. The budget is a claim about how fast a test
-is on a quiet machine, and only CI is quiet. So CI keeps running the gate
-single-threaded with `--test-timeout=180 --enforce-duration-budget` and stays
-the authority on duration, while workers and verifiers run parallel without it
-and answer only whether the code is correct. `auto` rather than a fixed count,
-so a small host is not oversubscribed and two grinds can share a machine. On a
-host without pytest-xdist, drop `-n auto`; the identical selection still runs
-serially.
+**Everything parallelises; CI scales the budget rather than dropping it.** Most
+of this suite's wall clock is subprocess wait rather than computation — a
+grind-family test drives eight to twelve `bd` invocations at roughly a second
+each — so `-n auto` (pytest-xdist) returns the same answer several times
+sooner. Workers, verifiers and the comprehensive CI gate all run it. Contention
+is the price: a test measured while three others compete for the same runner is
+slower than the same test alone, and the `fast or integration` selection run at
+`-n 16` reported 15 duration breaches a serial run did not. The unscaled budget
+is a claim about how fast a test is on a quiet machine, and a distributed
+runner is not quiet, so CI raises `ORTUS_TEST_BUDGET_SCALE` to `5`, a 25s cap,
+instead of turning the guard off. A pathological test still fails there; a
+healthy one no longer reddens main for having shared a core. `-n auto` stays
+out of `addopts` so the inner pytest sessions the policy tests spawn keep
+measuring one test at a time. `auto` rather than a fixed count, so a small host
+is not oversubscribed and two grinds can share a machine. On a host without
+pytest-xdist, drop `-n auto`; the identical selection still runs serially.
 
 **Verification-to-CI flag parity.** The flags above change how durations and
-timeouts are judged and how many processes run them, and
-never which tests are selected. Narrowing the marker expression to get past
-them is never the fix; record a plan gap instead. `slow`-marked tests stay
-exempt from the CI budget as before. A test that passes serially but fails
-under `-n auto` is a real finding about a shared resource that test depends
-on: fix or mark it rather than dropping the flag.
+timeouts are judged, and never which tests are selected. A sweep and the gate
+now distribute the same way, so the gate's `--test-timeout=180
+--enforce-duration-budget` under its scaled cap is the only thing a local sweep
+does not reproduce. Narrowing the marker expression to get past them is never
+the fix; record a plan gap instead. `slow`-marked tests stay exempt from the CI
+budget as before. A test that passes serially but fails under `-n auto` is a
+real finding about a shared resource that test depends on: fix or mark it
+rather than dropping the flag.
 
 ## bd workspaces: copy a template, never `bd init`
 
@@ -101,8 +104,8 @@ machine has one and a runner does not. `tests/conftest.py` points
 `GIT_CONFIG_GLOBAL` at an empty file for every test, so a fixture that shells
 out to `git commit` has to configure its own `user.name` and `user.email`.
 
-Every selection below runs with `-n auto` in both phases; only CI runs them
-serially with the duration budget.
+Every selection below runs with `-n auto` in both phases, and so does CI; only
+CI adds the duration budget, under its contention-scaled cap.
 
 | Changed path | Implementation gate | Verifier expansion |
 | --- | --- | --- |
@@ -113,9 +116,10 @@ serially with the duration budget.
 | test policy or CI | `tests/test_test_policy.py` | collect-only marker probes plus the fast gate |
 
 The comprehensive main CI matrix runs `fast or integration` on Linux and
-macOS across every supported Python version, single-threaded and with the
-budget enforced. It records JUnit XML, reports the 20 slowest tests, and
-rejects hermetic tests exceeding five seconds unless they carry `slow`. Per-test timeouts print the running node id and allow pytest
+macOS across every supported Python version, distributed across the runner's
+cores and with the scaled budget enforced. It records JUnit XML, reports the 20
+slowest tests, and rejects hermetic tests exceeding the scaled budget unless
+they carry `slow`. Per-test timeouts print the running node id and allow pytest
 to finish the report, preserving JUnit and timing evidence.
 
 Only tagged release validation runs these external groups:
