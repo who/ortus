@@ -111,20 +111,30 @@ def test_ambient_git_identity_neutralized(tmp_path: Path) -> None:
     assert committed.returncode == 0, committed.stderr
 
 
-_BUDGET_PROBE = '''
+#: The budget multiplier the inner probe session runs under. Scaling the
+#: budget down is the same mechanism CI uses to scale it up, so the probe
+#: still drives the real hook — it just breaches a tenth of a second instead
+#: of spending the five real seconds the unscaled budget names.
+_PROBE_BUDGET_SCALE = 0.02
+_PROBE_BUDGET = conftest._HERMETIC_TEST_BUDGET_SECONDS * _PROBE_BUDGET_SCALE
+#: What each probe sleeps. A sleep is a floor on the call phase, so any value
+#: comfortably above the scaled budget breaches it on the slowest machine.
+_PROBE_SLEEP = 0.4
+
+_BUDGET_PROBE = f"""
 import time
 
 import pytest
 
 
 def test_unmarked_hermetic_test_over_budget() -> None:
-    time.sleep(5.2)
+    time.sleep({_PROBE_SLEEP})
 
 
 @pytest.mark.slow
 def test_slow_marked_test_over_budget() -> None:
-    time.sleep(5.2)
-'''
+    time.sleep({_PROBE_SLEEP})
+"""
 
 
 @pytest.mark.slow
@@ -133,8 +143,11 @@ def test_over_budget_is_rejected_under_verification_flags(tmp_path: Path) -> Non
 
     Two probes run in one inner pytest session under the flags a verifier now
     uses: the unmarked one must be rejected for its duration, and the
-    `slow`-marked one must stay exempt exactly as it is under CI. Marked slow
-    itself because proving a five-second breach costs five real seconds twice.
+    `slow`-marked one must stay exempt exactly as it is under CI. The inner
+    session scales the budget down rather than sleeping past the real one, so
+    the breach costs a fraction of a second instead of five of them. Still
+    marked slow: spawning a pytest session is subprocess work, and the budget
+    judges it beside whatever else a distributed run has on the machine.
     """
     probe = tmp_path / "test_budget_probe.py"
     probe.write_text(_BUDGET_PROBE, encoding="utf-8")
@@ -160,11 +173,15 @@ def test_over_budget_is_rejected_under_verification_flags(tmp_path: Path) -> Non
         capture_output=True,
         check=False,
         timeout=180,
-        # This proves the guard rejects a breach of the stated budget, so the
-        # probe must run against the unscaled number. CI raises the scale to
-        # absorb slow runners, and inheriting it here would let the probe's
-        # deliberate overrun slip under a budget three times its size.
-        env={**os.environ, "ORTUS_TEST_BUDGET_SCALE": "1"},
+        # The probe must run against a budget it can name, never the ambient
+        # one: CI raises the scale to absorb slow runners, and inheriting it
+        # would let the deliberate overrun slip under a budget several times
+        # its size. Pinning a tiny scale fixes the number the guard enforces
+        # and keeps the breach cheap.
+        env={
+            **os.environ,
+            "ORTUS_TEST_BUDGET_SCALE": str(_PROBE_BUDGET_SCALE),
+        },
     )
     combined = result.stdout + result.stderr
     assert result.returncode != 0, combined
@@ -179,6 +196,28 @@ def test_over_budget_is_rejected_under_verification_flags(tmp_path: Path) -> Non
     assert all("test_unmarked_hermetic_test_over_budget" in line for line in rejected), (
         f"the budget rejected something other than the unmarked probe: {rejected}"
     )
+    # The scale reached the hook: an ignored multiplier would report the
+    # unscaled five seconds instead of the budget this run asked for.
+    assert all(f"over {_PROBE_BUDGET:.0f}s" in line for line in rejected), (
+        f"the guard enforced a budget other than the scaled one: {rejected}"
+    )
+
+
+def test_unscaled_hermetic_budget_is_five_seconds() -> None:
+    """Pin the number the probe's scaled budget is a fraction of.
+
+    The probe proves the guard cheaply by shrinking the budget, which leaves
+    nothing in that test asserting how long a hermetic test is actually
+    allowed to take. This does, in process and for free: the contract is five
+    seconds, the multiplier only stretches it, and the probe's own sleep must
+    stay above the budget that multiplier produces.
+    """
+    assert conftest._HERMETIC_TEST_BUDGET_SECONDS == 5.0
+    assert conftest._DURATION_BUDGET_SCALE > 0
+    assert conftest._DURATION_BUDGET == pytest.approx(
+        conftest._HERMETIC_TEST_BUDGET_SECONDS * conftest._DURATION_BUDGET_SCALE
+    )
+    assert _PROBE_BUDGET < _PROBE_SLEEP
 
 
 def test_testing_guide_documents_flag_parity() -> None:
