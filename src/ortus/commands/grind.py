@@ -759,14 +759,20 @@ def _snapshot(bd: BdClient) -> StateSnapshot:
     under test — so the duplicate is dropped rather than kept for symmetry.
     A tracker error still reads as zero here, because the id set answers a
     failed query with an empty set exactly as the count answered with 0.
+
+    The three surviving queries are three views of one tracker state, so they
+    are taken under one reading rather than three processes. A caller that
+    wants more of that same state — the closed ids beside these counts, say —
+    opens its own block around this one and pays for the listing once.
     """
-    in_progress_ids = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
-    return StateSnapshot.from_counts(
-        closed=bd.count_by_status("closed"),
-        in_progress=len(in_progress_ids),
-        open=bd.count_by_status("open", exclude_labels=EXCLUDED_LABELS),
-        in_progress_ids=in_progress_ids,
-    )
+    with bd.snapshot():
+        in_progress_ids = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+        return StateSnapshot.from_counts(
+            closed=bd.count_by_status("closed"),
+            in_progress=len(in_progress_ids),
+            open=bd.count_by_status("open", exclude_labels=EXCLUDED_LABELS),
+            in_progress_ids=in_progress_ids,
+        )
 
 
 def _exit_counts(bd: BdClient, loop_view: StateSnapshot) -> tuple[int, int]:
@@ -1377,7 +1383,7 @@ def _flagged_claims(bd: BdClient) -> set[str]:
     unflagged = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
     flagged: set[str] = set()
     for issue_id in every - unflagged:
-        labels = bd.show(issue_id).get("labels") or []
+        labels = bd.labels_of(issue_id)
         if any(label in EXCLUDED_LABELS for label in labels):
             flagged.add(issue_id)
     return flagged
@@ -2434,8 +2440,12 @@ def grind(
                 phase="startup",
             )
             # Leftover work is the leftover in_progress claim in bd plus the
-            # git tree. A leftover journal is never the resume key.
-            leftover_claims = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+            # git tree. A leftover journal is never the resume key. The claim
+            # set and the counts printed beside it are views of one tracker
+            # state, so one reading answers both.
+            with bd.snapshot():
+                leftover_claims = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
+                startup_snapshot = _snapshot(bd)
             if bind_worker and len(leftover_claims) > 1:
                 for claimed_id in sorted(leftover_claims):
                     bd.add_label(claimed_id, "human")
@@ -2449,7 +2459,7 @@ def grind(
                     "recovery: resuming the single claimed issue "
                     f"{resume_issue_id}"
                 )
-            initial_snapshot = _snapshot(bd)
+            initial_snapshot = startup_snapshot
             write_log(
                 f"initial state: open={initial_snapshot.open} "
                 f"in_progress={initial_snapshot.in_progress} "
@@ -2627,12 +2637,13 @@ def grind(
                 triage route on the packet the turn left behind.
                 """
                 write_log(f"triage: re-specifying {issue_id} in one planner turn")
-                rc = runner.run(
-                    _respec_prompt(issue_id),
-                    repo=target,
-                    log_path=log,
-                    profile=respec_profile,
-                )
+                with bd.no_snapshot():
+                    rc = runner.run(
+                        _respec_prompt(issue_id),
+                        repo=target,
+                        log_path=log,
+                        profile=respec_profile,
+                    )
                 write_log(f"triage: the re-spec turn for {issue_id} exited {rc}")
                 return rc == 0
 
@@ -2670,14 +2681,18 @@ def grind(
                 # the next milestone's subtree unblocks and this iteration
                 # can claim from it. Must precede the `before` snapshot.
                 _rollover_exhausted_epics(bd, write_log)
-                before = _snapshot(bd)
                 # Closed ids are captured so post-iteration attribution can
                 # name a worker that claimed AND closed within one window —
                 # the in_progress diff is empty there and the snapshot's
-                # closed count alone cannot say which issue landed.
-                before_closed_ids: set[str] = (
-                    bd.closed_ids() if harness_select else set()
-                )
+                # closed count alone cannot say which issue landed. They come
+                # out of the same reading as the counts beside them: both
+                # describe the tracker as it stood before this window, and
+                # nothing but this process can change it between the reads.
+                with bd.snapshot():
+                    before = _snapshot(bd)
+                    before_closed_ids: set[str] = (
+                        bd.closed_ids() if harness_select else set()
+                    )
                 # Until a claim materializes a worker workspace, every phase
                 # operates on the primary repository (legacy --condition mode
                 # never leaves it).
@@ -2885,7 +2900,13 @@ def grind(
                         write_log(
                             f"iter prep: worker will claim {issue_id} via goal-prompt"
                         )
-                    target_issue = bd.show(issue_id)
+                    # `target_issue` is already this issue's full `bd show`
+                    # payload: every path into the selection loads a candidate
+                    # that way, and epics — the one entry admitted straight
+                    # from the ready listing — are skipped before selection.
+                    # Reading it again here bought nothing; no worker runs
+                    # between the two reads, so the second only paid for a
+                    # second process.
                     iteration_pin = _pin_directive_for(
                         bd, target_issue, write_log
                     )
@@ -3089,23 +3110,29 @@ def grind(
                     flagged_at_start: frozenset[str] | None = None
                     human_open_at_start: frozenset[str] | None = None
                     if resolved_backend in ("claude", "grok"):
-                        try:
-                            baseline_closed = bd.count_by_status("closed")
-                        except Exception:
-                            baseline_closed = None
-                        try:
-                            flagged_at_start = frozenset(_flagged_claims(bd))
-                        except Exception:
-                            flagged_at_start = None
-                        # The operator's open issues, remembered so a claim
-                        # the worker puts on one of them can be handed back
-                        # once the flagged-claim reap has fired.
-                        try:
-                            human_open_at_start = frozenset(
-                                bd.open_ids(labels=EXCLUDED_LABELS)
-                            )
-                        except Exception:
-                            human_open_at_start = None
+                        # Three baselines, one tracker state: what is closed,
+                        # which claims were already flagged, and which open
+                        # issues are the operator's, all as they stand the
+                        # moment before the worker starts. One reading is
+                        # what makes them the same moment.
+                        with bd.snapshot():
+                            try:
+                                baseline_closed = bd.count_by_status("closed")
+                            except Exception:
+                                baseline_closed = None
+                            try:
+                                flagged_at_start = frozenset(_flagged_claims(bd))
+                            except Exception:
+                                flagged_at_start = None
+                            # The operator's open issues, remembered so a
+                            # claim the worker puts on one of them can be
+                            # handed back once the flagged reap has fired.
+                            try:
+                                human_open_at_start = frozenset(
+                                    bd.open_ids(labels=EXCLUDED_LABELS)
+                                )
+                            except Exception:
+                                human_open_at_start = None
                         if reaper_mode is not ProgressMode.OFF:
                             progress_watch = ProgressWatch(
                                 repo=target,
@@ -3124,15 +3151,25 @@ def grind(
                         def _reap_worker() -> bool:
                             if hook_run is not None and hook_run.poll():
                                 return True
-                            reason = _reap_reason(
-                                bd,
-                                git,
-                                baseline_closed=baseline_closed,
-                                flagged_at_start=flagged_at_start,
-                                integration_branch=integration_branch,
-                                bound_issue_id=gate_turn.bound.issue["id"] if gate_turn else None,
-                                progress=progress_watch,
-                            )
+                            # One tick asks the tracker several questions —
+                            # the closed count, the claims, a claim's labels —
+                            # about a single instant. One reading per tick
+                            # answers them all; the next tick takes a new one,
+                            # because between ticks the worker is running.
+                            with bd.snapshot():
+                                reason = _reap_reason(
+                                    bd,
+                                    git,
+                                    baseline_closed=baseline_closed,
+                                    flagged_at_start=flagged_at_start,
+                                    integration_branch=integration_branch,
+                                    bound_issue_id=(
+                                        gate_turn.bound.issue["id"]
+                                        if gate_turn
+                                        else None
+                                    ),
+                                    progress=progress_watch,
+                                )
                             if reason is None:
                                 return False
                             if reason.startswith(_DONE_BAR_REASON):
@@ -3160,16 +3197,17 @@ def grind(
                         f"iter {iters_run}: spawning {resolved_backend} "
                         "(single-issue worker)"
                     )
-                    rc = runner.run(
-                        iteration_prompt,
-                        repo=worker_repo,
-                        log_path=log,
-                        fast=fast,
-                        profile=implement_profile,
-                        timeout=(worker_timeout if worker_timeout > 0 else None),
-                        reap_when=reap_when,
-                        on_poll=_poll_impl_handshake,
-                    )
+                    with bd.no_snapshot():
+                        rc = runner.run(
+                            iteration_prompt,
+                            repo=worker_repo,
+                            log_path=log,
+                            fast=fast,
+                            profile=implement_profile,
+                            timeout=(worker_timeout if worker_timeout > 0 else None),
+                            reap_when=reap_when,
+                            on_poll=_poll_impl_handshake,
+                        )
                 except subprocess.TimeoutExpired:
                     worker_timed_out = True
                     rc = 143  # 128 + SIGTERM; group was SIGTERM'd then SIGKILL'd
@@ -3178,6 +3216,12 @@ def grind(
                         f"killed (rc={rc})"
                     )
                 finally:
+                    # The worker is gone and this process is the tracker's
+                    # only writer again, so the post-mortem reads that follow
+                    # — the shadow outcome, the mis-claim hand-back, the
+                    # parked claims and their labels — all describe one state
+                    # and take one reading of it.
+                    bd.open_snapshot()
                     if hook_run is not None:
                         try:
                             hook_run.poll()
@@ -3333,6 +3377,16 @@ def grind(
                 # Do not re-run tests, do not require Claims v1, do not
                 # spawn a verifier or a correction, do not revert a live
                 # in_progress claim.
+                # The worker has exited, so from here to the end of the step
+                # this process is the tracker's only writer again: the
+                # read-back, the judge's packet and the stuck decision all
+                # describe one post-window state. They take one reading of
+                # it, which a write of ours drops. It is opened by hand
+                # rather than with a block because the step's own reads
+                # straddle the try/finally the worker spawn sits in; the
+                # next reading starts at the head of the next step or at the
+                # run's exit summary, so an escape here cannot be read stale.
+                bd.open_snapshot()
                 closed_delta = 1
                 if harness_select:
                     # Attribution reads bd, not grind's prediction: the ids
@@ -3569,6 +3623,7 @@ def grind(
                         time.sleep(idle_sleep)
                     else:
                         break
+                bd.close_snapshot()
                 if iterations > 0 and iters_run >= iterations:
                     write_log(
                         f"--iterations cap reached: {iters_run}/{iterations}; "
@@ -3577,7 +3632,16 @@ def grind(
                     break
                 continue
 
+            # The loop's view and the operator's are two readings of the
+            # same end-of-run state: the first drops human-labelled issues so
+            # an escalated one cannot make the orchestrator spin, the second
+            # counts every issue left here. `open_snapshot` rather than a
+            # block, so a step that broke out mid-read-back cannot leave its
+            # own reading standing behind this one.
+            bd.open_snapshot()
             final_snapshot = _snapshot(bd)
+            exit_in_progress, exit_open = _exit_counts(bd, final_snapshot)
+            bd.close_snapshot()
             if resolved_backend == "codex":
                 _checkpoint_codex_preflight(
                     git,
@@ -3592,7 +3656,6 @@ def grind(
                 f"iters_run={iters_run}) ==="
             )
             leftover = final_snapshot.in_progress
-            exit_in_progress, exit_open = _exit_counts(bd, final_snapshot)
             output.progress(
                 "grind",
                 f"done — {tasks_completed} landed this session, "
