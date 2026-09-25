@@ -1,6 +1,8 @@
 """Tests for ortus init (q075.5 acceptance criteria).
 
-Marked integration since they shell out to real `bd init`.
+Marked integration since init drives real subprocesses. The workspace itself
+comes from the session's bd template (`bd_init_from_template`); the tests that
+own bd's own contract carry `real_bd` and shell out to the real binary.
 """
 
 from __future__ import annotations
@@ -26,7 +28,10 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover
     import tomli as tomllib
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("bd_init_from_template"),
+]
 runner = CliRunner()
 
 
@@ -247,6 +252,7 @@ def _bd_memories(repo: Path) -> dict:
     return json.loads(proc.stdout)
 
 
+@pytest.mark.real_bd
 def test_init_stores_readiness_memory(tmp_path: Path) -> None:
     """AC-1: the keyed pointer memory lands in the new bd workspace."""
     target = tmp_path / "fresh"
@@ -257,6 +263,7 @@ def test_init_stores_readiness_memory(tmp_path: Path) -> None:
     assert "ortus spec" in memories[READINESS_MEMORY_KEY]
 
 
+@pytest.mark.real_bd
 @pytest.mark.slow
 def test_init_force_does_not_duplicate_readiness_memory(tmp_path: Path) -> None:
     """Re-running init over an existing workspace updates the memory in place."""
@@ -349,6 +356,7 @@ def test_init_force_adopts_a_premarker_gitignore(tmp_path: Path) -> None:
     assert ".codegraph/" in text
 
 
+@pytest.mark.real_bd
 def test_prefix_is_respected(tmp_path: Path) -> None:
     """Acceptance #5: --prefix foo causes bd issues to carry foo- prefix."""
     target = tmp_path / "fresh"
@@ -366,6 +374,7 @@ def test_prefix_is_respected(tmp_path: Path) -> None:
     assert new_id.startswith("myfeat-"), f"got id {new_id!r}, expected myfeat- prefix"
 
 
+@pytest.mark.real_bd
 def test_default_prefix_is_dir_basename(tmp_path: Path) -> None:
     target = tmp_path / "fancyname"
     runner.invoke(app, ["init", str(target)])
@@ -379,6 +388,7 @@ def test_default_prefix_is_dir_basename(tmp_path: Path) -> None:
     assert proc.stdout.strip().startswith("fancyname-")
 
 
+@pytest.mark.real_bd
 @pytest.mark.slow
 def test_init_under_five_seconds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -460,6 +470,7 @@ def test_init_passes_non_interactive_to_bd(tmp_path: Path, monkeypatch: pytest.M
     assert captured["args"][:3] == ["bd", "init", "--non-interactive"], captured["args"]
 
 
+@pytest.mark.real_bd
 def test_init_completes_with_closed_stdin(tmp_path: Path) -> None:
     """ortus-btt3: end-to-end check that `ortus init` completes promptly when
     invoked via a real subprocess with stdin=/dev/null (proxy for a terminal

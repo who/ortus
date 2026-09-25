@@ -110,4 +110,5 @@ markers = [
     "smoke: end-to-end smoke tests against seeded fixtures + canned claude responses",
     "slow: tests allowed to exceed the 5s per-test hermetic budget",
     "codegraph_default: tests that must see the real resolved CodeGraph policy default",
+    "real_bd: tests that deliberately invoke the real bd binary rather than a template workspace",
 ]
