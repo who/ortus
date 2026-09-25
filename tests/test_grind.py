@@ -33,7 +33,7 @@ from tests._shims import (
     post_completion_comment,
     shim_path,
 )
-from tests.conftest import copy_bd_workspace
+from tests.conftest import copy_bd_workspace, run_bd
 from tests.test_readiness import ready_issue
 
 runner = CliRunner()
@@ -78,52 +78,43 @@ def _create_ready_issue(
 ) -> str:
     packet = ready_issue()
     description = packet["description"] + extra_description
-    return subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            title,
-            "--type",
-            "task",
-            "--priority",
-            priority,
-            "--description",
-            description,
-            "--design",
-            packet["design"],
-            "--acceptance",
-            packet["acceptance_criteria"],
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    # Through `run_bd`, not a bare subprocess: this helper is imported and
+    # called outside a test body too, where the autouse BEADS_DIR scrub never
+    # ran, and an inherited grind pin would file the issue in the host tracker.
+    return run_bd(
+        repo,
+        "create",
+        "--silent",
+        "--title",
+        title,
+        "--type",
+        "task",
+        "--priority",
+        priority,
+        "--description",
+        description,
+        "--design",
+        packet["design"],
+        "--acceptance",
+        packet["acceptance_criteria"],
+    )
 
 
 def _create_unready_issue(repo: Path, title: str, *, priority: str = "2") -> str:
     """A hand-authored leaf: real work, but no readiness schema v1 packet."""
-    return subprocess.run(
-        [
-            "bd",
-            "create",
-            "--silent",
-            "--title",
-            title,
-            "--type",
-            "task",
-            "--priority",
-            priority,
-            "--description",
-            "make it work",
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    return run_bd(
+        repo,
+        "create",
+        "--silent",
+        "--title",
+        title,
+        "--type",
+        "task",
+        "--priority",
+        priority,
+        "--description",
+        "make it work",
+    )
 
 
 def _bd_repo(tmp_path: Path, name: str) -> Path:
@@ -236,6 +227,38 @@ def _emit_verdict(
     }
     with log_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(event) + "\n")
+
+
+def test_fixture_database_isolation_survives_inherited_beads_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-1: the shared bd helpers write only into their own workspace.
+
+    A grind worker pins BEADS_DIR at the project tracker, and bd honors that
+    pin over its working directory. Two fixture issues reached the tracked
+    database that way. The pin is restored here after the autouse scrub, as
+    it is for a helper called outside a test body, with a scratch workspace
+    standing in for the project so the real database is never at risk.
+    """
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    project = copy_bd_workspace(tmp_path / "project", "bare").path
+
+    def ids(repo: Path) -> set[str]:
+        listing = run_bd(repo, "list", "--all", "--json")
+        return {issue["id"] for issue in json.loads(listing or "[]")}
+
+    before = ids(project)
+    monkeypatch.setenv("BEADS_DIR", str((project / ".beads").resolve()))
+    repo = _bd_repo(tmp_path, "fixture")
+    created = {
+        _create_ready_issue(repo, "close after handshake"),
+        _create_unready_issue(repo, "hand-authored leaf"),
+    }
+    monkeypatch.delenv("BEADS_DIR")
+
+    assert ids(repo) == created
+    assert ids(project) == before
 
 
 @pytest.mark.slow
