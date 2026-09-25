@@ -95,6 +95,13 @@ class _FakeBd:
             raise BdError(["bd", "show", issue_id], 1, "tracker down")
         return {"id": issue_id, "labels": list(self.claims[issue_id])}
 
+    def labels_of(self, issue_id: str) -> list[str]:
+        """The confirmation read by name, which the real client answers from
+        its open reading when it has one and from `show` when it does not.
+        Here it is always the `show` route, so a tracker that fails that read
+        still fails this one."""
+        return [str(label) for label in self.show(issue_id).get("labels") or []]
+
     def update_status(self, issue_id: str, status: str) -> None:
         if self.fail == "update":
             raise BdError(["bd", "update", issue_id], 1, "tracker down")

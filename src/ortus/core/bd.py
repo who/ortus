@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -119,12 +121,59 @@ class BeadsTracker:
 
 
 @dataclass
+class _Reading:
+    """One tracker reading, shared by every derived query in a snapshot block.
+
+    ``rows`` is the whole-tracker listing the id and count views are derived
+    from; ``shows`` and ``comments`` memoize the per-issue reads no listing
+    can answer. All three are dropped together by a write, because within a
+    block a write is the only thing that can change any of them.
+    """
+
+    rows: list[dict[str, Any]] | None = None
+    shows: dict[str, dict[str, Any]] = field(default_factory=dict)
+    comments: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
+
+def _rows_in(
+    rows: list[dict[str, Any]],
+    status: str,
+    *,
+    exclude_labels: tuple[str, ...] = (),
+    labels: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
+    """A listing's rows in `status`, under the label filters bd would apply.
+
+    ``exclude_labels`` drops a row carrying any of them, the way
+    ``--exclude-label`` does; ``labels`` keeps only rows carrying at least
+    one, the way ``--label-any`` does.
+    """
+
+    selected: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("status") != status:
+            continue
+        row_labels = row.get("labels") or []
+        if any(label in row_labels for label in exclude_labels):
+            continue
+        if labels and not any(label in row_labels for label in labels):
+            continue
+        selected.append(row)
+    return selected
+
+
+def _ids(rows: list[dict[str, Any]]) -> set[str]:
+    return {row["id"] for row in rows if "id" in row}
+
+
+@dataclass
 class BdClient:
     """Thin typed surface over the bd CLI, scoped to a single repo workspace."""
 
     repo: Path
     binary: str = "bd"
     _fresh_claims: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _reading: _Reading | None = field(default=None, init=False, repr=False)
 
     # --- subprocess primitive -------------------------------------------
 
@@ -132,6 +181,98 @@ class BdClient:
         return BeadsTracker(self.repo, binary=self.binary).run(
             *args, parse_json=parse_json
         )
+
+    # --- one reading per step -------------------------------------------
+
+    @contextmanager
+    def snapshot(self) -> Iterator[None]:
+        """Answer this block's repeated reads from one listing of the tracker.
+
+        Every method here is a fresh `bd` process opening the embedded
+        database — about a second of it on a CI runner — so a block that
+        wants the open ids, the in-progress ids and the closed count pays
+        three of them for three views of one state. Inside this block those
+        views are derived from a single listing, and a repeated `show` or
+        `comments` of the same issue is served from the first one.
+
+        A block is only sound where this process is the sole writer. A worker
+        subprocess changes the tracker underneath an open reading, so the
+        block ends before one is spawned and a new one begins when it exits.
+        A write through this client invalidates the reading, so a read that
+        follows one still observes it. Nesting is a no-op: the outermost
+        block owns the reading, and the inner one neither restarts nor ends it.
+        """
+
+        if self._reading is not None:
+            yield
+            return
+        self.open_snapshot()
+        try:
+            yield
+        finally:
+            self.close_snapshot()
+
+    def open_snapshot(self) -> None:
+        """Begin a reading, or restart one, where a block cannot be nested.
+
+        The grind loop's step spans a `try`/`finally` around a worker spawn
+        rather than one indented region, so it drives the reading by hand.
+        """
+
+        self._reading = _Reading()
+
+    def close_snapshot(self) -> None:
+        """End the reading; every later read goes back to the tracker."""
+
+        self._reading = None
+
+    @contextmanager
+    def no_snapshot(self) -> Iterator[None]:
+        """Suspend any open reading across work another process does.
+
+        A turn spent in an agent, or anything else that reaches the tracker
+        from outside this process, can change what a reading holds without
+        passing through the invalidation here. So the reading ends at the
+        top of such a block and, if one was open, a new and empty one begins
+        at the bottom: the reads that follow describe the tracker as the
+        other process left it.
+        """
+
+        held = self._reading is not None
+        self._reading = None
+        try:
+            yield
+        finally:
+            if held:
+                self.open_snapshot()
+
+    def _invalidate(self) -> None:
+        """Drop what the open reading holds, because this write changed it."""
+
+        if self._reading is not None:
+            self._reading = _Reading()
+
+    def _listing(self) -> list[dict[str, Any]] | None:
+        """The open reading's whole-tracker rows, or None outside a block.
+
+        A listing bd could not answer is remembered as no rows at all, so
+        each view derived from it reports exactly what its own failed query
+        reported: zero for a count, an empty set for an id set.
+        """
+
+        reading = self._reading
+        if reading is None:
+            return None
+        if reading.rows is None:
+            try:
+                _, data = self._run(
+                    "list", "--all", "--limit", "0", "--json", "--brief",
+                    parse_json=True,
+                )
+            except BdError:
+                data = []
+            reading.rows = data if isinstance(data, list) else []
+        return reading.rows
 
     # --- typed surface --------------------------------------------------
 
@@ -238,12 +379,23 @@ class BdClient:
         return data or []
 
     def comments(self, issue_id: str) -> list[dict[str, Any]]:
-        """`bd comments <id> --json`: ordered comment list for one issue."""
+        """`bd comments <id> --json`: ordered comment list for one issue.
+
+        Inside a snapshot block the first read of an issue's thread answers
+        every later one, until a write drops the reading.
+        """
+        reading = self._reading
+        if reading is not None and issue_id in reading.comments:
+            return reading.comments[issue_id]
         _, data = self._run("comments", issue_id, "--json", parse_json=True)
-        return data or []
+        thread = data or []
+        if reading is not None:
+            reading.comments[issue_id] = thread
+        return thread
 
     def add_comment(self, issue_id: str, body: str) -> None:
         """Append a durable comment without interpreting its Markdown."""
+        self._invalidate()
         self._run("comments", "add", issue_id, body)
 
     def memories(self) -> dict[str, str]:
@@ -288,13 +440,37 @@ class BdClient:
 
     def show(self, issue_id: str) -> dict[str, Any]:
         """Return the issue's full JSON dict. `bd show --json` returns a list
-        with one element when passed a single id; unwrap it."""
+        with one element when passed a single id; unwrap it.
+
+        Inside a snapshot block the first read of an issue answers every
+        later one, until a write drops the reading. The block's listing
+        cannot stand in for this: it is taken `--brief`, without the
+        description, design and acceptance a work spec is made of.
+        """
+        reading = self._reading
+        if reading is not None and issue_id in reading.shows:
+            return reading.shows[issue_id]
         _, data = self._run("show", "--json", "--", issue_id, parse_json=True)
         if not data:
             raise BdError([self.binary, "show", issue_id], 0, "empty JSON response")
-        if isinstance(data, list):
-            return data[0]
-        return data
+        issue = data[0] if isinstance(data, list) else data
+        if reading is not None:
+            reading.shows[issue_id] = issue
+        return issue
+
+    def labels_of(self, issue_id: str) -> list[str]:
+        """The issue's labels, from the open reading when it holds that row.
+
+        A listing already carries every row's labels, so a block that has
+        one answers this without starting a process. Outside a block, and
+        for an issue no listing holds, it is the `bd show` it always was.
+        """
+        rows = self._listing()
+        if rows is not None:
+            for row in rows:
+                if isinstance(row, dict) and row.get("id") == issue_id:
+                    return list(row.get("labels") or [])
+        return list(self.show(issue_id).get("labels") or [])
 
     def create(
         self,
@@ -332,6 +508,7 @@ class BdClient:
             args.extend(["--labels", ",".join(labels)])
         if external_ref:
             args.extend(["--external-ref", external_ref])
+        self._invalidate()
         stdout, _ = self._run(*args)
         return stdout.strip()
 
@@ -381,6 +558,7 @@ class BdClient:
 
     def update_status(self, issue_id: str, status: str) -> None:
         """`bd update <id> --status <status>`. Used by orphan-policy=revert."""
+        self._invalidate()
         self._run("update", issue_id, "--status", status)
 
     def require_atomic_claims(self) -> None:
@@ -398,6 +576,7 @@ class BdClient:
         before = self.show(issue_id)
         if before.get("status") != "open" or "human" in (before.get("labels") or []):
             raise BdError([self.binary, "update", issue_id], 1, "issue is not claimable")
+        self._invalidate()
         self._run("--actor", actor, "update", "--claim", "--", issue_id)
         claimed = self.show(issue_id)
         if (
@@ -428,10 +607,12 @@ class BdClient:
 
     def add_label(self, issue_id: str, label: str) -> None:
         """`bd label add <id> <label>`. Used by orphan-policy=escalate."""
+        self._invalidate()
         self._run("label", "add", issue_id, label)
 
     def remove_label(self, issue_id: str, label: str) -> None:
         """`bd label remove <id> <label>`. Used by the triage routes that unpark."""
+        self._invalidate()
         self._run("label", "remove", issue_id, label)
 
     def count_by_status(
@@ -454,7 +635,14 @@ class BdClient:
         Returns 0 if bd is missing, the status is unknown, or the response
         is malformed — the outer grind loop treats failures as "no change",
         which is the conservative branch (idle-sleep instead of false claim).
+
+        Inside a snapshot block neither route runs: the block's one listing
+        already holds every row and its labels, so the count is taken there.
         """
+        rows = self._listing()
+        if rows is not None:
+            return len(_rows_in(rows, status, exclude_labels=exclude_labels))
+
         if not exclude_labels:
             try:
                 _, data = self._run(
@@ -496,7 +684,15 @@ class BdClient:
         the same set. ``--limit 0`` lifts bd's default cap of 50 for the
         reason :meth:`open_ids` gives: a claim beyond the fiftieth row is
         still a claim, and both the diff and that figure have to see it.
+
+        Inside a snapshot block the ids come from the block's one listing,
+        which is what lets the reap poll ask for the flagged and unflagged
+        claims without paying for two.
         """
+        rows = self._listing()
+        if rows is not None:
+            return _ids(_rows_in(rows, "in_progress", exclude_labels=exclude_labels))
+
         args = ["list", "--status", "in_progress"]
         for label in exclude_labels:
             args.extend(["--exclude-label", label])
@@ -519,8 +715,13 @@ class BdClient:
         never finish, and the reap that follows hands it back. ``--limit 0``
         lifts bd's default cap for the same reason as :meth:`closed_ids`.
         A failed query answers with an empty set, which means nothing is
-        handed back rather than a crash mid-window.
+        handed back rather than a crash mid-window. Inside a snapshot block
+        the ids come from the block's one listing.
         """
+        rows = self._listing()
+        if rows is not None:
+            return _ids(_rows_in(rows, "open", labels=labels))
+
         args = ["list", "--status", "open"]
         for label in labels:
             args.extend(["--label-any", label])
@@ -541,8 +742,13 @@ class BdClient:
         in_progress diff is empty and the snapshot's closed count alone
         cannot say which issue landed. ``--limit 0`` lifts bd's default list
         cap so a long-lived repository's older closes can't push the fresh
-        one out of the diff.
+        one out of the diff. Inside a snapshot block the ids come from the
+        block's one listing, beside the counts taken from the same rows.
         """
+        rows = self._listing()
+        if rows is not None:
+            return _ids(_rows_in(rows, "closed"))
+
         args = ["list", "--status", "closed", "--limit", "0", "--json"]
         try:
             _, data = self._run(*args, parse_json=True)

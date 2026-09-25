@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import platform
 import re
@@ -3353,6 +3354,13 @@ class _CountingBd:
 
     def in_progress_ids(self, *, exclude_labels: tuple[str, ...] = ()) -> set[str]:
         return set(self._matching("in_progress", exclude_labels))
+
+    @contextlib.contextmanager
+    def snapshot(self):
+        """The real client's one-reading block, which the snapshot opens so
+        its three views cost one listing. This double already answers every
+        query from one in-memory queue, so the block only has to exist."""
+        yield
 
 
 class _BlindBd(_CountingBd):

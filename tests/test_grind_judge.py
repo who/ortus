@@ -1,5 +1,6 @@
 """Exercise gate decisions through the grind CLI without a provider or worker process."""
 
+import contextlib
 from copy import deepcopy
 import json
 import subprocess
@@ -79,6 +80,27 @@ class Tracker:
 
     def open_ids(self, **kwargs):
         return set()
+
+    def labels_of(self, issue_id):
+        return list(self.show(issue_id).get('labels') or [])
+
+    # The real client groups a step's repeated reads into one listing and
+    # suspends that reading across a turn another process runs. This double
+    # answers every query from one dict, so the blocks only have to exist.
+
+    @contextlib.contextmanager
+    def snapshot(self):
+        yield
+
+    @contextlib.contextmanager
+    def no_snapshot(self):
+        yield
+
+    def open_snapshot(self):
+        pass
+
+    def close_snapshot(self):
+        pass
 
 
 def answer(route):
