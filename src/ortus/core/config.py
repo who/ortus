@@ -100,10 +100,13 @@ DEFAULTS: dict[str, Any] = {
     # run without editing a tracked file.
     "prompt_audit": False,
     # Whether a worker prompt puts its per-bead segments behind every segment
-    # that is identical across the beads of a run. Off by default so today's
-    # ordering stays the control arm; `ORTUS_STABLE_PREFIX` flips one run
-    # without editing a tracked file.
-    "stable_prompt_prefix": False,
+    # that is identical across the beads of a run. On by default since the
+    # hello-world comparison adopted the reordered arm: it held the control's
+    # close rate of 1.0 while spending 1.5581 against 1.6794 per closed bead,
+    # with the cache hit rate flat at 0.9565 against 0.9574. Both orderings
+    # still compose, and `ORTUS_STABLE_PREFIX=0` restores the legacy one for a
+    # single run without editing a tracked file.
+    "stable_prompt_prefix": True,
     # Whether the judge's probability vectors pick the implementation model and
     # reasoning effort for the claimed bead, instead of every worker inheriting
     # the pinned `[profiles.<backend>.implement]` values. On by default since
