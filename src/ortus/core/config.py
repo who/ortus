@@ -95,10 +95,13 @@ DEFAULTS: dict[str, Any] = {
     # one run.
     "verification": DEFAULT_VERIFICATION_MODE,
     # Which variant of the two worker-facing prompt texts a run serves: the
-    # legacy bundles (off) or the audited rewrite. Off by default so today's
-    # text stays the control arm of the A/B; `ORTUS_PROMPT_AUDIT` flips one
-    # run without editing a tracked file.
-    "prompt_audit": False,
+    # legacy bundles (off) or the audited rewrite. On by default since the
+    # hello-world comparison adopted the audited arm: it held the control's
+    # close rate of 1.0 and finished in 684 seconds against 1030, which the
+    # operator took over the 2.0027 against 1.6794 it spent per closed bead.
+    # Both variants still resolve, and `ORTUS_PROMPT_AUDIT=0` restores the
+    # legacy text for a single run without editing a tracked file.
+    "prompt_audit": True,
     # Whether a worker prompt puts its per-bead segments behind every segment
     # that is identical across the beads of a run. On by default since the
     # hello-world comparison adopted the reordered arm: it held the control's

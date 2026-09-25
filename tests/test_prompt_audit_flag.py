@@ -2,9 +2,10 @@
 
 Two worker-facing texts ship twice: the goal-prompt loop a worker fetches with
 `ortus prompt show goal`, and the per-iteration work-issue condition. The flag
-is default-off, so the legacy bundles stay the control arm of the A/B; these
-tests hold the selection, the audited text's content rules, and the enforcement
-behind every rule the audit moved out of prompt text.
+ships on, the arm its comparison adopted, and off still serves the legacy
+bundles the comparison ran against; these tests hold the selection, the
+audited text's content rules, and the enforcement behind every rule the audit
+moved out of prompt text.
 """
 
 from __future__ import annotations
@@ -38,6 +39,15 @@ from ortus.core.prompts import (
 
 runner = CliRunner()
 
+#: The verdict recorded on this flag's measurement issue. `DEFAULTS` follows
+#: this constant, never the other way round. It is True because the
+#: hello-world comparison was run from a terminal and adopted: the audited arm
+#: held the control's close rate of 1.0 and finished in 684 seconds against
+#: 1030, which the operator took over the 2.0027 against 1.6794 it spent per
+#: closed bead. Moving it again means running the arms again, because this is
+#: a reading and not a preference.
+MEASURED_VERDICT = True
+
 
 @pytest.fixture(autouse=True)
 def _no_exported_flag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,13 +78,30 @@ def _audited_texts() -> tuple[tuple[str, str], ...]:
 # --- selection ---------------------------------------------------------------
 
 
-def test_flag_defaults_off_and_serves_the_legacy_bundles(tmp_path: Path) -> None:
-    """No key, no export: today's text, resolved exactly as before."""
-    repo = _repo(tmp_path)
+def test_the_shipped_default_is_the_arm_the_comparison_adopted(
+    tmp_path: Path,
+) -> None:
+    """AC-2: an untouched repository resolves the recorded verdict, named as itself."""
+    from ortus.core.config import DEFAULTS
+
+    config = load_config(repo=_repo(tmp_path), home=tmp_path / "home")
+    assert DEFAULTS["prompt_audit"] is MEASURED_VERDICT
+    assert config.get("prompt_audit") is MEASURED_VERDICT
+    assert audit_enabled(config, environ={}) is MEASURED_VERDICT
+    # The arm alone, because no `.ortusrc` layer carries the key. Crediting a
+    # pin that does not exist misreports where a run's arm came from.
+    assert audit_note(config, environ={}) == "audited"
+    # A caller holding no resolved configuration still serves the legacy text:
+    # no config is not the same fact as a config carrying the adopted default.
+    assert audit_enabled(None, environ={}) is False
+
+
+def test_pinning_the_key_off_restores_the_legacy_bundles(tmp_path: Path) -> None:
+    """Off is the kill switch and the control arm at once, credited to its layer."""
+    repo = _repo(tmp_path, "prompt_audit = false\n")
     config = load_config(repo=repo, home=tmp_path / "home")
-    assert config.get("prompt_audit") is False
     assert audit_enabled(config, environ={}) is False
-    assert audit_note(config, environ={}) == "legacy"
+    assert audit_note(config, environ={}) == "legacy from .ortusrc"
     assert read_work_issue_condition() != read_work_issue_condition(audited=True)
     resolved = resolve_named_prompt("goal", repo=repo, home=tmp_path / "home")
     assert resolved.source == "bundled"
@@ -109,11 +136,14 @@ def test_exported_flag_overrides_the_pinned_key(tmp_path: Path) -> None:
     )
 
 
-def test_unparsable_values_fall_back_to_the_legacy_arm(tmp_path: Path) -> None:
-    """A value that means nothing is not an opt-in to the experimental arm."""
-    config = load_config(repo=_repo(tmp_path), home=tmp_path)
-    assert audit_enabled(config, environ={AUDIT_ENV: "maybe"}) is False
-    assert audit_enabled(None, environ={}) is False
+def test_an_unparsable_export_resolves_the_layer_below_it(tmp_path: Path) -> None:
+    """A value that parses as neither arm is no instruction, not a vote for one."""
+    default = load_config(repo=_repo(tmp_path), home=tmp_path)
+    assert audit_enabled(default, environ={AUDIT_ENV: "maybe"}) is MEASURED_VERDICT
+    pinned = load_config(
+        repo=_repo(tmp_path / "off", "prompt_audit = false\n"), home=tmp_path
+    )
+    assert audit_enabled(pinned, environ={AUDIT_ENV: "maybe"}) is False
 
 
 def test_a_non_boolean_key_fails_config_load(tmp_path: Path) -> None:
@@ -150,7 +180,7 @@ def test_prompt_show_serves_the_variant_the_repo_pins(
     assert shown.exit_code == 0, shown.stdout + shown.stderr
     assert shown.stdout == audited_goal_text()
     assert "bundled (audited)" in shown.stderr
-    legacy_repo = _repo(tmp_path / "legacy")
+    legacy_repo = _repo(tmp_path / "legacy", "prompt_audit = false\n")
     legacy = runner.invoke(app, ["prompt", "show", "goal", str(legacy_repo)])
     assert legacy.exit_code == 0, legacy.stdout + legacy.stderr
     assert legacy.stdout == bundled_prompt_text("goal-prompt")
@@ -162,8 +192,12 @@ def test_prompt_list_names_every_registered_prompt_under_either_variant(
 ) -> None:
     """AC-1: the audit changes text, not the registry `ortus prompt list` reads."""
     _isolate_home(monkeypatch, tmp_path)
-    for ortusrc, label in (("", "bundled (default)"), ("prompt_audit = true\n", None)):
-        repo = _repo(tmp_path / f"repo{bool(ortusrc)}", ortusrc)
+    arms = (
+        ("legacy", "prompt_audit = false\n", "bundled (default)"),
+        ("audited", "prompt_audit = true\n", None),
+    )
+    for arm, ortusrc, label in arms:
+        repo = _repo(tmp_path / f"repo-{arm}", ortusrc)
         result = runner.invoke(app, ["prompt", "list", str(repo)])
         assert result.exit_code == 0, result.stdout + result.stderr
         for entry in PROMPT_REGISTRY:
@@ -177,7 +211,7 @@ def test_prompt_list_names_every_registered_prompt_under_either_variant(
                 assert label in line
         # Only the worker-facing goal prompt has an audited variant; the two
         # planner-facing prompts keep resolving to their single bundle.
-        if ortusrc:
+        if arm == "audited":
             goal_line = next(
                 row for row in result.stdout.splitlines() if row.split()[0] == "goal"
             )
@@ -241,9 +275,13 @@ def test_grind_dry_run_names_the_arm_it_would_serve(tmp_path: Path) -> None:
     from tests.test_grind import _fixture_repo, _plain
 
     repo = _fixture_repo(tmp_path)
+    shipped = runner.invoke(app, ["grind", str(repo), "--dry-run"])
+    assert shipped.exit_code == 0, shipped.stdout
+    assert "prompt text:    audited\n" in _plain(shipped.stdout)
+    (repo / ".ortusrc").write_text("prompt_audit = false\n", encoding="utf-8")
     legacy = runner.invoke(app, ["grind", str(repo), "--dry-run"])
     assert legacy.exit_code == 0, legacy.stdout
-    assert "prompt text:    legacy" in _plain(legacy.stdout)
+    assert "prompt text:    legacy from .ortusrc" in _plain(legacy.stdout)
     (repo / ".ortusrc").write_text("prompt_audit = true\n", encoding="utf-8")
     audited = runner.invoke(app, ["grind", str(repo), "--dry-run"])
     assert audited.exit_code == 0, audited.stdout

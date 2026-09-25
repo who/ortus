@@ -400,11 +400,11 @@ def test_verification_mode_rejects_other_values(tmp_path: Path, value: str) -> N
 # arm that wins its comparison has to be turned on here as well as in DEFAULTS.
 
 
-def test_prompt_audit_default_is_off(tmp_path: Path) -> None:
-    """The legacy prompt bundles stay the control arm until an A/B says otherwise."""
+def test_prompt_audit_default_is_on(tmp_path: Path) -> None:
+    """The comparison adopted the audited text, so a fresh load resolves it on."""
     cfg = load_config(repo=tmp_path, home=tmp_path / "home")
-    assert DEFAULTS["prompt_audit"] is False
-    assert cfg.get("prompt_audit") is False
+    assert DEFAULTS["prompt_audit"] is True
+    assert cfg.get("prompt_audit") is True
 
 
 def test_stable_prompt_prefix_default_is_on(tmp_path: Path) -> None:
