@@ -26,6 +26,15 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ['3.10', '3.11', '3.12']
+        # Coverage tracing costs every leg wall clock for an artifact only the
+        # pull-request upload below ever reads, so exactly one leg measures it.
+        # An `include` entry whose keys match a combination the matrix already
+        # produces adds its extra key to that leg rather than appending a
+        # seventh one, so this stays a six-leg matrix (ortus-nwfo).
+        include:
+          - os: ubuntu-latest
+            python-version: '3.12'
+            coverage: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
 
@@ -120,7 +129,7 @@ jobs:
           uv run pytest -m "fast or integration" -n auto \
             --test-timeout=180 --enforce-duration-budget --durations=20 \
             --junitxml=junit.xml \
-            --cov=ortus --cov-report=xml --cov-report=term
+            ${{ matrix.coverage && '--cov=ortus --cov-report=xml --cov-report=term' || '' }}
 
       - name: Upload pytest timing evidence
         if: always()
@@ -131,7 +140,10 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload coverage artifact (PR only)
-        if: github.event_name == 'pull_request'
+        # Gated to the measuring leg as well as to the event: the other five
+        # write no coverage.xml, and an ungated step would warn about the
+        # missing file on every one of them.
+        if: github.event_name == 'pull_request' && matrix.coverage
         uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}

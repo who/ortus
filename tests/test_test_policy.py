@@ -318,6 +318,100 @@ def test_testing_guide_documents_the_parallel_gate() -> None:
 
 
 # ---------------------------------------------------------------------------
+# One leg measures coverage; five stop paying for it (ortus-nwfo).
+# ---------------------------------------------------------------------------
+
+#: The flags that turn tracing on, in the order the gate command passes them.
+_COVERAGE_FLAGS = ("--cov=ortus", "--cov-report=xml", "--cov-report=term")
+
+
+def _workflow_steps(body: str) -> dict[str, str]:
+    """Map a workflow step's name to the rest of its block.
+
+    Steps are keyed by name across the whole file, first occurrence winning, so
+    the names the `test` job shares with `release-smoke` resolve to the gate's
+    copy. The block runs to the next step, which is all any assertion here
+    needs to read.
+    """
+    steps: dict[str, str] = {}
+    for block in re.split(r"\n      - name: ", body)[1:]:
+        name, _, rest = block.partition("\n")
+        steps.setdefault(name.strip(), rest)
+    return steps
+
+
+def test_coverage_leg_is_only_ubuntu_latest_py312() -> None:
+    """Coverage must be measured on exactly one leg, and that leg is pinned.
+
+    Five of six legs used to pay tracing overhead for a coverage.xml only the
+    pull-request upload reads. The saving is only real while the flags stay
+    behind the matrix flag, and the artifact is only real while one leg still
+    carries them, so both directions are asserted: coverage returning to every
+    leg fails here, and coverage disappearing altogether fails here too.
+    """
+    workflow = conftest._CI_GATE_WORKFLOW.read_text(encoding="utf-8")
+    command = ci_gate_command()
+
+    # Still measured, and only from inside the gate command's matrix guard —
+    # one occurrence each, all of them within the expression.
+    guard = re.search(
+        r"\$\{\{ matrix\.coverage && '([^']*)' \|\| '' \}\}", command
+    )
+    assert guard is not None, (
+        f"the gate command no longer gates its coverage flags on a matrix "
+        f"flag: {command!r}"
+    )
+    assert tuple(guard.group(1).split()) == _COVERAGE_FLAGS, guard.group(1)
+    for flag in _COVERAGE_FLAGS:
+        assert workflow.count(flag) == 1, (
+            f"{flag} appears {workflow.count(flag)} times in the workflow; "
+            f"exactly one gated occurrence is the contract"
+        )
+
+    # The flag reaches exactly one leg, and that leg is one the base matrix
+    # already produces — an include that matched nothing would add a seventh.
+    include = re.search(
+        r"\n        include:\n"
+        r"          - os: (\S+)\n"
+        r"            python-version: '([^']+)'\n"
+        r"            coverage: true\n",
+        workflow,
+    )
+    assert include is not None, "no matrix include grants `coverage: true`"
+    assert workflow.count("coverage: true") == 1, (
+        "more than one matrix entry measures coverage"
+    )
+    coverage_os, coverage_python = include.group(1), include.group(2)
+    assert coverage_os == "ubuntu-latest", coverage_os
+    assert coverage_python == "3.12", coverage_python
+
+    operating_systems = re.search(r"\n        os: \[([^\]]+)\]\n", workflow)
+    pythons = re.search(r"\n        python-version: \[([^\]]+)\]\n", workflow)
+    assert operating_systems is not None and pythons is not None, workflow
+    assert coverage_os in [
+        name.strip() for name in operating_systems.group(1).split(",")
+    ], operating_systems.group(1)
+    assert coverage_python in [
+        version.strip().strip("'") for version in pythons.group(1).split(",")
+    ], pythons.group(1)
+
+    # The PR artifact survives, gated to the same leg so the five that write no
+    # coverage.xml never run an upload that could only warn about its absence.
+    upload = _workflow_steps(workflow)["Upload coverage artifact (PR only)"]
+    condition = re.search(r"^        if: (.+)$", upload, re.MULTILINE)
+    assert condition is not None, upload
+    assert "github.event_name == 'pull_request'" in condition.group(1), condition.group(1)
+    assert "matrix.coverage" in condition.group(1), (
+        f"the coverage upload is not gated to the measuring leg: "
+        f"{condition.group(1)!r}"
+    )
+    assert "path: coverage.xml" in upload, upload
+    assert (
+        "name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}" in upload
+    ), upload
+
+
+# ---------------------------------------------------------------------------
 # One `bd init` per session, then copies (ortus-apmf).
 # ---------------------------------------------------------------------------
 
