@@ -170,6 +170,13 @@ def _bd_repo(tmp_path: Path) -> Path:
 def test_init_emits_progress_lines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """One real init proves both halves of the convention for a verb.
+
+    The per-phase lines init promises (`target:` first, `done (` last), and
+    the shape every stamped line opens with: the timestamp, then the phase,
+    with no `[ortus <verb>]` tag in between (ortus-kawu). Both read the same
+    stderr, so one invocation answers for both.
+    """
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     target = tmp_path / "fresh"
@@ -186,24 +193,6 @@ def test_init_emits_progress_lines(
     assert "[ortus init]" not in stderr
     assert re.search(r"^\[[\d\-: ]+\] target: ", stderr, re.M), result.stderr
     assert re.search(r"^\[[\d\-: ]+\] done \(", stderr, re.M), result.stderr
-
-
-def test_verb_progress_lines_open_with_timestamp_then_phase(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Every progress line a real verb emits opens with the stamp, then the
-    phase — no `[ortus <verb>]` tag in between (ortus-kawu)."""
-    if shutil.which("bd") is None:
-        pytest.skip("bd not on PATH")
-    target = tmp_path / "stamped"
-    # Same hermeticity stub as test_init_emits_progress_lines: a missing
-    # pinned-run-backend CLI would fail init before any lines are asserted.
-    import ortus.commands.init as init_mod
-
-    monkeypatch.setattr(init_mod, "_backend_cli", lambda name: f"/usr/bin/{name}")
-    result = runner.invoke(app, ["init", str(target), "--codegraph", "off"])
-    assert result.exit_code == 0, result.stdout + result.stderr
-    stderr = _ANSI.sub("", result.stderr)
     stamped = [
         line
         for line in stderr.splitlines()
