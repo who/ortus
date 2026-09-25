@@ -28,10 +28,26 @@ quantity on both sides.
 Every bucket is ``None`` until a provider reports it. A turn that omits a field
 leaves that bucket unset rather than zero and marks its record
 ``partial_usage``; a Codex turn that reports a total input without the cached
-split is left unsplit rather than guessed. Dollars are only ever the provider's
-own number (Claude ``total_cost_usd``, OpenCode ``cost``) — neither Codex nor
-Grok reports one, so their rows carry a null cost and the buckets are what a
-price table weights later.
+split is left unsplit rather than guessed.
+
+Claude says what a window cost twice over, and both readings are needed. The
+``result`` event carries the session totals and ``total_cost_usd``, and wins
+wherever it exists. But the harness reaps a Claude worker the moment its bead
+is closed and pushed — the ``/goal`` Stop hook would otherwise hold the session
+open indefinitely — so a window that did its job never writes that event, which
+is why whole runs of them used to report null usage and null dollars. Each
+``assistant`` event also carries its own message's usage, repeated on every
+content block of that message, so deduplicating by message id and summing
+across ids rebuilds the window's input buckets exactly; only the output count
+comes out low, because each message reports what it had produced so far.
+
+Dollars are the provider's own number whenever one exists
+(``total_cost_usd``, OpenCode ``cost``) and the row says ``cost_source:
+provider``. A Claude window with buckets but no provider figure is weighted by
+the versioned price table here and says ``estimated`` instead; a model the
+table does not name keeps null dollars and marks the row partial rather than
+inventing a price. Codex and Grok report no dollars of their own and are not
+priced here, so their rows are unchanged.
 """
 
 from __future__ import annotations
@@ -39,9 +55,9 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from ortus.core.profiles import Phase
 from ortus.core.worker_failure import (
@@ -52,6 +68,9 @@ from ortus.core.worker_failure import (
 
 #: Same glob the tail and dashboard surfaces use to find run logs.
 LOG_GLOB = "grind-*.log"
+
+#: `ortus plan` writes one of these per planning session, beside the run logs.
+PLAN_LOG_GLOB = "plan-*.log"
 
 #: The bead key a session with no attribution marker rolls up under.
 UNATTRIBUTED = None
@@ -187,6 +206,124 @@ class UsageBuckets:
         }
 
 
+#: What a row's `cost_source` says about where its dollars came from.
+COST_PROVIDER = "provider"
+COST_ESTIMATED = "estimated"
+
+#: The revision of the price table below. Prices change, and a dollar figure
+#: weighted by a table that has since moved must stay readable as such, so the
+#: version travels with the report rather than living only in this file.
+PRICE_TABLE_VERSION = "2026-06-24"
+
+
+@dataclass(frozen=True)
+class ModelPrice:
+    """USD per million tokens, bucket by bucket, for one model family."""
+
+    input_usd: float
+    cache_write_usd: float
+    cache_read_usd: float
+    output_usd: float
+
+
+#: Published per-million input and output prices, with the two cache buckets
+#: derived from the documented multipliers: a cache read costs 0.1x the input
+#: price (0.025x on Claude Fable 5.1) and a cache write costs 2x it at the
+#: one-hour TTL the worker windows weighted here are written under. A family
+#: this table does not name is not priced by guesswork — its window keeps null
+#: dollars and says so.
+PRICES: dict[str, ModelPrice] = {
+    "claude-fable-5-1": ModelPrice(10.0, 20.0, 0.25, 50.0),
+    "claude-fable-5": ModelPrice(10.0, 20.0, 1.0, 50.0),
+    "claude-opus-5": ModelPrice(5.0, 10.0, 0.5, 25.0),
+    "claude-opus-4-8": ModelPrice(5.0, 10.0, 0.5, 25.0),
+    "claude-opus-4-7": ModelPrice(5.0, 10.0, 0.5, 25.0),
+    "claude-opus-4-6": ModelPrice(5.0, 10.0, 0.5, 25.0),
+    "claude-sonnet-5": ModelPrice(2.0, 4.0, 0.2, 10.0),
+    "claude-sonnet-4-6": ModelPrice(3.0, 6.0, 0.3, 15.0),
+    "claude-haiku-4-5": ModelPrice(1.0, 2.0, 0.1, 5.0),
+}
+
+
+def model_price(model: str | None) -> ModelPrice | None:
+    """The price row for a model id, or None when this table does not name it.
+
+    The id on a window is whatever the CLI printed, which may carry a context
+    marker (``claude-opus-5[1m]``) or a dated snapshot suffix. Both name the
+    same priced family, so the longest table key the id begins with wins. A
+    stream placeholder such as ``<synthetic>`` matches nothing and stays
+    unpriced, which is the whole point of refusing a prefix-free fallback.
+    """
+
+    if not model:
+        return None
+    name = model.split("[", 1)[0].strip().lower()
+    best: str | None = None
+    for key in PRICES:
+        if name.startswith(key) and (best is None or len(key) > len(best)):
+            best = key
+    return None if best is None else PRICES[best]
+
+
+def estimate_cost(usage: UsageBuckets, model: str | None) -> float | None:
+    """What this model's published prices make these buckets worth, or None.
+
+    Only reported buckets are weighted, so an estimate over an incomplete
+    record is a floor rather than an invention. That matters for the record
+    this exists to price: a reaped window's per-message reconstruction matches
+    the provider's own input buckets exactly, while its output count is what
+    each message reported while it was still streaming and runs well under the
+    session total.
+    """
+
+    price = model_price(model)
+    if price is None:
+        return None
+    weighted = (
+        (usage.uncached_input_tokens or 0) * price.input_usd
+        + (usage.cache_write_tokens or 0) * price.cache_write_usd
+        + (usage.cached_input_tokens or 0) * price.cache_read_usd
+        + (usage.output_tokens or 0) * price.output_usd
+    )
+    return weighted / 1_000_000
+
+
+def _largest(left: UsageBuckets, right: UsageBuckets) -> UsageBuckets:
+    """Bucket-wise maximum of two readings of one message's usage.
+
+    The CLI repeats a message's usage block on every content event it streams,
+    and the counts only ever grow within a message, so the largest reading is
+    the message's own bill and summing the repeats would multiply it.
+    """
+
+    def pick(one: float | None, other: float | None) -> Any:
+        if one is None:
+            return other
+        if other is None:
+            return one
+        return max(one, other)
+
+    return UsageBuckets(
+        output_tokens=pick(left.output_tokens, right.output_tokens),
+        uncached_input_tokens=pick(
+            left.uncached_input_tokens, right.uncached_input_tokens
+        ),
+        cached_input_tokens=pick(left.cached_input_tokens, right.cached_input_tokens),
+        cache_write_tokens=pick(left.cache_write_tokens, right.cache_write_tokens),
+        reasoning_tokens=pick(left.reasoning_tokens, right.reasoning_tokens),
+        cost_usd=pick(left.cost_usd, right.cost_usd),
+    )
+
+
+def _model_name(value: Any) -> str | None:
+    """A model id, with the stream's ``<synthetic>`` placeholder read as unset."""
+
+    name = _as_text(value)
+    if name is None or (name.startswith("<") and name.endswith(">")):
+        return None
+    return name
+
+
 @dataclass(frozen=True)
 class EventFacts:
     """What one worker-stream event contributes to the window it sits in."""
@@ -203,6 +340,12 @@ class EventFacts:
     errors: int = 0
     #: The stream ended badly, so its usage covers only part of the work.
     aborted: bool = False
+    #: The assistant message this usage belongs to. Set only by the per-message
+    #: path, whose readings are deduplicated by id rather than summed.
+    message_id: str | None = None
+    #: This usage is the provider's total for the whole window, so it stands in
+    #: for every per-message reading rather than adding to them.
+    window_total: bool = False
 
 
 def _claude_facts(obj: dict[str, Any]) -> EventFacts | None:
@@ -225,6 +368,8 @@ def _claude_facts(obj: dict[str, Any]) -> EventFacts | None:
             and block.get("is_error") is True
         )
         return EventFacts(errors=failed) if failed else None
+    if kind == "assistant":
+        return _claude_message_facts(obj)
     if kind != "result":
         return None
     subtype = obj.get("subtype")
@@ -233,6 +378,7 @@ def _claude_facts(obj: dict[str, Any]) -> EventFacts | None:
         "session_id": _as_text(obj.get("session_id")),
         "errors": 1 if obj.get("is_error") is True else 0,
         "aborted": bool(subtype) and subtype != "success",
+        "window_total": True,
     }
     usage = obj.get("usage")
     if not isinstance(usage, dict):
@@ -252,6 +398,39 @@ def _claude_facts(obj: dict[str, Any]) -> EventFacts | None:
         ),
         partial=any(value is None for value in (output_tokens, uncached, cached)),
         **common,
+    )
+
+
+def _claude_message_facts(obj: dict[str, Any]) -> EventFacts | None:
+    """One assistant message's own usage, keyed by the message id.
+
+    This is the only billing a reaped window ever reports: the harness kills a
+    worker as soon as its bead is closed and pushed, so the `result` event that
+    carries the session totals is never written. The per-message blocks that
+    did arrive are enough to rebuild the input buckets exactly.
+
+    A message with no usage block contributes nothing rather than an empty
+    reading, and a message with no id is skipped: without one there is no way
+    to tell a repeat of one message from a second message, and guessing either
+    way would double count or drop a real bill.
+    """
+
+    message = obj.get("message")
+    if not isinstance(message, dict):
+        return None
+    message_id = _as_text(message.get("id"))
+    usage = message.get("usage")
+    if message_id is None or not isinstance(usage, dict):
+        return None
+    return EventFacts(
+        usage=UsageBuckets(
+            output_tokens=_as_int(usage.get("output_tokens")),
+            uncached_input_tokens=_as_int(usage.get("input_tokens")),
+            cached_input_tokens=_as_int(usage.get("cache_read_input_tokens")),
+            cache_write_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+        ),
+        message_id=message_id,
+        model=_model_name(message.get("model")),
     )
 
 
@@ -404,6 +583,9 @@ class SessionCost:
     partial_usage: bool = False
     #: The closed class this window failed under; None when it did not fail.
     failure_class: str | None = None
+    #: Where this row's dollars came from: the provider's own figure, this
+    #: module's price table, or nowhere at all.
+    cost_source: str | None = None
     usage: UsageBuckets = field(default_factory=UsageBuckets)
 
     def as_dict(self) -> dict[str, Any]:
@@ -422,6 +604,7 @@ class SessionCost:
             "incomplete": self.incomplete,
             "partial_usage": self.partial_usage,
             "failure_class": self.failure_class,
+            "cost_source": self.cost_source,
             "usage": self.usage.as_dict(),
         }
 
@@ -443,6 +626,9 @@ class BeadCost:
     incomplete: bool = False
     partial_usage: bool = False
     failure_classes: tuple[str, ...] = ()
+    #: `estimated` when any window behind this bead was priced here rather than
+    #: by its provider, so a bead's dollars are never read as surer than they are.
+    cost_source: str | None = None
     usage: UsageBuckets = field(default_factory=UsageBuckets)
 
     def as_dict(self) -> dict[str, Any]:
@@ -460,6 +646,7 @@ class BeadCost:
             "incomplete": self.incomplete,
             "partial_usage": self.partial_usage,
             "failure_classes": list(self.failure_classes),
+            "cost_source": self.cost_source,
             "usage": self.usage.as_dict(),
         }
 
@@ -510,6 +697,13 @@ class _Window:
         self.started = started
         self.last_stamp = started
         self.usage = UsageBuckets()
+        #: Each assistant message's own usage, largest reading per id.
+        self.message_usage: dict[str, UsageBuckets] = {}
+        #: The provider's total for the window, when it lived long enough to say.
+        self.result_usage: UsageBuckets | None = None
+        #: This window's billing came from the Claude stream, so the price table
+        #: in this module is the right one to weight it with.
+        self.claude_billed = False
         self.reported_turns: int | None = None
         self.counted_turns = 0
         self.errors = 0
@@ -521,7 +715,31 @@ class _Window:
         self.failure_class: str | None = None
 
     def absorb(self, facts: EventFacts) -> None:
-        if facts.usage is not None:
+        if facts.message_id is not None:
+            self.claude_billed = True
+            if facts.usage is not None:
+                previous = self.message_usage.get(facts.message_id)
+                self.message_usage[facts.message_id] = (
+                    facts.usage if previous is None else _largest(previous, facts.usage)
+                )
+                self.saw_usage = True
+            if facts.session_id and self.session_id is None:
+                self.session_id = facts.session_id
+            # The init banner and the profile marker both name the model on
+            # purpose; a message only fills the gap when neither did.
+            if facts.model and self.model is None:
+                self.model = facts.model
+            return
+        if facts.window_total:
+            self.claude_billed = True
+            if facts.usage is not None:
+                self.result_usage = (
+                    facts.usage
+                    if self.result_usage is None
+                    else self.result_usage.merged(facts.usage)
+                )
+                self.saw_usage = True
+        elif facts.usage is not None:
             self.usage = self.usage.merged(facts.usage)
             self.saw_usage = True
         if facts.partial:
@@ -539,6 +757,37 @@ class _Window:
         if facts.aborted:
             self.incomplete = True
 
+    def billed(self) -> tuple[UsageBuckets, str | None, bool]:
+        """This window's buckets, where its dollars came from, and whether the
+        billing is only partly known.
+
+        The provider's own window total wins whenever the window lived long
+        enough to emit one, so a normal window is billed exactly as before and
+        nothing is counted twice. A window that was reaped mid-session falls
+        back to the per-message reconstruction, and its dollars come from the
+        price table because no provider figure exists to prefer.
+        """
+
+        partial = self.partial_usage
+        if self.result_usage is not None:
+            usage = self.result_usage
+        elif self.message_usage:
+            usage = UsageBuckets()
+            for buckets in self.message_usage.values():
+                usage = usage.merged(buckets)
+        else:
+            usage = self.usage
+        if usage.cost_usd is not None:
+            return usage, COST_PROVIDER, partial
+        if not self.claude_billed or usage.is_empty:
+            return usage, None, partial
+        dollars = estimate_cost(usage, self.model)
+        if dollars is None:
+            # An unpriced model is the one case where tokens are known and
+            # dollars cannot be: the row says so rather than reading as free.
+            return usage, None, True
+        return replace(usage, cost_usd=dollars), COST_ESTIMATED, partial
+
     def freeze(self) -> SessionCost:
         turns = self.reported_turns
         if turns is None:
@@ -546,6 +795,7 @@ class _Window:
         wall = None
         if self.started is not None and self.last_stamp is not None:
             wall = max((self.last_stamp - self.started).total_seconds(), 0.0)
+        usage, cost_source, partial_usage = self.billed()
         return SessionCost(
             run_id=self.run_id,
             backend=self.backend,
@@ -559,9 +809,10 @@ class _Window:
             wall_seconds=wall,
             closed=self.closed,
             incomplete=self.incomplete,
-            partial_usage=self.partial_usage,
+            partial_usage=partial_usage,
             failure_class=self.failure_class,
-            usage=self.usage,
+            cost_source=cost_source,
+            usage=usage,
         )
 
 
@@ -723,10 +974,27 @@ def rollup_beads(sessions: tuple[SessionCost, ...]) -> tuple[BeadCost, ...]:
                 failure_classes=tuple(
                     dict.fromkeys(s.failure_class for s in group if s.failure_class)
                 ),
+                cost_source=bead_cost_source(group),
                 usage=usage,
             )
         )
     return tuple(beads)
+
+
+def bead_cost_source(sessions: Sequence[SessionCost]) -> str | None:
+    """How sure a group's dollars are, taken from its least sure window.
+
+    One estimated window makes the sum an estimate: a reader comparing two
+    arms has to know that a bead's figure leans on the price table before
+    treating a difference between them as measured.
+    """
+
+    sources = {session.cost_source for session in sessions}
+    if COST_ESTIMATED in sources:
+        return COST_ESTIMATED
+    if COST_PROVIDER in sources:
+        return COST_PROVIDER
+    return None
 
 
 @dataclass(frozen=True)
@@ -806,13 +1074,11 @@ def failure_rates(sessions: tuple[SessionCost, ...]) -> tuple[FailureRate, ...]:
     return tuple(rates)
 
 
-def find_grind_logs(repo: Path, *, newest: int = 1) -> tuple[Path, ...]:
-    """Grind logs under `repo/logs`, newest first; `newest=0` means every one."""
+def _find_logs(repo: Path, glob: str, newest: int) -> tuple[Path, ...]:
+    """Logs under `repo/logs` matching one glob, newest first."""
 
     try:
-        candidates = [
-            path for path in (repo / "logs").glob(LOG_GLOB) if path.is_file()
-        ]
+        candidates = [path for path in (repo / "logs").glob(glob) if path.is_file()]
     except OSError:
         return ()
     ordered = sorted(
@@ -821,3 +1087,129 @@ def find_grind_logs(repo: Path, *, newest: int = 1) -> tuple[Path, ...]:
         reverse=True,
     )
     return tuple(ordered if newest <= 0 else ordered[:newest])
+
+
+def find_grind_logs(repo: Path, *, newest: int = 1) -> tuple[Path, ...]:
+    """Grind logs under `repo/logs`, newest first; `newest=0` means every one."""
+
+    return _find_logs(repo, LOG_GLOB, newest)
+
+
+def find_plan_logs(repo: Path, *, newest: int = 0) -> tuple[Path, ...]:
+    """Plan logs under `repo/logs`, newest first; `newest=0` means every one.
+
+    A planning session writes one log of its own and carries no harness marker
+    lines, so it parses as a single unattributed window — which is exactly what
+    it is: one agent, no bead of its own, spending on behalf of every bead it
+    went on to create.
+    """
+
+    return _find_logs(repo, PLAN_LOG_GLOB, newest)
+
+
+@dataclass(frozen=True)
+class TreeCost:
+    """What one repository's logs cost, planner and workers together.
+
+    The A/B comparisons ask what a closed bead costs, and a bead that no
+    planner wrote would not exist to close, so a tree that reported only worker
+    windows would flatter every arm by the same hidden amount — which is worse
+    than a wrong number, because it is invisible.
+    """
+
+    planner: tuple[SessionCost, ...] = ()
+    workers: tuple[SessionCost, ...] = ()
+
+    @property
+    def beads(self) -> tuple[BeadCost, ...]:
+        return rollup_beads(self.workers)
+
+    @property
+    def closed_beads(self) -> int:
+        return sum(1 for bead in self.beads if bead.closed)
+
+    @property
+    def planner_usd(self) -> float | None:
+        return _sum_dollars(self.planner)
+
+    @property
+    def worker_usd(self) -> float | None:
+        return _sum_dollars(self.workers)
+
+    @property
+    def total_usd(self) -> float | None:
+        return _add_dollars(self.planner_usd, self.worker_usd)
+
+    @property
+    def usd_per_closed_bead(self) -> float | None:
+        """Total spend over beads actually closed, or None when none were.
+
+        Nothing closed is not a zero-cost run: it is a run with no denominator,
+        and dividing by it would report the cheapest arm as the one that
+        finished nothing.
+        """
+
+        total = self.total_usd
+        if total is None or self.closed_beads <= 0:
+            return None
+        return total / self.closed_beads
+
+    def source_counts(self) -> dict[str, int]:
+        """How many windows the provider priced, this table priced, and neither."""
+
+        counts = {COST_PROVIDER: 0, COST_ESTIMATED: 0, "unpriced": 0}
+        for session in (*self.planner, *self.workers):
+            counts[session.cost_source or "unpriced"] += 1
+        return counts
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "price_table_version": PRICE_TABLE_VERSION,
+            "planner_sessions": [session.as_dict() for session in self.planner],
+            "worker_sessions": [session.as_dict() for session in self.workers],
+            "beads": [bead.as_dict() for bead in self.beads],
+            "planner_usd": self.planner_usd,
+            "worker_usd": self.worker_usd,
+            "total_usd": self.total_usd,
+            "closed_beads": self.closed_beads,
+            "usd_per_closed_bead": self.usd_per_closed_bead,
+            "cost_sources": self.source_counts(),
+        }
+
+
+def _add_dollars(left: float | None, right: float | None) -> float | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _sum_dollars(sessions: Sequence[SessionCost]) -> float | None:
+    """These windows' dollars, or None when not one of them was priced."""
+
+    total: float | None = None
+    for session in sessions:
+        total = _add_dollars(total, session.usage.cost_usd)
+    return total
+
+
+def parse_tree(repo: Path, *, runs: int = 0) -> TreeCost:
+    """Every planning and grind log the repository holds, as one rollup.
+
+    `runs` bounds the grind logs the way `ortus cost` already does; the plan
+    logs are always read whole, because a planning session that ran before the
+    newest grind still paid for the beads that grind is closing.
+    """
+
+    planner = tuple(
+        session
+        for path in find_plan_logs(repo)
+        for session in parse_grind_log(path).sessions
+    )
+    workers = tuple(
+        session
+        for path in find_grind_logs(repo, newest=runs)
+        for session in parse_grind_log(path).sessions
+    )
+    return TreeCost(planner=planner, workers=workers)
