@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from tests.conftest import (
     ci_gate_budget_scale,
     ci_gate_command,
     ci_gate_flags,
+    inner_pytest_env,
 )
 
 
@@ -45,6 +47,7 @@ def _collect(marker: str) -> str:
         capture_output=True,
         check=False,
         timeout=30,
+        env=inner_pytest_env(),
     )
     assert result.returncode in (0, 5), result.stderr
     return result.stdout
@@ -178,10 +181,9 @@ def test_over_budget_is_rejected_under_verification_flags(tmp_path: Path) -> Non
         # would let the deliberate overrun slip under a budget several times
         # its size. Pinning a tiny scale fixes the number the guard enforces
         # and keeps the breach cheap.
-        env={
-            **os.environ,
-            "ORTUS_TEST_BUDGET_SCALE": str(_PROBE_BUDGET_SCALE),
-        },
+        env=inner_pytest_env(
+            ORTUS_TEST_BUDGET_SCALE=str(_PROBE_BUDGET_SCALE),
+        ),
     )
     combined = result.stdout + result.stderr
     assert result.returncode != 0, combined
@@ -201,6 +203,85 @@ def test_over_budget_is_rejected_under_verification_flags(tmp_path: Path) -> Non
     assert all(f"over {_PROBE_BUDGET:.0f}s" in line for line in rejected), (
         f"the guard enforced a budget other than the scaled one: {rejected}"
     )
+
+
+#: A probe whose only job is to make its session take a temporary directory.
+#: Taking one is what puts a numbered root under the root that session started
+#: against, and creating that root is what triggers the retention sweep.
+_TEMP_ROOT_PROBE = """
+def test_probe_takes_a_temporary_directory(tmp_path) -> None:
+    (tmp_path / "workspace").mkdir()
+"""
+
+#: Numbered roots seeded under the stand-in for a spawning run's temporary
+#: root. Comfortably more than the three pytest retains, so a session that
+#: sweeps them deletes several rather than sitting on the boundary.
+_SEEDED_ROOTS = 8
+
+
+def _spawn_inner_session(
+    probe: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run one pytest session as a subprocess, the way this module's tests do."""
+
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", str(probe)],
+        cwd=str(probe.parent),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+        env=env,
+    )
+
+
+def test_inner_session_spares_the_numbered_roots_of_the_run_that_spawned_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spawned session must not garbage-collect its parent's temporary root.
+
+    Both arms run here rather than the fixed one alone: the control arm deletes
+    the seeded directories, which is the loss a gate run read as a flaky
+    dashboard assertion, and the isolated arm leaves them. Each session runs one
+    trivial probe against no configuration, which keeps the pair of subprocesses
+    well inside the per-test budget.
+    """
+
+    ambient = tmp_path / "ambient-temproot"
+    try:
+        # The name pytest keys its root on, derived the way pytest derives it.
+        user = getpass.getuser()
+    except (ImportError, OSError, KeyError):
+        user = "unknown"
+    rootdir = ambient / f"pytest-of-{user}"
+    rootdir.mkdir(mode=0o700, parents=True)
+    seeded = [rootdir / f"pytest-{index}" for index in range(_SEEDED_ROOTS)]
+    for numbered in seeded:
+        numbered.mkdir()
+    probe = tmp_path / "test_temp_root_probe.py"
+    probe.write_text(_TEMP_ROOT_PROBE, encoding="utf-8")
+    # What a spawned session inherits when nothing intervenes.
+    monkeypatch.setenv("PYTEST_DEBUG_TEMPROOT", str(ambient))
+
+    env = inner_pytest_env()
+    isolated = Path(env["PYTEST_DEBUG_TEMPROOT"])
+    assert isolated != ambient
+    result = _spawn_inner_session(probe, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    # The isolated session put its numbered root under its own temporary root,
+    # and every seeded directory outlived it.
+    assert (isolated / rootdir.name / "pytest-0").is_dir(), sorted(
+        str(entry.relative_to(isolated)) for entry in isolated.rglob("*")
+    )
+    assert [numbered for numbered in seeded if numbered.exists()] == seeded
+
+    # The same session inheriting the parent's root does delete them, which is
+    # what the isolation above prevents rather than merely avoids provoking.
+    control = _spawn_inner_session(probe, dict(os.environ))
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert [path.name for path in ambient.glob("pytest-of-*")] == [rootdir.name]
+    assert [numbered for numbered in seeded if numbered.exists()] != seeded
 
 
 def test_unscaled_hermetic_budget_is_five_seconds() -> None:
