@@ -216,9 +216,21 @@ def test_contract_snapshot_block_agrees_with_direct_reads(client: BdClient) -> N
         assert client.labels_of(plain) == ["human"]
         assert client.in_progress_ids(exclude_labels=("human",)) == set()
         assert client.count_by_status("in_progress", exclude_labels=("human",)) == 0
+        # A close is one of those writes. The reading is deliberately taken
+        # again between the label write and the close, so the close is the
+        # only write standing between the listing and the reads below: every
+        # view derived from it has to observe the close inside the block, not
+        # only once the block ends, and the memoized `show` behind `status`
+        # — the read that makes `close_once` idempotent — has to go with them.
+        client.remove_label(plain, "human")
+        assert client.in_progress_ids() == {plain, flagged}
+        assert client.status(plain) == "in_progress"
+        client.close(plain)
+        assert client.closed_ids() == {plain}
+        assert client.count_by_status("closed") == 1
+        assert client.in_progress_ids() == {flagged}
+        assert client.status(plain) == "closed"
 
-    client.remove_label(plain, "human")
-    client.close(plain)
     assert client.closed_ids() == {plain}
     assert client.in_progress_ids() == {flagged}
 

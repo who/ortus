@@ -693,9 +693,17 @@ class BdClient:
         return stdout.strip()
 
     def close(self, issue_id: str, *, reason: str | None = None) -> None:
+        """`bd close <id>`, dropping the open reading like every other write.
+
+        Without that drop a close is the one write a `snapshot()` block does
+        not see: the ids and counts derived from the block's listing keep
+        answering from the state taken before it, so the issue reads as still
+        claimed until the block ends.
+        """
         args = ["close", issue_id]
         if reason:
             args.extend(["--reason", reason])
+        self._invalidate()
         self._run(*args)
 
     def status(self, issue_id: str) -> str:
@@ -729,7 +737,10 @@ class BdClient:
 
         The observable status is checked first so a restart after a close that
         landed — but whose journal phase transition never got written — does not issue
-        a second `bd close`.
+        a second `bd close`. Inside a `snapshot()` block that check reads
+        through the reading, so it is :meth:`close` dropping the reading that
+        keeps a second call idempotent; nothing here has to invalidate ahead
+        of a status read taken before any write of its own.
         """
         if self.status(issue_id) == "closed":
             return False
