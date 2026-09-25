@@ -139,6 +139,11 @@ class UsageBuckets:
     uncached_input_tokens: int | None = None
     cached_input_tokens: int | None = None
     cache_write_tokens: int | None = None
+    #: The two TTLs a cache write is billed under, where the backend states
+    #: one. They split `cache_write_tokens`, which stays the whole bucket, so
+    #: a write that named no TTL sits in the total and in neither of these.
+    cache_write_5m_tokens: int | None = None
+    cache_write_1h_tokens: int | None = None
     reasoning_tokens: int | None = None
     cost_usd: float | None = None
 
@@ -169,6 +174,8 @@ class UsageBuckets:
                 self.uncached_input_tokens,
                 self.cached_input_tokens,
                 self.cache_write_tokens,
+                self.cache_write_5m_tokens,
+                self.cache_write_1h_tokens,
                 self.reasoning_tokens,
                 self.cost_usd,
             )
@@ -189,6 +196,12 @@ class UsageBuckets:
                 self.cached_input_tokens, other.cached_input_tokens
             ),
             cache_write_tokens=_add(self.cache_write_tokens, other.cache_write_tokens),
+            cache_write_5m_tokens=_add(
+                self.cache_write_5m_tokens, other.cache_write_5m_tokens
+            ),
+            cache_write_1h_tokens=_add(
+                self.cache_write_1h_tokens, other.cache_write_1h_tokens
+            ),
             reasoning_tokens=_add(self.reasoning_tokens, other.reasoning_tokens),
             cost_usd=cost,
         )
@@ -199,6 +212,8 @@ class UsageBuckets:
             "uncached_input_tokens": self.uncached_input_tokens,
             "cached_input_tokens": self.cached_input_tokens,
             "cache_write_tokens": self.cache_write_tokens,
+            "cache_write_5m_tokens": self.cache_write_5m_tokens,
+            "cache_write_1h_tokens": self.cache_write_1h_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "input_tokens": self.input_tokens,
             "cache_hit_rate": self.cache_hit_rate,
@@ -221,27 +236,30 @@ class ModelPrice:
     """USD per million tokens, bucket by bucket, for one model family."""
 
     input_usd: float
-    cache_write_usd: float
+    cache_write_5m_usd: float
+    cache_write_1h_usd: float
     cache_read_usd: float
     output_usd: float
 
 
-#: Published per-million input and output prices, with the two cache buckets
+#: Published per-million input and output prices, with the three cache buckets
 #: derived from the documented multipliers: a cache read costs 0.1x the input
-#: price (0.025x on Claude Fable 5.1) and a cache write costs 2x it at the
-#: one-hour TTL the worker windows weighted here are written under. A family
-#: this table does not name is not priced by guesswork — its window keeps null
-#: dollars and says so.
+#: price (0.025x on Claude Fable 5.1), and a cache write costs 1.25x it under
+#: the five-minute TTL and 2x under the one-hour TTL. Which of those two a
+#: write was billed at is a property of the write, not of the repository, so
+#: both rates are carried and the window's own report chooses between them. A
+#: family this table does not name is not priced by guesswork — its window
+#: keeps null dollars and says so.
 PRICES: dict[str, ModelPrice] = {
-    "claude-fable-5-1": ModelPrice(10.0, 20.0, 0.25, 50.0),
-    "claude-fable-5": ModelPrice(10.0, 20.0, 1.0, 50.0),
-    "claude-opus-5": ModelPrice(5.0, 10.0, 0.5, 25.0),
-    "claude-opus-4-8": ModelPrice(5.0, 10.0, 0.5, 25.0),
-    "claude-opus-4-7": ModelPrice(5.0, 10.0, 0.5, 25.0),
-    "claude-opus-4-6": ModelPrice(5.0, 10.0, 0.5, 25.0),
-    "claude-sonnet-5": ModelPrice(2.0, 4.0, 0.2, 10.0),
-    "claude-sonnet-4-6": ModelPrice(3.0, 6.0, 0.3, 15.0),
-    "claude-haiku-4-5": ModelPrice(1.0, 2.0, 0.1, 5.0),
+    "claude-fable-5-1": ModelPrice(10.0, 12.5, 20.0, 0.25, 50.0),
+    "claude-fable-5": ModelPrice(10.0, 12.5, 20.0, 1.0, 50.0),
+    "claude-opus-5": ModelPrice(5.0, 6.25, 10.0, 0.5, 25.0),
+    "claude-opus-4-8": ModelPrice(5.0, 6.25, 10.0, 0.5, 25.0),
+    "claude-opus-4-7": ModelPrice(5.0, 6.25, 10.0, 0.5, 25.0),
+    "claude-opus-4-6": ModelPrice(5.0, 6.25, 10.0, 0.5, 25.0),
+    "claude-sonnet-5": ModelPrice(2.0, 2.5, 4.0, 0.2, 10.0),
+    "claude-sonnet-4-6": ModelPrice(3.0, 3.75, 6.0, 0.3, 15.0),
+    "claude-haiku-4-5": ModelPrice(1.0, 1.25, 2.0, 0.1, 5.0),
 }
 
 
@@ -279,9 +297,17 @@ def estimate_cost(usage: UsageBuckets, model: str | None) -> float | None:
     price = model_price(model)
     if price is None:
         return None
+    five_minute = usage.cache_write_5m_tokens or 0
+    one_hour = usage.cache_write_1h_tokens or 0
+    # The total is the bucket of record, so whatever it holds beyond the two
+    # stated TTLs is a write whose own TTL went unreported. It keeps the
+    # one-hour rate, which is what this table weighted every write at before
+    # the split, so a log that names no TTL is priced exactly as it always was.
+    unstated = max((usage.cache_write_tokens or 0) - five_minute - one_hour, 0)
     weighted = (
         (usage.uncached_input_tokens or 0) * price.input_usd
-        + (usage.cache_write_tokens or 0) * price.cache_write_usd
+        + five_minute * price.cache_write_5m_usd
+        + (one_hour + unstated) * price.cache_write_1h_usd
         + (usage.cached_input_tokens or 0) * price.cache_read_usd
         + (usage.output_tokens or 0) * price.output_usd
     )
@@ -310,6 +336,12 @@ def _largest(left: UsageBuckets, right: UsageBuckets) -> UsageBuckets:
         ),
         cached_input_tokens=pick(left.cached_input_tokens, right.cached_input_tokens),
         cache_write_tokens=pick(left.cache_write_tokens, right.cache_write_tokens),
+        cache_write_5m_tokens=pick(
+            left.cache_write_5m_tokens, right.cache_write_5m_tokens
+        ),
+        cache_write_1h_tokens=pick(
+            left.cache_write_1h_tokens, right.cache_write_1h_tokens
+        ),
         reasoning_tokens=pick(left.reasoning_tokens, right.reasoning_tokens),
         cost_usd=pick(left.cost_usd, right.cost_usd),
     )
@@ -346,6 +378,30 @@ class EventFacts:
     #: This usage is the provider's total for the whole window, so it stands in
     #: for every per-message reading rather than adding to them.
     window_total: bool = False
+
+
+def _claude_cache_writes(
+    usage: dict[str, Any],
+) -> tuple[int | None, int | None, int | None]:
+    """One usage block's cache writes, as (total, five-minute, one-hour).
+
+    Claude states the TTL a write was billed under in a `cache_creation`
+    object whose two fields break down the flat total beside it. That total is
+    what older logs and every other backend report, so it stays the bucket of
+    record: where the fields and the total disagree, the total is the sum and
+    the fields are only the split. A block with no `cache_creation` object at
+    all reports its total and no split, which is what a log written before
+    this existed looks like.
+    """
+
+    creation = usage.get("cache_creation")
+    creation = creation if isinstance(creation, dict) else {}
+    five_minute = _as_int(creation.get("ephemeral_5m_input_tokens"))
+    one_hour = _as_int(creation.get("ephemeral_1h_input_tokens"))
+    total = _as_int(usage.get("cache_creation_input_tokens"))
+    if total is None:
+        total = _add(five_minute, one_hour)
+    return total, five_minute, one_hour
 
 
 def _claude_facts(obj: dict[str, Any]) -> EventFacts | None:
@@ -388,12 +444,15 @@ def _claude_facts(obj: dict[str, Any]) -> EventFacts | None:
     output_tokens = _as_int(usage.get("output_tokens"))
     uncached = _as_int(usage.get("input_tokens"))
     cached = _as_int(usage.get("cache_read_input_tokens"))
+    writes, five_minute, one_hour = _claude_cache_writes(usage)
     return EventFacts(
         usage=UsageBuckets(
             output_tokens=output_tokens,
             uncached_input_tokens=uncached,
             cached_input_tokens=cached,
-            cache_write_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+            cache_write_tokens=writes,
+            cache_write_5m_tokens=five_minute,
+            cache_write_1h_tokens=one_hour,
             cost_usd=_as_float(obj.get("total_cost_usd")),
         ),
         partial=any(value is None for value in (output_tokens, uncached, cached)),
@@ -422,12 +481,15 @@ def _claude_message_facts(obj: dict[str, Any]) -> EventFacts | None:
     usage = message.get("usage")
     if message_id is None or not isinstance(usage, dict):
         return None
+    writes, five_minute, one_hour = _claude_cache_writes(usage)
     return EventFacts(
         usage=UsageBuckets(
             output_tokens=_as_int(usage.get("output_tokens")),
             uncached_input_tokens=_as_int(usage.get("input_tokens")),
             cached_input_tokens=_as_int(usage.get("cache_read_input_tokens")),
-            cache_write_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+            cache_write_tokens=writes,
+            cache_write_5m_tokens=five_minute,
+            cache_write_1h_tokens=one_hour,
         ),
         message_id=message_id,
         model=_model_name(message.get("model")),

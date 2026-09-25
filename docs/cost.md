@@ -62,6 +62,15 @@ estimate is therefore a floor, and grind gives a worker that met the done bar a
 short bounded grace to flush its `result` line before the reap signal so the
 provider's figure is used wherever it can be.
 
+A cache write is billed at a rate that depends on how long the entry it wrote
+is kept, so the two TTLs are priced separately rather than assumed. Claude's
+`cache_creation` object splits the flat cache-write total into the five-minute
+and one-hour writes behind it, and the table weights the first at 1.25x the
+model's input price and the second at 2x. The flat total stays the bucket
+`--json` and the dashboard read, and a write whose TTL nothing in the stream
+named keeps the one-hour rate — which is what every write was weighted at
+before the split, so an older log is priced exactly as it was before.
+
 The price table is keyed by model family, versioned, and refuses to guess: a
 context marker (`claude-opus-5[1m]`) or a dated snapshot suffix resolves to its
 family, while a model the table does not name — including the stream's
