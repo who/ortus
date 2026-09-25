@@ -16,6 +16,7 @@ from ortus.core.grind_logic import (
     build_condition,
     grind_flock,
 )
+from tests.conftest import wall_clock_budget
 
 
 # --- build_condition --------------------------------------------------------
@@ -70,6 +71,13 @@ def test_built_condition_under_ceiling() -> None:
 # --- flock ------------------------------------------------------------------
 
 
+#: The lock path's own bound on a CI-shaped host, and the ceiling its widening
+#: stops at. The holder below keeps the flock for three seconds, so a budget
+#: allowed to grow that far would pass on a lock that never failed fast at all.
+_FLOCK_BUDGET_SECONDS = 0.5
+_FLOCK_BUDGET_CEILING = 1.5
+
+
 def test_flock_acquired_and_released(tmp_path: Path) -> None:
     (tmp_path / ".beads").mkdir()
     with grind_flock(tmp_path) as lockfile:
@@ -114,12 +122,15 @@ def test_second_concurrent_grind_raises_flockbusy_under_500ms(
         assert acquired.wait(timeout=5.0), (
             "child grind_flock holder did not signal lock acquisition within 5s"
         )
+        budget = min(wall_clock_budget(_FLOCK_BUDGET_SECONDS), _FLOCK_BUDGET_CEILING)
         t0 = time.monotonic()
         with pytest.raises(FlockBusy):
             with grind_flock(tmp_path):
                 pass
         elapsed = time.monotonic() - t0
-        assert elapsed < 0.5, f"FlockBusy took {elapsed*1000:.0f}ms (budget: 500ms)"
+        assert elapsed < budget, (
+            f"FlockBusy took {elapsed*1000:.0f}ms (budget: {budget*1000:.0f}ms)"
+        )
     finally:
         proc.terminate()
         proc.join(timeout=2)
