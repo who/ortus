@@ -50,6 +50,26 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads to Dolt remote
 ```
 
+## Tracker export
+
+The tracker owns issue state; `.beads/issues.jsonl` is a passive export of it and
+is the only tracker file a commit carries. Two things keep it honest:
+
+- `bd hooks install` — once per clone. `bd init` points `core.hooksPath` at the
+  tracked `.beads/hooks/`, but that setting is local to the machine that ran it:
+  a clone gets the directory and none of the wiring, so git runs no tracker hook
+  at all (which is how this repo's export drifted by 139 records). The install
+  lands them in `.git/hooks/` for such a clone; `git config core.hooksPath
+  .beads/hooks` is the equivalent one-liner. `ortus init --force` does it for
+  you, and a fresh `ortus init` has it from the start.
+- `ortus export` — regenerates the export from the tracker, atomically, with
+  every term in `.beads/protected-terms.txt` removed first. That file is
+  resolved per machine and gitignored: it lists this clone's host identity
+  (home directory, login name) plus anything the operator adds, and a tracked
+  copy would publish the strings it exists to suppress. Refresh through this
+  verb, never with a bare `bd export` over the tracked path, and the export
+  can be committed without leaking them.
+
 ## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. When a remote is configured, work is NOT complete until `git push` succeeds.
@@ -59,7 +79,8 @@ bd dolt push          # Push beads to Dolt remote
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY when a remote is configured:
+4. **Refresh the tracked export** - `ortus export`, then stage `.beads/issues.jsonl` with the commit
+5. **PUSH TO REMOTE** - This is MANDATORY when a remote is configured:
    ```bash
    if [ -n "$(git remote)" ]; then
      git pull --rebase --autostash
@@ -70,9 +91,9 @@ bd dolt push          # Push beads to Dolt remote
      echo "No git remote configured; skipping push (local-only project)."
    fi
    ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed (when a remote is configured)
-7. **Hand off** - Provide context for next session
+6. **Clean up** - Clear stashes, prune remote branches
+7. **Verify** - All changes committed AND pushed (when a remote is configured)
+8. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - When a remote is configured, work is NOT complete until `git push` succeeds

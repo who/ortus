@@ -104,6 +104,27 @@ def _bd_remember(repo: Path) -> None:
     )
 
 
+def _bd_hooks_install(repo: Path) -> None:
+    """Run `bd hooks install` so the clone carries the tracker's git hooks.
+
+    A fresh `bd init` wires its own hooks and points `core.hooksPath` at the
+    tracked `.beads/hooks/`. A clone is the gap: the directory arrives with the
+    checkout and the setting does not, so a repository can look fully
+    provisioned while git runs none of the hooks and the passive export drifts
+    from the database unnoticed. Running the install on both paths is what
+    makes `--force` the retrofit for such a clone, where it lands the hooks in
+    `.git/hooks/` instead. The install keeps any content outside its own
+    section markers, so a repo with its own pre-commit hook keeps it.
+    """
+    subprocess.run(
+        ["bd", "hooks", "install"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _remove_bd_claude_scaffold(repo: Path) -> None:
     """Remove the Claude *config dir* ``bd init`` creates in a non-Claude repo.
 
@@ -927,6 +948,20 @@ def init(
         )
     else:
         output.success(f"readiness memory stored (key={READINESS_MEMORY_KEY})")
+
+    # Same treatment as the memory above, and for the same reason: a repo
+    # without the tracker's git hooks still grinds, so a failure here is a
+    # warning naming the command an operator can run later.
+    output.progress("init", "installing the tracker's git hooks")
+    try:
+        _bd_hooks_install(target)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        output.warn(
+            f"could not install the beads git hooks: {exc}\n"
+            "       install them later with: bd hooks install"
+        )
+    else:
+        output.success("beads git hooks installed")
 
     # Indexing runs before rendering so a failure leaves no half-written Ortus
     # config behind.

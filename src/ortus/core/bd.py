@@ -11,10 +11,12 @@ the real binary's behavior.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
+import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +52,150 @@ LESSON_PRIORITY_TOKENS = frozenset({"policy", "decision"})
 def is_priority_lesson(key: str) -> bool:
     """True when the memory key carries a policy or decision token."""
     return not LESSON_PRIORITY_TOKENS.isdisjoint(key.split("-"))
+
+
+#: Where a clone lists the strings its tracked tracker export must never
+#: carry, one per line, `#` comments and blanks ignored. The file is local by
+#: design and gitignored: a committed list would publish the very strings it
+#: exists to keep out of the repository, so each clone resolves its own.
+PROTECTED_TERMS_FILE = ".beads/protected-terms.txt"
+
+#: The header the resolved file carries, so an operator who opens it knows it
+#: is machine-maintained and why it is not tracked.
+PROTECTED_TERMS_HEADER = (
+    "# Strings `ortus` removes from .beads/issues.jsonl on every refresh.\n"
+    "# Local to this clone and gitignored — a tracked copy would publish them.\n"
+    "# One term per line; blanks and `#` comments are ignored.\n"
+)
+
+#: What a redacted term becomes. A home directory keeps reading as a path, so a
+#: scrubbed record still says where the tool was standing; anything else is
+#: replaced by a marker that claims nothing about what was removed.
+HOME_PLACEHOLDER = "$HOME"
+TERM_PLACEHOLDER = "[redacted]"
+
+#: Shortest login name redacted on its own. A two- or three-character name is a
+#: substring of ordinary prose, and an export with every such word mangled is
+#: worse than one that names a short account: the home-directory term still
+#: covers the paths, which is where a login name actually appears.
+MIN_BARE_TERM = 4
+
+
+def host_identity_terms(
+    *, home: Path | None = None, login: str | None = None
+) -> tuple[str, ...]:
+    """The strings that identify the machine this clone sits on.
+
+    The home directory first, because it is the shape a host path takes in a
+    tracker record and the longest match wins; then the login name on its own,
+    which is how an author field or a file-owner line names the same account.
+    """
+
+    if home is None:
+        home = Path.home()
+    if login is None:
+        try:
+            login = getpass.getuser()
+        except (KeyError, OSError):  # pragma: no cover - no passwd entry
+            login = ""
+    terms: list[str] = []
+    # A home directory that is the filesystem root leaves nothing specific to
+    # redact, and rstrip has already turned that case into the empty string.
+    rendered = str(home).rstrip("/")
+    if rendered:
+        terms.append(rendered)
+    if login and len(login) >= MIN_BARE_TERM:
+        terms.append(login)
+    return tuple(terms)
+
+
+def _terms_file_lines(repo: Path) -> tuple[str, ...]:
+    path = repo / PROTECTED_TERMS_FILE
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return ()
+    except OSError:
+        return ()
+    return tuple(
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+
+
+def resolve_protected_terms(
+    repo: Path, *, home: Path | None = None, login: str | None = None
+) -> tuple[str, ...]:
+    """Every term this clone refuses to export, longest first.
+
+    The clone's own file is merged with the host identity rather than replacing
+    it, so an operator adds a term without having to restate the ones the
+    machine already implies. Longest first is what makes the scrub's single
+    alternation replace a home path as a path instead of leaving the tail of
+    one behind, and the secondary sort keeps the resolved file stable between
+    refreshes that changed nothing.
+    """
+
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term in (*host_identity_terms(home=home, login=login), *_terms_file_lines(repo)):
+        folded = term.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        terms.append(term)
+    return tuple(sorted(terms, key=lambda term: (-len(term), term)))
+
+
+def ensure_protected_terms(repo: Path) -> tuple[str, ...]:
+    """Resolve this clone's terms and leave them where a checker can read them.
+
+    The file is the published interface of the scrub: `rg -f` over it is how an
+    acceptance check asks whether the export still carries a term, and a clone
+    that never wrote one could not run that check at all. Writing only on a
+    change keeps the file's mtime meaningful.
+    """
+
+    terms = resolve_protected_terms(repo)
+    path = repo / PROTECTED_TERMS_FILE
+    desired = PROTECTED_TERMS_HEADER + "".join(f"{term}\n" for term in terms)
+    try:
+        if path.read_text(encoding="utf-8") == desired:
+            return terms
+    except OSError:
+        pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(desired, encoding="utf-8")
+    except OSError:
+        # A read-only workspace still gets a scrubbed export; only the
+        # checker's copy of the term list is missing.
+        pass
+    return terms
+
+
+def scrub_protected_terms(text: str, terms: Sequence[str]) -> str:
+    """Replace every case-insensitive occurrence of `terms` in `text`.
+
+    One alternation over terms already ordered longest first, so a home path
+    is consumed whole and the login name inside it is never matched twice. Both
+    placeholders are free of quotes and backslashes, which is what keeps a
+    scrubbed JSON record valid — including one whose description embeds JSON of
+    its own — without this function having to parse anything.
+    """
+
+    if not terms:
+        return text
+    pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
+    return pattern.sub(
+        lambda match: (
+            HOME_PLACEHOLDER
+            if match.group(0).startswith(("/", "~"))
+            else TERM_PLACEHOLDER
+        ),
+        text,
+    )
 
 
 def _clip_lesson(text: str, max_chars: int) -> str:
@@ -322,6 +468,10 @@ class BdClient:
                 check=False,
             )
             if proc.returncode == 0:
+                reason = self._scrub_export(scratch)
+                if reason:
+                    scratch.unlink(missing_ok=True)
+                    return reason
                 try:
                     os.replace(scratch, target)
                 except OSError as exc:
@@ -333,6 +483,32 @@ class BdClient:
             last = last[0]
         scratch.unlink(missing_ok=True)
         return last
+
+    def _scrub_export(self, scratch: Path) -> str:
+        """Remove this clone's protected terms from a freshly written export.
+
+        The scrub runs on the scratch file, before the rename, because the
+        rename is the moment the export becomes the tracked file: a term
+        removed here was never in a path git could be asked to commit. Records
+        keep their ids, their order and their count — only the strings the
+        clone refuses to publish change. Returns "" on success, else the reason.
+        """
+
+        terms = ensure_protected_terms(self.repo)
+        if not terms:
+            return ""
+        try:
+            raw = scratch.read_text(encoding="utf-8")
+        except OSError as exc:
+            return f"could not read the fresh export ({exc})"
+        scrubbed = scrub_protected_terms(raw, terms)
+        if scrubbed == raw:
+            return ""
+        try:
+            scratch.write_text(scrubbed, encoding="utf-8")
+        except OSError as exc:
+            return f"could not rewrite the fresh export ({exc})"
+        return ""
 
     def list_ready(
         self, *, exclude_labels: tuple[str, ...] = ()

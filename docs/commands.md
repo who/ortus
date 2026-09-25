@@ -65,6 +65,14 @@ Drive the bd queue via backend-neutral subprocess-per-task workers.
 Clear a stuck grind flock; optionally revert in-progress claims. `--force`,
 `--revert-claims`.
 
+### `ortus export [<repo>]`
+
+Refresh `.beads/issues.jsonl` from the tracker, atomically, with every term in
+the clone's local `.beads/protected-terms.txt` removed before the new bytes
+become the tracked file. Run it at session close instead of a bare `bd export`
+over the tracked path, so the export a commit carries is both current and free
+of the strings this machine refuses to publish.
+
 ## Watching a run
 
 ### `ortus tail <repo>`

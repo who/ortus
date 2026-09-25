@@ -23,7 +23,14 @@ from pathlib import Path
 
 import pytest
 
-from ortus.core.bd import BdClient, BdError
+from ortus.core.bd import (
+    PROTECTED_TERMS_FILE,
+    BdClient,
+    BdError,
+    host_identity_terms,
+    resolve_protected_terms,
+    scrub_protected_terms,
+)
 from tests.conftest import copy_bd_workspace, run_bd
 
 pytestmark = pytest.mark.integration
@@ -421,6 +428,90 @@ def test_export_write_is_atomic(tmp_path: Path) -> None:
     client = BdClient(tmp_path, binary=str(healthy))
     assert client.export_issues() == ""
     assert target.read_text(encoding="utf-8") == '{"id": "fresh-1"}\n'
+
+
+def test_host_identity_keeps_a_short_login_out_of_the_term_list() -> None:
+    """A login too short to be redacted safely leaves only its home path.
+
+    Its own name would match inside ordinary prose, and the home path is where
+    such an account actually shows up in a tracker record anyway.
+    """
+    assert host_identity_terms(home=Path("/home/ab"), login="ab") == ("/home/ab",)
+    assert host_identity_terms(home=Path("/home/abcd"), login="abcd") == (
+        "/home/abcd",
+        "abcd",
+    )
+
+
+def test_resolved_terms_merge_the_clone_file_longest_first(tmp_path: Path) -> None:
+    """The operator's lines join the host identity, ordered so a path wins."""
+    beads = tmp_path / ".beads"
+    beads.mkdir()
+    (beads / "protected-terms.txt").write_text(
+        "# a comment and a blank line are not terms\n\nacme-internal\n",
+        encoding="utf-8",
+    )
+    terms = resolve_protected_terms(
+        tmp_path, home=Path("/home/abcd"), login="abcd"
+    )
+    assert terms == ("acme-internal", "/home/abcd", "abcd")
+
+
+def test_scrub_replaces_paths_as_paths_and_keeps_embedded_json_valid() -> None:
+    """A home path reads as one after the scrub; a record stays parseable."""
+    terms = ("/home/abcd", "abcd")
+    record = json.dumps(
+        {"id": "x-1", "design": 'abcd ran /home/abcd/code/x on {"k": 1}'}
+    )
+    scrubbed = scrub_protected_terms(record, terms)
+    assert "abcd" not in scrubbed
+    parsed = json.loads(scrubbed)
+    assert parsed["id"] == "x-1"
+    assert parsed["design"] == '[redacted] ran $HOME/code/x on {"k": 1}'
+
+
+def test_export_scrubs_the_host_identity_and_the_clone_list(tmp_path: Path) -> None:
+    """The tracked export is written already free of this clone's terms.
+
+    The home path is taken from the running machine rather than spelled out, so
+    the test states the contract without carrying the string it is about.
+    """
+    from tests._shims import make_inline_python_shim
+
+    beads = tmp_path / ".beads"
+    beads.mkdir()
+    (beads / "protected-terms.txt").write_text("acme-internal\n", encoding="utf-8")
+    home = str(Path.home())
+    payload = tmp_path / "payload.jsonl"
+    payload.write_text(
+        json.dumps(
+            {"id": "x-1", "design": f"ran {home}/code/x for acme-internal"}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    exporting = make_inline_python_shim(
+        tmp_path,
+        "bd-export-payload",
+        (
+            "import shutil, sys\n"
+            f"shutil.copyfile({str(payload)!r}, sys.argv[sys.argv.index('-o') + 1])\n"
+        ),
+    )
+    client = BdClient(tmp_path, binary=str(exporting))
+    assert client.export_issues() == ""
+
+    exported = (beads / "issues.jsonl").read_text(encoding="utf-8")
+    assert home not in exported
+    assert "acme-internal" not in exported
+    assert json.loads(exported)["design"] == "ran $HOME/code/x for [redacted]"
+    assert not (beads / ".issues.jsonl.export-tmp").exists()
+
+    # The resolved list is left where a checker reads it, the operator's line
+    # kept, so `rg -f` over it can ask the same question this test just asked.
+    resolved = (tmp_path / PROTECTED_TERMS_FILE).read_text(encoding="utf-8")
+    assert "acme-internal" in resolved
+    assert home in resolved
 
 
 def test_interactions_disposition_matches_probe() -> None:
