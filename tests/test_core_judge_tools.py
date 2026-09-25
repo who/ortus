@@ -238,6 +238,42 @@ def test_ordinary_workflow_is_not_short_circuited_locally(repo, tool):
     assert judged(repo, response(), tool=tool)[0].action == ToolAction.ALLOW
 
 
+# --- the wrapped tracker call -----------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "bd list | head -5",
+    "bd update ortus-1 --claim && git push",
+    "cd sub; bd close ortus-1",
+    "xargs bd show",
+    "bash -c 'bd ready --json'",
+    "sudo bd close ortus-1 | tee close.log",
+    "TMPDIR=/x bd ready --json | jq .",
+    "bd ready --json\nbd show ortus-1",
+])
+def test_wrapped_tracker_call_is_refused_without_a_request(repo, command):
+    result = locally(repo, "Bash", command=command)
+    assert (result.action, result.reason) == (ToolAction.DENY_CALL, "wrapped_bd")
+    assert result.vector() is None
+
+
+@pytest.mark.parametrize("command", [
+    "bd ready --json",
+    "bd show ortus-1 --json > out.json",
+    "sudo bd list --status=in_progress",
+    "rg -n 'bd ready' docs/",
+    "git log --oneline | head -5",
+])
+def test_a_tracker_call_that_is_the_whole_command_is_still_judged(repo, command):
+    assert inspected(repo, "Bash", command=command).decision is None
+
+
+def test_a_destructive_wrapped_tracker_call_is_named_by_the_worse_refusal(repo):
+    """Both refusals match; the one an operator needs to read wins."""
+    decision = inspected(repo, "Bash", command="bd close ortus-1 && rm -rf /").decision
+    assert decision.reason == "recursive_root_deletion"
+
+
 # --- the three-class vector -------------------------------------------------
 
 

@@ -526,11 +526,13 @@ any client is built: a recursive delete of the filesystem root, the repository
 root, the home directory or anything outside the allowed roots; any delete
 whose target lies outside those roots; `git push --force`, `--force-with-lease`
 or `-f`; `git reset --hard`; a read or write of a credential path or of a
-configured `sensitive_paths` fragment; and a secret environment value appearing
-in a network argument. Wrappers and pipelines do not hide a match — `sudo`,
-`env`, a leading `NAME=value` and each segment of a compound line are read
-separately. Every other call is summarized and judged, including compound
-shell, `bd`, ordinary version control, test runners, search and MCP tools.
+configured `sensitive_paths` fragment; a secret environment value appearing in
+a network argument; and a `bd` call that is not the whole command, because a
+pipeline reports its last stage's exit status and a failed claim or close then
+reads as a success. Wrappers and pipelines do not hide a match — `sudo`, `env`,
+a leading `NAME=value` and each segment of a compound line are read separately.
+Every other call is summarized and judged, including compound shell, ordinary
+version control, test runners, search and MCP tools.
 Unfamiliar is not irreversible, and the previous allowlist treated it as though
 it were: it refused every call it did not recognise, which ended whole runs on
 their first tool use.
