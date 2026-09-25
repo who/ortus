@@ -235,6 +235,9 @@ def test_prompt_list_reports_bundled_defaults(
     _isolate_home(monkeypatch, tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
+    # The arm is pinned so this stays a test of what the verb prints for a
+    # bundled prompt, rather than of which variant `prompt_audit` ships.
+    (repo / ".ortusrc").write_text("prompt_audit = false\n", encoding="utf-8")
     result = runner.invoke(app, ["prompt", "list", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     for name, phase in (
@@ -258,6 +261,9 @@ def test_prompt_show_stdout_is_prompt_text_only(
     _isolate_home(monkeypatch, tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
+    # Pinned for the same reason as the listing above: the claim here is that
+    # stdout is the text and nothing else, under either arm.
+    (repo / ".ortusrc").write_text("prompt_audit = false\n", encoding="utf-8")
     result = runner.invoke(app, ["prompt", "show", "goal", str(repo)])
     assert result.exit_code == 0, result.stdout + result.stderr
     expected = resolve_prompt(
@@ -273,6 +279,9 @@ def test_prompt_show_origin_prints_tier_and_path_only(
     _isolate_home(monkeypatch, tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
+    # Pinned to the legacy arm so the assertion stays about the tier and the
+    # path being the whole output, not about which bundle ships by default.
+    (repo / ".ortusrc").write_text("prompt_audit = false\n", encoding="utf-8")
     result = runner.invoke(app, ["prompt", "show", "goal", str(repo), "--origin"])
     assert result.exit_code == 0, result.stdout + result.stderr
     assert result.stdout.startswith("bundled")

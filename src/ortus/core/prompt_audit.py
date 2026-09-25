@@ -8,12 +8,14 @@ instead of imperatives, and drops the rules Ortus already enforces in code.
 This module resolves which variant a repository serves and records where the
 dropped rules are enforced now.
 
-The flag is `prompt_audit` in `.ortusrc`, default off, with the
-`ORTUS_PROMPT_AUDIT` environment variable as a per-run override so an A/B run
-needs no file edit. Both layers reach the worker: the key lives in the
-repository the worker runs in, and the variable is inherited by the worker
-subprocess, so the worker's own `ortus prompt show goal` resolves the same
-variant as the harness that launched it.
+The flag is `prompt_audit` in `.ortusrc`, with the `ORTUS_PROMPT_AUDIT`
+environment variable as a per-run override so an A/B run needs no file edit.
+It defaults on, because the arms were run and the audited one was adopted;
+off serves the legacy bundles unchanged, which is both the kill switch and
+the control arm the comparison ran against. Both layers reach the worker: the
+key lives in the repository the worker runs in, and the variable is inherited
+by the worker subprocess, so the worker's own `ortus prompt show goal`
+resolves the same variant as the harness that launched it.
 
 Scope is those two texts. The `plan` and `interview` prompts are audited in
 the issue record but ship once each: neither is composed into a grind
@@ -175,8 +177,11 @@ def audit_enabled(
     """True when this repository serves the audited worker prompts.
 
     The environment wins over `.ortusrc` so one A/B run can flip the variant
-    without touching a tracked file, and an unparsable value in either layer
-    falls back to the legacy bundles rather than guessing at an opt-in.
+    without touching a tracked file, and a value that parses as neither arm
+    is no instruction at all: resolution falls through it to the layer below,
+    ending at the adopted default. A caller holding no resolved configuration
+    serves the legacy text, because no config is not the same fact as a
+    config carrying that default.
     """
     env = os.environ if environ is None else environ
     exported = _flag(env.get(AUDIT_ENV))
@@ -194,13 +199,17 @@ def audit_note(
 
     Names the layer whenever it is not the default, so a run log reads which
     prompt text a worker was served and why — the A/B is worthless if the
-    transcript cannot say which arm it belongs to.
+    transcript cannot say which arm it belongs to. The adopted default is the
+    audited text, so a run that pinned nothing reports the arm alone: naming
+    `.ortusrc` for a key no such layer carries would send a reader looking
+    for a pin that is not there.
     """
     env = os.environ if environ is None else environ
     exported = _flag(env.get(AUDIT_ENV))
     configured = bool(_flag(config.get(AUDIT_CONFIG_KEY, False))) if config else False
     if exported is None:
-        return "audited from .ortusrc" if configured else "legacy"
+        arm = "audited" if configured else "legacy"
+        return f"{arm} from .ortusrc" if _pinned(config) else arm
     variant = "audited" if exported else "legacy"
     if exported == configured or not _pinned(config):
         return f"{variant} from {AUDIT_ENV}"
