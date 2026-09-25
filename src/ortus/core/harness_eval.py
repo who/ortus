@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ortus.core import output
 from ortus.core.cost import (
@@ -185,6 +185,27 @@ class Treatment:
 
         return (self.enable_line, *self.requires)
 
+    @property
+    def assigned_keys(self) -> frozenset[str]:
+        """The top-level keys this arm writes a value for itself.
+
+        TOML rejects a repeated key outright instead of letting the later
+        line win, so the off-pins written above an arm have to leave out
+        whatever that arm assigns. A `requires` line stops counting at the
+        first table header: a key below one belongs to that table rather
+        than to the top level the pins occupy.
+        """
+
+        keys = {self.config_key}
+        for line in self.requires:
+            stripped = line.strip()
+            if stripped.startswith("["):
+                break
+            name, separator, _ = stripped.partition("=")
+            if separator:
+                keys.add(name.strip())
+        return frozenset(keys)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
@@ -237,6 +258,27 @@ def treatment(key: str) -> Treatment | None:
     return None
 
 
+def baseline_lines(exclude: Iterable[str] = ()) -> tuple[str, ...]:
+    """Pin every treatment key off, minus the keys an arm assigns itself.
+
+    A cell used to state only what it turned on, which left every other key
+    resolving to whatever the shipped defaults happened to be. Once a
+    comparison adopted a treatment that default flipped on, and the arm
+    appending the same value became a second control measured against the
+    first. Writing the whole matrix into every cell makes a cell's
+    configuration a property of the cell rather than of the release it ran
+    under, and keeps the single named key the only difference between an arm
+    and its control.
+    """
+
+    skip = frozenset(exclude)
+    return tuple(
+        f"{item.config_key} = false"
+        for item in TREATMENTS
+        if item.config_key not in skip
+    )
+
+
 def seat_name(fixture: EvalFixture, arm: str) -> str:
     """The directory one cell of the matrix runs in, under the seat root."""
 
@@ -257,14 +299,22 @@ def arm_commands(
     the set. The treatment is applied by appending its key to the seat's
     `.ortusrc` — every treatment here is a config key rather than a grind
     flag, so appended config is the entire difference between arms.
+
+    Every cell appends, the control included: it pins each treatment key off,
+    and an arm pins its own key on above that baseline. The pins are written
+    before any table header an arm's `requires` opens, so a top-level key
+    cannot be swallowed into a table.
     """
 
     seat = root / seat_name(fixture, arm)
     commands = [f"ortus init {seat} --backend {backend}"]
     applied = treatment(arm)
-    if applied is not None:
-        lines = "' '".join(applied.config_lines)
-        commands.append(f"printf '%s\\n' '{lines}' >> {seat}/.ortusrc")
+    own = () if applied is None else applied.config_lines
+    assigned: frozenset[str] = (
+        frozenset() if applied is None else applied.assigned_keys
+    )
+    lines = "' '".join((*baseline_lines(assigned), *own))
+    commands.append(f"printf '%s\\n' '{lines}' >> {seat}/.ortusrc")
     commands.append(f"ortus plan {seat} {fixture.prd_path}")
     commands.append(f"ortus grind {seat} --tasks 0")
     return tuple(commands)
