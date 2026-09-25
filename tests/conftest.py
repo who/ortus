@@ -11,6 +11,7 @@ generated .bat wrapper). See ortus-f4bu.
 from __future__ import annotations
 
 import atexit
+import fcntl
 import hashlib
 import json
 import os
@@ -19,6 +20,8 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -150,6 +153,22 @@ def wall_clock_budget(seconds: float) -> float:
     """
     workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1") or "1")
     return seconds * max(1.0, workers / 4.0)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Publish one template root for the whole session, workers included.
+
+    A template is a directory, so the processes of a distributed run can share
+    one instead of each paying its own `bd init`. The controller nominates the
+    directory here — before xdist spawns anything, so the workers inherit the
+    variable — and owns removing it. A worker sees it already set and neither
+    re-nominates nor cleans up.
+    """
+    if os.environ.get(_TEMPLATE_ROOT_ENV):
+        return
+    root = tempfile.mkdtemp(prefix="ortus-bd-templates-")
+    os.environ[_TEMPLATE_ROOT_ENV] = root
+    atexit.register(shutil.rmtree, root, True)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -531,17 +550,27 @@ class BdWorkspace:
 
 _TEMPLATES: dict[str, BdWorkspace] = {}
 _TEMPLATE_DIGESTS: dict[str, dict[str, str]] = {}
-_bd_init_calls = 0
+#: Where `pytest_configure` publishes the root every process of the run shares.
+_TEMPLATE_ROOT_ENV = "ORTUS_BD_TEMPLATE_ROOT"
+#: How long a process waits for whichever peer is mid-build, in seconds. A real
+#: `bd init` plus its seed is seconds, not minutes; past this the waiter builds
+#: nothing and says so rather than hanging for the session's lifetime.
+_TEMPLATE_BUILD_WAIT = 300.0
 
 
 def bd_init_calls() -> int:
     """How many times this session has run `bd init` to build a template.
 
-    Per process, so under `-n auto` each xdist worker builds its own templates
-    and pays its own single init — a handful of inits per run rather than one
-    per test, which is the saving either way.
+    Counted in the shared root rather than in this process, because the
+    processes of a distributed run share one template: the number answers "how
+    many inits did the session pay", which is the cost the harness exists to
+    hold at one, not "how many did this worker pay".
     """
-    return _bd_init_calls
+    ledger = _templates_root() / "init-calls"
+    try:
+        return len(ledger.read_text(encoding="utf-8").split())
+    except OSError:
+        return 0
 
 
 @lru_cache(maxsize=1)
@@ -550,9 +579,18 @@ def _templates_root() -> Path:
 
     Deliberately not `tmp_path_factory`: `copy_bd_workspace` is called from
     plain module-level helpers in the test modules, which have no fixture to
-    request. `atexit` removes the tree even when pytest exits on a signal.
+    request. Normally `pytest_configure` has already nominated the directory
+    and owns removing it; the fallback covers a process that reaches here
+    without that hook having run, and removes its own tree via `atexit` even
+    when pytest exits on a signal.
     """
+    published = os.environ.get(_TEMPLATE_ROOT_ENV)
+    if published:
+        root = Path(published)
+        if root.is_dir():
+            return root
     root = Path(tempfile.mkdtemp(prefix="ortus-bd-templates-"))
+    os.environ[_TEMPLATE_ROOT_ENV] = str(root)
     atexit.register(shutil.rmtree, root, True)
     return root
 
@@ -588,8 +626,9 @@ def _git(cwd: Path, *args: str) -> None:
 
 def _build_bare(path: Path) -> tuple[str, ...]:
     """The one `bd init` this session performs, plus the setup every test shares."""
-    global _bd_init_calls
-    _bd_init_calls += 1
+    ledger = _templates_root() / "init-calls"
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write(f"{os.getpid()}\n")
     run_bd(path, "init", "--non-interactive", "--prefix", BD_TEMPLATE_PREFIX)
     # `bd init` lands the incidental git repo on `master`; grind's branch guard
     # (ortus-6fu6) pins to the `main` integration branch. Normalized here rather
@@ -648,6 +687,29 @@ def _build_leaf(path: Path) -> tuple[str, ...]:
     )
 
 
+def _build_unready(path: Path) -> tuple[str, ...]:
+    """One hand-authored leaf: real work, no readiness schema v1 packet.
+
+    The shape the readiness gate must refuse. Priority 1 so it is the first
+    thing a selection reaches, which is what those tests are driving at.
+    """
+    return (
+        run_bd(
+            path,
+            "create",
+            "--silent",
+            "--title",
+            "hand authored leaf",
+            "--type",
+            "task",
+            "--priority",
+            "1",
+            "--description",
+            "make it work",
+        ),
+    )
+
+
 def _build_epic(path: Path) -> tuple[str, ...]:
     """1 epic + 2 children, one ready and one blocked behind it."""
     common = ("create", "--silent", "--type")
@@ -676,6 +738,7 @@ def _build_epic(path: Path) -> tuple[str, ...]:
 _TEMPLATE_BUILDERS: dict[str, Callable[[Path], tuple[str, ...]]] = {
     "bare": _build_bare,
     "leaf": _build_leaf,
+    "unready": _build_unready,
     "epic": _build_epic,
 }
 
@@ -696,18 +759,78 @@ def bd_template(kind: str = "bare") -> BdWorkspace:
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     path = _templates_root() / kind
-    if kind == "bare":
-        path.mkdir(parents=True)
-        issues = _build_bare(path)
-    else:
-        # Seeded kinds copy the bare template instead of re-running `bd init`,
-        # so the session pays exactly one init however many kinds it uses.
-        _copy_workspace(bd_template("bare").path, path)
-        issues = _TEMPLATE_BUILDERS[kind](path)
+    with _template_build_lock(kind):
+        issues = _adopt_built_template(kind)
+        if issues is None:
+            if kind == "bare":
+                path.mkdir(parents=True)
+                issues = _build_bare(path)
+            else:
+                # Seeded kinds copy the bare template instead of re-running
+                # `bd init`, so the session pays exactly one init however many
+                # kinds it uses.
+                _copy_workspace(bd_template("bare").path, path)
+                issues = _TEMPLATE_BUILDERS[kind](path)
+            _record_built_template(kind, issues)
     template = BdWorkspace(path, issues)
     _TEMPLATES[kind] = template
     _TEMPLATE_DIGESTS[kind] = _digests(path)
     return template
+
+
+@contextmanager
+def _template_build_lock(kind: str) -> Iterator[None]:
+    """Hold the session-wide right to build the `kind` template.
+
+    The lock is a file beside the template rather than inside it, so it never
+    reaches a copy and never disturbs the pristine digests. A peer already
+    building is waited on: `flock` blocks until it finishes, and the wait is
+    bounded so a builder killed mid-`bd init` fails this process loudly instead
+    of parking the session forever.
+    """
+    lock_path = _templates_root() / f"{kind}.lock"
+    deadline = time.monotonic() + _TEMPLATE_BUILD_WAIT
+    with open(lock_path, "a+", encoding="utf-8") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"waited {_TEMPLATE_BUILD_WAIT:.0f}s for another process "
+                        f"to finish building the {kind!r} bd template and it "
+                        f"never did; {lock_path} is still held"
+                    )
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _template_receipt(kind: str) -> Path:
+    """Where a finished build records the ids it baked, for peers to read."""
+    return _templates_root() / f"{kind}.json"
+
+
+def _adopt_built_template(kind: str) -> tuple[str, ...] | None:
+    """The baked issue ids if a peer already built `kind`, else None.
+
+    A receipt is only written once the build is complete, so its presence is
+    what makes the directory safe to copy from. Read under the build lock.
+    """
+    try:
+        recorded = json.loads(_template_receipt(kind).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return tuple(recorded["issues"])
+
+
+def _record_built_template(kind: str, issues: tuple[str, ...]) -> None:
+    _template_receipt(kind).write_text(
+        json.dumps({"issues": list(issues)}), encoding="utf-8"
+    )
 
 
 def copy_bd_workspace(dest: Path, kind: str = "bare") -> BdWorkspace:

@@ -136,6 +136,30 @@ def _bd_repo(tmp_path: Path, name: str) -> Path:
     return copy_bd_workspace(tmp_path / name, "bare").path
 
 
+def _leaf_repo(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """A workspace already holding one ready leaf, plus that leaf's id.
+
+    The seeded copy is what `_bd_repo` plus `_create_ready_issue` cost minus
+    the `bd create`: the template's leaf carries a readiness-schema-v1 packet
+    the gate accepts, so a test that only needs one claimable issue spends no
+    bd process on acquiring one. A test that asserts on the issue's own title,
+    needs a second issue ordered against it, or needs an oversized packet still
+    seeds its own.
+    """
+    workspace = copy_bd_workspace(tmp_path / name, "leaf")
+    return workspace.path, workspace.issues[0]
+
+
+def _unready_repo(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """A workspace holding one hand-authored leaf, plus that leaf's id.
+
+    The readiness gate's refusal shape, seeded the same way and for the same
+    reason as `_leaf_repo`.
+    """
+    workspace = copy_bd_workspace(tmp_path / name, "unready")
+    return workspace.path, workspace.issues[0]
+
+
 def _issue_ids(repo: Path) -> set[str]:
     listing = subprocess.run(
         ["bd", "list", "--all", "--json"],
@@ -221,8 +245,7 @@ def test_grind_unready_does_not_repair(
     """AC-1: default grind never spawns a planning/repair worker for unready-only."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "norepair")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    repo, issue_id = _unready_repo(tmp_path, "norepair")
     before = _packet_fields(_issue(repo, issue_id))
 
     class NeverRuns:
@@ -258,8 +281,7 @@ def test_grind_unready_flags_human(
     """AC-2: each unready leaf is labeled human, stays open, and is commented."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "flaghuman")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    repo, issue_id = _unready_repo(tmp_path, "flaghuman")
 
     class NeverRuns:
         extra_env: dict[str, str] = {}
@@ -293,8 +315,7 @@ def test_grind_unready_flags_all_then_stops(
     """Two unready leaves are both flagged human, then grind stops."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "flagall")
-    first = _create_unready_issue(repo, "first hand authored leaf", priority="1")
+    repo, first = _unready_repo(tmp_path, "flagall")
     second = _create_unready_issue(repo, "second hand authored leaf", priority="1")
 
     class NeverRuns:
@@ -327,8 +348,7 @@ def test_grind_unready_label_failure_warns_and_stops(
     """A failed human label still warns and stops; repair is not spawned."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "labelfail")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    repo, issue_id = _unready_repo(tmp_path, "labelfail")
 
     class NeverRuns:
         extra_env: dict[str, str] = {}
@@ -374,8 +394,7 @@ def test_grind_unready_flags_human_at_skip_time(
     surface it as claimable."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "readyplus")
-    unready_id = _create_unready_issue(repo, "unready sibling", priority="1")
+    repo, unready_id = _unready_repo(tmp_path, "readyplus")
     ready_id = _create_ready_issue(repo, "ready leaf", priority="2")
     recorded = _RecordingRunner()
 
@@ -458,8 +477,7 @@ def test_grind_reports_actual_worker_claim_when_closed_in_window(
     in_progress diff empty; attribution falls back to the closed-id delta."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "attrib-closed")
-    issue_id = _create_ready_issue(repo, "landed leaf", priority="1")
+    repo, issue_id = _leaf_repo(tmp_path, "attrib-closed")
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -491,8 +509,7 @@ def test_grind_leftover_in_progress_is_not_unready_target(
     """A leftover in_progress claim is continued, not repaired or human-flagged."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "leftover-unready")
-    leftover_id = _create_unready_issue(repo, "leftover unready", priority="1")
+    repo, leftover_id = _unready_repo(tmp_path, "leftover-unready")
     subprocess.run(
         ["bd", "update", leftover_id, "--status=in_progress"],
         cwd=repo,
@@ -794,8 +811,7 @@ def test_grind_queue_blocked_exit_uses_summary(
     keeps the follow-up command; the fifteen-clause wall stays in the log."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "exitsum")
-    issue_id = _create_unready_issue(repo, "hand authored leaf", priority="1")
+    repo, issue_id = _unready_repo(tmp_path, "exitsum")
 
     class NeverRuns:
         extra_env: dict[str, str] = {}
@@ -958,8 +974,7 @@ def test_dry_run_reports_independent_profiles(tmp_path: Path) -> None:
 def test_grind_routes_phase_profiles_and_fast_only_to_implementation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo = _bd_repo(tmp_path, "profile-routing")
-    issue_id = _create_ready_issue(repo, "route profiles")
+    repo, issue_id = _leaf_repo(tmp_path, "profile-routing")
     (repo / ".ortusrc").write_text(
         "reviewer = true\n"
         '[profiles.claude.implement]\nmodel = "sonnet"\n'
@@ -1046,8 +1061,7 @@ def test_verifier_report_and_mutation_isolation(
     expected_phase: str,
     expected_text: str,
 ) -> None:
-    repo = _bd_repo(tmp_path, mutation)
-    issue_id = _create_ready_issue(repo, "verify candidate transaction")
+    repo, issue_id = _leaf_repo(tmp_path, mutation)
     (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(
@@ -1276,8 +1290,7 @@ def _blocked_verifier_grind(
     configured step these tests turn on; the machine pipeline judges first
     and is scripted green so the reviewer leg is actually reached.
     """
-    repo = _bd_repo(tmp_path, name)
-    issue_id = _create_ready_issue(repo, "candidate awaiting a working verifier")
+    repo, issue_id = _leaf_repo(tmp_path, name)
     (repo / ".gitignore").write_text("logs/\n.cache/\n.beads/ortus.flock\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(
@@ -1580,8 +1593,7 @@ def test_grok_implement_reaps_on_done_bar(
     """AC-3: a grok implement spawn gets a reap_when bound to the claimed id."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "grok-reap")
-    _create_ready_issue(repo, "reap after close")
+    repo, _ = _leaf_repo(tmp_path, "grok-reap")
     recorded = _RecordingRunner()
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -1827,10 +1839,9 @@ def test_grind_runs_fake_claude_and_logs_locally(
     --iterations 1 --idle-sleep 0 so the fake-claude (which doesn't touch
     bd) doesn't trigger an infinite no-change retry.
     """
-    repo = _bd_repo(tmp_path, "fixture")
-    # Seed one ready issue so queue_drained() doesn't short-circuit before
-    # claude is spawned.
-    _create_ready_issue(repo, "smoke task")
+    # The seeded copy carries one ready issue, so queue_drained() does not
+    # short-circuit before claude is spawned.
+    repo, _ = _leaf_repo(tmp_path, "fixture")
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -1863,9 +1874,8 @@ def test_grind_harness_selects_claims_and_injects_issue_id(
     the worker was handed the specific id the harness claimed — proving the
     worker is TOLD which issue to work rather than choosing/transcribing it.
     """
-    repo = _bd_repo(tmp_path, "fixture")
-    issue_id = _create_ready_issue(repo, "inject me", priority="1")
-    assert issue_id, "expected bd create to print the new id"
+    repo, issue_id = _leaf_repo(tmp_path, "fixture")
+    assert issue_id, "expected the seeded workspace to name its ready leaf"
 
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
@@ -2305,8 +2315,7 @@ def test_grind_healthy_codegraph_lines_are_log_only(
     a missing handshake still earns its console fallback line."""
     from ortus.core.codegraph import CodeGraphProbe
 
-    repo = _bd_repo(tmp_path, f"cg-{'healthy' if healthy else 'fallback'}")
-    _create_ready_issue(repo, "codegraph narration")
+    repo, _ = _leaf_repo(tmp_path, f"cg-{'healthy' if healthy else 'fallback'}")
     _baseline_commit(repo)
     # The verification-phase agent narration only exists when the reviewer
     # step runs; the machine pipeline itself spawns no agent to narrate.
@@ -2516,8 +2525,7 @@ def _machine_grind(
     reviewer: bool = False,
 ) -> tuple[Path, str, object, _RecordingWorker]:
     """One branch-scoped run judged by the (scripted) machine pipeline."""
-    repo = _bd_repo(tmp_path, name)
-    issue_id = _create_ready_issue(repo, "machine judged leaf")
+    repo, issue_id = _leaf_repo(tmp_path, name)
     _baseline_commit(repo)
     if reviewer:
         _enable_reviewer(repo)
@@ -2659,8 +2667,7 @@ def test_primary_checkout_never_leaves_integration(
 ) -> None:
     """AC-1: through claim, implementation, verification and finalization the
     primary repository's checkout stays on the integration branch."""
-    repo = _bd_repo(tmp_path, "ws1")
-    issue_id = _create_ready_issue(repo, "workspace isolated leaf")
+    repo, issue_id = _leaf_repo(tmp_path, "ws1")
     _baseline_commit(repo)
     primary = repo
     observed: list[str] = []
@@ -2720,8 +2727,7 @@ def test_primary_side_commit_stays_out_of_candidate(
 ) -> None:
     """AC-3: operator intake in the primary tree during implementation — a
     file edit, tracker writes — never enters the candidate."""
-    repo = _bd_repo(tmp_path, "ws3")
-    issue_id = _create_ready_issue(repo, "isolated from intake")
+    repo, issue_id = _leaf_repo(tmp_path, "ws3")
     _baseline_commit(repo)
     primary = repo
 
@@ -2873,8 +2879,7 @@ def test_grind_counts_worker_close_without_claims_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-1: a worker close is a win; grind does not require Claims v1."""
-    repo = _bd_repo(tmp_path, "close-no-claims")
-    issue_id = _create_ready_issue(repo, "close me")
+    repo, issue_id = _leaf_repo(tmp_path, "close-no-claims")
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -2899,8 +2904,7 @@ def test_silent_fresh_worker_under_required_fails_handshake(
     """A silent required worker fails the live handshake even if it closed."""
     from ortus.core.codegraph import CodeGraphProbe
 
-    repo = _bd_repo(tmp_path, "silent-required")
-    issue_id = _create_ready_issue(repo, "close silently")
+    repo, issue_id = _leaf_repo(tmp_path, "silent-required")
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -2929,8 +2933,7 @@ def test_grind_leaves_unfinished_claim_in_progress(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-2: unfinished work stays in_progress; grind does not revert it."""
-    repo = _bd_repo(tmp_path, "leave-claimed")
-    issue_id = _create_ready_issue(repo, "leave me")
+    repo, issue_id = _leaf_repo(tmp_path, "leave-claimed")
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -2952,8 +2955,7 @@ def test_grind_implement_argv_has_no_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """f2he.5 AC-1: implement spawn does not pass resume=."""
-    repo = _bd_repo(tmp_path, "no-resume")
-    _create_ready_issue(repo, "fresh")
+    repo, _ = _leaf_repo(tmp_path, "no-resume")
     _baseline_commit(repo)
     recorded = _RecordingRunner()
     _fake_sandbox(monkeypatch)
@@ -2972,8 +2974,7 @@ def test_leftover_claim_spawn_has_no_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """f2he.5 AC-2: journal/leftover resume is a new process, no --resume."""
-    repo = _bd_repo(tmp_path, "leftover-no-resume")
-    issue_id = _create_ready_issue(repo, "leftover")
+    repo, issue_id = _leaf_repo(tmp_path, "leftover-no-resume")
     subprocess.run(
         ["bd", "update", issue_id, "--status=in_progress"],
         cwd=repo,
@@ -2999,8 +3000,7 @@ def test_grind_does_not_cut_issue_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """f2he.4 AC-1: a one-task grind does not create ortus/<id>."""
-    repo = _bd_repo(tmp_path, "no-issue-branch")
-    issue_id = _create_ready_issue(repo, "on main")
+    repo, issue_id = _leaf_repo(tmp_path, "no-issue-branch")
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -3025,8 +3025,7 @@ def test_grind_does_not_create_workspace_clone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """f2he.4 AC-2: a one-task grind does not create logs/grind-workspaces/<id>."""
-    repo = _bd_repo(tmp_path, "no-workspace")
-    issue_id = _create_ready_issue(repo, "no clone")
+    repo, issue_id = _leaf_repo(tmp_path, "no-workspace")
     _fake_sandbox(monkeypatch)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
     monkeypatch.setattr(
@@ -3054,8 +3053,7 @@ def test_grind_does_not_write_journal_after_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-1: a two-issue grind does not write a journal or handoff line."""
-    repo = _bd_repo(tmp_path, "no-handoff")
-    first = _create_ready_issue(repo, "first close")
+    repo, first = _leaf_repo(tmp_path, "no-handoff")
     second = _create_ready_issue(repo, "second close")
     _baseline_commit(repo)
     _fake_sandbox(monkeypatch)
@@ -3082,8 +3080,7 @@ def test_startup_ignores_leftover_finalized_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-2: leftover finalized-* journal is discarded, never finalized, no HALT."""
-    repo = _bd_repo(tmp_path, "stale-finalized")
-    leftover_id = _create_ready_issue(repo, "already shipped")
+    repo, leftover_id = _leaf_repo(tmp_path, "stale-finalized")
     ready_id = _create_ready_issue(repo, "next ready")
     _baseline_commit(repo)
     subprocess.run(
@@ -3169,8 +3166,7 @@ def _recorded_grind(
     separates one start-line field from the next, never at the closing
     `) ===`, so appending a field cannot break them again (ortus-m6cn).
     """
-    repo = _bd_repo(tmp_path, name)
-    _create_ready_issue(repo, "prototype leaf")
+    repo, _ = _leaf_repo(tmp_path, name)
     if ortusrc:
         (repo / ".ortusrc").write_text(ortusrc)
     worker = _PromptRecorder()
