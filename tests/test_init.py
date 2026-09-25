@@ -435,7 +435,7 @@ def test_init_surfaces_bd_failure_clearly(
     """
     import ortus.commands.init as init_mod
 
-    def fake_run(args, cwd, check):  # noqa: ARG001 — match subprocess.run signature
+    def fake_run(args, cwd=None, check=False, **kwargs):  # noqa: ARG001 — stands in for subprocess.run
         # bd's own stderr would normally print here; the wrapper trusts that
         # the operator already saw it and just signals the failure.
         raise subprocess.CalledProcessError(returncode=7, cmd=args)
@@ -456,12 +456,18 @@ def test_init_passes_non_interactive_to_bd(tmp_path: Path, monkeypatch: pytest.M
 
     captured: dict[str, list[str]] = {}
 
-    def fake_run(args, cwd, check):  # noqa: ARG001 — match subprocess.run signature
+    def fake_run(args, cwd=None, check=False, **kwargs):  # noqa: ARG001 — stands in for subprocess.run
+        # This double replaces subprocess.run for the whole verb, so it accepts
+        # whatever init passes — `capture_output`, `text`, `timeout` — rather
+        # than only the keywords the first call happens to use today.
         # Only the first call (bd init) is under test; init also shells out to
-        # `bd remember` afterwards.
+        # `bd remember` and `bd hooks install` afterwards.
         captured.setdefault("args", list(args))
-        # Pretend bd init succeeded so the rest of init can proceed.
-        return subprocess.CompletedProcess(args=args, returncode=0)
+        # Pretend the call succeeded, with the empty streams a capturing caller
+        # expects to be able to read.
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="", stderr=""
+        )
 
     monkeypatch.setattr(init_mod.subprocess, "run", fake_run)
     target = tmp_path / "nonint"
