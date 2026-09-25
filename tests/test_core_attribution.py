@@ -164,6 +164,38 @@ def test_markdown_heading_and_marker_blocks_are_regions(tmp_path: Path) -> None:
     assert kinds == {"Windows": "heading", "state-graph": "marker"}
 
 
+def test_markdown_link_reference_markers_are_regions(tmp_path: Path) -> None:
+    """Ortus's own pages spell the marker as a Markdown link-reference comment.
+
+    The HTML spelling above stays recognised for consumer repositories absorbed
+    by an older Ortus; a spelling this module stops reading turns every line of
+    a generated block into an unattributed change, which refuses the absorb.
+    """
+
+    repo = _repo(tmp_path)
+    (repo / DOC).write_text(
+        "\n".join(
+            [
+                "# Guide",  # 1
+                "## Glossary",  # 2
+                "[//]: # (BEGIN GENERATED: glossary)",  # 3
+                "",  # 4
+                "| Term | Meaning |",  # 5
+                "[//]: # (END GENERATED: glossary)",  # 6
+                "after",  # 7
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    regions = region_map(repo, DOC, {5}, index=None)
+
+    assert [(region.name, region.kind) for region in regions] == [
+        ("glossary", "marker")
+    ]
+
+
 def test_markdown_heading_and_marker_names_decide_ownership(tmp_path: Path) -> None:
     """A heading is prose, so it matches the packet's wording; a marker name is
     an identifier and matches the way the packet writes one."""

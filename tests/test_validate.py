@@ -204,5 +204,5 @@ def test_validate_is_discoverable() -> None:
     assert result.exit_code == 0
     assert "validate" in result.stdout
     text = README.read_text(encoding="utf-8")
-    verbs = text[text.index("## The verbs") : text.index("## Prerequisites")]
+    verbs = text[text.index("## The verbs") : text.index("## Why ortus")]
     assert "ortus validate" in verbs

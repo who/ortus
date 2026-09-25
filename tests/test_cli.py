@@ -7,7 +7,13 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+REPO = Path(__file__).resolve().parents[1]
+README = REPO / "README.md"
+DOCS = REPO / "docs"
+
+
+def _page(name: str) -> str:
+    return (DOCS / name).read_text(encoding="utf-8")
 
 
 def test_cli_imports() -> None:
@@ -31,11 +37,22 @@ def test_grind_help_lists_grok() -> None:
     assert "grok" in result.stdout
 
 
-def test_readme_documents_prompt_verbs() -> None:
-    text = README.read_text(encoding="utf-8")
-    verbs = text[text.index("## The verbs") : text.index("## Prerequisites")]
-    assert "ortus prompt" in verbs
-    section = text[text.index("## Runtime prompts") : text.index("## Glossary")]
+def test_top_level_help_is_backend_neutral() -> None:
+    """The entry point must not read as Claude-only; grind is backend-neutral."""
+
+    result = CliRunner().invoke(app, ["--help"])
+    assert result.exit_code == 0
+    # Typer wraps the help into a box, so compare on collapsed whitespace
+    # rather than on the exact line breaks the terminal width produced.
+    rendered = " ".join(result.stdout.split())
+    assert "Claude Code workflows" not in rendered
+    for backend in ("Claude", "Codex", "Grok", "opencode"):
+        assert backend in rendered
+
+
+def test_prompt_verbs_are_documented() -> None:
+    assert "ortus prompt" in _page("commands.md")
+    page = _page("prompts.md")
     for needle in (
         "ortus prompt list",
         "ortus prompt show",
@@ -46,11 +63,11 @@ def test_readme_documents_prompt_verbs() -> None:
         "`<repo>/.ortus/prompts/<name>.md`",
         "`~/.ortus/prompts/<name>.md`",
     ):
-        assert needle in section
+        assert needle in page
 
 
-def test_readme_documents_init_managed_agent_files() -> None:
-    text = README.read_text(encoding="utf-8")
+def test_init_managed_agent_files_are_documented() -> None:
+    backends = _page("backends.md")
     for needle in (
         "--backend all",
         "CLAUDE.md",
@@ -60,29 +77,23 @@ def test_readme_documents_init_managed_agent_files() -> None:
         "provisioned but not runnable",
         "preserved byte-for-byte",
         "`ortus init --force`",
+        'pins `backend = "claude"`',
     ):
-        assert needle in text
-    backends = text[text.index("## Agent backends") : text.index("## Why ortus")]
-    assert 'pins `backend = "claude"`' in backends
-    config = text[text.index("## Configuration") : text.index("## Runtime prompts")]
-    assert '"all" is init-only and invalid here' in config
+        assert needle in backends
+    assert '"all" is init-only and invalid here' in _page("configuration.md")
 
 
-def test_readme_lists_grok_backend() -> None:
-    text = README.read_text(encoding="utf-8")
-    start = text.index("## Agent backends")
-    end = text.index("## Why ortus", start)
-    section = text[start:end]
-    lowered = section.lower()
+def test_grok_backend_is_documented() -> None:
+    page = _page("backends.md")
+    lowered = page.lower()
     assert "grok" in lowered
     assert "claude remains the default" in lowered
-    assert "grok -p" in section
-    assert "/goal" in section
+    assert "grok -p" in page
+    assert "/goal" in page
 
 
-def test_readme_documents_prototype_verification() -> None:
-    text = README.read_text(encoding="utf-8")
-    config = text[text.index("## Configuration") : text.index("## Runtime prompts")]
+def test_prototype_verification_is_documented() -> None:
+    config = _page("configuration.md")
     for needle in (
         'verification = "full"   # full | prototype (default: full)',
         "`ortus grind --prototype`",
@@ -93,5 +104,6 @@ def test_readme_documents_prototype_verification() -> None:
         "lowered\nbar",
     ):
         assert needle in config
-    quick_start = text[text.index("## Quick start") : text.index("## The verbs")]
+    text = README.read_text(encoding="utf-8")
+    quick_start = text[text.index("## Quick start") : text.index("## Prerequisites")]
     assert "ortus grind . --prototype" in quick_start

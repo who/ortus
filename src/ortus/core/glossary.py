@@ -17,10 +17,10 @@ meaning, the established term wins and its entry records only the one
 Ortus-specific sense it is used in; novelty is spent solely on concepts
 that are themselves genuinely novel.
 
-The terms are declared here and rendered into ``README.md`` between the
+The terms are declared here and rendered into ``docs/glossary.md`` between the
 ``glossary`` generated markers by :func:`render_readme_block`, exactly the
 way :mod:`ortus.core.lifecycle` renders the state graphs.
-``tests/test_glossary_docs.py`` fails when the committed README block and
+``tests/test_glossary_docs.py`` fails when the committed block and
 this declaration disagree, so a definition cannot drift from the behavior it
 describes.
 
@@ -210,8 +210,13 @@ TERMS: tuple[Term, ...] = (
 )
 
 
-BEGIN_MARKER = "<!-- BEGIN GENERATED: glossary -->"
-END_MARKER = "<!-- END GENERATED: glossary -->"
+#: Markdown link-reference comments, for the same reason the state-graph block
+#: uses them: the docs pages are Markdown all the way down.
+BEGIN_MARKER = "[//]: # (BEGIN GENERATED: glossary)"
+END_MARKER = "[//]: # (END GENERATED: glossary)"
+
+#: The page that carries the block, named once for every message below.
+DOC_PATH = "docs/glossary.md"
 
 
 def _cell(value: str) -> str:
@@ -225,7 +230,7 @@ def _cell(value: str) -> str:
 
 
 def render_glossary_table(terms: Sequence[Term] = TERMS) -> str:
-    """Render `terms` as the Markdown table README carries.
+    """Render `terms` as the Markdown table :data:`DOC_PATH` carries.
 
     A term declared twice is a hard error rather than a silently deduplicated
     or doubled row: two entries for one word means two definitions were
@@ -266,7 +271,7 @@ def render_glossary_table(terms: Sequence[Term] = TERMS) -> str:
 
 
 def render_readme_block() -> str:
-    """The exact text README carries between the glossary markers.
+    """The exact text :data:`DOC_PATH` carries between the glossary markers.
 
     Nothing here reads the clock or the environment, so two runs in one
     session produce identical output.
@@ -274,8 +279,9 @@ def render_readme_block() -> str:
 
     return "\n".join(
         [
-            "<!-- Generated from src/ortus/core/glossary.py. Do not edit by hand: "
-            "tests/test_glossary_docs.py fails and prints the correct block. -->",
+            "[//]: # (Generated from src/ortus/core/glossary.py. Do not edit by "
+            "hand: tests/test_glossary_docs.py fails and prints the correct "
+            "block.)",
             "",
             render_glossary_table(),
         ]
@@ -283,7 +289,7 @@ def render_readme_block() -> str:
 
 
 def readme_block(text: str) -> str:
-    """Extract the generated glossary block from README `text`.
+    """Extract the generated glossary block from :data:`DOC_PATH` `text`.
 
     Raises :class:`GlossaryError` with an actionable message naming the marker
     when the markers are missing, duplicated or out of order, rather than
@@ -294,18 +300,18 @@ def readme_block(text: str) -> str:
         count = text.count(marker)
         if count == 0:
             raise GlossaryError(
-                f"README is missing the glossary {label} marker: {marker}"
+                f"{DOC_PATH} is missing the glossary {label} marker: {marker}"
             )
         if count > 1:
             raise GlossaryError(
-                f"README has {count} glossary {label} markers; "
+                f"{DOC_PATH} has {count} glossary {label} markers; "
                 f"expected exactly one: {marker}"
             )
     start = text.index(BEGIN_MARKER) + len(BEGIN_MARKER)
     end = text.index(END_MARKER)
     if end < start:
         raise GlossaryError(
-            "README glossary markers are out of order: "
+            f"{DOC_PATH} glossary markers are out of order: "
             f"{END_MARKER} appears before {BEGIN_MARKER}"
         )
     return text[start:end].strip("\n")

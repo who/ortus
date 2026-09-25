@@ -18,7 +18,7 @@
 Ortus's `ortus/ralph.sh` orchestrates autonomous execution by spawning a fresh `claude -p` subprocess for every iteration and parsing a stringly-typed `<promise>COMPLETE|EMPTY|BLOCKED</promise>` sentinel from stream-json output to decide whether to loop, exit, or sleep. This shape is load-bearing in important ways — process isolation, fresh-context-per-task, atomic git+bd commits between iterations, the flock invariant — but it also pays meaningful costs that have grown since Ortus was first scaffolded:
 
 1. **Per-iteration boot overhead.** Each iteration restarts `claude`, re-establishes MCP connections (CodeGraph, beads-adjacent), re-bootstraps caches under `XDG_CACHE_HOME`, and re-loads `AGENTS.md` + the orient block. On a 100-issue queue this is real wall-clock waste.
-2. **Sentinel parsing is heuristic-shaped.** `ralph.sh` greps stream-json for a literal `<promise>X</promise>` string. If the model omits the sentinel, mangles it, or produces it in a tool-call payload rather than assistant text, the loop misroutes (treats `BLOCKED` as `EMPTY`, sleeps when it should exit, exits when it should sleep). This is exactly the shape `ZFC.md` cautions against under "decision trees on unstructured input."
+2. **Sentinel parsing is heuristic-shaped.** `ralph.sh` greps stream-json for a literal `<promise>X</promise>` string. If the model omits the sentinel, mangles it, or produces it in a tool-call payload rather than assistant text, the loop misroutes (treats `BLOCKED` as `EMPTY`, sleeps when it should exit, exits when it should sleep). This is exactly the shape `docs/zfc.md` cautions against under "decision trees on unstructured input."
 3. **No declarative completion contract.** The "we're done" condition is encoded as a fixed-point of three independent branches in shell (`--tasks` cap, sentinel string match, error fallthrough → sleep). A reader cannot point to a single line that says "Ralph is finished when X."
 4. **Non-Ralph flows have no terminator at all.** `idea.sh`, `interview.sh`, and `prd-decompose-prompt.md` end with `tell the user to type /exit` — there is no autonomous "PRD is approved; the feature is decomposed; you may stop now" handoff. The user is the loop terminator.
 
@@ -190,7 +190,7 @@ The user-confirmed scope (q1: "Replace ralph.sh") and risk posture (q3: "Strictl
 | "Is the issue ambiguous?" | Model emits `has_enough_info: false` with `missing[]`; scheduler reads schema | Scheduler infers ambiguity from description text | **Allowed — unchanged from today** |
 | "What's the next task?" | `bd ready --json` returns ordered list (beads' job); model picks first | Scheduler scores issues by description content | **Allowed — unchanged from today** |
 | "Should we keep iterating?" | Goal condition is the sole signal; evaluator decides | Shell counts completed sentinels and infers | **Allowed — improvement over status quo** |
-| "Has the user 'approved' the PRD?" (interview.sh) | Condition references `label="approved"` (state schema per LABELS.md) | Shell greps interview transcript for "approved" keyword | **Allowed** |
+| "Has the user 'approved' the PRD?" (interview.sh) | Condition references `label="approved"` (state schema per docs/labels.md) | Shell greps interview transcript for "approved" keyword | **Allowed** |
 | "Cap iterations at N" | Condition contains literal "or stop after N turns"; evaluator counts | Shell parses turn count from stream-json | **Allowed** |
 | Per-task plan execution | Mechanical execution of JSON `implementation_steps` then `verification_steps` | Shell branches on plan content | **Allowed — unchanged from today** |
 
@@ -260,7 +260,7 @@ Net effect: `goal.sh` is **strictly more ZFC-aligned** than `ralph.sh`. The one 
 |---|---|
 | Long-lived session, not subprocess-per-iter | Direct user instruction (q1); enables boot-cost amortization (M1) |
 | Preserve `ralph.sh` invariants byte-for-byte via shared `lib/*.sh` | Direct user instruction (q3); parity asserted by `make parity` (FR-022) |
-| Retire scheduler-relevant sentinels (`EMPTY`, `COMPLETE`); keep `BLOCKED` as transcript marker | Sentinel parsing is exactly the heuristic shape `ZFC.md` forbids; `/goal` evaluator is the ZFC-aligned replacement |
+| Retire scheduler-relevant sentinels (`EMPTY`, `COMPLETE`); keep `BLOCKED` as transcript marker | Sentinel parsing is exactly the heuristic shape `docs/zfc.md` forbids; `/goal` evaluator is the ZFC-aligned replacement |
 | Use `/compact` for inter-task isolation rather than `/clear` | `/clear` also clears the active goal (per docs); `/compact` preserves the goal and summarizes prior turns |
 | Default condition references `bd ready` output, not internal state | The `/goal` evaluator cannot call tools (per docs); it judges from transcript. The condition must reference something the model has surfaced. |
 | Default to Haiku for the evaluator | Claude Code default; condition checks are short; Haiku is the cheapest correct choice |
@@ -358,8 +358,8 @@ No new persistent state. Existing state stores are preserved:
   exec "$(dirname "$0")/goal.sh" "$@"
   ```
 - README + CLAUDE.md + AGENTS.md updated to point at `goal.sh` as primary; `ralph.sh` documented as the deprecation shim.
-- LABELS.md unchanged (the schema is orthogonal).
-- ZFC.md gains a one-paragraph note in "Worked example" pointing at the sentinel-parsing → `/goal` migration as a textbook ZFC win.
+- docs/labels.md unchanged (the schema is orthogonal).
+- docs/zfc.md gains a one-paragraph note in "Worked example" pointing at the sentinel-parsing → `/goal` migration as a textbook ZFC win.
 
 **Dependencies**: Phase 3 (go/no-go decision must be "go").
 
@@ -429,7 +429,7 @@ No new persistent state. Existing state stores are preserved:
 - **Tasks**:
   - [ ] Replace `ralph.sh` body with the shim.
   - [ ] Update README, CLAUDE.md, AGENTS.md to point at `goal.sh`.
-  - [ ] Add a paragraph to ZFC.md's "Worked example" pointing at this migration as a ZFC win.
+  - [ ] Add a paragraph to docs/zfc.md's "Worked example" pointing at this migration as a ZFC win.
 
 ---
 
@@ -439,7 +439,7 @@ No new persistent state. Existing state stores are preserved:
 - **Q2 — Should the canonical condition include "and the working tree is clean and pushed"?** Pros: matches the AGENTS.md "session completion" checklist. Cons: makes the condition harder for Haiku to judge from transcript (push success is in the transcript only if the model logged it). Recommend: yes, but worded as "the latest turn surfaced a successful `git push` (or confirmed no remote is configured)." Validate phrasing in Phase 2 dry-runs.
 - **Q3 — Cost of running Haiku evaluator on every turn for a long queue.** The `/goal` docs say evaluator cost is "typically negligible compared to main-turn spend." For a 100-issue queue at ~5 turns per issue, that is ~500 evaluator calls — still cheap, but quantify in Phase 3's replay harness so we have numbers, not handwaves.
 - **Q4 — `disableAllHooks` / `allowManagedHooksOnly` gotchas.** Some downstream Ortus users may have managed settings that disable hooks; `/goal` won't run there. We should detect this case in `goal.sh` and (a) print a friendly error referencing the docs, (b) suggest falling back to `ralph.sh --legacy` (the shim could grow a `--legacy` flag during Phase 5 that bypasses the `goal.sh` exec). Decide in Phase 5.
-- **Q5 — Should the upstream-flow `/goal` conditions live in the prompts or in the shell scripts?** Per LABELS.md the label vocabulary is a schema; per ZFC.md prompt text in shell scripts is a drift risk. Recommend: condition strings live in `ortus/prompts/conditions/*.txt` (one file per condition), and shell scripts read them. Decide before Phase 4 lands.
+- **Q5 — Should the upstream-flow `/goal` conditions live in the prompts or in the shell scripts?** Per docs/labels.md the label vocabulary is a schema; per docs/zfc.md prompt text in shell scripts is a drift risk. Recommend: condition strings live in `ortus/prompts/conditions/*.txt` (one file per condition), and shell scripts read them. Decide before Phase 4 lands.
 - **Q6 — Does `/goal` work under `--docker` Tier-2 sandbox?** The docker subcommand is `docker sandbox run claude --name ortus-ralph --` today. The `/goal` command is a slash command; passing it via `-p "/goal ..."` should work identically inside the docker image because `/goal` is a Claude Code feature, not a flag. Validate in Phase 2 dry-run on a CI runner with docker.
 - **Q7 — Backpressure when the evaluator says "no" repeatedly.** Today, a failing test forces the model to re-iterate within a single subprocess; the failure is in-context. Under `/goal`, the model's "I'm still working on this task" turn ends, the evaluator says "no, queue isn't empty yet" with a reason, and the next turn starts. The reason becomes guidance — useful — but the within-turn backpressure (test fails, fix immediately) still lives entirely in the per-task body of `goal-prompt.md`. Confirm in Phase 2 that this layering does not cause turn-thrashing where the model declares done, the evaluator disagrees, and the next turn redoes work.
 
@@ -488,13 +488,13 @@ Notes:
 - **Backpressure** — Per Ghuntley: downstream signals (tests, lint, builds) that reject invalid work and force iteration. Per Ortus: the model fixes failures within the per-task body and only closes when verification passes.
 - **bd / beads** — local-first issue tracker; v1.0.0+ required; backed by Dolt embedded mode by default since v1.0.3 (no sql-server, no PID/port files).
 - **CodeGraph** — optional MCP-indexed semantic graph; Ortus integrates via `codegraph_*` tools when `.codegraph/` exists.
-- **Dumb pipe** (per ZFC.md) — code that does pure I/O, schema validation, or lifecycle tracking, with no inferred meaning from unstructured input.
+- **Dumb pipe** (per docs/zfc.md) — code that does pure I/O, schema validation, or lifecycle tracking, with no inferred meaning from unstructured input.
 - **flock(1)** — the `flock` *binary* (not the syscall); used by `ralph.sh` to scope the lock to a process that does not leak the FD to children.
 - **Fresh-per-iter** — Ralph's defining property: each iteration is a new `claude -p` subprocess with empty context. `/goal` does not provide this natively; FR-012's `/compact` ritual approximates it.
 - **`/goal` evaluator** — the Claude Code small-fast-model (Haiku by default) that judges the active goal's condition after every turn.
 - **Sentinel** — the literal `<promise>X</promise>` strings (`EMPTY`/`COMPLETE`/`BLOCKED`) that `ralph.sh` greps for to decide control flow. Phase 5 retires the first two; `BLOCKED` survives as a transcript marker.
 - **Smart zone** — Ortus's 40-60% main-context utilization band; past 60% quality degrades, past 80% the loop is in trouble.
-- **ZFC** — Zero-Framework Cognition; reasoning lives in the model, plumbing is mechanical (see `ZFC.md`).
+- **ZFC** — Zero-Framework Cognition; reasoning lives in the model, plumbing is mechanical (see `docs/zfc.md`).
 
 ### Appendix C: Reference Links
 
@@ -507,8 +507,8 @@ Notes:
 - Ortus repo — `~/code/ortus`
 - Ortus canonical Ralph orchestrator — `~/code/ortus/ortus/ralph.sh`
 - Ortus canonical Ralph prompt — `~/code/ortus/ortus/prompts/ralph-prompt.md`
-- Ortus ZFC rubric — `~/code/ortus/ZFC.md`
-- Ortus label state machine — `~/code/ortus/LABELS.md`
+- Ortus ZFC rubric — `~/code/ortus/docs/zfc.md`
+- Ortus label state machine — `~/code/ortus/docs/labels.md`
 - beads upstream — `~/code/beads-v1.0.4`
 
 ### Appendix D: Interview Notes Summary
@@ -516,7 +516,7 @@ Notes:
 Three direct decisions captured at the start of this PRD (q1/q2/q3 in the elicitation):
 
 1. **Scope** — Replace `ralph.sh`. Aggressively migrate the main loop to a single long-lived `/goal` session. (Not "augment," not "hybrid," not "lay it out and let me choose.")
-2. **Depth** — Full Ortus-style PRD (matching the shape of `prd/PRD-zero-framework-cognition.md` referenced from `ZFC.md`).
+2. **Depth** — Full Ortus-style PRD (matching the shape of `prd/PRD-zero-framework-cognition.md` referenced from `docs/zfc.md`).
 3. **Risk** — Strictly additive on the load-bearing invariants. Nothing the PRD proposes is allowed to touch `ralph.sh`'s flock guard, sandbox `excludedCommands`, or fresh-per-iter semantics. `/goal` lands only in new or non-Ralph code paths. *(q3's original list included the shared dolt sql-server lifecycle; that invariant was retired in the 2026-05-16 (b) revision when bd embedded mode became the default and the orchestration was removed from `ralph.sh`. The user reaffirmed the rip-out explicitly: "I just want it to simply frickin' work.")*
 
 The architectural reconciliation of (1) and (3) — replace the orchestrator while preserving every surviving invariant — is the central design constraint of this PRD and is enforced by FR-005, FR-007, FR-008, FR-009, FR-010 (invariant preservation; FR-006 reserved), FR-022 (parity test), and the `/compact` between-task ritual (FR-012) that approximates fresh-per-iter inside a long-lived session.

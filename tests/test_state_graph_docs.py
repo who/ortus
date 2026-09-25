@@ -1,4 +1,4 @@
-"""README's state-graph block must be exactly what the declaration renders."""
+"""The state-graph block must be exactly what the declaration renders."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pytest
 from ortus.core import lifecycle
 from ortus.core.lifecycle import (
     BEGIN_MARKER,
+    DOC_PATH,
     END_MARKER,
     ISSUE_MACHINE,
     LifecycleError,
@@ -17,15 +18,17 @@ from ortus.core.lifecycle import (
     render_readme_block,
 )
 
-README = Path(__file__).resolve().parents[1] / "README.md"
+#: Derived from the declaration rather than restated, so the page the renderer
+#: names and the page this suite checks cannot drift apart.
+DOC = Path(__file__).resolve().parents[1] / DOC_PATH
 
 
-def _readme_text() -> str:
-    return README.read_text(encoding="utf-8")
+def _doc_text() -> str:
+    return DOC.read_text(encoding="utf-8")
 
 
-def test_readme_contains_the_issue_graph_only() -> None:
-    block = readme_block(_readme_text())
+def test_the_page_contains_the_issue_graph_only() -> None:
+    block = readme_block(_doc_text())
 
     assert block.count("```mermaid") == 1
     assert mermaid_issue_graph() in block
@@ -54,7 +57,7 @@ def _assert_block_matches(text: str) -> None:
     actual = readme_block(text)
     if actual != expected:
         raise AssertionError(
-            "README.md's state-graph block has drifted from "
+            f"{DOC_PATH}'s state-graph block has drifted from "
             "src/ortus/core/lifecycle.py.\n"
             f"Replace everything between {BEGIN_MARKER} and {END_MARKER} with:\n\n"
             f"{expected}\n"
@@ -70,7 +73,7 @@ def test_every_transition_is_documented_even_when_the_diagram_omits_it() -> None
     replaced, because the omission is invisible.
     """
 
-    block = readme_block(_readme_text())
+    block = readme_block(_doc_text())
     for transition in ISSUE_MACHINE.transitions:
         row = (
             f"| `{transition.source}` | {transition.trigger} | "
@@ -78,12 +81,12 @@ def test_every_transition_is_documented_even_when_the_diagram_omits_it() -> None
         )
         assert row in block, (
             f"{ISSUE_MACHINE.name}: {transition.source} -> {transition.target} "
-            "is declared but absent from the README transition table"
+            f"is declared but absent from the {DOC_PATH} transition table"
         )
 
 
-def test_readme_block_matches_renderer() -> None:
-    _assert_block_matches(_readme_text())
+def test_committed_block_matches_renderer() -> None:
+    _assert_block_matches(_doc_text())
 
 
 def test_generated_block_is_deterministic() -> None:
@@ -122,12 +125,12 @@ def test_broken_markers_fail_clearly(text: str, message: str) -> None:
 
 
 def test_hand_edit_inside_the_markers_is_detected() -> None:
-    tampered = _readme_text().replace(
-        f"#### {ISSUE_MACHINE.title}",
-        f"#### {ISSUE_MACHINE.title} (hand-edited)",
+    tampered = _doc_text().replace(
+        f"### {ISSUE_MACHINE.title}",
+        f"### {ISSUE_MACHINE.title} (hand-edited)",
         1,
     )
-    assert tampered != _readme_text()
+    assert tampered != _doc_text()
     assert readme_block(tampered) != render_readme_block()
 
     # Run the assertion a contributor would hit, not a paraphrase of it: the

@@ -76,6 +76,10 @@ git_describe_command = "git describe --dirty --tags --long --match 'v[0-9]*.[0-9
 include = [
     "src/ortus",
     "README.md",
+    # README links every long-form topic into docs/, and PyPI's long
+    # description is README.md, so an sdist without these pages ships dangling
+    # links.
+    "docs",
     "pyproject.toml",
 ]
 
