@@ -152,9 +152,24 @@ from ortus.core.judge_routing import (
     baseline_implement_profile, jev_router_enabled, plan_routes, prepare_route,
     route_implement_profile,
 )
-from ortus.core.judge_state import StateError, pack_state
+from ortus.core.judge_state import OmissionReason, PackedState, StateError, pack_state
 from ortus.core.judge_triage import pin_directive_section, triage_parked_bead
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
+
+
+def _truncated_fields(packed: PackedState) -> tuple[str, ...]:
+    """The issue-text fields this pack shortened, sorted by name.
+
+    A decision row that stays silent about a cut field reads exactly like one
+    written from the whole field, so a replay cannot tell a judgment made on a
+    slice from a judgment made on everything. The packer already reports each
+    cut as an omission; both pre-turn writes carry those names so every phase
+    in the log answers that question the same way.
+    """
+    return tuple(sorted(
+        omission.field for omission in packed.omissions
+        if omission.reason is OmissionReason.TRUNCATED
+    ))
 
 
 def _shadow_turn(
@@ -167,9 +182,10 @@ def _shadow_turn(
         packing_config = replace(
             judge_config, routes=tuple(dict.fromkeys((*judge_config.routes, plan.baseline))),
         )
-        state = pack_state(
+        packed = pack_state(
             packet, packing_config, backends_available=plan.available_workers,
-        ).state
+        )
+        state = packed.state
         started = time.monotonic()
         try:
             verdict = TypeSafeJudge(judge_config).evaluate(state)
@@ -185,6 +201,7 @@ def _shadow_turn(
             criteria_version=CRITERIA_VERSION,
             criteria_hash=criteria_hash(judge_config, criteria),
             latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
+            truncated_fields=_truncated_fields(packed),
         ))
         if decision_id is not None:
             _observe_route(
@@ -355,9 +372,10 @@ def _gate_turn(
     packing_config = replace(
         judge_config, routes=tuple(dict.fromkeys((*judge_config.routes, plan.baseline))),
     )
-    state = pack_state(
+    packed = pack_state(
         packet, packing_config, backends_available=plan.available_workers,
-    ).state
+    )
+    state = packed.state
     started = time.monotonic()
     verdict = TypeSafeJudge(judge_config).evaluate(state)
     decision = decide_pre_turn(
@@ -370,6 +388,7 @@ def _gate_turn(
         criteria_version=CRITERIA_VERSION,
         criteria_hash=criteria_hash(judge_config, criteria),
         latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
+        truncated_fields=_truncated_fields(packed),
     ))
     turn.current_issue(bd)
     if decision.action == GateAction.HUMAN:
