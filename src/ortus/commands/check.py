@@ -50,6 +50,7 @@ from ortus.core.config import (
     load_config,
     read_recorded_local,
 )
+from ortus.core.git import GitClient
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.init_render import BACKEND_TEMPLATES, MERGED_CONFIGS, read_opencode_config
 from ortus.core.local_backend import (
@@ -191,6 +192,75 @@ def check_beads_dir(repo: Path) -> CheckResult:
     if not beads.is_dir():
         return CheckResult(".beads/", False, f"missing at {beads}")
     return CheckResult(".beads/", True, str(beads))
+
+
+#: The tracker's hook whose absence lets the passive export drift, and the
+#: marker that tells it apart from a project's own `pre-commit`.
+TRACKER_HOOK = "pre-commit"
+TRACKER_HOOK_MARKER = "BEADS INTEGRATION"
+TRACKER_HOOK_HINT = "install it with: bd hooks install"
+
+
+def check_tracker_hooks(repo: Path) -> CheckResult:
+    """Report whether git will run the tracker's hooks in this checkout.
+
+    The hooks ship tracked and `bd init` points `core.hooksPath` at them, but
+    that setting belongs to the machine that ran the init: a clone carries the
+    scripts and none of the wiring, so `git commit` refreshes nothing and the
+    passive export drifts from the database with nobody told. This row is the
+    telling. It never installs anything — the verb is read-only, and a grind
+    sandbox mounts the git directory read-only anyway, so the install stays an
+    operator action in an ordinary shell.
+
+    Informational, like the provisioned-backend rows: a repository grinds
+    perfectly well with no hook, it just exports by hand. A directory that is
+    not a checkout passes, because there is no hook it could have had.
+    """
+    name = "tracker git hooks"
+    git = GitClient(repo=repo)
+    try:
+        checkout = git.is_git_repo()
+        hooks = git.hooks_dir() if checkout else None
+    except OSError as exc:
+        # No `git` to ask. Every other row still has an answer, so this one
+        # says why it has none rather than taking the verb down with it.
+        return CheckResult(name, False, f"git could not be run: {exc}", level="info")
+    if not checkout:
+        return CheckResult(name, True, "not a git checkout", level="info")
+    if hooks is None:
+        return CheckResult(
+            name,
+            False,
+            f"git resolved no hooks directory — {TRACKER_HOOK_HINT}",
+            level="info",
+        )
+    hook = hooks / TRACKER_HOOK
+    try:
+        text = hook.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return CheckResult(
+            name,
+            False,
+            f"no {TRACKER_HOOK} in {hooks} — {TRACKER_HOOK_HINT}",
+            level="info",
+        )
+    if TRACKER_HOOK_MARKER not in text:
+        # A foreign hook is not the tracker's, and the install keeps whatever
+        # sits outside its own markers, so the remediation is safe to quote.
+        return CheckResult(
+            name,
+            False,
+            f"{hook} has no beads section — {TRACKER_HOOK_HINT}",
+            level="info",
+        )
+    if not os.access(hook, os.X_OK):
+        return CheckResult(
+            name,
+            False,
+            f"{hook} is not executable — {TRACKER_HOOK_HINT}",
+            level="info",
+        )
+    return CheckResult(name, True, str(hook))
 
 
 def check_readiness_memory(repo: Path) -> CheckResult:
@@ -1157,6 +1227,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
         results.append(c())
     repo_checks: list[tuple[Callable[[Path], CheckResult | list[CheckResult]], str]] = [
         (check_beads_dir, ".beads/"),
+        (check_tracker_hooks, "tracker git hooks"),
         (check_readiness_memory, "bd readiness memory"),
         (settings_check, settings_label),
     ]
