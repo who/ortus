@@ -653,6 +653,29 @@ def copy_bd_workspace(dest: Path, kind: str = "bare") -> BdWorkspace:
     return BdWorkspace(dest, template.issues)
 
 
+def graft_bd_workspace(dest: Path, kind: str = "bare") -> BdWorkspace:
+    """Add the `kind` template workspace to a directory that already exists.
+
+    `copy_bd_workspace` wants a destination that does not exist yet, while
+    `bd init` runs inside a directory its caller has already created — one a
+    test may have seeded with a host `AGENTS.md` or `.gitignore` that bd
+    appends to rather than replaces. So the template lands beside `dest` and
+    moves in file by file, leaving whatever was already there untouched, and
+    git's `core.hooksPath` is re-rooted onto the workspace's final home.
+    """
+    staged = dest.parent / f"{dest.name}.bd-template"
+    template = copy_bd_workspace(staged, kind)
+    for source in sorted(staged.rglob("*")):
+        landing = dest / source.relative_to(staged)
+        if source.is_dir() and not source.is_symlink():
+            landing.mkdir(parents=True, exist_ok=True)
+        elif not (landing.exists() or landing.is_symlink()):
+            shutil.move(str(source), str(landing))
+    shutil.rmtree(staged, ignore_errors=True)
+    _git(dest, "config", "core.hooksPath", str(dest / ".beads" / "hooks"))
+    return BdWorkspace(dest, template.issues)
+
+
 def _copy_workspace(template: Path, dest: Path) -> None:
     """Copy a workspace and prove the copy stands on its own.
 
@@ -762,6 +785,48 @@ def bd_workspace(tmp_path: Path) -> Callable[..., BdWorkspace]:
         return copy_bd_workspace(tmp_path / name, kind)
 
     return _make
+
+
+@pytest.fixture()
+def bd_init_from_template(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serve a module's `bd init` and `bd remember` from the session template.
+
+    Bootstrapping a workspace costs about four seconds of real `bd`, so a
+    module that bootstraps one per test pays that per test while asserting
+    nothing about bd: rendered files, `.ortusrc` facts and managed blocks are
+    what those tests are about. Here `bd init` becomes a graft of the template
+    workspace, so the steps behind it still see a genuine `.beads/` directory
+    and git repo, and the readiness-memory write becomes a no-op — that memory
+    is bd's own behavior and belongs to the tests that keep the real binary.
+
+    A test marked `real_bd` gets the real binary and owns that contract.
+    Nothing else is intercepted: git and every other subprocess still runs, and
+    a test that stands in for `subprocess.run` itself patches the same
+    attribute after this fixture, so its own fake wins over this one.
+    """
+    if request.node.get_closest_marker("real_bd") is not None:
+        return
+    # Built before the patch is in place: the template is itself made by a real
+    # `bd init`, which the dispatcher below would otherwise intercept and
+    # recurse into.
+    bd_template("bare")
+    real_run = subprocess.run
+
+    def dispatch(args, *rest, **kwargs):
+        argv = [str(arg) for arg in args]
+        command = " ".join(argv[:2])
+        if command == "bd init":
+            # KeyError rather than a default: a bootstrap with no cwd would
+            # otherwise graft a workspace into the process's own directory.
+            graft_bd_workspace(Path(kwargs["cwd"]))
+            return subprocess.CompletedProcess(argv, 0)
+        if command == "bd remember":
+            return subprocess.CompletedProcess(argv, 0)
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", dispatch)
 
 
 @pytest.fixture()
