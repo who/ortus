@@ -10,6 +10,15 @@ next context window, and that window is the running grind's next iteration.
 `revert` is coerced to `warn` there: reverting a live unfinished claim would
 discard the routing the worker recorded in bd. `escalate` still hands the
 issue to a human when the operator asked for that policy.
+
+What each test drives its tracker with follows from what it asserts. The
+cases below assert a loop decision — which claim grind keeps, what it writes
+to the log, whether it spends another iteration — and read that decision off
+three fields, so they run against `FakeBdClient` and spend no subprocess time
+on the tracker at all. `test_startup_escalate_labels_leftover_human` is this
+file's real-bd keeper: it is the one case whose claim is that a label lands
+in the tracker itself, driven by a real worker process, so faking either end
+of it would leave the contract unproven.
 """
 
 from __future__ import annotations
@@ -25,9 +34,11 @@ from typer.testing import CliRunner
 from ortus.cli import app
 from ortus.commands import grind as grind_mod
 from ortus.core import sandbox as sandbox_mod
+from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.sandbox import SandboxInfo
-from tests._shims import make_inline_python_shim
+from tests._fake_bd import FakeBdClient, seed
+from tests._shims import make_inline_python_shim, ready_issue_args
 from tests.conftest import copy_bd_workspace
 
 
@@ -63,6 +74,29 @@ def _seed_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, workspace.issues[0]
 
 
+def _fake_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, str, FakeBdClient]:
+    """The same fixture shape, with the tracker held in memory.
+
+    The git work tree is still real — grind's branch guard, its dirty-tree
+    reading and its HEAD comparison all run against it — and only the bd
+    process is replaced, through the `_make_bd` indirection production
+    already has. The leaf carries the same readiness packet the `leaf`
+    template bakes in, so selection sees the issue it would see.
+    """
+    workspace = copy_bd_workspace(tmp_path / "orphan-policy", "bare")
+    repo = workspace.path
+    tracker = FakeBdClient(repo)
+    issue_id = seed(
+        tracker,
+        "create", "--silent", "--title", "ready leaf", "--type", "task",
+        "--priority", "1", *ready_issue_args(),
+    )
+    monkeypatch.setattr(grind_mod, "_make_bd", lambda target: tracker)
+    return repo, issue_id, tracker
+
+
 def _claim_only_shim(tmp_path: Path) -> Path:
     return make_inline_python_shim(
         tmp_path,
@@ -86,6 +120,32 @@ def _claim_only_shim(tmp_path: Path) -> Path:
     )
 
 
+class _ClaimOnlyRunner:
+    """A worker that claims the first non-epic ready issue and then bails.
+
+    The in-process twin of `_claim_only_shim`: same two tracker writes, no
+    process and no `bd` binary behind them.
+    """
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, tracker: BdClient) -> None:
+        self.tracker = tracker
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        self.calls.append({"prompt": prompt, **kwargs})
+        claimed = self.tracker.in_progress_ids()
+        if not claimed:
+            ready = self.tracker.list_ready()
+            first = next(
+                (row["id"] for row in ready if row.get("issue_type") != "epic"), None
+            )
+            if first:
+                self.tracker.update_status(first, "in_progress")
+        return 0
+
+
 def _no_op_shim(tmp_path: Path) -> Path:
     """A fake claude that does nothing — isolates the startup sweep's effect
     from any per-iteration mutation."""
@@ -96,10 +156,27 @@ def _no_op_shim(tmp_path: Path) -> Path:
     )
 
 
+class _NoOpRunner:
+    """The in-process twin of `_no_op_shim`: a worker that changes nothing."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        self.calls.append({"prompt": prompt, **kwargs})
+        return 0
+
+
 def _install_shim(monkeypatch: pytest.MonkeyPatch, shim: Path) -> None:
     monkeypatch.setattr(
-        grind_mod, "_make_runner", lambda: ClaudeRunner(claude_binary=str(shim))
+        grind_mod, "_make_runner", lambda *a, **k: ClaudeRunner(claude_binary=str(shim))
     )
+
+
+def _install_runner(monkeypatch: pytest.MonkeyPatch, worker: object) -> None:
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: worker)
 
 
 def _force_fake_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -148,10 +225,10 @@ def test_worker_claim_left_in_progress_continues_the_run(
     """Default path: the worker claims and exits without closing. Grind judges
     bd status, keeps the claim, and spends its remaining iteration budget
     resuming it in this same process (ortus-86ui)."""
-    repo, issue_id = _seed_repo(tmp_path)
+    repo, issue_id, tracker = _fake_repo(tmp_path, monkeypatch)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
+    _install_runner(monkeypatch, _ClaimOnlyRunner(tracker))
 
     result = runner.invoke(
         app,
@@ -159,7 +236,7 @@ def test_worker_claim_left_in_progress_continues_the_run(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    issue = _bd_show(repo, issue_id)
+    issue = tracker.show(issue_id)
     assert issue["status"] == "in_progress", (
         f"a live claim must stay claimed for the next window; got {issue['status']}"
     )
@@ -172,7 +249,7 @@ def test_worker_claim_left_in_progress_continues_the_run(
     assert "iter 2: spawning" in log
     # The claim wedges rather than progressing, so the escalation policy —
     # not the old one-window exit — is what stops the resumes.
-    assert "human" in _bd_labels(repo, issue_id)
+    assert "human" in tracker.labels_of(issue_id)
     assert "escalating to the human queue" in log
 
 
@@ -181,10 +258,10 @@ def test_legacy_condition_path_leaves_claim_for_next_window(
 ) -> None:
     """The legacy --condition path judges by snapshot delta rather than a
     targeted `bd show`, and reaches the same verdict: claim stays, run ends."""
-    repo, issue_id = _seed_repo(tmp_path)
+    repo, issue_id, tracker = _fake_repo(tmp_path, monkeypatch)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-    _install_shim(monkeypatch, _claim_only_shim(tmp_path))
+    _install_runner(monkeypatch, _ClaimOnlyRunner(tracker))
 
     result = runner.invoke(
         app,
@@ -201,7 +278,7 @@ def test_legacy_condition_path_leaves_claim_for_next_window(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
 
-    assert _bd_show(repo, issue_id)["status"] == "in_progress"
+    assert tracker.show(issue_id)["status"] == "in_progress"
     log = _grind_log(repo)
     assert f"left {issue_id} in_progress for the next window" in log
 
@@ -215,11 +292,11 @@ def test_startup_leftover_claim_is_not_reverted_by_default(
     """Cross-restart scenario: a prior window claimed and exited. The new
     grind names the leftover claim at startup and must NOT revert it — a live
     unfinished claim is not an orphan."""
-    repo, issue_id = _seed_repo(tmp_path)
+    repo, issue_id, tracker = _fake_repo(tmp_path, monkeypatch)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-    _pre_claim(repo, issue_id)
-    _install_shim(monkeypatch, _no_op_shim(tmp_path))
+    tracker.update_status(issue_id, "in_progress")
+    _install_runner(monkeypatch, _NoOpRunner())
 
     result = runner.invoke(
         app,
@@ -235,7 +312,7 @@ def test_startup_leftover_claim_is_not_reverted_by_default(
     assert f"revert: {issue_id}" not in log, (
         "revert must never fire on a live claim"
     )
-    assert _bd_show(repo, issue_id)["status"] == "in_progress"
+    assert tracker.show(issue_id)["status"] == "in_progress"
 
 
 def test_startup_revert_policy_is_coerced_to_warn(
@@ -244,11 +321,11 @@ def test_startup_revert_policy_is_coerced_to_warn(
     """--orphan-policy=revert on a leftover claim degrades to warn: the claim
     is logged, not mutated. Reverting would erase the routing the worker
     recorded in bd."""
-    repo, issue_id = _seed_repo(tmp_path)
+    repo, issue_id, tracker = _fake_repo(tmp_path, monkeypatch)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)
-    _pre_claim(repo, issue_id)
-    _install_shim(monkeypatch, _no_op_shim(tmp_path))
+    tracker.update_status(issue_id, "in_progress")
+    _install_runner(monkeypatch, _NoOpRunner())
 
     result = runner.invoke(
         app,
@@ -268,7 +345,7 @@ def test_startup_revert_policy_is_coerced_to_warn(
     log = _grind_log(repo)
     assert f"warn: orphan claim on {issue_id}" in log
     assert f"revert: {issue_id}" not in log
-    assert _bd_show(repo, issue_id)["status"] == "in_progress", (
+    assert tracker.show(issue_id)["status"] == "in_progress", (
         "revert policy must not mutate a live claim"
     )
 
@@ -277,7 +354,12 @@ def test_startup_escalate_labels_leftover_human(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Escalate stays honored at startup: the operator explicitly asked for
-    leftover claims to be handed to the human queue."""
+    leftover claims to be handed to the human queue.
+
+    The real-bd keeper for this file. Its claim is that the label reaches the
+    tracker, so it runs a real `bd` against a real workspace and a real worker
+    process; the cases above assert loop decisions and run on the fake.
+    """
     repo, issue_id = _seed_repo(tmp_path)
     _stub_sandbox(monkeypatch)
     _force_fake_home(monkeypatch, tmp_path)

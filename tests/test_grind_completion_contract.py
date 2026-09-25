@@ -5,11 +5,20 @@ composed prompt that still tells the model to leave candidate edits for a
 later verification phase is a contract defect: grind must not spawn on it,
 and a successful resume must land exactly once without a false no-close
 window.
+
+Most of what these cases assert is a loop decision — landed or not landed,
+one land or two, a no-close window recorded — read off a status and a
+comment. Those run their tracker through `FakeBdClient`, which answers the
+same reads in memory instead of a second of `bd` per question. Two keepers
+stay on a real workspace: `test_resumed_completion_lands_one_task_without_no_close`
+for the completion contract, because its claim is that a worker's close
+reaches the tracker and grind counts it, and
+`test_failure_human_blocked_is_not_landed` for the failure contract, because
+its claim is that a real label on a real claim keeps grind out.
 """
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -27,12 +36,12 @@ from ortus.core.codegraph import (
     phase_contract,
 )
 from ortus.core.prompts import bundled_prompt_text
+from tests._fake_bd import FakeBdClient, seed
+from tests._shims import ready_issue_args
 from tests.test_grind import (
     _bd_repo,
     _claim_with_no_close_marker,
     _CloseWithoutClaimsRunner,
-    _comments_blob,
-    _create_ready_issue,
     _fake_sandbox,
     _fixture_repo,
     _grind_log,
@@ -42,6 +51,70 @@ from tests.test_grind import (
 )
 
 runner = CliRunner()
+
+
+# ---------------------------------------------------------------------------
+# in-memory tracker fixtures — the git work tree stays real
+# ---------------------------------------------------------------------------
+
+
+def _fake_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> tuple[Path, FakeBdClient]:
+    """A grind-ready repo whose bd process is a dict in this interpreter.
+
+    Substituted through `_make_bd`, the indirection production already has
+    for exactly this; nothing about the loop under test changes shape.
+    """
+    repo = _bd_repo(tmp_path, name)
+    tracker = FakeBdClient(repo)
+    monkeypatch.setattr(grind_mod, "_make_bd", lambda target: tracker)
+    return repo, tracker
+
+
+def _fake_ready_leaf(
+    tracker: FakeBdClient, title: str, *, priority: str = "2"
+) -> str:
+    """The same readiness-schema-v1 leaf `_create_ready_issue` writes."""
+    return seed(
+        tracker,
+        "create", "--silent", "--title", title, "--type", "task",
+        "--priority", priority, *ready_issue_args(),
+    )
+
+
+def _fake_claim_with_no_close_marker(
+    tracker: FakeBdClient, title: str, *, windows: int | None
+) -> str:
+    """A leftover in_progress claim, optionally carrying a no-close marker."""
+    issue_id = _fake_ready_leaf(tracker, title, priority="1")
+    tracker.update_status(issue_id, "in_progress")
+    if windows is not None:
+        tracker.add_comment(issue_id, f"ortus-grind: no-close window {windows}")
+    return issue_id
+
+
+class _FakeCloseRunner:
+    """Claims if nothing is claimed, then closes — the twin of
+    `_CloseWithoutClaimsRunner` with the tracker held in memory."""
+
+    extra_env: dict[str, str] = {}
+
+    def __init__(self, tracker: FakeBdClient) -> None:
+        self.tracker = tracker
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        claimed = sorted(self.tracker.in_progress_ids())
+        issue_id = claimed[0] if claimed else None
+        if issue_id is None:
+            issue_id = next(
+                row["id"]
+                for row in self.tracker.list_ready()
+                if row.get("issue_type") != "epic"
+            )
+            self.tracker.update_status(issue_id, "in_progress")
+        self.tracker.close(issue_id, reason="worker closed without Claims")
+        return 0
 
 
 def _available_probe(mode: CodeGraphMode = CodeGraphMode.REQUIRED) -> CodeGraphProbe:
@@ -180,8 +253,8 @@ def test_stale_leave_open_prompt_override_does_not_spawn(
     """Live grind must not spend a worker on a conflicting override."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "stale-override-spawn")
-    _create_ready_issue(repo, "must not spawn")
+    repo, tracker = _fake_repo(tmp_path, monkeypatch, "stale-override-spawn")
+    _fake_ready_leaf(tracker, "must not spawn")
     _write_goal_override(
         repo,
         "Custom loop.\nDo not close the issue; leave candidate edits for verification.\n",
@@ -219,7 +292,12 @@ def test_stale_leave_open_prompt_override_does_not_spawn(
 def test_resumed_completion_lands_one_task_without_no_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A leftover claim that session-closes counts as one land, not a stall."""
+    """A leftover claim that session-closes counts as one land, not a stall.
+
+    The completion contract's real-bd keeper: the claim here is that a
+    worker's close lands in the tracker and grind reads it back as one land,
+    so both ends of it stay real.
+    """
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     repo = _bd_repo(tmp_path, "resume-complete")
@@ -261,13 +339,13 @@ def test_fresh_completion_respects_task_cap(
     """A fresh close counts as one land and honours --tasks 1."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "fresh-cap")
-    first = _create_ready_issue(repo, "first leaf")
-    second = _create_ready_issue(repo, "second leaf")
+    repo, tracker = _fake_repo(tmp_path, monkeypatch, "fresh-cap")
+    first = _fake_ready_leaf(tracker, "first leaf")
+    second = _fake_ready_leaf(tracker, "second leaf")
     _fake_sandbox(monkeypatch)
     _isolate_home(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        grind_mod, "_make_runner", lambda *a, **k: _CloseWithoutClaimsRunner(repo)
+        grind_mod, "_make_runner", lambda *a, **k: _FakeCloseRunner(tracker)
     )
     result = runner.invoke(
         app,
@@ -284,8 +362,8 @@ def test_fresh_completion_respects_task_cap(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     statuses = {
-        first: _issue(repo, first)["status"],
-        second: _issue(repo, second)["status"],
+        first: tracker.show(first)["status"],
+        second: tracker.show(second)["status"],
     }
     assert set(statuses.values()) == {"closed", "open"}
     assert sum(1 for status in statuses.values() if status == "closed") == 1
@@ -301,42 +379,27 @@ def test_fresh_completion_respects_task_cap(
 
 
 class _FailedPushRunner:
-    """Commits nothing, cannot push, leaves the claim open, exits normally."""
+    """Commits nothing, cannot push, leaves the claim open, exits normally.
+
+    The push is a real `git push` against a repo with no remote, because the
+    failure this case turns on is git's; only the claim it reads first is in
+    memory.
+    """
 
     extra_env: dict[str, str] = {}
 
-    def __init__(self, host: Path) -> None:
+    def __init__(self, tracker: FakeBdClient, host: Path) -> None:
+        self.tracker = tracker
         self.host = host
 
     def run(self, prompt: str, **kwargs: object) -> int:
-        listing = json.loads(
-            subprocess.run(
-                ["bd", "list", "--status=in_progress", "--json"],
-                cwd=self.host,
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout
-        )
-        if not listing:
-            ready = json.loads(
-                subprocess.run(
-                    ["bd", "ready", "--json"],
-                    cwd=self.host,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout
-            )
+        if not self.tracker.in_progress_ids():
             issue_id = next(
-                item["id"] for item in ready if item.get("issue_type") != "epic"
+                row["id"]
+                for row in self.tracker.list_ready()
+                if row.get("issue_type") != "epic"
             )
-            subprocess.run(
-                ["bd", "update", issue_id, "--status=in_progress"],
-                cwd=self.host,
-                check=True,
-                capture_output=True,
-            )
+            self.tracker.update_status(issue_id, "in_progress")
         push = subprocess.run(
             ["git", "push", "origin", "main"],
             cwd=self.host,
@@ -355,8 +418,8 @@ def test_failure_exit_without_close_is_not_landed(
     """A normal worker exit that leaves the claim open is not a land."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "exit-open")
-    issue_id = _claim_with_no_close_marker(repo, "stays open", windows=None)
+    repo, tracker = _fake_repo(tmp_path, monkeypatch, "exit-open")
+    issue_id = _fake_claim_with_no_close_marker(tracker, "stays open", windows=None)
     recorded = _RecordingRunner()
     _fake_sandbox(monkeypatch)
     _isolate_home(monkeypatch, tmp_path)
@@ -376,7 +439,7 @@ def test_failure_exit_without_close_is_not_landed(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert recorded.calls
-    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert tracker.show(issue_id)["status"] == "in_progress"
     console = _squashed_console(result)
     assert "0 landed this session" in console
     assert f"closed {issue_id}" not in console
@@ -390,8 +453,8 @@ def test_failure_preserves_inherited_dirty_files(
     """Unrelated dirty files survive a no-close window."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "keep-dirty")
-    issue_id = _claim_with_no_close_marker(repo, "keep dirt", windows=None)
+    repo, tracker = _fake_repo(tmp_path, monkeypatch, "keep-dirty")
+    issue_id = _fake_claim_with_no_close_marker(tracker, "keep dirt", windows=None)
     leftover = repo / "inherited.txt"
     leftover.write_text("operator scratch\n", encoding="utf-8")
     recorded = _RecordingRunner()
@@ -413,7 +476,7 @@ def test_failure_preserves_inherited_dirty_files(
     )
     assert result.exit_code == 0, result.stdout + result.stderr
     assert leftover.read_text(encoding="utf-8") == "operator scratch\n"
-    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert tracker.show(issue_id)["status"] == "in_progress"
     assert "0 landed this session" in _squashed_console(result)
 
 
@@ -425,8 +488,8 @@ def test_failure_resumed_stall_records_no_close(
     """A resumed window that neither closes nor advances HEAD burns one stall."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "stall-count")
-    issue_id = _claim_with_no_close_marker(repo, "quiet stall", windows=None)
+    repo, tracker = _fake_repo(tmp_path, monkeypatch, "stall-count")
+    issue_id = _fake_claim_with_no_close_marker(tracker, "quiet stall", windows=None)
     recorded = _RecordingRunner()
     _fake_sandbox(monkeypatch)
     _isolate_home(monkeypatch, tmp_path)
@@ -445,9 +508,9 @@ def test_failure_resumed_stall_records_no_close(
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert _issue(repo, issue_id)["status"] == "in_progress"
-    assert "human" not in (_issue(repo, issue_id).get("labels") or [])
-    assert "ortus-grind: no-close window 1" in _comments_blob(repo, issue_id)
+    assert tracker.show(issue_id)["status"] == "in_progress"
+    assert "human" not in (tracker.show(issue_id).get("labels") or [])
+    assert tracker.has_comment(issue_id, "ortus-grind: no-close window 1")
     log = _grind_log(repo)
     assert "no-close window 1 of 2" in log
     assert "0 landed this session" in _squashed_console(result)
@@ -461,12 +524,12 @@ def test_failure_push_without_close_is_not_landed(
     """A worker that cannot push and does not close is not reported as landed."""
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
-    repo = _bd_repo(tmp_path, "failed-push")
-    issue_id = _claim_with_no_close_marker(repo, "cannot push", windows=None)
+    repo, tracker = _fake_repo(tmp_path, monkeypatch, "failed-push")
+    issue_id = _fake_claim_with_no_close_marker(tracker, "cannot push", windows=None)
     _fake_sandbox(monkeypatch)
     _isolate_home(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        grind_mod, "_make_runner", lambda *a, **k: _FailedPushRunner(repo)
+        grind_mod, "_make_runner", lambda *a, **k: _FailedPushRunner(tracker, repo)
     )
     result = runner.invoke(
         app,
@@ -482,7 +545,7 @@ def test_failure_push_without_close_is_not_landed(
         ],
     )
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert _issue(repo, issue_id)["status"] == "in_progress"
+    assert tracker.show(issue_id)["status"] == "in_progress"
     assert "0 landed this session" in _squashed_console(result)
     assert f"worker closed {issue_id}" not in _grind_log(repo)
 
@@ -492,7 +555,11 @@ def test_failure_push_without_close_is_not_landed(
 def test_failure_human_blocked_is_not_landed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A leftover claim labelled human is the operator's, never a land."""
+    """A leftover claim labelled human is the operator's, never a land.
+
+    The failure contract's real-bd keeper: what keeps grind out here is a
+    label on a real claim, so the label and the claim both stay real.
+    """
     if shutil.which("bd") is None:
         pytest.skip("bd not on PATH")
     repo = _bd_repo(tmp_path, "human-block")

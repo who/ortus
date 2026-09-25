@@ -1,8 +1,12 @@
 """Wrapper around the `bd` (beads) CLI.
 
-All methods shell out to a real `bd` binary. We never mock bd — Testing
-Strategy item from PRD: bd is integration-tested against tmp `bd init`
-workspaces.
+All methods shell out to a real `bd` binary. Nothing here is ever mocked —
+Testing Strategy item from PRD: bd is integration-tested against tmp bd
+workspaces, and `tests/test_core_bd.py` owns that contract. A test whose
+subject is a loop decision rather than the tracker may substitute a client
+whose `_run` answers in memory, which leaves every method below running as
+written; `tests/test_fake_bd_contract.py` is what holds such a substitute to
+the real binary's behavior.
 """
 
 from __future__ import annotations

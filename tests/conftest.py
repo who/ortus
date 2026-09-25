@@ -496,10 +496,20 @@ def _templates_root() -> Path:
     return root
 
 
-def _bd(cwd: Path, *args: str) -> str:
+def run_bd(cwd: Path, *args: str) -> str:
+    """Run `bd` against the workspace at `cwd` and return its stdout.
+
+    The BEADS_DIR scrub is the whole point of routing a fixture's bd calls
+    through here. Grind workers pin that variable at the host tracker and a
+    criterion-check pytest inherits the pin, so a plain `subprocess.run`
+    would seed the developer's own database instead of the workspace under
+    `cwd`. The autouse `isolated_beads_tracker` fixture covers a test's own
+    calls, but it is function-scoped: anything built at module or session
+    scope — a template, a shared read-only workspace — runs before it and
+    has to scrub the variable itself.
+    """
+
     env = os.environ.copy()
-    # Grind workers pin BEADS_DIR to the host tracker. Template init/create
-    # must use the workspace under cwd, not that inherited database.
     env.pop("BEADS_DIR", None)
     return subprocess.run(
         ["bd", *args],
@@ -519,7 +529,7 @@ def _build_bare(path: Path) -> tuple[str, ...]:
     """The one `bd init` this session performs, plus the setup every test shares."""
     global _bd_init_calls
     _bd_init_calls += 1
-    _bd(path, "init", "--non-interactive", "--prefix", BD_TEMPLATE_PREFIX)
+    run_bd(path, "init", "--non-interactive", "--prefix", BD_TEMPLATE_PREFIX)
     # `bd init` lands the incidental git repo on `master`; grind's branch guard
     # (ortus-6fu6) pins to the `main` integration branch. Normalized here rather
     # than at the copy so every copy inherits an already-correct branch.
@@ -562,7 +572,7 @@ def _build_bare(path: Path) -> tuple[str, ...]:
 def _build_leaf(path: Path) -> tuple[str, ...]:
     """One ready, executable leaf — the shape most grind tests drive."""
     return (
-        _bd(
+        run_bd(
             path,
             "create",
             "--silent",
@@ -580,9 +590,9 @@ def _build_leaf(path: Path) -> tuple[str, ...]:
 def _build_epic(path: Path) -> tuple[str, ...]:
     """1 epic + 2 children, one ready and one blocked behind it."""
     common = ("create", "--silent", "--type")
-    epic = _bd(path, *common, "epic", "--title", "Test epic", "--priority", "1")
+    epic = run_bd(path, *common, "epic", "--title", "Test epic", "--priority", "1")
     children = [
-        _bd(
+        run_bd(
             path,
             *common,
             "task",
@@ -598,7 +608,7 @@ def _build_epic(path: Path) -> tuple[str, ...]:
     ]
     ready, blocked = children
     # `blocked` waits on `ready` being closed first.
-    _bd(path, "dep", "add", blocked, ready)
+    run_bd(path, "dep", "add", blocked, ready)
     return (epic, ready, blocked)
 
 
