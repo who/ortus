@@ -4,10 +4,10 @@ The live close path is the issue machine only: ``open`` / ``in_progress`` /
 ``closed``, owned by bd and read and written by :mod:`ortus.core.bd`. It
 outlives any single grind run.
 
-The declaration is rendered into ``README.md`` between the ``state-graph``
+The declaration is rendered into ``docs/grind.md`` between the ``state-graph``
 generated markers by :func:`render_readme_block`.
-``tests/test_state_graph_docs.py`` fails when the committed README block and
-the renderer disagree, so a status cannot change without the documentation
+``tests/test_state_graph_docs.py`` fails when the committed block and the
+renderer disagree, so a status cannot change without the documentation
 changing with it.
 
 Log labels
@@ -212,8 +212,16 @@ ISSUE_MACHINE.validate()
 # Rendering
 # ---------------------------------------------------------------------------
 
-BEGIN_MARKER = "<!-- BEGIN GENERATED: state-graph -->"
-END_MARKER = "<!-- END GENERATED: state-graph -->"
+#: Markdown link-reference comments rather than HTML ones. The pages these
+#: blocks live in are GitHub-flavored Markdown all the way down, and a reader
+#: who opens the raw file should not have to switch languages to find where a
+#: generated region starts.
+BEGIN_MARKER = "[//]: # (BEGIN GENERATED: state-graph)"
+END_MARKER = "[//]: # (END GENERATED: state-graph)"
+
+#: The page that carries the block. Named once, so every message below points
+#: a contributor at the same file.
+DOC_PATH = "docs/grind.md"
 
 
 def _node_id(state: str) -> str:
@@ -300,7 +308,7 @@ def _machine_section(machine: StateMachine, graph: str) -> list[str]:
         else ""
     )
     lines = [
-        f"#### {machine.title}",
+        f"### {machine.title}",
         "",
         machine.summary,
         "",
@@ -312,27 +320,26 @@ def _machine_section(machine: StateMachine, graph: str) -> list[str]:
         graph,
         "```",
         "",
-        f"<details><summary>Every {machine.name} transition "
-        f"({len(machine.transitions)})</summary>",
+        f"**Every {machine.name} transition "
+        f"({len(machine.transitions)})**",
         "",
         render_transition_table(machine),
-        "",
-        "</details>",
         "",
     ]
     return lines
 
 
 def render_readme_block() -> str:
-    """The exact text README carries between the state-graph markers.
+    """The exact text :data:`DOC_PATH` carries between the state-graph markers.
 
-    Operator-facing README shows the bd issue-status machine. The advertised
+    The operator-facing page shows the bd issue-status machine. The advertised
     close path is the worker session-closing the issue.
     """
 
     lines = [
-        "<!-- Generated from src/ortus/core/lifecycle.py. Do not edit by hand: "
-        "tests/test_state_graph_docs.py fails and prints the correct block. -->",
+        "[//]: # (Generated from src/ortus/core/lifecycle.py. Do not edit by "
+        "hand: tests/test_state_graph_docs.py fails and prints the correct "
+        "block.)",
         "",
     ]
     lines += _machine_section(ISSUE_MACHINE, mermaid_issue_graph())
@@ -340,7 +347,7 @@ def render_readme_block() -> str:
 
 
 def readme_block(text: str) -> str:
-    """Extract the generated block from README `text`.
+    """Extract the generated block from :data:`DOC_PATH` `text`.
 
     Raises :class:`LifecycleError` with an actionable message when the markers
     are missing or duplicated, rather than returning a confusing diff.
@@ -350,17 +357,18 @@ def readme_block(text: str) -> str:
         count = text.count(marker)
         if count == 0:
             raise LifecycleError(
-                f"README is missing the state-graph {label} marker: {marker}"
+                f"{DOC_PATH} is missing the state-graph {label} marker: {marker}"
             )
         if count > 1:
             raise LifecycleError(
-                f"README has {count} state-graph {label} markers; expected exactly one"
+                f"{DOC_PATH} has {count} state-graph {label} markers; "
+                "expected exactly one"
             )
     start = text.index(BEGIN_MARKER) + len(BEGIN_MARKER)
     end = text.index(END_MARKER)
     if end < start:
         raise LifecycleError(
-            "README state-graph markers are out of order: "
+            f"{DOC_PATH} state-graph markers are out of order: "
             f"{END_MARKER} appears before {BEGIN_MARKER}"
         )
     return text[start:end].strip("\n")

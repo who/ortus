@@ -199,6 +199,49 @@ the host environment. Also set `judge.pre_tool = false` and
 Neither command interrupts a worker already running. Disabling the gate does
 not remove existing human labels or change claim ownership.
 
+## Export and replay the evidence
+
+A judge decision is only worth as much as the record of whether it was right.
+Two verbs read that record, and neither can change a run: nothing is applied
+back, no configuration is written, and no candidate threshold can withhold a
+claim.
+
+```mermaid
+sequenceDiagram
+    participant J as judge seat
+    participant G as ortus grind
+    participant L as logs/jev-decisions.jsonl
+    participant O as operator
+    J-->>G: probability vector per route
+    Note over G: advice is context, never a withheld claim
+    G->>L: decision plus linked outcome
+    O->>L: ortus judge export --output <clean.jsonl>
+    L-->>O: validated, deduplicated, allowed fields only
+    O->>O: ortus judge replay --labels <answers.json> --output <metrics.json>
+    O->>O: optional --thresholds scores candidate bands
+    Note over O: candidates are compared, never auto-applied
+```
+
+`ortus judge export <input> --output <path>` reads a version-1 judge event
+JSONL, validates and deduplicates it, and writes only the fields the logger is
+allowed to emit. `--force` replaces an existing output file. The result is the
+artifact to hand to someone else, because the private log is not.
+
+`ortus judge replay <input> --labels <path> --output <path>` scores an exported
+log against recorded answers and writes accuracy, latency, coverage and measured
+costs without calling the provider again. Labels are a JSON object keyed by
+`decision_id`, each carrying `expected_action` (`proceed`, `human` or `skip`),
+`needs_human`, and an optional `worker_cost_usd`. Shadow accuracy uses the
+intended action only when the observed issue matches the actual worker.
+Percentiles use nearest rank, and a cost stays null when no measurement is
+available.
+
+With `--thresholds <path>` — a TOML file holding at most 20 soft candidate
+tables (`log`, `flag` or `rewrite`) — each candidate band is also scored against
+the recorded answers and reported under `calibration`. That is the calibration
+loop: propose bands, score them offline, then decide by hand whether to adopt
+one.
+
 ## Offline evidence and pilot measurements
 
 `tests/fixtures/jev/replay.jsonl` contains synthetic authored responses and
@@ -384,7 +427,8 @@ configuration. Set `seat = "birch"` in the second repository. Retain existing
 backend settings and replace any existing judge tables instead of duplicating
 them. The example enables only atlas's pre-turn shadow observation.
 
-<!-- BEGIN two-seat rollout example -->
+[//]: # (BEGIN two-seat rollout example)
+
 ```toml
 [judge]
 enabled = false
@@ -422,7 +466,7 @@ pack = "atlas_review"
 enabled = false
 pack = "birch_review"
 ```
-<!-- END two-seat rollout example -->
+[//]: # (END two-seat rollout example)
 
 Inspect both seats before running atlas:
 

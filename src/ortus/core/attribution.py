@@ -7,9 +7,10 @@ step actually needs: *of the lines this path changes against HEAD, which
 enclosing regions does the claimed issue's work spec name?*
 
 A region is a symbol from the CodeGraph index (code), or a heading span or
-``<!-- BEGIN GENERATED: name -->`` block (Markdown). Anything that encloses no
-changed line, and any changed line nothing encloses, is foreign — the failure
-direction is refusing to absorb, never absorbing something unattributed.
+``BEGIN GENERATED: name`` block (Markdown, in either the link-reference or the
+legacy HTML comment spelling). Anything that encloses no changed line, and any
+changed line nothing encloses, is foreign — the failure direction is refusing
+to absorb, never absorbing something unattributed.
 
 The decision is whole-path by design: `own` re-adopts it, `foreign` honors the
 declaration, and `mixed` is a planning gap for a human rather than a hunk-level
@@ -43,8 +44,25 @@ _FILE_KIND = "file"
 _HUNK = re.compile(rb"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _MD_FENCE = re.compile(r"^\s{0,3}(?:```|~~~)")
 _MD_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
-_MD_BEGIN = re.compile(r"^\s*<!--\s*BEGIN GENERATED:\s*(.+?)\s*-->\s*$")
-_MD_END = re.compile(r"^\s*<!--\s*END GENERATED:\s*(.+?)\s*-->\s*$")
+def _generated_marker(edge: str) -> re.Pattern[str]:
+    """Match a generated-block marker in either spelling.
+
+    Ortus's own pages carry the Markdown link-reference form, because a
+    Markdown page has no reason to switch languages to hold a comment. A
+    consumer repository absorbed by an older Ortus still carries the HTML form,
+    and a marker this function stops recognising becomes an unattributed
+    changed line — which refuses the absorb. Both spellings name the block in
+    group 1, so a caller never has to know which one it read.
+    """
+
+    return re.compile(
+        rf"^\s*(?:<!--\s*{edge} GENERATED:\s*(.+?)\s*-->"
+        rf"|\[//\]:\s*#\s*\(\s*{edge} GENERATED:\s*(.+?)\s*\))\s*$"
+    )
+
+
+_MD_BEGIN = _generated_marker("BEGIN")
+_MD_END = _generated_marker("END")
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
 _TOKEN = re.compile(r"[A-Za-z0-9_]+(?:[./][A-Za-z0-9_]+)*")
 
@@ -343,7 +361,7 @@ def _markdown_spans(file: Path) -> tuple[_Span, ...]:
             continue
         begin = _MD_BEGIN.match(line)
         if begin is not None and marker is None:
-            marker = (begin.group(1), number)
+            marker = (begin.group(1) or begin.group(2), number)
             continue
         end = _MD_END.match(line)
         if end is not None and marker is not None:

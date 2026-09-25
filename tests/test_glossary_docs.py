@@ -1,4 +1,4 @@
-"""README's glossary block must be exactly what the declaration renders."""
+"""The glossary block must be exactly what the declaration renders."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 from ortus.core import lifecycle
 from ortus.core.glossary import (
     BEGIN_MARKER,
+    DOC_PATH,
     END_MARKER,
     TERMS,
     GlossaryError,
@@ -21,7 +22,10 @@ from ortus.core.glossary import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-README = REPO / "README.md"
+#: Each block now lives on the page its own renderer names, so neither path is
+#: restated here.
+DOC = REPO / DOC_PATH
+STATE_GRAPH_DOC = REPO / lifecycle.DOC_PATH
 
 #: The vocabulary this glossary owes a definition: the words that appear in
 #: operator-facing output, prompt contracts or error messages. Restated here
@@ -40,12 +44,12 @@ REQUIRED_TERMS = frozenset(
 )
 
 
-def _readme_text() -> str:
-    return README.read_text(encoding="utf-8")
+def _doc_text() -> str:
+    return DOC.read_text(encoding="utf-8")
 
 
-def test_readme_contains_the_glossary() -> None:
-    text = _readme_text()
+def test_the_page_contains_the_glossary() -> None:
+    text = _doc_text()
 
     assert text.count(BEGIN_MARKER) == 1
     assert text.count(END_MARKER) == 1
@@ -55,18 +59,22 @@ def test_readme_contains_the_glossary() -> None:
     # match inside a wider table and stop noticing a dropped column.
     assert block.count("| --- | --- | --- | --- | --- |") == 1
 
-    # Its own marker pair, next to the state graphs and never inside them: a
-    # glossary edit and a state-machine edit must not collide in one block.
+    # Its own marker pair, never the state machine's: a glossary edit and a
+    # state-machine edit must not collide in one block.
     assert lifecycle.BEGIN_MARKER not in block
     assert lifecycle.END_MARKER not in block
-    assert BEGIN_MARKER not in lifecycle.readme_block(text)
-    assert END_MARKER not in lifecycle.readme_block(text)
+    state_graph = lifecycle.readme_block(
+        STATE_GRAPH_DOC.read_text(encoding="utf-8")
+    )
+    assert BEGIN_MARKER not in state_graph
+    assert END_MARKER not in state_graph
 
 
 def test_state_graph_block_is_untouched() -> None:
-    """The section this one sits beside stays byte-identical to its renderer."""
+    """The block this one moved alongside stays byte-identical to its renderer."""
 
-    assert lifecycle.readme_block(_readme_text()) == lifecycle.render_readme_block()
+    committed = lifecycle.readme_block(STATE_GRAPH_DOC.read_text(encoding="utf-8"))
+    assert committed == lifecycle.render_readme_block()
 
 
 def _assert_block_matches(text: str) -> None:
@@ -82,22 +90,22 @@ def _assert_block_matches(text: str) -> None:
     actual = readme_block(text)
     if actual != expected:
         raise AssertionError(
-            "README.md's glossary block has drifted from "
+            f"{DOC_PATH}'s glossary block has drifted from "
             "src/ortus/core/glossary.py.\n"
             f"Replace everything between {BEGIN_MARKER} and {END_MARKER} with:\n\n"
             f"{expected}\n"
         )
 
 
-def test_readme_block_matches_renderer() -> None:
-    _assert_block_matches(_readme_text())
+def test_committed_block_matches_renderer() -> None:
+    _assert_block_matches(_doc_text())
 
 
 def test_hand_edit_inside_the_markers_is_detected() -> None:
-    tampered = _readme_text().replace(
+    tampered = _doc_text().replace(
         "| **work spec** |", "| **work spec (hand-edited)** |", 1
     )
-    assert tampered != _readme_text()
+    assert tampered != _doc_text()
 
     with pytest.raises(AssertionError) as caught:
         _assert_block_matches(tampered)
@@ -109,7 +117,7 @@ def test_hand_edit_inside_the_markers_is_detected() -> None:
 
 
 def test_every_declared_term_is_rendered() -> None:
-    block = readme_block(_readme_text())
+    block = readme_block(_doc_text())
     declared = {entry.term for entry in TERMS}
 
     assert declared == REQUIRED_TERMS, (
@@ -121,7 +129,7 @@ def test_every_declared_term_is_rendered() -> None:
             f"| **{entry.term}** | {entry.definition} | {entry.team_role} | "
             f"{entry.analogy} | {entry.home} |"
         )
-        assert row in block, f"{entry.term} is declared but absent from the README"
+        assert row in block, f"{entry.term} is declared but absent from {DOC_PATH}"
 
 
 def test_each_definition_is_one_sentence_naming_where_it_lives() -> None:

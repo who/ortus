@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def rollout_example():
     guide = (ROOT / "docs/judge.md").read_text()
-    section = guide.split("<!-- BEGIN two-seat rollout example -->", 1)[1]
+    section = guide.split("[//]: # (BEGIN two-seat rollout example)", 1)[1]
     return section.split("```toml\n", 1)[1].split("```", 1)[0]
 
 

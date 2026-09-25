@@ -23,7 +23,7 @@ from ortus.commands.validate import validate
 
 app = typer.Typer(
     name="ortus",
-    help="Global CLI for bd-driven Claude Code workflows.",
+    help="Global CLI for bd-driven agent workflows: Claude, Codex, Grok or opencode.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -54,7 +54,11 @@ def main(
         help="Show ortus version and exit.",
     ),
 ) -> None:
-    """ortus: global CLI for bd-driven Claude Code workflows."""
+    """ortus: global CLI for bd-driven agent workflows.
+
+    The run backend is Claude, Codex, Grok or opencode. Claude is the default;
+    every verb here is backend-neutral unless its own help says otherwise.
+    """
 
 
 # FR-002 verb set (+unlock, added for stuck-flock recovery). Order here
