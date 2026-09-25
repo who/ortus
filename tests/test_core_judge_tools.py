@@ -6,7 +6,7 @@ import pytest
 
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode
 from ortus.core.judge_tools import (
-    ToolAction, ToolInput, decide_tool, inspect_tool, route_tool, tool_vector,
+    _VALUE_CAP, ToolAction, ToolInput, decide_tool, inspect_tool, route_tool, tool_vector,
 )
 
 
@@ -366,6 +366,48 @@ def test_host_paths_and_oversized_arguments_are_reduced(repo):
     result = inspect_tool(ToolInput("Bash", {"command": "echo " + "x" * 5000}), repo,
                           config=JudgeConfig(tool_cap=64), environ={})
     assert len(json.loads(result.summary)["arguments"]) <= 64
+
+
+def test_long_allowed_root_path_is_labeled_not_capped(repo, tmp_path):
+    """A deep temporary directory is the shape a macOS runner hands pytest."""
+    target = tmp_path / ("d" * 60) / ("e" * 60) / "ordinary"
+    target.parent.mkdir(parents=True)
+    assert len(str(target)) > _VALUE_CAP
+    result = inspect_tool(ToolInput("Read", {"file_path": str(target)}), repo,
+                          allowed_roots=(tmp_path,), environ={})
+    assert result.decision is None
+    assert json.loads(result.summary)["arguments"] == "file_path=[allowed-root]"
+    assert str(tmp_path) not in result.summary
+
+
+def test_long_repo_path_keeps_its_relative_label(repo):
+    """Length belongs to the label, not to the host path it stands for."""
+    name = min(110, max(8, _VALUE_CAP + 1 - len(str(repo)) - len("/module.py")))
+    target = repo / ("d" * name) / "module.py"
+    target.parent.mkdir()
+    relative = f"{'d' * name}/module.py"
+    assert len(str(target)) > _VALUE_CAP >= len(relative)
+    result = inspect_tool(ToolInput("Read", {"file_path": str(target)}), repo, environ={})
+    assert json.loads(result.summary)["arguments"] == f"file_path={relative}"
+    assert str(repo) not in result.summary
+
+
+def test_long_repo_path_over_the_cap_is_bounded_and_host_free(repo):
+    """The label itself can outgrow the cap; what it may never do is leak."""
+    target = repo / ("d" * 70) / ("e" * 70) / "module.py"
+    target.parent.mkdir(parents=True)
+    relative = f"{'d' * 70}/{'e' * 70}/module.py"
+    assert len(relative) > _VALUE_CAP
+    result = inspect_tool(ToolInput("Read", {"file_path": str(target)}), repo, environ={})
+    assert json.loads(result.summary)["arguments"] == f"file_path=<str:{len(relative)}>"
+    assert str(repo) not in result.summary
+
+
+def test_long_relative_path_stays_a_shape(repo):
+    """Only an absolute argument is labeled; a long relative one is capped."""
+    value = "d" * (_VALUE_CAP + 1)
+    result = inspected(repo, "Read", file_path=value)
+    assert json.loads(result.summary)["arguments"] == f"file_path=<str:{len(value)}>"
 
 
 def test_secret_values_never_survive_into_the_summary(repo):

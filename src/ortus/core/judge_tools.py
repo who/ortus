@@ -343,9 +343,17 @@ def _render(key: str, value: object, root: Path, roots: tuple[Path, ...]) -> str
             size = 0
         return f"<{type(value).__name__}:{size}>"
     if isinstance(value, str):
+        if value.startswith("/"):
+            # An absolute path is labeled before it is bounded. The label is
+            # the only fact about the target a judge gets, and it is never
+            # longer than the host path it replaces, so capping the argument
+            # first threw that fact away on a deep enough checkout: the
+            # summary said `<str:N>` and named nothing.
+            label = _label(value, root, roots)
+            return label if len(label) <= _VALUE_CAP else f"<str:{len(label)}>"
         if len(value) > _VALUE_CAP:
             return f"<str:{len(value)}>"
-        return _label(value, root, roots) if value.startswith("/") else value
+        return value
     return repr(value)
 
 
