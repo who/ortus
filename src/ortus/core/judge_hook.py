@@ -28,16 +28,21 @@ from typing import BinaryIO, Mapping
 from ortus.core.config import Config
 from ortus.core.judge import JudgeConfig, JudgeMode, parse_judge_config
 from ortus.core.judge_tools import (
-    MAX_INPUT_BYTES, ToolAction, ToolInput, decide_tool, inspect_tool,
+    MAX_INPUT_BYTES, ToolAction, ToolDecision, ToolInput, decide_tool, inspect_tool,
 )
 from ortus.core.output import progress
 
 CONTEXT_ENV = "ORTUS_JUDGE_HOOK_CONTEXT"
 WATCHDOG_SECONDS = 5.0
 
+#: Longest tool name recorded. The parent screens it again before it reaches
+#: the log; this only keeps one record inside the reader's line budget.
+TOOL_NAME_CAP = 160
+
 
 class HookReason(str, Enum):
     POLICY_DENIED = "policy_denied"
+    DENIED_CALL = "denied_call"
     NEEDS_HUMAN = "needs_human"
     INVALID_INPUT = "invalid_input"
     INVALID_CONTEXT = "invalid_context"
@@ -154,16 +159,16 @@ def parse_input(body: dict, context: HookContext) -> ToolInput:
     return ToolInput(name, body["tool_input"])
 
 
-def write_human_signal(context: HookContext) -> None:
-    """Publish a durable complete record; never persist tool arguments or text."""
+def _publish(context: HookContext, prefix: str, body: dict[str, object]) -> None:
+    """Publish one durable complete record into the run's private inbox."""
     call_id = uuid.uuid4().hex
     record = {"version": 1, "call_id": call_id, "issue_id": context.issue_id,
               "session_hash": hashlib.sha256(context.session_id.encode()).hexdigest(),
-              "reason": HookReason.NEEDS_HUMAN.value}
+              **body}
     if context.run_id:
         record["run_id"] = context.run_id
-    temporary = context.directory / f".human-{call_id}.tmp"
-    destination = context.directory / f"human-{call_id}.json"
+    temporary = context.directory / f".{prefix}-{call_id}.tmp"
+    destination = context.directory / f"{prefix}-{call_id}.json"
     try:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -178,6 +183,36 @@ def write_human_signal(context: HookContext) -> None:
             os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def write_human_signal(context: HookContext) -> None:
+    """Publish a park request; never persist tool arguments or text."""
+    _publish(context, "human", {"reason": HookReason.NEEDS_HUMAN.value})
+
+
+def write_tool_record(
+    context: HookContext, tool: str, decision: ToolDecision, applied: ToolAction,
+) -> None:
+    """Publish what this call was decided as, for the parent to log.
+
+    The hook cannot append to the repository's decision log — the worker owns
+    that tree — so it records the outcome in the same inbox the parent already
+    reads. Every decision is recorded, including the allowed ones and the ones
+    local policy answered with no request, and none of them carries any part of
+    the call's arguments.
+    """
+    usage = decision.usage
+    _publish(context, "tool", {
+        "reason": decision.reason,
+        "tool": tool[:TOOL_NAME_CAP],
+        "action": decision.action.value,
+        "effective_action": applied.value,
+        "vector": decision.vector(),
+        "failure": decision.failure.value if decision.failure is not None else None,
+        "latency_ms": round(decision.latency_ms, 3),
+        "input_tokens": usage.input_tokens if usage is not None else None,
+        "output_tokens": usage.output_tokens if usage is not None else None,
+    })
 
 
 def _deny(reason: HookReason, code: int = 0) -> int:
@@ -219,18 +254,28 @@ def main() -> int:
             decision = inspection.decision or decide_tool(
                 tool, context.repo, config=context.config, allowed_roots=context.allowed_roots,
             )
-        if decision.action == ToolAction.DENY:
-            return _deny(HookReason.POLICY_DENIED)
+        local = inspection.decision is not None
         # Shadow suppresses only model decisions, never local policy refusals.
-        shadow = context.config.mode == JudgeMode.SHADOW and inspection.decision is None
-        if decision.action == ToolAction.HUMAN and not shadow:
+        shadow = context.config.mode == JudgeMode.SHADOW and not local
+        applied = ToolAction.ALLOW if shadow else decision.action
+        if applied not in set(ToolAction):
+            return _deny(HookReason.INTERNAL_FAILURE, 2)
+        try:
+            write_tool_record(context, tool.name, decision, applied)
+        except Exception:  # noqa: BLE001 - a record is evidence, not a verdict
+            # A record that cannot be published is a logging fault. It must not
+            # turn an allowed call into a refusal or a refusal into a pass.
+            pass
+        if applied == ToolAction.DENY_CALL:
+            # Only this call is refused. The worker keeps its claim, its
+            # window and its next attempt; a park is the other action.
+            return _deny(HookReason.POLICY_DENIED if local else HookReason.DENIED_CALL)
+        if applied == ToolAction.PARK_BEAD:
             try:
                 write_human_signal(context)
             except Exception:
                 return _deny(HookReason.SIGNAL_FAILURE, 2)
             return _deny(HookReason.NEEDS_HUMAN)
-        if decision.action not in {ToolAction.ALLOW, ToolAction.HUMAN}:
-            return _deny(HookReason.INTERNAL_FAILURE, 2)
         progress("judge-hook", "done (normal permission flow)")
         return 0
     except WatchdogExpired:

@@ -13,7 +13,8 @@ from ortus.core.judge import (
     GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgeMode, JudgePhase, JudgeRoute,
 )
 from ortus.core.judge_log import (
-    DecisionEvent, OutcomeEvent, OutcomeStatus, write_decision, write_outcome, write_shadow_outcome,
+    DecisionEvent, OutcomeEvent, OutcomeStatus, write_decision, write_outcome,
+    write_shadow_outcome, write_tool_decision,
 )
 from ortus.core.judge_post import Outcome, OutcomeVerdict, WorkerOutcome, apply_outcome
 from ortus.core.judge_replay import (
@@ -368,3 +369,62 @@ def test_a_decision_record_may_not_carry_the_post_turn_side_field(tmp_path, reco
     decision = records(outcome=False)[0]
     with pytest.raises(ReplayError):
         list(read_events(save(tmp_path, [{**decision, "worker_failure": "timeout"}])))
+
+
+def _tool_decision(tmp_path, record, *, mode=JudgeMode.ENFORCE):
+    """One pre_tool record through the real logger, as the parent writes it."""
+    write_tool_decision(tmp_path, JudgeConfig(enabled=True, mode=mode), uuid4(),
+                        "sample-1", record)
+    events = list(read_events(tmp_path / "logs" / "jev-decisions.jsonl"))
+    return [e for e in events if e["event"] == "tool_decision"][-1]
+
+
+def _judged(**changes):
+    return {"tool": "Bash", "reason": "judged", "action": "allow",
+            "effective_action": "allow", "latency_ms": 4.5,
+            "vector": {"allow": .7, "deny_call": .2, "park_bead": .1},
+            "failure": None, "input_tokens": 9, "output_tokens": 2, **changes}
+
+
+def test_tool_decision_records_round_trip_through_replay(tmp_path):
+    record = _tool_decision(tmp_path, _judged())
+    assert record["phase"] == "pre_tool" and record["issue_id"] == "sample-1"
+    assert record["vector"] == {"allow": .7, "deny_call": .2, "park_bead": .1}
+    assert (record["input_tokens"], record["output_tokens"]) == (9, 2)
+    assert record["measured_cost_usd"] is None
+    assert list(read_events(save(tmp_path, [record]))) == [record]
+
+
+def test_tool_decision_local_policy_rows_carry_a_reason_and_no_vector(tmp_path):
+    record = _tool_decision(tmp_path, _judged(
+        reason="force_push", action="deny_call", effective_action="deny_call",
+        vector=None, input_tokens=None, output_tokens=None))
+    assert record["vector"] is None and record["reason"] == "force_push"
+    assert list(read_events(save(tmp_path, [record]))) == [record]
+
+
+def test_tool_decision_shadow_row_records_the_read_action_and_applies_allow(tmp_path):
+    record = _tool_decision(tmp_path, _judged(action="park_bead"), mode=JudgeMode.SHADOW)
+    record["effective_action"] = "allow"
+    assert list(read_events(save(tmp_path, [record]))) == [record]
+
+
+@pytest.mark.parametrize("change", [
+    {"action": "needs_human"}, {"effective_action": "human"},
+    {"vector": {"allow": .5, "deny_call": .5}},
+    {"vector": {"allow": 2, "deny_call": 0, "park_bead": 0}},
+    {"failure": "moon_phase"}, {"latency_ms": -1}, {"tool": None},
+    {"action": "allow", "effective_action": "deny_call"},
+    # Only local policy answers without a vector, and it only ever denies.
+    {"vector": None},
+])
+def test_tool_decision_rejects_invented_shapes(tmp_path, change):
+    record = _tool_decision(tmp_path, _judged())
+    with pytest.raises(ReplayError):
+        list(read_events(save(tmp_path, [{**record, **change}])))
+
+
+def test_tool_decision_events_without_the_kind_still_load(tmp_path, records):
+    # A log written before this phase existed carries none of these rows.
+    decision = records(outcome=False)[0]
+    assert list(read_events(save(tmp_path, [decision]))) == [decision]

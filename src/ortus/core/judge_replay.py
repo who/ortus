@@ -51,8 +51,16 @@ TRIAGE = COMMON | {
     "phase", "mode", "issue_id", "seat", "model", "vector", "regex_hit",
     "fail_open", "triage_failure", "triage_class", "effective_action",
 }
+#: One pre_tool outcome. Unlike the stuck and triage records it does carry
+#: usage, because most of these rows are a real request; the local-policy rows
+#: carry the same fields with nulls in them rather than a second shape.
+TOOL = COMMON | USAGE | {
+    "phase", "mode", "issue_id", "seat", "model", "tool", "reason", "vector",
+    "action", "effective_action", "failure", "latency_ms",
+}
 STUCK_ACTIONS = {"continue", "replan", "escalate"}
 TRIAGE_CLASSES = {"pin_skew", "planner_fix", "needs_human"}
+TOOL_ACTIONS = {"allow", "deny_call", "park_bead"}
 OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
 #: The worker-failure class a post-turn record may also carry. Optional, and
 #: read beside `reason` rather than folded into `OUTCOMES`: a log written
@@ -123,7 +131,8 @@ def validate_event(value: object) -> dict:
               OUTCOME | (SHADOW_OUTCOME if shadow else set()) if kind == "outcome" else
               POST if kind == "post_turn" else
               STUCK if kind == "stuck_decision" else
-              TRIAGE if kind == "triage" else set())
+              TRIAGE if kind == "triage" else
+              TOOL if kind == "tool_decision" else set())
     optional = (POST_SIDE if kind == "post_turn"
                 else DECISION_SIDE if kind == "decision" else set())
     _require(bool(fields) and fields <= set(e) <= fields | optional)
@@ -134,12 +143,12 @@ def validate_event(value: object) -> dict:
     for name in ("seat", "issue_id", "criteria_version", "observed_issue_id", "actual_claimed_id"):
         if name in e:
             _metadata(e[name])
-    if kind in ("decision", "post_turn", "stuck_decision", "triage"):
+    if kind in ("decision", "post_turn", "stuck_decision", "triage", "tool_decision"):
         _require(e["model"] is None or (type(e["model"]) is str
                  and re.fullmatch(r"jev-\d+\.\d+\.\d+", e["model"]) is not None))
-    if kind in ("decision", "post_turn"):
+    if kind in ("decision", "post_turn", "tool_decision"):
         _require(_choice(e["failure"], JudgeFailure, nullable=True))
-    if kind in ("decision", "outcome"):
+    if kind in ("decision", "outcome", "tool_decision"):
         for key in ("input_tokens", "output_tokens"):
             _require(e[key] is None or (type(e[key]) is int and 0 <= e[key] <= 2**63 - 1))
         _require((e["input_tokens"] is None) == (e["output_tokens"] is None))
@@ -215,6 +224,22 @@ def validate_event(value: object) -> dict:
         # only ways the applied route differs from the decided one: an
         # automatic route can never be applied over a different decision.
         _require(shadow or e["effective_action"] in (e["triage_class"], "needs_human"))
+    elif kind == "tool_decision":
+        _require(e["phase"] == "pre_tool" and _choice(e["mode"], {"shadow", "enforce"}))
+        _require(type(e["tool"]) is str and type(e["reason"]) is str)
+        _require(_number(e["latency_ms"]))
+        for key in ("action", "effective_action"):
+            _require(_choice(e[key], TOOL_ACTIONS))
+        vector = e["vector"]
+        _require(vector is None or (type(vector) is dict and set(vector) == TOOL_ACTIONS))
+        for value in (vector or {}).values():
+            _require(_number(value, 1))
+        # Local policy answers without a vector and only ever denies the call;
+        # shadow records what a judgment read and applies allow. Those are the
+        # only two ways the applied action differs from the decided one.
+        _require(vector is not None or e["action"] == "deny_call")
+        _require(e["effective_action"] == ("allow" if shadow and vector is not None
+                                           else e["action"]))
     else:
         _require(e["phase"] == "post_turn" and _choice(e["mode"], {"shadow", "enforce"}))
         _require(type(e["exit_status"]) is int)

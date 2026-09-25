@@ -100,16 +100,11 @@ class MovedRule:
 #: holds it. Every phrase here is absent from the audited text and present in
 #: the legacy bundle, and every entry point resolves — `check_worker_prompt`
 #: and the flag's tests both hold that.
+#: The wrapped-`bd` rule used to sit here, owned by
+#: `ortus.core.judge_tools:inspect_tool`. That hook held it only as collateral
+#: of refusing every compound shell line, and it no longer refuses those, so
+#: the rule has no owner and the claim is gone rather than left standing false.
 MOVED_RULES: tuple[MovedRule, ...] = (
-    MovedRule(
-        rule=(
-            "a bd call wrapped in a pipe, xargs, &&, ;, or bash -c is stopped "
-            "before it runs"
-        ),
-        legacy_phrase="Never wrap `bd` in a pipe, `xargs`, `&&`, `;`, or `bash -c`.",
-        entry_point="ortus.core.judge_tools:inspect_tool",
-        kind="hook",
-    ),
     MovedRule(
         rule=(
             "a queue orchestrator started from inside a worker session cannot "

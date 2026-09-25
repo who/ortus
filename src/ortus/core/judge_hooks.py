@@ -17,7 +17,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from ortus.core import hooks
 from ortus.core.agent import BackendError
@@ -25,6 +25,15 @@ from ortus.core.bd import BdClient
 from ortus.core.claude import ClaudeRunner
 from ortus.core.judge import JudgeConfig
 from ortus.core.judge_hook import CONTEXT_ENV, _private, read_object
+from ortus.core.judge_log import write_tool_decision
+
+#: The fields a published tool-decision record carries beyond the identity
+#: every inbox record shares. An exact match is required, so a record from a
+#: different version of the hook is dropped rather than half-read.
+_TOOL_FIELDS = frozenset({
+    "reason", "tool", "action", "effective_action", "vector", "failure",
+    "latency_ms", "input_tokens", "output_tokens",
+})
 
 
 def check_pre_tool(repo: Path, backend: str, *, docker: bool = False) -> None:
@@ -59,6 +68,8 @@ class HookRun:
 
     def __init__(self, repo: Path, issue_id: str, config: JudgeConfig, run_id: str,
                  runner: ClaudeRunner):
+        self.repo = repo.resolve()
+        self.config = config
         self.issue_id = issue_id
         self.run_id = run_id
         self.session_id = str(uuid4())
@@ -126,32 +137,66 @@ class HookRun:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(body, stream, sort_keys=True)
 
+    def _identity(self, call_id: str) -> dict:
+        """The fields every inbox record must carry to be this run's record."""
+        return {"version": 1, "call_id": call_id, "issue_id": self.issue_id,
+                "run_id": self.run_id, "session_hash": self.session_hash}
+
+    def _read(self, path: Path) -> dict | None:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                _private(os.fstat(stream.fileno()))
+                return read_object(stream)
+        except (OSError, ValueError):
+            return None
+
+    def _log_tool(self, body: dict) -> None:
+        """Append one hook decision to the repository's log, or drop it quietly.
+
+        A log this parent cannot write is not a reason to disturb a live
+        worker: the policy outcome already happened inside the hook, and the
+        record is evidence about it rather than part of it.
+        """
+        try:
+            write_tool_decision(self.repo, self.config, UUID(self.run_id),
+                                self.issue_id, body)
+        except Exception:  # noqa: BLE001 - logging never changes an outcome
+            pass
+
     def poll(self) -> bool:
-        """Accept only complete signals bound to this issue, run and session."""
+        """Accept only complete records bound to this issue, run and session.
+
+        Two kinds share the inbox. A `human` record is a park request and is
+        the only thing that stops the worker; a `tool` record is one pre_tool
+        decision on its way to the log and never reaps anything, so an ordinary
+        denied call leaves the window running.
+        """
         try:
             paths = list(self.directory.iterdir())
         except OSError:
             self.failure = True
             return True
-        for path in paths:
-            match = re.fullmatch(r"human-([0-9a-f]{32})\.json", path.name)
-            if not match or match[1] in self.seen:
+        for path in sorted(paths):
+            match = re.fullmatch(r"(human|tool)-([0-9a-f]{32})\.json", path.name)
+            if not match or match[2] in self.seen:
                 continue
-            try:
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, "rb") as stream:
-                    _private(os.fstat(stream.fileno()))
-                    body = read_object(stream)
-            except (OSError, ValueError):
+            body = self._read(path)
+            if body is None or type(body.get("version")) is not int:
                 continue
-            if body != {
-                "version": 1, "call_id": match[1], "issue_id": self.issue_id,
-                "run_id": self.run_id, "session_hash": self.session_hash,
-                "reason": "needs_human",
-            } or type(body.get("version")) is not int:
-                continue
-            self.seen.add(match[1])
-            self.requested = True
+            identity = self._identity(match[2])
+            if match[1] == "human":
+                if body != {**identity, "reason": "needs_human"}:
+                    continue
+                self.seen.add(match[2])
+                self.requested = True
+            else:
+                if set(body) != set(identity) | _TOOL_FIELDS or any(
+                    body[key] != value for key, value in identity.items()
+                ):
+                    continue
+                self.seen.add(match[2])
+                self._log_tool(body)
         return self.requested or self.failure
 
     def escalate(self, bd: BdClient) -> None:

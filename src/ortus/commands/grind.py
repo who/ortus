@@ -3095,9 +3095,27 @@ def grind(
                             bd, target, judge_config, gate_run_id, elapsed_ms(impl_started),
                         )
                 if hook_run is not None and hook_run.requested:
-                    write_log(f"iter {iters_run}: judge pre_tool human; worker reaped")
-                    output.progress("grind", f"judge requires human handling for {issue_id}: needs_human")
-                    break
+                    # A park takes one bead out of the queue; it does not end
+                    # the run. `escalate` has already labelled this id human in
+                    # the block above, so selection skips it from here and the
+                    # rest of the queue still gets its windows. Only the
+                    # iteration cap stops the loop, and it is checked here
+                    # because this path does not reach the one at the bottom.
+                    write_log(
+                        f"iter {iters_run}: judge pre_tool park_bead; {issue_id} "
+                        "flagged human, worker reaped, queue continues"
+                    )
+                    output.progress(
+                        "grind",
+                        f"judge parked {issue_id} for human handling: needs_human",
+                    )
+                    if iterations > 0 and iters_run >= iterations:
+                        write_log(
+                            f"--iterations cap reached: {iters_run}/{iterations}; "
+                            "exiting outer loop"
+                        )
+                        break
+                    continue
                 if (
                     reap_reasons
                     and reap_reasons[-1].startswith(_FLAGGED_REASON)
