@@ -407,11 +407,11 @@ def test_prompt_audit_default_is_off(tmp_path: Path) -> None:
     assert cfg.get("prompt_audit") is False
 
 
-def test_stable_prompt_prefix_default_is_off(tmp_path: Path) -> None:
-    """Today's segment ordering stays the control arm until an A/B says otherwise."""
+def test_stable_prompt_prefix_default_is_on(tmp_path: Path) -> None:
+    """The comparison adopted the reordering, so a fresh load resolves it on."""
     cfg = load_config(repo=tmp_path, home=tmp_path / "home")
-    assert DEFAULTS["stable_prompt_prefix"] is False
-    assert cfg.get("stable_prompt_prefix") is False
+    assert DEFAULTS["stable_prompt_prefix"] is True
+    assert cfg.get("stable_prompt_prefix") is True
 
 
 def test_jev_model_router_default_is_on(tmp_path: Path) -> None:

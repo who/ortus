@@ -16,12 +16,13 @@ or per-bead. :func:`resolve_segment` loads what an entry names, so the
 inventory cannot quietly drift away from the code it describes.
 
 The reordering itself is a flag, `stable_prompt_prefix` in `.ortusrc` with
-`ORTUS_STABLE_PREFIX` as a per-run override, default off. Off composes
-today's ordering byte for byte, so the A/B has an unchanged control arm; on
-moves every per-bead segment behind the stable ones. The win is measured on
-the billing buckets named in :data:`CACHE_TELEMETRY_FIELDS`, not on prompt
-character count: a shorter prompt that misses the cache costs more than a
-longer one that hits it.
+`ORTUS_STABLE_PREFIX` as a per-run override. It defaults on, because the arms
+were run and the reordered one won; off composes the legacy ordering byte for
+byte, which is both the kill switch and the control arm the comparison ran
+against. The win was read from the billing buckets named in
+:data:`CACHE_TELEMETRY_FIELDS` together with cost per closed bead, never from
+prompt character count: a shorter prompt that misses the cache costs more than
+a longer one that hits it.
 
 Ortus only owns the ordering and the content of the string it hands to a
 backend CLI. Whether those bytes are actually cached is the provider's
@@ -222,7 +223,10 @@ def stable_prefix_note(
     """The active ordering with its provenance, for a log line or dry run.
 
     Names the layer whenever it is not the default: an A/B whose transcript
-    cannot say which arm a run belonged to proves nothing.
+    cannot say which arm a run belonged to proves nothing. The adopted default
+    is the stable ordering, so a run that pinned nothing reports the arm alone
+    — crediting `.ortusrc` for a key no such layer carries would send a reader
+    looking for a pin that is not there.
     """
     env = os.environ if environ is None else environ
     exported = _flag(env.get(STABLE_PREFIX_ENV))
@@ -230,7 +234,8 @@ def stable_prefix_note(
         bool(_flag(config.get(STABLE_PREFIX_CONFIG_KEY, False))) if config else False
     )
     if exported is None:
-        return "stable from .ortusrc" if configured else "legacy"
+        arm = "stable" if configured else "legacy"
+        return f"{arm} from .ortusrc" if _pinned(config) else arm
     arm = "stable" if exported else "legacy"
     if exported == configured or not _pinned(config):
         return f"{arm} from {STABLE_PREFIX_ENV}"

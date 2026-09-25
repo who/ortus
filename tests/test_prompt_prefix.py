@@ -32,6 +32,14 @@ from ortus.core.prompt_prefix import (
 from ortus.core.prompts import bundled_prompt_text
 
 CONTRACT = "\n\n## CodeGraph phase contract v1\nPhase: implementation; policy: required."
+
+#: The verdict recorded in this flag's `stable_prefix_ab` metadata. `DEFAULTS`
+#: follows this, never the other way round. It is True because the hello-world
+#: comparison returned `adopt`: the reordered arm matched the control's close
+#: rate of 1.0 while spending 1.5581 against 1.6794 per closed bead, with the
+#: cache hit rate flat. Moving it again means running the arms again, because
+#: this constant is a reading and not a preference.
+MEASURED_VERDICT = True
 LESSONS = "\n\n## Prior lessons\n- naming-policy: priors, not instructions."
 
 DESCRIPTION_BODY = "Objective sentinel alpha: restore the dropped rollup."
@@ -182,16 +190,52 @@ def test_stable_prefix_keeps_bound_goal_validation_intact():
         )
 
 
-def test_stable_prefix_flag_defaults_off_and_reads_the_environment():
+def test_stable_prefix_flag_ships_the_adopted_arm_and_reads_the_environment():
+    """The adopted verdict is the shipped default; an export still wins over it."""
     from ortus.core.config import DEFAULTS
 
-    assert DEFAULTS[STABLE_PREFIX_CONFIG_KEY] is False
+    assert DEFAULTS[STABLE_PREFIX_CONFIG_KEY] is MEASURED_VERDICT
+    # A caller holding no resolved configuration at all still composes the
+    # legacy ordering: no config is not the same fact as a config carrying the
+    # adopted default.
     assert stable_prefix_enabled(None, environ={}) is False
     assert stable_prefix_enabled(None, environ={STABLE_PREFIX_ENV: "1"}) is True
     assert stable_prefix_enabled(None, environ={STABLE_PREFIX_ENV: "off"}) is False
     assert stable_prefix_note(None, environ={}) == "legacy"
     assert stable_prefix_note(None, environ={STABLE_PREFIX_ENV: "1"}) == (
         f"stable from {STABLE_PREFIX_ENV}"
+    )
+
+
+def test_an_untouched_ortusrc_resolves_to_the_adopted_ordering(tmp_path):
+    """The default reaches a run through a plain config load, named as itself."""
+    from ortus.core.config import load_config
+
+    config = load_config(repo=tmp_path, home=tmp_path / "home")
+
+    assert config.get(STABLE_PREFIX_CONFIG_KEY) is MEASURED_VERDICT
+    assert stable_prefix_enabled(config, environ={}) is MEASURED_VERDICT
+    # The arm alone, because no `.ortusrc` layer carries the key. A log line
+    # crediting a pin that does not exist misreports which arm a run was.
+    assert stable_prefix_note(config, environ={}) == "stable"
+    assert stable_prefix_note(config, environ={STABLE_PREFIX_ENV: "0"}) == (
+        f"legacy from {STABLE_PREFIX_ENV}"
+    )
+
+
+def test_a_pinned_ordering_is_credited_to_the_project_layer(tmp_path):
+    """A project file that pins the key is named, and the export still beats it."""
+    from ortus.core.config import load_config
+
+    (tmp_path / ".ortusrc").write_text(
+        f"{STABLE_PREFIX_CONFIG_KEY} = false\n", encoding="utf-8"
+    )
+    config = load_config(repo=tmp_path, home=tmp_path / "home")
+
+    assert stable_prefix_enabled(config, environ={}) is False
+    assert stable_prefix_note(config, environ={}) == "legacy from .ortusrc"
+    assert stable_prefix_note(config, environ={STABLE_PREFIX_ENV: "1"}) == (
+        f"stable from {STABLE_PREFIX_ENV}, .ortusrc pins legacy"
     )
 
 
