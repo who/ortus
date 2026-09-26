@@ -11,12 +11,16 @@ the provider's, not the test's.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from ortus.cli import app
+from ortus.commands.grind import _done_bar_met
 from ortus.core.config import DEFAULTS
 from ortus.core.harness_eval import (
     ADOPT,
@@ -41,7 +45,10 @@ from ortus.core.harness_eval import (
     render_report,
     run_matrix,
     seat_name,
+    shell_executor,
 )
+from ortus.core import harness_eval
+from ortus.core.git import GitClient
 from ortus.core.judge_log import ROUTE_LOG_NAME
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -759,3 +766,133 @@ def test_model_router_arm_enables_the_gate_it_is_routed_from(tmp_path: Path) -> 
 
     rendered = render_matrix(matrix(root=Path("/seats")))
     assert "jev_model_router = true" in rendered
+
+
+def _origin_setup(commands: tuple[str, ...]) -> list[str]:
+    """The commands between the `.ortusrc` pins and `ortus plan`."""
+
+    pins = next(i for i, c in enumerate(commands) if ".ortusrc" in c)
+    plan = next(i for i, c in enumerate(commands) if c.startswith("ortus plan "))
+    return list(commands[pins + 1 : plan])
+
+
+def test_arm_commands_push_a_baseline_to_a_seat_origin_before_plan() -> None:
+    """AC-1: every arm commits, gets a bare origin, and pushes before planning."""
+
+    for fixture in FIXTURE_PACK:
+        for arm in ARMS:
+            commands = arm_commands(fixture, arm, root=Path("/seats"))
+            seat = Path("/seats") / seat_name(fixture, arm)
+            origin = f"{seat}.origin.git"
+            setup = _origin_setup(commands)
+
+            assert setup == [
+                f"git -C {seat} add -A",
+                f"git -C {seat} commit -q -m 'ortus eval: seat baseline'",
+                f"test ! -e {origin} || {{ echo 'stale eval origin {origin}: "
+                "remove it before re-running this cell' >&2; exit 1; }",
+                f"git init -q --bare {origin}",
+                f"git -C {seat} remote add origin {origin}",
+                f"git -C {seat} push -q -u origin main",
+            ]
+            # Nothing in the setup hard-codes who authored the baseline.
+            assert not any("--author" in c or "user.name" in c for c in setup)
+
+
+class _ClosedOneBd:
+    def count_by_status(self, status: str) -> int:
+        assert status == "closed"
+        return 1
+
+
+def _init_like_seat(seat: Path) -> None:
+    """A committed repo with the dirty paths `ortus init` leaves behind."""
+
+    seat.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seat)], check=True)
+    (seat / "AGENTS.md").write_text("tracker\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(seat), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(seat), "commit", "-q", "-m", "bd init"], check=True
+    )
+    (seat / "AGENTS.md").write_text("tracker\nortus block\n", encoding="utf-8")
+    (seat / ".gitignore").write_text("logs/\n", encoding="utf-8")
+
+
+def test_eval_seat_done_bar_fires_once_the_recipe_built_its_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a recipe-built seat is in sync and clean, so the bar can fire."""
+
+    for key, value in {
+        "GIT_AUTHOR_NAME": "eval",
+        "GIT_AUTHOR_EMAIL": "eval@example.invalid",
+        "GIT_COMMITTER_NAME": "eval",
+        "GIT_COMMITTER_EMAIL": "eval@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }.items():
+        monkeypatch.setenv(key, value)
+    root = tmp_path / "seats"
+    seat = root / seat_name(FIXTURE_A, CONTROL_ARM)
+    _init_like_seat(seat)
+    commands = arm_commands(FIXTURE_A, CONTROL_ARM, root=root)
+
+    for command in commands:
+        if command.startswith("ortus "):
+            continue
+        assert shell_executor(command) == 0, command
+
+    git = GitClient(seat)
+    assert git.remote_tip("main")
+    assert git.dirty_paths() == frozenset()
+    assert _done_bar_met(_ClosedOneBd(), git, 0, "main") == "closed 0->1"
+
+    # A second build over the same seat root refuses the stale origin.
+    stale = next(c for c in commands if c.startswith("test ! -e "))
+    assert shell_executor(stale) == 1
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat = Path(f"/proc/{pid}/stat")
+    try:
+        return stat.read_text().split(") ", 1)[1][:1] != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def _wait_dead(pid: int, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize("ignores_term", [False, True])
+def test_shell_executor_timeout_kills_the_whole_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ignores_term: bool
+) -> None:
+    """AC-3: a timed-out cell leaves no child of its command alive."""
+
+    monkeypatch.setattr(harness_eval, "KILL_GRACE_SECONDS", 0.3)
+    pidfile = tmp_path / "child.pid"
+    trap = "trap '' TERM; " if ignores_term else ""
+    command = f"sh -c \"{trap}sleep 60\" & echo $! > {pidfile}; wait"
+
+    status = shell_executor(command, timeout=0.5)
+
+    assert status == harness_eval.TIMEOUT_STATUS
+    child = int(pidfile.read_text().strip())
+    assert _wait_dead(child), f"child {child} survived the cell timeout"
+
+
+def test_shell_executor_keeps_a_failing_commands_exit_status() -> None:
+    """A non-timeout failure still reports the command's own status."""
+
+    assert shell_executor("exit 3", timeout=10) == 3
+    assert shell_executor("true") == 0
