@@ -308,16 +308,23 @@ def arm_commands(
     before any table header an arm's `requires` opens, so a top-level key
     cannot be swallowed into a table.
 
-    Before planning, the seat is committed and pushed to its own bare origin
-    beside it. Grind's done bar needs `origin/<branch>` to resolve and a clean
-    tree, and a seat with neither can only end a window through the model
-    judging "in sync with origin" against no origin at all — which a cell once
-    spent its whole hour re-prompting. An origin left by an aborted run fails
-    the cell rather than taking a push it never tracked.
+    Before planning, the seat is committed and pushed to its own bare origin.
+    Grind's done bar needs `origin/<branch>` to resolve and a clean tree, and a
+    seat with neither can only end a window through the model judging "in sync
+    with origin" against no origin at all — which a cell once spent its whole
+    hour re-prompting. An origin left by an aborted run fails the cell rather
+    than taking a push it never tracked.
+
+    The origin lives inside the seat's own `.git`. A sibling directory beside
+    the seat took the recipe's push, but the Claude worker's filesystem sandbox
+    only writes inside the seat, so the worker's own push after a close was
+    rejected and the seat sat one commit ahead until the cell was stopped.
+    Under `.git` the origin is writable from the sandbox and is never tracked
+    or reported dirty.
     """
 
     seat = root / seat_name(fixture, arm)
-    origin = root / f"{seat_name(fixture, arm)}.origin.git"
+    origin = seat_origin(seat)
     commands = [f"ortus init {seat} --backend {backend}"]
     applied = treatment(arm)
     own = () if applied is None else applied.config_lines
@@ -330,6 +337,12 @@ def arm_commands(
     commands.append(f"ortus plan {seat} {fixture.prd_path}")
     commands.append(f"ortus grind {seat} --tasks 0")
     return tuple(commands)
+
+
+def seat_origin(seat: Path) -> Path:
+    """Where a seat's bare origin lives: inside the seat's own git directory."""
+
+    return seat / ".git" / "eval-origin.git"
 
 
 def seat_origin_commands(
