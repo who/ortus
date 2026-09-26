@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -889,6 +890,32 @@ def test_shell_executor_timeout_kills_the_whole_process_group(
     assert status == harness_eval.TIMEOUT_STATUS
     child = int(pidfile.read_text().strip())
     assert _wait_dead(child), f"child {child} survived the cell timeout"
+
+
+def test_shell_executor_timeout_survives_a_permission_error_from_killpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS refuses killpg with EPERM on an all-zombie group: that is gone."""
+
+    signals: list[int] = []
+    real_killpg = os.killpg
+
+    def refusing_killpg(pgid: int, sig: int) -> None:
+        signals.append(sig)
+        if sig == signal.SIGTERM:
+            # End the real group so the leader's wait() still returns.
+            real_killpg(pgid, signal.SIGKILL)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(harness_eval.os, "killpg", refusing_killpg)
+    assert harness_eval._signal_group(os.getpid(), 0) is False
+
+    signals.clear()
+    status = shell_executor("sleep 60", timeout=0.3)
+
+    assert status == harness_eval.TIMEOUT_STATUS
+    # EPERM on the first SIGTERM ends cleanup without a grace-period wait.
+    assert signals == [signal.SIGTERM]
 
 
 def test_shell_executor_keeps_a_failing_commands_exit_status() -> None:

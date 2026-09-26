@@ -436,11 +436,17 @@ KILL_GRACE_SECONDS = 5.0
 
 
 def _signal_group(pgid: int, sig: int) -> bool:
-    """Send `sig` to a process group; False once the group is gone."""
+    """Send `sig` to a process group; False once the group is gone.
+
+    macOS answers EPERM rather than ESRCH once every member left in the group
+    is a zombie awaiting its reap, so a group that refuses the signal counts
+    as gone: nothing in it can still run, and raising there crashed the sweep
+    the timeout was meant to bound.
+    """
 
     try:
         os.killpg(pgid, sig)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
     return True
 
