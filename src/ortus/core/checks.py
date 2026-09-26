@@ -28,6 +28,8 @@ human-landed task.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -236,6 +238,66 @@ def parse_criterion_checks(
             CriterionCheck(criterion_id, command, kinds.get(criterion_id))
         )
     return tuple(parsed), tuple(failures)
+
+
+#: First words that are the shell's own rather than a program on PATH.
+_SHELL_WORDS = frozenset({
+    "cd", "export", "test", "[", "[[", "true", "false", "echo", "printf",
+    "set", "source", ".", "exit", "if", "then", "fi", "for", "do", "done",
+    "while", "!", "{", "(",
+})
+_SEGMENT_BREAKS = frozenset({"&&", "||", ";", "|"})
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def check_programs(command: str) -> list[str]:
+    """The programs one check command starts, in order of appearance.
+
+    The command is split into shell segments on ``&&``, ``||``, ``;`` and
+    ``|``, and the first word of each segment after any ``NAME=value``
+    assignments is the program. Shell builtins and keywords are skipped, and
+    so is any word containing ``/``: a path may name a script the issue
+    itself creates. A command that does not tokenize names no program —
+    readiness already accepted it, and guessing would halt a run on a parse
+    the shell may not share.
+    """
+
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    programs: list[str] = []
+    at_start = True
+    for token in tokens:
+        if token in _SEGMENT_BREAKS:
+            at_start = True
+            continue
+        if not at_start or _ASSIGNMENT.match(token):
+            continue
+        at_start = False
+        if token not in _SHELL_WORDS and "/" not in token:
+            programs.append(token)
+    return programs
+
+
+def missing_check_programs(acceptance_criteria: object, *, path: str) -> list[str]:
+    """Sorted programs the criterion checks start that ``path`` cannot resolve.
+
+    Grind asks this before a worker is launched on an issue: a check that
+    calls a program missing from the worker's PATH fails the same way on
+    every issue using that toolchain, and the worker would only find out
+    mid-window. Criteria with no parseable check contribute nothing.
+    """
+
+    checks, _ = parse_criterion_checks(acceptance_criteria)
+    return sorted({
+        program
+        for check in checks
+        for program in check_programs(check.command)
+        if shutil.which(program, path=path) is None
+    })
 
 
 def _criterion_kinds(acceptance_criteria: object) -> dict[str, str]:

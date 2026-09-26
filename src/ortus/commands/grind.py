@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import subprocess
 import time
 from contextlib import ExitStack
@@ -54,6 +55,7 @@ from ortus.core.agent import (
     resolve_backend,
 )
 from ortus.core.bd import BdClient, BdError
+from ortus.core.checks import missing_check_programs
 from ortus.core.claude import ClaudeRunner
 from ortus.core.codegraph import (
     CodeGraphAdapter,
@@ -2880,6 +2882,31 @@ def grind(
                             )
                         break
                     issue_id = target_issue["id"]
+                    # A check program the worker cannot find fails on every
+                    # issue using that toolchain, so it halts the run before
+                    # anything claims, binds, or prompts for this issue.
+                    worker_path = runner.extra_env.get("PATH") or os.environ.get(
+                        "PATH", ""
+                    )
+                    missing_programs = missing_check_programs(
+                        target_issue.get("acceptance_criteria"), path=worker_path
+                    )
+                    if missing_programs:
+                        programs = ", ".join(missing_programs)
+                        write_log(
+                            f"iter prep: HALT — {issue_id}: acceptance checks "
+                            f"need {programs}, not found on the worker PATH "
+                            f"({worker_path})"
+                        )
+                        output.error(
+                            f"grind: {issue_id}: acceptance checks need "
+                            f"{programs}, not found on the worker PATH "
+                            f"({worker_path})",
+                            hint=f"put {programs} on PATH for the shell that "
+                            "runs ortus grind (for example add its bin "
+                            "directory to ~/.profile), then re-run grind",
+                        )
+                        raise typer.Exit(code=1)
                     # f2he.2: grind does not claim a fresh ready issue. The
                     # worker claims via goal-prompt. A leftover in_progress
                     # is already claimed; spawn a new process for it.
