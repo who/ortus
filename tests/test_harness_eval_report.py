@@ -784,7 +784,7 @@ def test_arm_commands_push_a_baseline_to_a_seat_origin_before_plan() -> None:
         for arm in ARMS:
             commands = arm_commands(fixture, arm, root=Path("/seats"))
             seat = Path("/seats") / seat_name(fixture, arm)
-            origin = f"{seat}.origin.git"
+            origin = f"{seat}/.git/eval-origin.git"
             setup = _origin_setup(commands)
 
             assert setup == [
@@ -851,6 +851,49 @@ def test_eval_seat_done_bar_fires_once_the_recipe_built_its_origin(
     # A second build over the same seat root refuses the stale origin.
     stale = next(c for c in commands if c.startswith("test ! -e "))
     assert shell_executor(stale) == 1
+
+
+def test_eval_seat_push_from_inside_the_seat_keeps_the_done_bar_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2: a worker's plain `git push` from the seat lands on its origin.
+
+    The worker only writes inside the seat, so the origin has to be there too;
+    after its commit and push the seat is in sync and clean.
+    """
+
+    for key, value in {
+        "GIT_AUTHOR_NAME": "eval",
+        "GIT_AUTHOR_EMAIL": "eval@example.invalid",
+        "GIT_COMMITTER_NAME": "eval",
+        "GIT_COMMITTER_EMAIL": "eval@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }.items():
+        monkeypatch.setenv(key, value)
+    root = tmp_path / "seats"
+    seat = root / seat_name(FIXTURE_A, CONTROL_ARM)
+    _init_like_seat(seat)
+    for command in arm_commands(FIXTURE_A, CONTROL_ARM, root=root):
+        if command.startswith("ortus "):
+            continue
+        assert shell_executor(command) == 0, command
+
+    assert (seat / ".git" / "eval-origin.git" / "HEAD").is_file()
+    assert not list(root.glob("*.origin.git"))
+
+    (seat / "converter.py").write_text("CELSIUS = True\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=seat, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "close a bead"], cwd=seat, check=True)
+    subprocess.run(["git", "push", "-q"], cwd=seat, check=True)
+
+    git = GitClient(seat)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=seat, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert git.remote_tip("main") == head
+    assert git.local_ahead_of_remote("main") == 0
+    assert git.dirty_paths() == frozenset()
+    assert _done_bar_met(_ClosedOneBd(), git, 0, "main") == "closed 0->1"
 
 
 def _pid_alive(pid: int) -> bool:
