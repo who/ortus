@@ -492,6 +492,94 @@ def test_grind_reports_actual_worker_claim(
     assert f"worker claimed {issue_id} (read back from bd state)" in log_text
 
 
+class _PathRunner:
+    """Records launches under a worker PATH the test chooses."""
+
+    def __init__(self, path: str) -> None:
+        self.extra_env: dict[str, str] = {"PATH": path}
+        self.calls: list[str] = []
+
+    def run(self, prompt: str, **kwargs: object) -> int:
+        self.calls.append(prompt)
+        return 0
+
+
+def _stub_bin(tmp_path: Path, *programs: str) -> str:
+    bin_dir = tmp_path / "worker-bin"
+    bin_dir.mkdir()
+    for program in programs:
+        stub = bin_dir / program
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    return str(bin_dir)
+
+
+@pytest.mark.slow
+def test_grind_halts_on_missing_check_program_before_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2 (ortus-0867): a check program absent from the worker PATH halts
+    grind with exit 1 before any claim, label, comment, or worker launch."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "nouv")
+    issue_id = _create_ready_issue(repo, "needs uv", priority="1")
+    comments_before = _comments_blob(repo, issue_id)
+    worker = _PathRunner(_stub_bin(tmp_path))
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: worker)
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 1, result.stdout + result.stderr
+    assert worker.calls == []
+    log_text = _grind_log(repo)
+    assert f"iter prep: HALT — {issue_id}: acceptance checks need uv" in log_text
+    assert "worker will claim" not in log_text
+    assert "put uv on PATH" in _squashed_console(result)
+    shown = _issue(repo, issue_id)
+    assert shown["status"] == "open"
+    assert not shown.get("assignee")
+    assert "human" not in (shown.get("labels") or [])
+    assert _comments_blob(repo, issue_id) == comments_before
+
+
+@pytest.mark.slow
+def test_grind_launches_when_check_programs_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-3 (ortus-0867): with every check program on the worker PATH, grind
+    launches the worker exactly as before."""
+    if shutil.which("bd") is None:
+        pytest.skip("bd not on PATH")
+    repo = _bd_repo(tmp_path, "hasuv")
+    issue_id = _create_ready_issue(repo, "has uv", priority="1")
+    worker = _PathRunner(_stub_bin(tmp_path, "uv"))
+
+    _fake_sandbox(monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "fake-home"))
+    monkeypatch.setattr(grind_mod, "_make_runner", lambda *a, **k: worker)
+    monkeypatch.setattr(
+        grind_mod,
+        "_compose_work_prompt",
+        lambda *a, **k: "/goal work this issue",
+    )
+
+    result = runner.invoke(
+        app, ["grind", str(repo), "--iterations", "1", "--idle-sleep", "0"]
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert worker.calls == ["/goal work this issue"]
+    log_text = _grind_log(repo)
+    assert "HALT" not in log_text
+    assert f"worker will claim {issue_id} via goal-prompt" in log_text
+
+
 @pytest.mark.slow
 def test_grind_reports_actual_worker_claim_when_closed_in_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
