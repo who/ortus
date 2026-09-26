@@ -1,0 +1,10 @@
+# Ortus repo config (read by `ortus grind` in this repository).
+
+[judge]
+# Jev after-turn check: classifies each worker window and logs every stuck
+# decision to logs/jev-decisions.jsonl. That log is the corpus ortus-saqu
+# needs to tune the stuck-claim constants.
+post_turn = true
+# Shadow: record what Jev would do, but act on the existing fallback and
+# never change tracker state. Pre-turn gate (enabled) stays off.
+mode = "shadow"
