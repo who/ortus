@@ -61,6 +61,11 @@ from ortus.core.profiles import (
 _WORKERS = WORKER_ROUTES
 
 
+def _backend_binary(name: str, *, path: str | None) -> str | None:
+    """Resolve a worker CLI on ``path``; the seam tests patch instead of shutil."""
+    return shutil.which(name, path=path)
+
+
 class RoutePreparationError(BackendError):
     """Stop before claiming or launching; the selected route cannot run."""
 
@@ -153,7 +158,7 @@ def plan_routes(
             if backend == JudgeRoute.OPENCODE:
                 load_local_config(config)
                 resolve_opencode_binary()
-            elif shutil.which(backend.value, path=environment.get("PATH")) is None:
+            elif _backend_binary(backend.value, path=environment.get("PATH")) is None:
                 raise ProfileError(f"{backend.value} executable is not on PATH")
             _profiles(
                 config,
@@ -223,7 +228,7 @@ def prepare_route(
             binary = str(resolve_opencode_binary())
             probe_models(load_local_config(config))
         else:
-            binary = shutil.which(
+            binary = _backend_binary(
                 backend.value, path=env.get("PATH", os.environ.get("PATH"))
             )
         if binary is None:

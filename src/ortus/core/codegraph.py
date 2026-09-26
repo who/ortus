@@ -137,6 +137,11 @@ class CodeGraphSummary:
         )
 
 
+def _codegraph_binary() -> str | None:
+    """Resolve the codegraph CLI; the seam tests patch instead of shutil."""
+    return shutil.which("codegraph")
+
+
 def _bounded_join(values: Iterable[str]) -> str:
     bounded = [str(value)[:MAX_LABEL] for value in list(values)[:MAX_SYMBOLS]]
     return ", ".join(bounded) if bounded else "none"
@@ -177,7 +182,7 @@ class CodeGraphAdapter:
         if mode is CodeGraphMode.OFF:
             return CodeGraphProbe(mode, False, False, False, "disabled by policy")
         index = (repo / ".codegraph").is_dir()
-        cli_path = shutil.which("codegraph")
+        cli_path = _codegraph_binary()
         cli = cli_path is not None
         registration: str | None = None
         if backend == "codex":

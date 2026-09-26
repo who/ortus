@@ -116,7 +116,7 @@ def test_synthetic_replay_through_adapter_and_grind(gate, monkeypatch, case):
         cfg, lambda cfg: CannedClient(), {"TYPESAFE_API_KEY": "synthetic-test-key"},
     ))
     # Exercise actual availability filtering without consulting installed binaries.
-    monkeypatch.setattr("ortus.core.judge_routing.shutil.which", lambda name, **kw:
+    monkeypatch.setattr("ortus.core.judge_routing._backend_binary", lambda name, **kw:
                         "/synthetic/" + name if name in case["available"] else None)
     monkeypatch.setattr(grind_mod, "plan_routes", plan_routes)
     result = gate.invoke("--tasks", "1")

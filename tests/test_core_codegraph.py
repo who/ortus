@@ -42,7 +42,7 @@ def test_codex_probe_produces_the_child_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     monkeypatch.setattr(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )
@@ -58,7 +58,7 @@ def test_probe_local_takes_the_opencode_registration_path(
 ) -> None:
     """`local` is opencode under its older name: file-backed registration, nothing injected."""
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     monkeypatch.setattr(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )
@@ -85,7 +85,7 @@ def test_grok_probe_is_cli_and_index_not_injected_capability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     monkeypatch.setattr(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )
@@ -99,7 +99,7 @@ def test_codex_probe_reports_missing_server_with_initialized_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: None)
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: None)
     probe = CodeGraphAdapter().probe(tmp_path, CodeGraphMode.AUTO, backend="codex")
     assert not probe.available and probe.capability is None
     assert probe.reason == "codegraph CLI is not on PATH"
@@ -203,7 +203,7 @@ def test_grok_required_launch_carries_the_trust_that_starts_the_server(
         '[mcp_servers.codegraph]\ncommand = "codegraph"\n'
         'args = ["serve", "--mcp"]\nenabled = true\n'
     )
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     monkeypatch.setattr(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )
@@ -411,7 +411,7 @@ def test_required_probe_performs_mcp_tools_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     calls: list[str] = []
 
     def _fake_mcp(self: CodeGraphAdapter, repo: Path, query: str, **kwargs: object) -> dict:
@@ -428,7 +428,7 @@ def test_required_probe_mcp_tools_call_fails_when_rpc_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
 
     def _boom(self: CodeGraphAdapter, *args: object, **kwargs: object) -> dict:
         raise CodeGraphRpcError("server unavailable")
@@ -442,7 +442,7 @@ def test_auto_probe_mcp_failure_degrades(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
 
     def _boom(self: CodeGraphAdapter, *args: object, **kwargs: object) -> dict:
         raise CodeGraphRpcError("server unavailable")
@@ -523,7 +523,7 @@ def test_opencode_probe_requires_the_project_mcp_registration(
     claim, which is what the probe exists to prevent.
     """
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     rpcs: list[object] = []
     monkeypatch.setattr(
         CodeGraphAdapter,
@@ -583,7 +583,7 @@ def test_grok_probe_ignores_opencode_registration(
 ) -> None:
     """The opencode registration check is opencode's alone; grok is unchanged."""
     (tmp_path / ".codegraph").mkdir()
-    monkeypatch.setattr("ortus.core.codegraph.shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ortus.core.codegraph._codegraph_binary", lambda: "/bin/codegraph")
     monkeypatch.setattr(
         CodeGraphAdapter, "mcp_tools_call", lambda self, *a, **k: {"content": []}
     )

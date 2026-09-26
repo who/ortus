@@ -126,7 +126,7 @@ def test_cli_invocations_keep_credentials_requests_and_logs_in_their_seat(
     monkeypatch.setattr(grind_mod, "load_config", lambda *, repo: load_config(repo=repo, home=home))
     monkeypatch.setattr(grind_mod, "_make_bd", lambda repo: trackers[repo])
     monkeypatch.setattr(grind_mod, "plan_routes", plan_routes)
-    monkeypatch.setattr("ortus.core.judge_routing.shutil.which",
+    monkeypatch.setattr("ortus.core.judge_routing._backend_binary",
                         lambda name, **kw: f"/synthetic/{name}")
     current_repo = None
     monkeypatch.setattr(grind_mod, "_make_runner",
