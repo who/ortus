@@ -169,6 +169,10 @@ class Treatment:
     summary: str
     #: The bd issue that consumes this arm's numbers, when one is filed.
     measured_by: str | None = None
+    #: The fixture keys whose cells the recorded verdict was read from. A
+    #: default adopted on one fixture reads the same in the tree as one
+    #: adopted on the whole pack unless the record says which it was.
+    measured_on: tuple[str, ...] = ()
     #: Further `.ortusrc` lines without which the flag changes nothing. A
     #: treatment whose code path sits behind another opt-in has to switch that
     #: on too, or its arm silently runs the control and the cell measures the
@@ -217,6 +221,7 @@ class Treatment:
             "config_lines": list(self.config_lines),
             "summary": self.summary,
             "measured_by": self.measured_by,
+            "measured_on": list(self.measured_on),
         }
 
 
@@ -226,6 +231,7 @@ TREATMENTS: tuple[Treatment, ...] = (
         config_key="prompt_audit",
         summary="Serve the audited prompt variants to every phase.",
         measured_by="ortus-2637",
+        measured_on=(FIXTURE_A.key, FIXTURE_B.key),
     ),
     Treatment(
         key="stable-prefix",
@@ -235,12 +241,14 @@ TREATMENTS: tuple[Treatment, ...] = (
             "the prefix stays byte-identical across beads."
         ),
         measured_by="ortus-nudo",
+        measured_on=(FIXTURE_A.key, FIXTURE_B.key),
     ),
     Treatment(
         key="model-router",
         config_key="jev_model_router",
         summary="Let the judge pick the per-bead worker model tier.",
         measured_by="ortus-ib1w",
+        measured_on=(FIXTURE_A.key, FIXTURE_B.key),
         # The router is only ever consulted from the enforcing pre-turn gate,
         # and a fresh seat ships that gate off. Without these two lines the arm
         # is the control arm with an unread flag in its config.
@@ -259,6 +267,32 @@ def treatment(key: str) -> Treatment | None:
         if candidate.key == key:
             return candidate
     return None
+
+
+def measurement_gaps(
+    defaults: Mapping[str, Any],
+    treatments: Iterable[Treatment] = TREATMENTS,
+    pack: Iterable[EvalFixture] = FIXTURE_PACK,
+) -> dict[str, tuple[str, ...]]:
+    """The pack fixtures each on-by-default treatment's verdict never read.
+
+    A treatment that ships off has no verdict to back, so it is never listed.
+    One that ships on is listed with every fixture its `measured_on` leaves
+    out, which is the whole pack when it records none. A fixture added to the
+    pack later therefore shows up here against every adopted default until
+    its cells are run and recorded; a key that names no pack fixture counts
+    for nothing.
+    """
+
+    keys = tuple(fixture.key for fixture in pack)
+    gaps: dict[str, tuple[str, ...]] = {}
+    for item in treatments:
+        if defaults.get(item.config_key) is not True:
+            continue
+        missing = tuple(key for key in keys if key not in item.measured_on)
+        if missing:
+            gaps[item.key] = missing
+    return gaps
 
 
 def baseline_lines(exclude: Iterable[str] = ()) -> tuple[str, ...]:
