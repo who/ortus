@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -39,9 +40,11 @@ from ortus.core.harness_eval import (
     REPORT_SCHEMA,
     TREATMENTS,
     UNMEASURED,
+    Treatment,
     arm_commands,
     build_report,
     matrix,
+    measurement_gaps,
     render_matrix,
     render_report,
     run_matrix,
@@ -345,6 +348,61 @@ def test_adopted_default_arm_is_not_a_second_control_arm() -> None:
         # twice and left to the later line to win.
         assert len(pinned) == len(set(pinned))
         assert set(pinned) == {other.config_key for other in TREATMENTS}
+
+
+def test_adopted_default_is_measured_on_every_pack_fixture() -> None:
+    """AC-1: a shipped-on treatment names the fixtures its verdict came from."""
+
+    adopted = [item for item in TREATMENTS if DEFAULTS.get(item.config_key) is True]
+    assert adopted, "an adopted default is what this record exists to back"
+
+    pack = {fixture.key for fixture in FIXTURE_PACK}
+    for item in adopted:
+        assert item.measured_on, item.key
+        assert set(item.measured_on) <= pack, item.key
+        assert item.as_dict()["measured_on"] == list(item.measured_on)
+    assert measurement_gaps(DEFAULTS) == {}
+
+
+def test_unrecorded_default_is_reported_as_a_gap() -> None:
+    """AC-2: shipping on with no fixture on record fails rather than passing."""
+
+    bare = Treatment(key="bare", config_key="bare_flag", summary="unrecorded")
+    partial = Treatment(
+        key="partial",
+        config_key="partial_flag",
+        summary="one fixture only",
+        measured_on=(FIXTURE_A.key,),
+    )
+    stray = Treatment(
+        key="stray",
+        config_key="stray_flag",
+        summary="names no pack fixture",
+        measured_on=("not-in-the-pack",),
+    )
+    everything = (bare, partial, stray)
+    pack_keys = tuple(fixture.key for fixture in FIXTURE_PACK)
+
+    on = {"bare_flag": True, "partial_flag": True, "stray_flag": True}
+    assert measurement_gaps(on, everything) == {
+        "bare": pack_keys,
+        "partial": (FIXTURE_B.key,),
+        "stray": pack_keys,
+    }
+
+    # A treatment that ships off has no verdict to back.
+    off = {"bare_flag": False, "partial_flag": False}
+    assert measurement_gaps(off, everything) == {}
+
+    # A fixture added to the pack later leaves every existing record short.
+    later = FIXTURE_PACK + (
+        replace(FIXTURE_B, key="later-fixture", title="Later"),
+    )
+    assert measurement_gaps(DEFAULTS, pack=later) == {
+        item.key: ("later-fixture",)
+        for item in TREATMENTS
+        if DEFAULTS.get(item.config_key) is True
+    }
 
 
 def test_treatments_render_through_the_eval_verb() -> None:
