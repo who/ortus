@@ -34,6 +34,8 @@ run, because there is only one construction path for the commands.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -51,6 +53,7 @@ from ortus.core.cost import (
     parse_grind_log,
     rollup_beads,
 )
+from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
 from ortus.core.judge_log import ROUTE_LOG_NAME
 from ortus.core.judge_routing import RouterTier
 
@@ -304,9 +307,17 @@ def arm_commands(
     and an arm pins its own key on above that baseline. The pins are written
     before any table header an arm's `requires` opens, so a top-level key
     cannot be swallowed into a table.
+
+    Before planning, the seat is committed and pushed to its own bare origin
+    beside it. Grind's done bar needs `origin/<branch>` to resolve and a clean
+    tree, and a seat with neither can only end a window through the model
+    judging "in sync with origin" against no origin at all — which a cell once
+    spent its whole hour re-prompting. An origin left by an aborted run fails
+    the cell rather than taking a push it never tracked.
     """
 
     seat = root / seat_name(fixture, arm)
+    origin = root / f"{seat_name(fixture, arm)}.origin.git"
     commands = [f"ortus init {seat} --backend {backend}"]
     applied = treatment(arm)
     own = () if applied is None else applied.config_lines
@@ -315,9 +326,30 @@ def arm_commands(
     )
     lines = "' '".join((*baseline_lines(assigned), *own))
     commands.append(f"printf '%s\\n' '{lines}' >> {seat}/.ortusrc")
+    commands.extend(seat_origin_commands(seat, origin))
     commands.append(f"ortus plan {seat} {fixture.prd_path}")
     commands.append(f"ortus grind {seat} --tasks 0")
     return tuple(commands)
+
+
+def seat_origin_commands(
+    seat: Path, origin: Path, *, branch: str = DEFAULT_INTEGRATION_BRANCH
+) -> tuple[str, ...]:
+    """Commit what init and the pins left, then push it to a fresh bare origin.
+
+    The commit takes the operator's own git identity; nothing here names an
+    author.
+    """
+
+    return (
+        f"git -C {seat} add -A",
+        f"git -C {seat} commit -q -m 'ortus eval: seat baseline'",
+        f"test ! -e {origin} || {{ echo 'stale eval origin {origin}: "
+        "remove it before re-running this cell' >&2; exit 1; }",
+        f"git init -q --bare {origin}",
+        f"git -C {seat} remote add origin {origin}",
+        f"git -C {seat} push -q -u origin {branch}",
+    )
 
 
 @dataclass(frozen=True)
@@ -384,13 +416,48 @@ def shell_executor(command: str, timeout: float | None = None) -> int:
     construction path the frozen recipe exists to prevent. The commands run in
     the caller's working directory, which is where an operator copying the
     same lines would have run them.
+
+    The command leads its own process group, and a timeout ends the whole
+    group: killing only the shell left `ortus grind`'s worker running, and
+    spending, after its cell had already been reported over.
     """
 
+    process = subprocess.Popen(command, shell=True, start_new_session=True)
     try:
-        completed = subprocess.run(command, shell=True, check=False, timeout=timeout)
+        return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_group(process)
         return TIMEOUT_STATUS
-    return completed.returncode
+
+
+#: How long a timed-out cell's process group gets to exit on SIGTERM before
+#: SIGKILL follows.
+KILL_GRACE_SECONDS = 5.0
+
+
+def _signal_group(pgid: int, sig: int) -> bool:
+    """Send `sig` to a process group; False once the group is gone."""
+
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _kill_group(process: subprocess.Popen[bytes]) -> None:
+    """SIGTERM the command's process group, then SIGKILL what outlives it."""
+
+    pgid = process.pid
+    if _signal_group(pgid, signal.SIGTERM):
+        deadline = time.monotonic() + KILL_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            process.poll()
+            if not _signal_group(pgid, 0):
+                break
+            time.sleep(0.05)
+        _signal_group(pgid, signal.SIGKILL)
+    process.wait()
 
 
 def cell_has_run(root: Path, cell: EvalCell) -> bool:
