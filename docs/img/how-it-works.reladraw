@@ -1,0 +1,26 @@
+// How Ortus works. Top row: plan once, left to right.
+// Bottom row: the grind loop, right to left under validate, then back.
+style dim      text: (color: muted)
+style cmd      border: #6b8fd6
+style setupbox border: #5c5c7c
+style loopbox  border: #5c9a52
+default edge  line: (path: square, corners: rounded)
+
+node setup "1. Plan once" (at: top-left)  style: setupbox
+node setup.prd      "PRD or idea / [dim]what you want built[/dim]"  shape: document
+node setup.plan     "ortus plan / [dim]splits it into issues[/dim]"  style: cmd  right of setup.prd
+node setup.beads    "bd issues / [dim]readiness schema v1[/dim]"  badge: database  right of setup.plan
+node setup.validate "ortus validate / [dim]checks each issue is ready[/dim]"  style: cmd  right of setup.beads
+
+node loop "2. Grind until no ready issues are left" (at: top-left)  style: loopbox  below setup (gap: wide)  right level with setup
+node loop.grind  "ortus grind / [dim]picks the next ready issue[/dim]"  style: cmd
+node loop.worker "One fresh worker / [dim]one issue, clean context[/dim]"  left of loop.grind
+node loop.close  "Worker finishes / [dim]commit, bd close, push[/dim]"  left of loop.worker
+
+edge setup.prd -> setup.plan         from: right  to: left
+edge setup.plan -> setup.beads       from: right  to: left
+edge setup.beads -> setup.validate   from: right  to: left
+edge setup.validate -> loop.grind    "ready issues"  from: bottom  to: top
+edge loop.grind -> loop.worker       "hands off"  from: left  to: right
+edge loop.worker -> loop.close       from: left  to: right
+edge loop.close -> loop.grind        "next issue"  from: bottom  to: bottom  below loop.worker

@@ -8,16 +8,9 @@ Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, Code
 
 ## How it works
 
-```mermaid
-flowchart LR
-    prd["PRD or idea"] --> plan["ortus plan"]
-    plan --> beads["bd issues, readiness schema v1"]
-    beads --> validate["ortus validate"]
-    validate --> grind["ortus grind"]
-    grind --> worker["one fresh worker, one issue"]
-    worker --> close["commit, bd close, push"]
-    close --> grind
-```
+![How Ortus works: plan once, then grind through ready issues one fresh worker at a time](docs/img/how-it-works.svg)
+
+<!-- Diagram source: docs/img/how-it-works.reladraw (render with: reladraw docs/img/how-it-works.reladraw) -->
 
 ## Install
 

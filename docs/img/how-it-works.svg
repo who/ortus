@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1152" height="457" viewBox="0 0 1152 457" font-family="'DejaVu Sans Mono', 'Menlo', 'Consolas', 'Liberation Mono', 'Courier New', monospace" font-size="14px">
+  <defs>
+    <marker id="arrow-5c5c7c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5c5c7c"/>
+    </marker>
+    <marker id="arrow-5c5c7c-back" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5c5c7c"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1152" height="457" fill="#111111"/>
+  <path d="M48 40 H1104 a8 8 0 0 1 8 8 V155 a8 8 0 0 1 -8 8 H48 a8 8 0 0 1 -8 -8 V48 a8 8 0 0 1 8 -8 Z" fill="#191920" stroke="#5c5c7c"/>
+  <text x="54" y="68.4" fill="#d9d9d9" text-anchor="start">1. Plan once</text>
+  <path d="M62 83 H226 L242 99 V141 a8 8 0 0 1 -8 8 H62 a8 8 0 0 1 -8 -8 V91 a8 8 0 0 1 8 -8 Z" fill="#191728" stroke="#4f5367"/>
+  <path d="M226 83 V99 H242" fill="none" stroke="#4f5367"/>
+  <text x="148" y="111.4" fill="#d9d9d9" text-anchor="middle">PRD or idea</text>
+  <text x="148" y="130.4" fill="#8b8b8b" text-anchor="middle">what you want built</text>
+  <path d="M306 83 H495 a8 8 0 0 1 8 8 V141 a8 8 0 0 1 -8 8 H306 a8 8 0 0 1 -8 -8 V91 a8 8 0 0 1 8 -8 Z" fill="#191728" stroke="#6b8fd6"/>
+  <text x="400.5" y="111.4" fill="#d9d9d9" text-anchor="middle">ortus plan</text>
+  <text x="400.5" y="130.4" fill="#8b8b8b" text-anchor="middle">splits it into issues</text>
+  <path d="M567 83 H787 a8 8 0 0 1 8 8 V141 a8 8 0 0 1 -8 8 H567 a8 8 0 0 1 -8 -8 V91 a8 8 0 0 1 8 -8 Z" fill="#191920" stroke="#25242f"/>
+  <text x="653" y="111.4" fill="#d9d9d9" text-anchor="middle">bd issues</text>
+  <text x="653" y="130.4" fill="#8b8b8b" text-anchor="middle">readiness schema v1</text>
+  <g transform="translate(743 97) scale(1.58333)">
+    <path d="M3 6.4 v11.2 a9 3.4 0 0 0 18 0 v-11.2 Z" fill="#3e3d58" stroke="#8d8d8e" stroke-width="1.1" stroke-linejoin="round"/>
+    <path d="M3 6.4 a9 3.4 0 0 1 18 0 a9 3.4 0 0 1 -18 0 Z" fill="#3e3d58" stroke="#8d8d8e" stroke-width="1.1" stroke-linejoin="round"/>
+    <path d="M3 11 a9 3.4 0 0 0 18 0" fill="none" stroke="#8d8d8e" stroke-width="1.1" stroke-linejoin="round"/>
+    <path d="M3 15.6 a9 3.4 0 0 0 18 0" fill="none" stroke="#8d8d8e" stroke-width="1.1" stroke-linejoin="round"/>
+  </g>
+  <path d="M859 83 H1090 a8 8 0 0 1 8 8 V141 a8 8 0 0 1 -8 8 H859 a8 8 0 0 1 -8 -8 V91 a8 8 0 0 1 8 -8 Z" fill="#191728" stroke="#6b8fd6"/>
+  <text x="974.5" y="111.4" fill="#d9d9d9" text-anchor="middle">ortus validate</text>
+  <text x="974.5" y="130.4" fill="#8b8b8b" text-anchor="middle">checks each issue is ready</text>
+  <path d="M197.6 273 H1104 a8 8 0 0 1 8 8 V388 a8 8 0 0 1 -8 8 H197.6 a8 8 0 0 1 -8 -8 V281 a8 8 0 0 1 8 -8 Z" fill="#191920" stroke="#5c9a52"/>
+  <text x="203.6" y="301.4" fill="#d9d9d9" text-anchor="start">2. Grind until no ready issues are left</text>
+  <path d="M859 316 H1090 a8 8 0 0 1 8 8 V374 a8 8 0 0 1 -8 8 H859 a8 8 0 0 1 -8 -8 V324 a8 8 0 0 1 8 -8 Z" fill="#191728" stroke="#6b8fd6"/>
+  <text x="974.5" y="344.4" fill="#d9d9d9" text-anchor="middle">ortus grind</text>
+  <text x="974.5" y="363.4" fill="#8b8b8b" text-anchor="middle">picks the next ready issue</text>
+  <path d="M480.6 316 H694.6 a8 8 0 0 1 8 8 V374 a8 8 0 0 1 -8 8 H480.6 a8 8 0 0 1 -8 -8 V324 a8 8 0 0 1 8 -8 Z" fill="#191728" stroke="#4f5367"/>
+  <text x="587.6" y="344.4" fill="#d9d9d9" text-anchor="middle">One fresh worker</text>
+  <text x="587.6" y="363.4" fill="#8b8b8b" text-anchor="middle">one issue, clean context</text>
+  <path d="M211.6 316 H408.6 a8 8 0 0 1 8 8 V374 a8 8 0 0 1 -8 8 H211.6 a8 8 0 0 1 -8 -8 V324 a8 8 0 0 1 8 -8 Z" fill="#191728" stroke="#4f5367"/>
+  <text x="310.1" y="344.4" fill="#d9d9d9" text-anchor="middle">Worker finishes</text>
+  <text x="310.1" y="363.4" fill="#8b8b8b" text-anchor="middle">commit, bd close, push</text>
+  <path d="M 242 116 L 298 116" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <path d="M 503 116 L 559 116" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <path d="M 795 116 L 851 116" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <path d="M 974.5 149 L 974.5 316" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <rect x="919" y="223" width="111" height="19" fill="#111111"/>
+  <text x="974.5" y="237.4" fill="#d9d9d9" text-anchor="middle">ready issues</text>
+  <path d="M 851 349 L 702.6 349" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <rect x="733.8" y="339.5" width="86" height="19" fill="#111111"/>
+  <text x="776.8" y="353.9" fill="#d9d9d9" text-anchor="middle">hands off</text>
+  <path d="M 472.6 349 L 416.6 349" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <path d="M 310.1 382 L 310.1 393.2 C 310.1 400.27, 315.83 406, 322.9 406 L 961.7 406 C 968.77 406, 974.5 400.27, 974.5 393.2 L 974.5 382" fill="none" stroke="#5c5c7c" stroke-width="1.6" marker-end="url(#arrow-5c5c7c)"/>
+  <rect x="595.3" y="396.5" width="94" height="19" fill="#111111"/>
+  <text x="642.3" y="410.9" fill="#d9d9d9" text-anchor="middle">next issue</text>
+</svg>
