@@ -10,7 +10,7 @@ Ortus autonomously closes a backlog of bd-tracked issues using Claude Code, Code
 
 ![How Ortus works: plan once, then grind through ready issues one fresh worker at a time](docs/img/how-it-works.svg)
 
-<!-- Diagram source: docs/img/how-it-works.reladraw (render with: reladraw docs/img/how-it-works.reladraw) -->
+Diagram source: [`docs/img/how-it-works.reladraw`](docs/img/how-it-works.reladraw), rendered with `reladraw docs/img/how-it-works.reladraw -o docs/img/how-it-works.svg`.
 
 ## Install
 

@@ -215,11 +215,27 @@ def test_relative_links_and_anchors_resolve() -> None:
 # ---------------------------------------------------------------------------
 
 
+_RENDERED_DIAGRAM = re.compile(r"!\[[^\]]+\]\(([^)\s]+\.svg)\)")
+
+
+def _has_sourced_diagram(page: Path, text: str) -> bool:
+    """A rendered SVG counts when its reladraw source is checked in beside it."""
+    for target in _RENDERED_DIAGRAM.findall(text):
+        svg = (page.parent / target).resolve()
+        if svg.exists() and svg.with_suffix(".reladraw").exists():
+            return True
+    return False
+
+
 @pytest.mark.parametrize("name", DIAGRAM_PAGES)
 def test_flow_pages_carry_a_mermaid_diagram(name: str) -> None:
-    text = (REPO / name).read_text(encoding="utf-8")
+    page = REPO / name
+    text = page.read_text(encoding="utf-8")
 
-    assert "```mermaid" in text, f"{name} describes a flow and owes a mermaid diagram"
+    assert "```mermaid" in text or _has_sourced_diagram(page, text), (
+        f"{name} describes a flow and owes a diagram: a mermaid block, or an "
+        "SVG image whose .reladraw source is checked in beside it"
+    )
 
 
 # ---------------------------------------------------------------------------
