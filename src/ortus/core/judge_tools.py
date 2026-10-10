@@ -167,6 +167,42 @@ def _secret_path(path: Path) -> bool:
     )
 
 
+def _split_unquoted(command: str) -> list[str]:
+    """The command split on separators outside quotes and escapes.
+
+    A separator inside a quoted argument is that argument's text, so
+    `bd comments add x "a; b"` is one call. A line whose quotes never close
+    has no reliable quoting to honour and splits on every separator, as it
+    did before quotes were tracked.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            current.append(command[index:index + 2])
+            index += 2
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif _SEPARATORS.match(char):
+            parts.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    if quote is not None:
+        return _SEPARATORS.split(command)
+    parts.append("".join(current))
+    return parts
+
+
 def _segments(command: str) -> list[list[str]]:
     """The command's segments, each split into words. Nothing is executed.
 
@@ -175,7 +211,7 @@ def _segments(command: str) -> list[list[str]]:
     not a reason to hand the worker's next step to an operator.
     """
     found: list[list[str]] = []
-    for part in _SEPARATORS.split(command):
+    for part in _split_unquoted(command):
         stripped = part.strip()
         if not stripped:
             continue

@@ -268,6 +268,36 @@ def test_a_tracker_call_that_is_the_whole_command_is_still_judged(repo, command)
     assert inspected(repo, "Bash", command=command).decision is None
 
 
+@pytest.mark.parametrize("command", [
+    'bd comments add x "a; b && c | d"',
+    "bd comments add x 'checked a; then b'",
+    'bd comments add x "said \\"a | b\\" && left"',
+    "bd comments add x a\\;b",
+])
+def test_quoted_separators_do_not_wrap_a_tracker_call(repo, command):
+    assert inspected(repo, "Bash", command=command).decision is None
+
+
+@pytest.mark.parametrize("command", [
+    'bd comments add x "a; b" | tee log',
+    "bd close x 'done; ok' && git push",
+    'bash -c "bd close x; git push"',
+])
+def test_quoted_separators_leave_a_real_pipeline_wrapped(repo, command):
+    result = locally(repo, "Bash", command=command)
+    assert (result.action, result.reason) == (ToolAction.DENY_CALL, "wrapped_bd")
+
+
+def test_quoted_text_does_not_hide_a_delete_after_a_separator(repo):
+    decision = inspected(repo, "Bash", command='rm -rf / ; echo "x; y"').decision
+    assert decision.reason == "recursive_root_deletion"
+
+
+def test_an_unbalanced_quote_still_splits_on_every_separator(repo):
+    result = locally(repo, "Bash", command='bd close x "oops | tee log')
+    assert (result.action, result.reason) == (ToolAction.DENY_CALL, "wrapped_bd")
+
+
 def test_a_destructive_wrapped_tracker_call_is_named_by_the_worse_refusal(repo):
     """Both refusals match; the one an operator needs to read wins."""
     decision = inspected(repo, "Bash", command="bd close ortus-1 && rm -rf /").decision
