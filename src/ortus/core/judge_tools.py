@@ -29,7 +29,7 @@ from typing import Any, Callable, Mapping
 from ortus.core.user_env import judge_environment
 
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeState
-from ortus.core.judge_state import StateError, sanitize_field
+from ortus.core.judge_state import TRUNCATION_MARKER, StateError, sanitize_field
 from ortus.core.judge_typesafe import (
     ACTION_RISK, API_KEY_ENV, NEEDS_HUMAN, JudgeFailure, JudgeUsage, _answer,
     _default_client, _Invalid, _mapping, _number, _usage, build_questions,
@@ -376,6 +376,116 @@ def _screened(
     if field.value is None:
         return "[omitted]"
     return field.value[:cap]
+
+
+#: What a redacted word, a dropped heredoc body and a path outside the repo
+#: become in a logged command. Fixed text, so a reader can count them.
+REDACTED = "[redacted]"
+
+#: A heredoc opener: `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"`.
+_HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+#: The argument names whose value is the path a non-shell tool acts on.
+_PATH_KEYS = ("file_path", "path", "notebook_path")
+
+
+def cap_command(text: str, cap: int) -> str:
+    """Bound a logged command, marking the cut so it never reads as complete.
+
+    Slicing a `str` cuts between code points, so no UTF-8 sequence is split.
+    """
+    if len(text) <= cap:
+        return text
+    if cap <= len(TRUNCATION_MARKER):
+        return text[:cap]
+    return text[:cap - len(TRUNCATION_MARKER)] + TRUNCATION_MARKER
+
+
+def _heredocs(command: str) -> str:
+    """Replace each heredoc body with its line count; the body is file content."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for match in _HEREDOC.finditer(line):
+            strip = match[0].startswith("<<-")
+            body = 0
+            while index < len(lines):
+                closing = lines[index].lstrip("\t") if strip else lines[index]
+                if closing == match[2]:
+                    break
+                body += 1
+                index += 1
+            kept.append(f"<heredoc:{body} lines>")
+            if index < len(lines):
+                kept.append(lines[index])
+                index += 1
+    return "\n".join(kept)
+
+
+def _redacted_words(
+    text: str, config: JudgeConfig, secrets: tuple[str, ...],
+    root: Path, roots: tuple[Path, ...], home: Path,
+) -> str:
+    """Screen one command word by word, then screen what is left as a whole.
+
+    A word holding a secret value, a credential path, a configured sensitive
+    path or a credential-shaped assignment becomes :data:`REDACTED`; an
+    absolute path becomes its repository label. The final pass is
+    :func:`_screened`, which drops the whole text to a placeholder when a
+    secret survives in a shape no single word showed.
+    """
+    for secret in sorted(secrets, key=len, reverse=True):
+        text = text.replace(secret, REDACTED)
+    parts = re.split(r"(\s+)", text)
+    for index, word in enumerate(parts):
+        if not word or word.isspace():
+            continue
+        bare = word.strip("'\"<>()=;|&")
+        if (_literal_reason(bare, config) is not None
+                or _literal_reason(word, config) is not None
+                or _screened(word, config, (), cap=len(word)) != word):
+            parts[index] = REDACTED
+        elif bare.startswith("/"):
+            parts[index] = word.replace(bare, _label(bare, root, roots))
+    text = "".join(parts)
+    for location, label in ((str(root), "."), (str(home), "~")):
+        if len(location) > 1:
+            text = text.replace(location, label)
+    return _screened(text, config, secrets, cap=len(text)) if text else ""
+
+
+def redacted_command(
+    tool: ToolInput, config: JudgeConfig, roots: tuple[Path, ...],
+    secrets: tuple[str, ...],
+) -> str:
+    """The call as the decision log may carry it: screened, then bounded.
+
+    A shell call logs its command with heredoc bodies counted rather than
+    copied, and every word the packer or :func:`inspect_tool` would refuse
+    replaced. Any other tool logs only its screened path operand, never its
+    contents. ``roots`` leads with the repository; the result is capped at
+    ``config.tool_cap`` characters.
+    """
+    if not isinstance(tool, ToolInput) or not isinstance(tool.arguments, Mapping):
+        return ""
+    try:
+        root = roots[0].resolve()
+        resolved = tuple(path.resolve() for path in roots)
+        home = Path(os.environ.get("HOME") or Path.home()).resolve()
+    except (IndexError, OSError, RuntimeError, ValueError):
+        return REDACTED
+    command = tool.arguments.get("command")
+    if isinstance(command, str):
+        text = _heredocs(command)
+    else:
+        text = next((value for key in _PATH_KEYS
+                     if isinstance(value := tool.arguments.get(key), str)), "")
+    text = _redacted_words(text, config, secrets, root, resolved, home)
+    return cap_command(text, config.tool_cap)
 
 
 def inspect_tool(

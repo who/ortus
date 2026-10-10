@@ -16,7 +16,9 @@ from typing import Callable, Iterable
 from uuid import UUID
 
 from ortus.core.judge import WORKER_ROUTES, GateAction, GateReason, JudgeConfig, JudgePhase, JudgeRoute
-from ortus.core.judge_log import MAX_EVENT_BYTES, OutcomeStatus, _clean_metadata
+from ortus.core.judge_log import (
+    MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, OutcomeStatus, _clean_metadata,
+)
 from ortus.core.judge_state import TRUNCATABLE_FIELDS
 from ortus.core.judge_typesafe import JudgeFailure
 from ortus.core.worker_failure import WorkerFailure
@@ -72,6 +74,18 @@ POST_SIDE = {"worker_failure"}
 #: the same reason: a decision written before truncation existed carries no
 #: such list and is still a valid version-1 record.
 DECISION_SIDE = {"truncated_fields"}
+#: What plain code did beside what Jev's answer argued for, and which wording
+#: of the question it answered. Optional on every Jev record kind, so a log
+#: written before these fields existed is still a valid version-1 record.
+COMPARISON_SIDE = {"baseline_action", "jev_action", "question_version", "option_order"}
+#: Request cost for the kinds whose required fields never carried it. Null
+#: when the site made no request.
+REQUEST_SIDE = {"latency_ms", "input_tokens", "output_tokens"}
+#: The bounded, redacted command a pre_tool record may carry.
+TOOL_SIDE = {"command"}
+#: Each kind's action vocabulary for `baseline_action` and `jev_action`, and
+#: the choice options its `option_order` may name.
+POST_ACTIONS = {"human", "preserve"}
 WORKER_FAILURES = {failure.value for failure in WorkerFailure}
 MAX_LABEL_BYTES = 16 * 1024 * 1024
 
@@ -119,6 +133,47 @@ def _decode(data: bytes) -> object:
                       parse_constant=lambda _: _require(False))
 
 
+def _vocabularies(kind: str) -> tuple[set[str], set[str]]:
+    """One kind's actions and the choice options its question presents."""
+    if kind == "decision":
+        return {a.value for a in GateAction}, {r.value for r in JudgeRoute}
+    if kind == "post_turn":
+        return POST_ACTIONS, OUTCOMES
+    if kind == "stuck_decision":
+        return STUCK_ACTIONS, STUCK_ACTIONS
+    if kind == "triage":
+        return TRIAGE_CLASSES, TRIAGE_CLASSES
+    return TOOL_ACTIONS, TOOL_ACTIONS
+
+
+def _side(e: dict, kind: str) -> None:
+    """Type-check whichever optional comparison and request fields are present."""
+    actions, options = _vocabularies(kind)
+    for key in ("baseline_action", "jev_action"):
+        if key in e:
+            _require(_choice(e[key], actions, nullable=True))
+    if "question_version" in e:
+        version = e["question_version"]
+        _require(version is None or (type(version) is str
+                 and QUESTION_VERSION.fullmatch(version) is not None))
+    if "option_order" in e:
+        order = e["option_order"]
+        _require(order is None or (type(order) is list
+                 and all(_choice(name, options) for name in order)
+                 and len(set(order)) == len(order)))
+    if kind in ("post_turn", "stuck_decision", "triage"):
+        if "latency_ms" in e:
+            _require(e["latency_ms"] is None or _number(e["latency_ms"]))
+        for key in ("input_tokens", "output_tokens"):
+            if key in e:
+                _require(e[key] is None or (type(e[key]) is int and 0 <= e[key] <= 2**63 - 1))
+        _require(e.get("input_tokens") is None and e.get("output_tokens") is None
+                 or ("input_tokens" in e and "output_tokens" in e
+                     and e["input_tokens"] is not None and e["output_tokens"] is not None))
+    if "command" in e:
+        _require(type(e["command"]) is str and len(e["command"]) <= MAX_COMMAND_CHARS)
+
+
 def validate_event(value: object) -> dict:
     """Reject unknown fields and invalid values rather than exporting raw prose."""
     _require(type(value) is dict)
@@ -133,8 +188,10 @@ def validate_event(value: object) -> dict:
               STUCK if kind == "stuck_decision" else
               TRIAGE if kind == "triage" else
               TOOL if kind == "tool_decision" else set())
-    optional = (POST_SIDE if kind == "post_turn"
-                else DECISION_SIDE if kind == "decision" else set())
+    optional = (POST_SIDE | COMPARISON_SIDE | REQUEST_SIDE if kind == "post_turn"
+                else DECISION_SIDE | COMPARISON_SIDE if kind == "decision"
+                else COMPARISON_SIDE | REQUEST_SIDE if kind in ("stuck_decision", "triage")
+                else COMPARISON_SIDE | TOOL_SIDE if kind == "tool_decision" else set())
     _require(bool(fields) and fields <= set(e) <= fields | optional)
     _uuid(e["run_id"])
     _uuid(e["decision_id"])
@@ -153,6 +210,8 @@ def validate_event(value: object) -> dict:
             _require(e[key] is None or (type(e[key]) is int and 0 <= e[key] <= 2**63 - 1))
         _require((e["input_tokens"] is None) == (e["output_tokens"] is None))
         _require(e["measured_cost_usd"] is None or _number(e["measured_cost_usd"]))
+    if kind != "outcome":
+        _side(e, kind)
     if kind == "decision":
         _require(_choice(e["phase"], JudgePhase))
         _require(_choice(e["reason"], GateReason))

@@ -154,8 +154,8 @@ from ortus.core.judge_stuck import (
 )
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePlan, RoutePreparationError,
-    baseline_implement_profile, jev_router_enabled, plan_routes, prepare_route,
-    route_implement_profile,
+    argued_tier, baseline_implement_profile, jev_router_enabled, plan_routes,
+    prepare_route, route_implement_profile,
 )
 from ortus.core.judge_state import OmissionReason, PackedState, StateError, pack_state
 from ortus.core.judge_triage import pin_directive_section, triage_parked_bead
@@ -260,6 +260,7 @@ def _observe_route(
             reasoning_effort=route.profile.reasoning_effort,
             needs_frontier=route.needs_frontier, action_risk=route.action_risk,
             difficulty=route.difficulty, applied=False,
+            jev_tier=argued_tier(route),
         ))
     except Exception:
         output.progress("grind", "judge shadow route unavailable; continuing baseline")
@@ -448,6 +449,7 @@ def _route_model(
             reasoning_effort=route.profile.reasoning_effort,
             needs_frontier=route.needs_frontier, action_risk=route.action_risk,
             difficulty=route.difficulty, applied=True,
+            jev_tier=argued_tier(route),
         ))
     return replace(bundle, implement_profile=route.profile)
 

@@ -398,6 +398,15 @@ def _tier(difficulty: float) -> RouterTier:
     return RouterTier.BASELINE
 
 
+def argued_tier(route: ModelRoute) -> str | None:
+    """The tier the route's vectors argue for, or None when it had no answers.
+
+    Differs from ``route.tier`` only when the argued tier's profile could not
+    be mapped and the bead fell back to baseline.
+    """
+    return None if route.difficulty is None else _tier(route.difficulty).value
+
+
 def baseline_implement_profile(config: Config, plan: RoutePlan) -> AgentProfile:
     """The implementation profile the baseline worker would launch with.
 

@@ -64,7 +64,8 @@ def test_complete_decision_and_correlated_outcome(tmp_path, capsys):
         "issue_id", "phase", "answers", "intended_action", "effective_action",
         "backend", "reason", "model", "criteria_version", "criteria_hash",
         "latency_ms", "failure", "truncated_fields", "input_tokens", "output_tokens",
-        "measured_cost_usd",
+        "measured_cost_usd", "baseline_action", "jev_action", "question_version",
+        "option_order",
     }
     assert logged["schema_version"] == 1
     assert logged["timestamp"].endswith("+00:00")

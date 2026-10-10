@@ -32,7 +32,7 @@ import json
 import os
 import time
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
@@ -40,11 +40,13 @@ from uuid import UUID, uuid4
 
 from ortus.core.judge import JudgeConfig
 from ortus.core.judge_log import (
-    OutcomeStatus, _append, _clean_metadata, _common,
+    OutcomeStatus, _append, _clean_metadata, _common, question_version,
+    request_fields, side_fields,
 )
 from ortus.core.judge_state import StateError, environment_secrets, sanitize_field
 from ortus.core.judge_typesafe import (
-    API_KEY_ENV, JudgeFailure, _answer, _default_client, _Invalid, _mapping, _number,
+    API_KEY_ENV, JudgeFailure, JudgeUsage, _answer, _default_client, _Invalid,
+    _mapping, _number, _usage,
 )
 from ortus.core.user_env import judge_environment
 
@@ -186,6 +188,10 @@ class ProgressVerdict:
     p_progressing: float | None = None
     confidence: float | None = None
     failure: JudgeFailure | None = None
+    #: Request cost, for the log only, and left out of equality so two
+    #: readings that say the same thing compare equal.
+    latency_ms: float | None = field(default=None, compare=False)
+    usage: JudgeUsage | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if self.failure is not None:
@@ -258,6 +264,12 @@ def should_reap(history: Sequence[ProgressSample]) -> bool:
            or sample.shrunk_looping <= _LOOPING_FLOOR for sample in recent):
         return False
     return bool(recent[0].head_oid) and len({s.head_oid for s in recent}) == 1
+
+
+#: The progress question set's name in a record's `question_version`.
+PROGRESS_QUESTIONS = "progress-v1"
+#: What the progress site can do with a live worker.
+PROGRESS_ACTIONS = frozenset({"continue", "reap"})
 
 
 def build_progress_questions() -> dict:
@@ -401,6 +413,11 @@ def evaluate_progress(
     env = os.environ if environ is None else environ
     if not str(env.get(API_KEY_ENV, "")).strip():
         return ProgressVerdict(failure=JudgeFailure.KEY_MISSING)
+    started = time.monotonic()
+
+    def timed(verdict: ProgressVerdict, usage: JudgeUsage | None = None) -> ProgressVerdict:
+        return replace(verdict, usage=usage,
+                       latency_ms=max((time.monotonic() - started) * 1000.0, 0.0))
 
     async def ask() -> object:
         async with AsyncExitStack() as stack:
@@ -420,11 +437,11 @@ def evaluate_progress(
     try:
         response = asyncio.run(bounded())
     except ImportError:
-        return ProgressVerdict(failure=JudgeFailure.SDK_MISSING)
+        return timed(ProgressVerdict(failure=JudgeFailure.SDK_MISSING))
     except asyncio.TimeoutError:
-        return ProgressVerdict(failure=JudgeFailure.TIMEOUT)
+        return timed(ProgressVerdict(failure=JudgeFailure.TIMEOUT))
     except Exception:  # noqa: BLE001 - provider prose never escapes
-        return ProgressVerdict(failure=JudgeFailure.SERVICE_ERROR)
+        return timed(ProgressVerdict(failure=JudgeFailure.SERVICE_ERROR))
     try:
         dump = getattr(response, "model_dump", None)
         body = _mapping(dump(mode="json") if callable(dump) else response)
@@ -433,11 +450,11 @@ def evaluate_progress(
         answers = _mapping(body.get("answers"))
         if set(answers) != {LOOPING_QUESTION}:
             raise _Invalid
-        return _reading(
+        return timed(_reading(
             _number(_answer(answers, LOOPING_QUESTION, "noul").get("noul"), 1.0)
-        )
+        ), _usage(body.get("usage")))
     except Exception:  # noqa: BLE001 - a malformed answer is a typed failure
-        return ProgressVerdict(failure=JudgeFailure.INVALID_ANSWER)
+        return timed(ProgressVerdict(failure=JudgeFailure.INVALID_ANSWER))
 
 
 @dataclass(frozen=True)
@@ -494,6 +511,17 @@ def log_progress_check(
         "failure": verdict.failure.value if verdict.failure is not None else None,
         "would_reap": event.would_reap,
         "reaped": event.reaped,
+        # Without Jev nothing reaps a worker; `should_reap` is the rule that
+        # reads Jev's readings, so it names Jev's action.
+        **side_fields(
+            PROGRESS_ACTIONS, baseline_action="continue",
+            jev_action=(None if verdict.failure is not None
+                        else "reap" if event.would_reap else "continue"),
+            question_version=question_version(
+                PROGRESS_QUESTIONS, build_progress_questions(),
+            ),
+        ),
+        **request_fields(verdict.latency_ms, verdict.usage),
     })
     _append(repo, payload, name=PROGRESS_LOG_NAME)
 
@@ -512,6 +540,12 @@ def log_progress_window(
         "checks": event.checks,
         "would_reap": event.would_reap,
         "reaped": event.reaped,
+        # The window summarizes its checks and asks nothing itself.
+        **side_fields(
+            PROGRESS_ACTIONS, baseline_action="continue",
+            jev_action="reap" if event.would_reap else "continue",
+        ),
+        **request_fields(None, None),
     })
     _append(repo, payload, name=PROGRESS_LOG_NAME)
 

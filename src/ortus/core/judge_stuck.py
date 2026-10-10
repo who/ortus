@@ -21,7 +21,9 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from ortus.core.judge import JudgeConfig
-from ortus.core.judge_log import _append, _clean_metadata, _common
+from ortus.core.judge_log import (
+    _append, _clean_metadata, _common, request_fields, side_fields,
+)
 from ortus.core.judge_post import Outcome, OutcomeVerdict
 
 
@@ -72,6 +74,9 @@ _ADVANCED_PULL = 0.5
 #: this claim. A directive that did not work the first time is weak evidence
 #: for a second one.
 _REPLAN_STEP = 0.6
+
+
+STUCK_ACTIONS = frozenset(action.value for action in StuckAction)
 
 
 @dataclass(frozen=True)
@@ -200,5 +205,13 @@ def log_stuck_decision(
         "vector": decision.vector(),
         "action": decision.action.value,
         "effective_action": applied.value,
+        # The stuck vector is derived from the post-turn verdict, so this site
+        # asks no question and makes no request of its own.
+        **side_fields(
+            STUCK_ACTIONS,
+            baseline_action=baseline_stuck_action(decision.windows).value,
+            jev_action=None if decision.fail_open else decision.action.value,
+        ),
+        **request_fields(None, None),
     })
     _append(repo, payload)

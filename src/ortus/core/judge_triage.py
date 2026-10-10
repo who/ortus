@@ -30,18 +30,22 @@ import asyncio
 import json
 import os
 import re
+import time
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from uuid import UUID, uuid4
 
 from ortus.core.judge import JudgeConfig, JudgeMode, JudgePhase
-from ortus.core.judge_log import _append, _clean_metadata, _common
+from ortus.core.judge_log import (
+    _append, _clean_metadata, _common, question_version, request_fields, side_fields,
+)
 from ortus.core.judge_state import StateError, pack_state, sanitize_field
 from ortus.core.judge_typesafe import (
-    API_KEY_ENV, JudgeFailure, _answer, _default_client, _Invalid, _mapping,
+    API_KEY_ENV, JudgeFailure, JudgeUsage, _answer, _default_client, _Invalid,
+    _mapping, _usage,
 )
 from ortus.core.pin_skew import PIN_SKEW_LABEL, classify_plan_gap
 from ortus.core.readiness import validate_issue
@@ -78,6 +82,7 @@ class TriageClass(str, Enum):
 _CLASSES: tuple[TriageClass, ...] = (
     TriageClass.NEEDS_HUMAN, TriageClass.PIN_SKEW, TriageClass.PLANNER_FIX,
 )
+TRIAGE_CLASSES = frozenset(entry.value for entry in TriageClass)
 
 
 class _Tracker(Protocol):
@@ -109,6 +114,10 @@ class TriageVector:
     fail_open: bool = False
     regex_hit: bool = False
     failure: JudgeFailure | None = None
+    #: Request cost, for the log only, and left out of equality: two readings
+    #: of the same park compare equal however long each request took.
+    latency_ms: float | None = field(default=None, compare=False)
+    usage: JudgeUsage | None = field(default=None, compare=False)
 
     def vector(self) -> dict[str, float]:
         """The probability vector keyed by class value, log-ready."""
@@ -141,6 +150,10 @@ def route_triage(vector: TriageVector) -> TriageClass:
         _CLASSES,
         key=lambda entry: (weights[entry.value], -_CLASSES.index(entry)),
     )
+
+
+#: The triage question set's name in a record's `question_version`.
+TRIAGE_QUESTIONS = "triage-v1"
 
 
 def build_triage_questions() -> dict:
@@ -224,6 +237,11 @@ def triage_parked(
     if not env.get(API_KEY_ENV, "").strip():
         return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
                         failure=JudgeFailure.KEY_MISSING)
+    started = time.monotonic()
+
+    def timed(vector: TriageVector, usage: JudgeUsage | None = None) -> TriageVector:
+        return replace(vector, usage=usage,
+                       latency_ms=max((time.monotonic() - started) * 1000.0, 0.0))
 
     async def ask() -> object:
         async with AsyncExitStack() as stack:
@@ -242,14 +260,14 @@ def triage_parked(
     try:
         response = asyncio.run(bounded())
     except ImportError:
-        return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
-                        failure=JudgeFailure.SDK_MISSING)
+        return timed(_certain(TriageClass.NEEDS_HUMAN, fail_open=True,
+                              failure=JudgeFailure.SDK_MISSING))
     except asyncio.TimeoutError:
-        return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
-                        failure=JudgeFailure.TIMEOUT)
+        return timed(_certain(TriageClass.NEEDS_HUMAN, fail_open=True,
+                              failure=JudgeFailure.TIMEOUT))
     except Exception:  # noqa: BLE001 - provider prose never escapes
-        return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
-                        failure=JudgeFailure.SERVICE_ERROR)
+        return timed(_certain(TriageClass.NEEDS_HUMAN, fail_open=True,
+                              failure=JudgeFailure.SERVICE_ERROR))
     try:
         dump = getattr(response, "model_dump", None)
         body = _mapping(dump(mode="json") if callable(dump) else response)
@@ -267,8 +285,8 @@ def triage_parked(
         if type(confidence) not in (int, float) or not 0.0 <= float(confidence) <= 1.0:
             raise _Invalid
     except Exception:  # noqa: BLE001 - a malformed answer is a park, not a route
-        return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
-                        failure=JudgeFailure.INVALID_ANSWER)
+        return timed(_certain(TriageClass.NEEDS_HUMAN, fail_open=True,
+                              failure=JudgeFailure.INVALID_ANSWER))
     # The answer's confidence lands on the class it argues for and the rest
     # spreads uniformly, so a zero-confidence answer is the uniform vector —
     # which the tie rule reads as the park it already was.
@@ -277,11 +295,11 @@ def triage_parked(
         entry: spread + (float(confidence) if entry is chosen else 0.0)
         for entry in _CLASSES
     }
-    return TriageVector(
+    return timed(TriageVector(
         p_pin_skew=weights[TriageClass.PIN_SKEW],
         p_planner_fix=weights[TriageClass.PLANNER_FIX],
         p_needs_human=weights[TriageClass.NEEDS_HUMAN],
-    )
+    ), _usage(body.get("usage")))
 
 
 def pin_directive_section(evidence: str) -> str:
@@ -374,6 +392,18 @@ def log_triage(
         "triage_failure": vector.failure.value if vector.failure is not None else None,
         "triage_class": decided.value,
         "effective_action": applied.value,
+        # Without Jev a regex hit routes and anything else stays parked.
+        **side_fields(
+            TRIAGE_CLASSES,
+            baseline_action=(decided.value if vector.regex_hit
+                             else TriageClass.NEEDS_HUMAN.value),
+            jev_action=(None if vector.regex_hit or vector.fail_open
+                        else route_triage(vector).value),
+            question_version=(None if vector.regex_hit or not config.enabled
+                              else question_version(TRIAGE_QUESTIONS,
+                                                    build_triage_questions())),
+        ),
+        **request_fields(vector.latency_ms, vector.usage),
     })
     _append(repo, payload)
 

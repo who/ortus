@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -29,8 +30,10 @@ from ortus.core.judge import (
     GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgeMode, JudgePhase,
 )
 from ortus.core.judge import JudgeRoute
-from ortus.core.judge_state import TRUNCATABLE_FIELDS, StateError, sanitize_field
-from ortus.core.judge_tools import ToolAction
+from ortus.core.judge_state import (
+    TRUNCATABLE_FIELDS, StateError, environment_secrets, sanitize_field,
+)
+from ortus.core.judge_tools import ToolAction, _screened, cap_command
 from ortus.core.judge_typesafe import JudgeFailure, JudgeUsage
 
 MAX_EVENT_BYTES = 8192
@@ -46,6 +49,16 @@ TOOL_ACTIONS = frozenset(action.value for action in ToolAction)
 #: already validates. `run_id` and `decision_id` join a routing record back to
 #: the gate decision and its outcome.
 ROUTE_LOG_NAME = "jev-model-routes.jsonl"
+
+#: Longest tool command a `tool_decision` record carries, whatever `tool_cap`
+#: says. Four bytes a character at worst keeps the record well inside
+#: MAX_EVENT_BYTES beside every other field.
+MAX_COMMAND_CHARS = 1024
+
+#: `<question set>-v<n>:<first 16 hex of the resolved-question hash>`. The
+#: name says which wording a decision answered and the hash which resolution
+#: of it, so a reworded question never scores against the old one's labels.
+QUESTION_VERSION = re.compile(r"[a-z][a-z0-9-]{0,47}-v\d+:[a-f0-9]{16}")
 
 
 class LogFailure(str, Enum):
@@ -127,6 +140,9 @@ class ModelRouteEvent:
     action_risk: float | None = None
     difficulty: float | None = None
     applied: bool = True
+    #: The tier the vectors argue for, before a profile that cannot be mapped
+    #: sends the bead back to baseline; None when no answers reached the router.
+    jev_tier: str | None = None
 
 
 def elapsed_ms(started_at: float) -> float:
@@ -184,6 +200,69 @@ def _usage(usage: JudgeUsage | None) -> dict:
     }
 
 
+def question_version(name: str, questions: Mapping[str, object]) -> str:
+    """The version string one site's resolved questions log under."""
+    digest = hashlib.sha256(json.dumps(
+        questions, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()).hexdigest()
+    version = f"{name}:{digest[:16]}"
+    if not QUESTION_VERSION.fullmatch(version):
+        _invalid()
+    return version
+
+
+def side_fields(
+    vocabulary: frozenset[str] | set[str], *,
+    baseline_action: str | None, jev_action: str | None,
+    question_version: str | None = None, option_order: object = None,
+    options: frozenset[str] | set[str] | None = None,
+) -> dict:
+    """The comparison fields every Jev record kind may carry beside its own.
+
+    `baseline_action` is what plain code did or would have done and
+    `jev_action` what the site's own argmax reads off Jev's answer, both drawn
+    from the site's action vocabulary so neither can carry prose. Either is
+    null where it has no meaning: no answer, or no baseline. `option_order`
+    lists the choice options in the order they were presented, drawn from
+    `options` when the question's choices are not the site's actions.
+    """
+    for action in (baseline_action, jev_action):
+        if action is not None and action not in vocabulary:
+            _invalid()
+    if question_version is not None and (
+        not isinstance(question_version, str)
+        or not QUESTION_VERSION.fullmatch(question_version)
+    ):
+        _invalid()
+    if option_order is not None:
+        known = vocabulary if options is None else options
+        if not isinstance(option_order, (list, tuple)) or any(
+            not isinstance(name, str) or name not in known for name in option_order
+        ) or len(set(option_order)) != len(option_order):
+            _invalid()
+        option_order = list(option_order)
+    return {
+        "baseline_action": baseline_action,
+        "jev_action": jev_action,
+        "question_version": question_version,
+        "option_order": option_order,
+    }
+
+
+def request_fields(latency_ms: float | None, usage: JudgeUsage | None) -> dict:
+    """Latency and token counts for a site whose record did not carry them.
+
+    All three are null when no request was made; a request that failed still
+    has a latency and no usage.
+    """
+    counts = _usage(usage)
+    return {
+        "latency_ms": None if latency_ms is None else _number(latency_ms),
+        "input_tokens": counts["input_tokens"],
+        "output_tokens": counts["output_tokens"],
+    }
+
+
 def _clean_metadata(
     value: str, config: JudgeConfig, environ: Mapping[str, str] | None = None,
 ) -> str | None:
@@ -215,6 +294,18 @@ def _truncated_fields(value: object) -> list[str]:
     if len(set(names)) != len(names) or any(name not in TRUNCATABLE_FIELDS for name in names):
         _invalid()
     return names
+
+
+GATE_ACTIONS = frozenset(action.value for action in GateAction)
+#: `RouterTier` values, named here because importing the router module pulls in
+#: every backend runner.
+ROUTER_TIERS = frozenset({"cheap", "baseline", "frontier"})
+
+
+def _criteria_version(version: str, digest: str) -> str | None:
+    """The gate's question version, from the criteria fields it already logs."""
+    candidate = f"{version}:{digest[:16]}"
+    return candidate if QUESTION_VERSION.fullmatch(candidate) else None
 
 
 def _decision_payload(
@@ -268,6 +359,13 @@ def _decision_payload(
         "failure": _enum(event.failure, JudgeFailure) if event.failure is not None else None,
         "truncated_fields": _truncated_fields(event.truncated_fields),
         **_usage(event.usage),
+        # Without the judge, grind claims the bead it selected; the gate's own
+        # action is what Jev's answers argue for, and a failure argues nothing.
+        **side_fields(
+            GATE_ACTIONS, baseline_action=GateAction.PROCEED.value,
+            jev_action=action if answers is not None else None,
+            question_version=_criteria_version(event.criteria_version, event.criteria_hash),
+        ),
     })
     if config.mode == JudgeMode.SHADOW:
         payload.update({
@@ -364,7 +462,8 @@ def write_tool_decision(
     the ones local policy answered without a request: a phase whose refusals
     were previously visible only in a worker transcript is a phase nobody can
     tune. The record names the tool, its local reason or its vector, and what
-    the hook applied — never an argument, a target or a provider string.
+    the hook applied — never a provider string. The one argument it may carry
+    is `command`, which the hook redacted and this screens and caps again.
     """
     if not isinstance(record, Mapping):
         _invalid()
@@ -383,6 +482,9 @@ def write_tool_decision(
     ):
         _invalid()
     usage = JudgeUsage(*counts) if all(type(c) is int for c in counts) else None
+    command = record.get("command")
+    if command is not None and not isinstance(command, str):
+        _invalid()
     payload = _common("tool_decision", run_id, uuid4())
     payload.update({
         "phase": "pre_tool", "mode": config.mode.value,
@@ -397,8 +499,32 @@ def write_tool_decision(
         "latency_ms": _number(record.get("latency_ms", 0)),
         **_usage(usage),
     })
+    if command is not None:
+        # The hook already redacted and bounded it; screening the text again
+        # here means a hook from another version cannot widen what is logged.
+        payload["command"] = _screened_command(command, config)
+    if any(key in record for key in SIDE_KEYS):
+        payload.update(side_fields(
+            TOOL_ACTIONS, baseline_action=record.get("baseline_action"),
+            jev_action=record.get("jev_action"),
+            question_version=record.get("question_version"),
+            option_order=record.get("option_order"),
+        ))
     _append(repo, payload)
     return UUID(payload["decision_id"])
+
+
+#: The side fields a hook record may carry; a hook that predates them omits
+#: all of them and its record is logged in the old shape.
+SIDE_KEYS = ("baseline_action", "jev_action", "question_version", "option_order")
+
+
+def _screened_command(command: str, config: JudgeConfig) -> str:
+    secrets = environment_secrets()
+    return cap_command(
+        _screened(command, config, secrets, cap=len(command)) if command else "",
+        min(config.tool_cap, MAX_COMMAND_CHARS),
+    )
 
 
 def write_model_route(
@@ -444,6 +570,11 @@ def write_model_route(
                 ("difficulty", event.difficulty),
             )
         },
+        # The router asks nothing of its own; it reads the gate's answers.
+        **side_fields(
+            ROUTER_TIERS, baseline_action="baseline", jev_action=event.jev_tier,
+        ),
+        **request_fields(None, None),
     })
     _append(repo, payload, name=ROUTE_LOG_NAME)
     output.progress("grind", f"judge route tier={payload['tier']} "

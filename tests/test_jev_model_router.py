@@ -322,7 +322,11 @@ def test_logging_records_vectors_model_effort_bead_and_backend(tmp_path, capsys)
         "schema_version", "event", "timestamp", "run_id", "decision_id", "seat",
         "issue_id", "backend", "tier", "reason", "model", "reasoning_effort",
         "needs_frontier", "action_risk", "difficulty", "applied",
+        "baseline_action", "jev_action", "question_version", "option_order",
+        "latency_ms", "input_tokens", "output_tokens",
     }
+    assert record["baseline_action"] == "baseline"
+    assert record["latency_ms"] is record["input_tokens"] is None
     # An enforcing launch is the applied case; a shadow seat is not.
     assert record["applied"] is True
     assert record["event"] == "model_route"

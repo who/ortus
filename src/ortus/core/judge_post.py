@@ -4,8 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -16,12 +17,14 @@ from ortus.core.user_env import judge_environment
 
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode, JudgePhase
 from ortus.core.judge_log import (
-    OutcomeStatus, _append, _clean_metadata, _common,
+    OutcomeStatus, _append, _clean_metadata, _common, question_version,
+    request_fields, side_fields,
 )
 from ortus.core.judge_state import StateError, pack_state
 from ortus.core.worker_failure import WorkerFailure
 from ortus.core.judge_typesafe import (
-    API_KEY_ENV, JudgeFailure, _answer, _default_client, _Invalid, _mapping, _number,
+    API_KEY_ENV, JudgeFailure, JudgeUsage, _answer, _default_client, _Invalid,
+    _mapping, _number, _usage,
 )
 
 
@@ -70,6 +73,10 @@ class OutcomeVerdict:
     outcome: Outcome | None = None
     confidence: float | None = None
     failure: JudgeFailure | None = None
+    #: Request cost, for the log only. Left out of equality so two verdicts
+    #: that say the same thing compare equal however long each one took.
+    latency_ms: float | None = field(default=None, compare=False)
+    usage: JudgeUsage | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if self.failure is not None:
@@ -83,6 +90,12 @@ class OutcomeVerdict:
                 _number(self.confidence, 1)
             except _Invalid:
                 raise ValueError("invalid outcome confidence") from None
+
+
+#: The post_turn question set's name in a record's `question_version`.
+OUTCOME_QUESTIONS = "post-turn-v1"
+#: What the post_turn site does with a live window outside shadow.
+POST_ACTIONS = frozenset({"human", "preserve"})
 
 
 def build_outcome_questions() -> dict:
@@ -121,6 +134,11 @@ def evaluate_outcome(
     env = os.environ if environ is None else environ
     if not env.get(API_KEY_ENV, "").strip():
         return OutcomeVerdict(failure=JudgeFailure.KEY_MISSING)
+    started = time.monotonic()
+
+    def timed(verdict: OutcomeVerdict, usage: JudgeUsage | None = None) -> OutcomeVerdict:
+        return replace(verdict, usage=usage,
+                       latency_ms=max((time.monotonic() - started) * 1000.0, 0.0))
 
     async def ask() -> object:
         async with AsyncExitStack() as stack:
@@ -138,11 +156,11 @@ def evaluate_outcome(
     try:
         response = asyncio.run(bounded())
     except ImportError:
-        return OutcomeVerdict(failure=JudgeFailure.SDK_MISSING)
+        return timed(OutcomeVerdict(failure=JudgeFailure.SDK_MISSING))
     except asyncio.TimeoutError:
-        return OutcomeVerdict(failure=JudgeFailure.TIMEOUT)
+        return timed(OutcomeVerdict(failure=JudgeFailure.TIMEOUT))
     except Exception:  # noqa: BLE001 - provider prose never escapes
-        return OutcomeVerdict(failure=JudgeFailure.SERVICE_ERROR)
+        return timed(OutcomeVerdict(failure=JudgeFailure.SERVICE_ERROR))
     try:
         dump = getattr(response, "model_dump", None)
         body = _mapping(dump(mode="json") if callable(dump) else response)
@@ -155,9 +173,10 @@ def evaluate_outcome(
         choice = answer.get("choice")
         if not isinstance(choice, str):
             raise _Invalid
-        return OutcomeVerdict(Outcome(choice), _number(answer.get("confidence"), 1))
+        return timed(OutcomeVerdict(Outcome(choice), _number(answer.get("confidence"), 1)),
+                     _usage(body.get("usage")))
     except Exception:  # noqa: BLE001 - malformed response is a typed failure
-        return OutcomeVerdict(failure=JudgeFailure.INVALID_ANSWER)
+        return timed(OutcomeVerdict(failure=JudgeFailure.INVALID_ANSWER))
 
 
 def apply_outcome(
@@ -208,6 +227,18 @@ def apply_outcome(
         "disagreement": verdict.outcome == Outcome.DONE and status != OutcomeStatus.CLOSED,
         "worker_failure": (observation.worker_failure.value
                            if observation.worker_failure is not None else None),
+        # The baseline keeps the tracker's result. Jev's action is the one
+        # this function takes on its answer outside shadow; a failure argues
+        # for nothing, whatever the failure mode then applies.
+        **side_fields(
+            POST_ACTIONS, baseline_action="preserve",
+            jev_action=None if verdict.failure is not None
+            else "human" if human else "preserve",
+            question_version=question_version(
+                OUTCOME_QUESTIONS, build_outcome_questions(),
+            ),
+        ),
+        **request_fields(verdict.latency_ms, verdict.usage),
     })
     _append(repo, payload)
     if human and not shadow:

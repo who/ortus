@@ -296,15 +296,19 @@ def test_park_only_on_park_bead_and_one_call_on_deny(run_context, monkeypatch, c
         assert record["vector"] == {"allow": 0.1, "deny_call": 0.5, "park_bead": 0.4}
 
 
-def test_every_decision_publishes_one_record_with_no_arguments(run_context, monkeypatch):
+def test_every_decision_publishes_one_record_with_only_its_command(run_context, monkeypatch):
     path, data = run_context
     assert invoke(monkeypatch, data, tool_name="Bash",
                   tool_input={"command": "cat SECRET-FILE && pwd"}) == 0
     records = list(path.parent.glob("tool-*.json"))
     assert len(records) == 1
     raw = records[0].read_text()
-    assert "SECRET-FILE" not in raw
     record = json.loads(raw)
+    # The redacted command is the one place any argument may appear.
+    assert record.pop("command") == "cat SECRET-FILE && pwd"
+    assert "SECRET-FILE" not in json.dumps(record)
+    assert record["baseline_action"] == "allow"
+    assert record["jev_action"] is None
     assert record["tool"] == "Bash"
     assert (record["action"], record["effective_action"]) == ("allow", "allow")
     assert record["reason"] == "service_failure"

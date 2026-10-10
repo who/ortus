@@ -27,8 +27,11 @@ from typing import BinaryIO, Mapping
 
 from ortus.core.config import Config
 from ortus.core.judge import JudgeConfig, JudgeMode, parse_judge_config
+from ortus.core.judge_log import question_version
+from ortus.core.judge_state import environment_secrets
 from ortus.core.judge_tools import (
-    MAX_INPUT_BYTES, ToolAction, ToolDecision, ToolInput, decide_tool, inspect_tool,
+    MAX_INPUT_BYTES, ToolAction, ToolDecision, ToolInput, build_tool_questions,
+    decide_tool, inspect_tool, redacted_command,
 )
 from ortus.core.output import progress
 
@@ -190,18 +193,42 @@ def write_human_signal(context: HookContext) -> None:
     _publish(context, "human", {"reason": HookReason.NEEDS_HUMAN.value})
 
 
+#: The pre_tool question set's name in a record's `question_version`.
+TOOL_QUESTIONS = "pre-tool-v1"
+
+
 def write_tool_record(
     context: HookContext, tool: str, decision: ToolDecision, applied: ToolAction,
+    *, call: ToolInput | None = None, local: bool = False,
 ) -> None:
     """Publish what this call was decided as, for the parent to log.
 
     The hook cannot append to the repository's decision log — the worker owns
     that tree — so it records the outcome in the same inbox the parent already
     reads. Every decision is recorded, including the allowed ones and the ones
-    local policy answered with no request, and none of them carries any part of
-    the call's arguments.
+    local policy answered with no request. With ``call`` the record also
+    carries :func:`redacted_command` — the command with secrets, sensitive
+    paths and heredoc bodies replaced, capped at `tool_cap` — and the
+    comparison fields: the baseline lets every call local policy passes, and
+    Jev's action is the argmax of its vector when it has one.
     """
     usage = decision.usage
+    extra: dict[str, object] = {}
+    if call is not None:
+        vector = decision.vector()
+        extra = {
+            "command": redacted_command(
+                call, context.config, (context.repo, *context.allowed_roots),
+                environment_secrets(),
+            ),
+            "baseline_action": (decision.action.value if local
+                                else ToolAction.ALLOW.value),
+            "jev_action": decision.action.value if vector is not None else None,
+            "question_version": None if local else question_version(
+                TOOL_QUESTIONS, build_tool_questions(context.config),
+            ),
+            "option_order": None,
+        }
     _publish(context, "tool", {
         "reason": decision.reason,
         "tool": tool[:TOOL_NAME_CAP],
@@ -212,6 +239,7 @@ def write_tool_record(
         "latency_ms": round(decision.latency_ms, 3),
         "input_tokens": usage.input_tokens if usage is not None else None,
         "output_tokens": usage.output_tokens if usage is not None else None,
+        **extra,
     })
 
 
@@ -261,7 +289,8 @@ def main() -> int:
         if applied not in set(ToolAction):
             return _deny(HookReason.INTERNAL_FAILURE, 2)
         try:
-            write_tool_record(context, tool.name, decision, applied)
+            write_tool_record(context, tool.name, decision, applied,
+                              call=tool, local=local)
         except Exception:  # noqa: BLE001 - a record is evidence, not a verdict
             # A record that cannot be published is a logging fault. It must not
             # turn an allowed call into a refusal or a refusal into a pass.

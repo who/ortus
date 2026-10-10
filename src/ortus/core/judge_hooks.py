@@ -34,6 +34,11 @@ _TOOL_FIELDS = frozenset({
     "reason", "tool", "action", "effective_action", "vector", "failure",
     "latency_ms", "input_tokens", "output_tokens",
 })
+#: Fields a hook that records the command and comparison fields adds. All of
+#: them or none: a record from a hook predating them is still logged.
+_TOOL_SIDE_FIELDS = frozenset({
+    "command", "baseline_action", "jev_action", "question_version", "option_order",
+})
 
 
 def check_pre_tool(repo: Path, backend: str, *, docker: bool = False) -> None:
@@ -191,7 +196,9 @@ class HookRun:
                 self.seen.add(match[2])
                 self.requested = True
             else:
-                if set(body) != set(identity) | _TOOL_FIELDS or any(
+                if set(body) - _TOOL_SIDE_FIELDS != set(identity) | _TOOL_FIELDS or (
+                    set(body) & _TOOL_SIDE_FIELDS not in (set(), _TOOL_SIDE_FIELDS)
+                ) or any(
                     body[key] != value for key, value in identity.items()
                 ):
                     continue
