@@ -33,9 +33,22 @@ def observation(status='in_progress', watchdog=False):
     return WorkerOutcome(143 if watchdog else 0, watchdog, OutcomeStatus(status), False)
 
 
+#: The post-v2 noul each legacy outcome is read off; `continue` is none of them.
+OUTCOME_NOULS = {'done': 'work_complete', 'plan_gap': 'spec_gap',
+                 'flake': 'transient_failure', 'auth': 'needs_operator_credential_or_decision',
+                 'needs_human': 'needs_operator_credential_or_decision'}
+
+
 def response(choice='continue', confidence=.9):
+    """A post-v2 answer set arguing for `choice`, with `confidence` as its basis."""
+    values = dict.fromkeys(('work_complete', 'transient_failure',
+                            'needs_operator_credential_or_decision', 'spec_gap'), .1)
+    values[OUTCOME_NOULS.get(choice, choice)] = .9
+    if choice == 'continue':
+        del values['continue']
+    values['has_basis'] = confidence
     return {'model': 'jev-1.13.0', 'answers': {
-        'outcome': {'type': 'choice', 'choice': choice, 'confidence': confidence}}}
+        name: {'type': 'noul', 'noul': value} for name, value in values.items()}}
 
 
 def post_turn_events(gate):
@@ -68,13 +81,17 @@ def test_single_choice_and_sanitized_facts(choice):
              'log_tail': 'raw transcript', 'notes': 'secret-test-credential'}
     verdict = evaluate_outcome(issue, observation(), config, environ=ENV,
                                client_factory=lambda _: client(response(choice), calls))
-    assert verdict == OutcomeVerdict(choice, .9)
+    # Credentials and operator decisions are one narrow question now.
+    expected = Outcome.NEEDS_HUMAN if choice == Outcome.AUTH else choice
+    assert verdict == OutcomeVerdict(expected, .9)
     assert len(calls) == 1
     args, kwargs = calls[0]
-    assert set(args[1]) == {'outcome'}
-    assert set(args[1]['outcome']['criteria']) == {x.value for x in Outcome}
-    assert args[0]['phase'] == 'post_turn'
-    assert args[0]['worker'] == observation().payload()
+    assert set(args[1]) == {'work_complete', 'transient_failure', 'spec_gap',
+                            'needs_operator_credential_or_decision', 'has_basis'}
+    assert all(question['type'] == 'noul' for question in args[1].values())
+    assert set(args[0]) == {'facts', 'untrusted'}
+    assert args[0]['facts']['phase'] == 'post_turn'
+    assert args[0]['facts']['worker'] == observation().facts()
     wire = json.dumps(args[0])
     assert all(text not in wire for text in ('private details', 'raw transcript', ENV['TYPESAFE_API_KEY']))
     assert kwargs['timeout'] == config.timeout_seconds

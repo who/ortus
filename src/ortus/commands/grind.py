@@ -142,7 +142,8 @@ from ortus.core.judge_log import (
 )
 from ortus.core.judge_policy import decide_pre_turn
 from ortus.core.judge_progress import (
-    ProgressMode, ProgressWatch, WindowOutcome, progress_interval, progress_mode,
+    ProgressMode, ProgressWatch, WindowOutcome, last_check_result,
+    progress_interval, progress_mode,
 )
 from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
 from ortus.core.judge_post import (
@@ -3525,6 +3526,9 @@ def grind(
                             worker_failure=(
                                 window_failure.failure
                                 if window_failure is not None else None
+                            ),
+                            last_check=last_check_result(
+                                log, start_offset=phase_offset
                             ),
                         )
                         verdict = evaluate_outcome(packet, observation, judge_config)

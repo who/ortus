@@ -314,6 +314,26 @@ def _transport_state(state: JudgeState, config: JudgeConfig | None = None) -> di
     return payload
 
 
+def packed_split(
+    packed: Mapping[str, object], facts: Mapping[str, Any],
+    untrusted: Mapping[str, Any],
+) -> dict[str, Any]:
+    """A packed issue state plus one site's own facts and text, as two blocks.
+
+    The packer's metadata and spec facts join the site's code-computed facts
+    in the trusted block; the issue text joins the site's untrusted text.
+    """
+    flat = dict(packed)
+    spec = flat.pop("facts", {})
+    text = {key: flat.pop(key) for key in _UNTRUSTED if key in flat}
+    return split_state({**flat, **(spec if isinstance(spec, Mapping) else {}), **facts},
+                       {**text, **untrusted})
+
+
+#: Bytes the trusted/untrusted wrapper adds around a packed state.
+SPLIT_OVERHEAD = 64
+
+
 def _mapping(value: object) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
         raise _Invalid

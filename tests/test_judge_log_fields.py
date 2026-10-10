@@ -198,13 +198,13 @@ def test_fields_on_post_turn_stuck_and_triage(tmp_path):
     post, stuck, triage = validated(tmp_path)
     assert SIDE | REQUEST <= set(post) and SIDE | REQUEST <= set(stuck)
     assert (post["baseline_action"], post["jev_action"]) == ("preserve", "human")
-    assert post["question_version"].startswith("post-turn-v1:")
+    assert post["question_version"].startswith("post-v2:")
     assert (post["latency_ms"], post["input_tokens"], post["output_tokens"]) == (250.0, 400, 12)
     assert stuck["baseline_action"] == "escalate"
     assert stuck["jev_action"] == decision.action.value
     assert stuck["latency_ms"] is stuck["input_tokens"] is stuck["question_version"] is None
     assert (triage["baseline_action"], triage["jev_action"]) == ("needs_human", "planner_fix")
-    assert triage["question_version"].startswith("triage-v1:")
+    assert triage["question_version"].startswith("triage-v2:")
     assert (triage["latency_ms"], triage["input_tokens"]) == (90.0, 200)
 
 
@@ -242,7 +242,7 @@ def test_fields_on_progress_and_model_route(tmp_path):
     ))
     (check,) = lines(tmp_path, PROGRESS_LOG_NAME)
     assert (check["baseline_action"], check["jev_action"]) == ("continue", "reap")
-    assert check["question_version"].startswith("progress-v1:")
+    assert check["question_version"].startswith("progress-v2:")
     assert (check["latency_ms"], check["input_tokens"]) == (70.0, 50)
     write_model_route(tmp_path, CONFIG, ModelRouteEvent(
         uuid4(), uuid4(), "product", "demo-1", "claude", "baseline", "unmappable_profile",

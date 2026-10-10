@@ -70,7 +70,7 @@ OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
 #: before the taxonomy existed is still a valid version-1 record, so the field
 #: widens the accepted shape instead of bumping the schema out from under the
 #: readers that already consume these files.
-POST_SIDE = {"worker_failure"}
+POST_SIDE = {"worker_failure", "narrow_answers", "soft_bands"}
 #: The issue-text fields the packer shortened for this request. Optional for
 #: the same reason: a decision written before truncation existed carries no
 #: such list and is still a valid version-1 record.
@@ -82,6 +82,8 @@ COMPARISON_SIDE = {"baseline_action", "jev_action", "question_version", "option_
 #: Request cost for the kinds whose required fields never carried it. Null
 #: when the site made no request.
 REQUEST_SIDE = {"latency_ms", "input_tokens", "output_tokens"}
+#: The narrow answers a triage record's vector was read off, and their bands.
+NARROW_SIDE = {"narrow_answers", "soft_bands"}
 #: The bounded, redacted command a pre_tool record may carry.
 TOOL_SIDE = {"command", "narrow_answers", "soft_bands"}
 #: Each kind's action vocabulary for `baseline_action` and `jev_action`, and
@@ -143,7 +145,7 @@ def _vocabularies(kind: str) -> tuple[set[str], set[str]]:
     if kind == "stuck_decision":
         return STUCK_ACTIONS, STUCK_ACTIONS
     if kind == "triage":
-        return TRIAGE_CLASSES, TRIAGE_CLASSES
+        return TRIAGE_CLASSES, TRIAGE_CLASSES | {"none"}
     return TOOL_ACTIONS, TOOL_ACTIONS
 
 
@@ -198,7 +200,8 @@ def validate_event(value: object) -> dict:
               TOOL if kind == "tool_decision" else set())
     optional = (POST_SIDE | COMPARISON_SIDE | REQUEST_SIDE if kind == "post_turn"
                 else DECISION_SIDE | COMPARISON_SIDE if kind == "decision"
-                else COMPARISON_SIDE | REQUEST_SIDE if kind in ("stuck_decision", "triage")
+                else COMPARISON_SIDE | REQUEST_SIDE if kind == "stuck_decision"
+                else COMPARISON_SIDE | REQUEST_SIDE | NARROW_SIDE if kind == "triage"
                 else COMPARISON_SIDE | TOOL_SIDE if kind == "tool_decision" else set())
     _require(bool(fields) and fields <= set(e) <= fields | optional)
     _uuid(e["run_id"])
@@ -319,7 +322,8 @@ def validate_event(value: object) -> dict:
         _require(e["confidence"] is None if e["failure"] else _number(e["confidence"], 1))
         _require(_choice(e["effective_action"], {"baseline"} if shadow else {"human", "preserve"}))
         _require(_choice(e["reason"], {"classified", "tracker_closed", "worker_timeout",
-                 "service_failure", "low_confidence", "closure_disagreement", "plan_gap", "auth", "needs_human"}))
+                 "service_failure", "low_confidence", "closure_disagreement", "plan_gap", "auth", "needs_human",
+                 "no_basis"}))
         _require(_choice(e.get("worker_failure"), WORKER_FAILURES, nullable=True))
     return e
 

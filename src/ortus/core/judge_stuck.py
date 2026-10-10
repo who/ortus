@@ -128,9 +128,12 @@ def decide_stuck_claim(
     how many re-plan directives it has already been given. A missing verdict,
     a typed judge failure and an answerless verdict all fail open to
     :func:`baseline_stuck_action`, which is why a disabled Jev changes
-    nothing. Otherwise the verdict's confidence lands on the class its choice
+    nothing. Otherwise the verdict's confidence lands on the class its outcome
     argues for and the rest spreads uniformly, so zero confidence is the
-    uniform vector rather than a park; the window count then moves mass off
+    uniform vector rather than a park. A post-v2 verdict's outcome is derived
+    from its narrow answers and its confidence is their basis answer, so an
+    answer set with little real basis shrinks toward uniform the same way a
+    hedged pick did. The window count then moves mass off
     continue, a spent re-plan moves mass off replan, and an advanced
     integration branch pulls mass back to continue.
     """

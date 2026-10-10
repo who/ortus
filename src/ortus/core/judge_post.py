@@ -17,14 +17,17 @@ from ortus.core.user_env import judge_environment
 
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode, JudgePhase
 from ortus.core.judge_log import (
-    OutcomeStatus, _append, _clean_metadata, _common, question_version,
-    request_fields, side_fields,
+    OutcomeStatus, _append, _clean_metadata, _common, narrow_fields,
+    question_version, request_fields, side_fields,
+)
+from ortus.core.judge_questions import (
+    HAS_BASIS, basis_question, has_basis, noul_question,
 )
 from ortus.core.judge_state import StateError, pack_state
 from ortus.core.worker_failure import WorkerFailure
 from ortus.core.judge_typesafe import (
-    API_KEY_ENV, JudgeFailure, JudgeUsage, _answer, _default_client, _Invalid,
-    _mapping, _number, _usage,
+    API_KEY_ENV, SPLIT_OVERHEAD, JudgeFailure, JudgeUsage, _default_client,
+    _Invalid, _mapping, _narrow, _number, _usage, packed_split,
 )
 
 
@@ -35,6 +38,11 @@ class Outcome(str, Enum):
     AUTH = "auth"
     NEEDS_HUMAN = "needs_human"
     CONTINUE = "continue"
+
+
+#: What the last test or check command of a window read; see
+#: `judge_progress.last_check_result`.
+CHECK_RESULTS = frozenset({"pass", "fail", "none-run"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,8 @@ class WorkerOutcome:
     #: killed the worker, and a replay that has to tell a sandbox refusal from
     #: a low-confidence verdict needs both.
     worker_failure: WorkerFailure | None = None
+    #: The window's last test or check result, when the caller read the log.
+    last_check: str | None = None
 
     def __post_init__(self) -> None:
         if (type(self.exit_status) is not int
@@ -56,16 +66,27 @@ class WorkerOutcome:
                 or type(self.branch_advanced) is not bool
                 or not isinstance(self.observed_status, OutcomeStatus)
                 or not (self.worker_failure is None
-                        or isinstance(self.worker_failure, WorkerFailure))):
+                        or isinstance(self.worker_failure, WorkerFailure))
+                or not (self.last_check is None or self.last_check in CHECK_RESULTS)):
             raise ValueError("invalid worker outcome")
 
     def payload(self) -> dict:
-        """The typed facts the judge is asked about. The failure class is not
-        among them: it is recorded beside the verdict, never put to the model,
-        so a mechanical death cannot steer a judgment about the work."""
+        """The typed facts a post_turn record carries in its own fields."""
         return {"exit_status": self.exit_status, "watchdog": self.watchdog,
                 "observed_status": self.observed_status.value,
                 "branch_advanced": self.branch_advanced}
+
+    def facts(self) -> dict:
+        """The trusted facts the questions are asked over.
+
+        The failure class travels as a fact: a narrow transient-failure
+        question is answered better knowing the window died of a sandbox
+        refusal than guessing it from the tracker status.
+        """
+        return {**self.payload(),
+                "worker_failure": (self.worker_failure.value
+                                   if self.worker_failure is not None else None),
+                "last_check": self.last_check}
 
 
 @dataclass(frozen=True)
@@ -77,6 +98,8 @@ class OutcomeVerdict:
     #: that say the same thing compare equal however long each one took.
     latency_ms: float | None = field(default=None, compare=False)
     usage: JudgeUsage | None = field(default=None, compare=False)
+    #: The narrow answers the outcome was derived from, keyed by question name.
+    narrow: Mapping[str, float] | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         if self.failure is not None:
@@ -93,24 +116,78 @@ class OutcomeVerdict:
 
 
 #: The post_turn question set's name in a record's `question_version`.
-OUTCOME_QUESTIONS = "post-turn-v1"
+OUTCOME_QUESTIONS = "post-v2"
 #: What the post_turn site does with a live window outside shadow.
 POST_ACTIONS = frozenset({"human", "preserve"})
 
+#: The narrow questions, one worker window each.
+WORK_COMPLETE = "work_complete"
+TRANSIENT_FAILURE = "transient_failure"
+NEEDS_OPERATOR = "needs_operator_credential_or_decision"
+SPEC_GAP = "spec_gap"
+
+#: Legacy outcome precedence, most consequential first. The first question
+#: answered yes names the outcome; none answered yes is `continue`.
+_PRECEDENCE: tuple[tuple[str, Outcome], ...] = (
+    (NEEDS_OPERATOR, Outcome.NEEDS_HUMAN),
+    (SPEC_GAP, Outcome.PLAN_GAP),
+    (TRANSIENT_FAILURE, Outcome.FLAKE),
+    (WORK_COMPLETE, Outcome.DONE),
+)
+
 
 def build_outcome_questions() -> dict:
-    return {"outcome": {
-        "type": "choice",
-        "instructions": "Classify the observed worker outcome without granting completion.",
-        "criteria": {
-            "done": {"description": "The tracker records completed work."},
-            "plan_gap": {"description": "The work specification needs an operator decision."},
-            "flake": {"description": "A transient failure interrupted the worker."},
-            "auth": {"description": "Authentication or access requires operator handling."},
-            "needs_human": {"description": "The worker cannot safely proceed without a human."},
-            "continue": {"description": "Incomplete work can continue in a fresh window."},
-        },
-    }}
+    """Four narrow yes/nos about one ended worker window, plus their basis.
+
+    Each replaces one branch of the old six-way pick, so a window can read as
+    neither complete nor failed without being forced into a class.
+    """
+    return {
+        WORK_COMPLETE: noul_question(
+            "Do the facts show this issue's work complete?",
+            ["The tracker status is closed, or the branch advanced and the last "
+             "check passed with nothing left unfinished in the issue text."],
+            ["The tracker status is open or in progress and the facts show "
+             "unfinished work or a failing check."],
+        ),
+        TRANSIENT_FAILURE: noul_question(
+            "Did a transient failure, not the work itself, end this window?",
+            ["The worker failure class or exit status names a timeout, a "
+             "provider error, or a killed process."],
+            ["The window ended normally, or the failure would recur on a retry."],
+        ),
+        NEEDS_OPERATOR: noul_question(
+            "Does the next step need an operator to supply a credential, an "
+            "access grant, or a product decision?",
+            ["The worker failure class names authentication, or the issue text "
+             "asks for a decision no worker is allowed to make."],
+            ["Another worker window could proceed with what it already has."],
+        ),
+        SPEC_GAP: noul_question(
+            "Is the work specification itself missing or contradicting what "
+            "the worker needs?",
+            ["A required section is absent, or two sections contradict each other."],
+            ["The specification is complete enough to keep working from."],
+        ),
+        HAS_BASIS: basis_question("these answers about this worker window"),
+    }
+
+
+def derive_outcome(narrow: Mapping[str, float]) -> Outcome:
+    """The legacy outcome the narrow answers argue for, by fixed precedence."""
+    return next((outcome for name, outcome in _PRECEDENCE if narrow[name] >= 0.5),
+                Outcome.CONTINUE)
+
+
+def _verdict(narrow: Mapping[str, float]) -> OutcomeVerdict:
+    """The verdict one answer set reads as: its derived outcome at its basis."""
+    return OutcomeVerdict(derive_outcome(narrow), float(narrow[HAS_BASIS]),
+                          narrow=dict(narrow))
+
+
+def _no_basis(verdict: OutcomeVerdict) -> bool:
+    """Whether an answered verdict claims no real basis for its outcome."""
+    return verdict.narrow is not None and not has_basis(verdict.narrow)
 
 
 def evaluate_outcome(
@@ -118,17 +195,18 @@ def evaluate_outcome(
     *, environ: Mapping[str, str] | None = None,
     client_factory: Callable[[JudgeConfig], Any] = _default_client,
 ) -> OutcomeVerdict:
-    """Send one bounded Choice request with sanitized state and typed facts only."""
+    """Send the narrow questions with typed facts trusted and issue text not."""
     environ = judge_environment(environ)
-    # Reserve space for the facts as well as the issue envelope.
-    facts = {"worker": observation.payload()}
+    # Reserve space for the facts and the block wrapper as well as the issue.
+    facts = {"worker": observation.facts()}
     overhead = len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode())
-    budget = config.total_bytes_cap - overhead
+    budget = config.total_bytes_cap - overhead - SPLIT_OVERHEAD
     if budget <= 0:
         raise StateError("judge outcome state budget is too small")
     packed = pack_state(issue, replace(config, total_bytes_cap=budget),
                         phase=JudgePhase.POST_TURN, environ=environ)
-    payload = {**packed.to_payload(), **facts}
+    payload = packed_split(packed.to_payload(), facts, {})
+    questions = build_outcome_questions()
     if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) > config.total_bytes_cap:
         raise StateError("judge outcome state budget is too small")
     env = os.environ if environ is None else environ
@@ -147,7 +225,7 @@ def evaluate_outcome(
                 client = await stack.enter_async_context(client)
             elif hasattr(client, "aclose"):
                 stack.push_async_callback(client.aclose)
-            return await client.system_one(payload, build_outcome_questions(),
+            return await client.system_one(payload, questions,
                                            model=config.model, timeout=config.timeout_seconds)
 
     async def bounded() -> object:
@@ -166,15 +244,8 @@ def evaluate_outcome(
         body = _mapping(dump(mode="json") if callable(dump) else response)
         if body.get("model") != config.model:
             raise _Invalid
-        answers = _mapping(body.get("answers"))
-        if set(answers) != {"outcome"}:
-            raise _Invalid
-        answer = _answer(answers, "outcome", "choice")
-        choice = answer.get("choice")
-        if not isinstance(choice, str):
-            raise _Invalid
-        return timed(OutcomeVerdict(Outcome(choice), _number(answer.get("confidence"), 1)),
-                     _usage(body.get("usage")))
+        narrow = _narrow(_mapping(body.get("answers")), questions)
+        return timed(_verdict(narrow), _usage(body.get("usage")))
     except Exception:  # noqa: BLE001 - malformed response is a typed failure
         return timed(OutcomeVerdict(failure=JudgeFailure.INVALID_ANSWER))
 
@@ -201,6 +272,10 @@ def apply_outcome(
     elif verdict.failure is not None:
         human = config.failure_mode == FailureMode.CLOSED
         reason = "service_failure"
+    elif _no_basis(verdict):
+        # An answer that claims no basis falls to the code baseline: keep the
+        # tracker's result and let the stuck rule read the near-uniform vector.
+        reason = "no_basis"
     # No confidence floor. An unsure answer is still an answer about the work,
     # and parking a bead on it spent an operator every time the model hedged.
     # The confidence now travels to `decide_stuck_claim`, where it shrinks the
@@ -238,6 +313,7 @@ def apply_outcome(
                 OUTCOME_QUESTIONS, build_outcome_questions(),
             ),
         ),
+        **narrow_fields(verdict.narrow),
         **request_fields(verdict.latency_ms, verdict.usage),
     })
     _append(repo, payload)
@@ -250,4 +326,6 @@ def apply_outcome(
             prefix = "PLAN-GAP: " if reason == "plan_gap" else ""
             bd.add_comment(issue_id, f"{prefix}judge post_turn requires human handling: {reason}")
     output.progress("grind", f"judge post_turn {reason}")
-    return not shadow and (human or verdict.outcome in (Outcome.FLAKE, Outcome.CONTINUE))
+    return not shadow and (human or (
+        not _no_basis(verdict) and verdict.outcome in (Outcome.FLAKE, Outcome.CONTINUE)
+    ))

@@ -40,12 +40,16 @@ from uuid import UUID, uuid4
 
 from ortus.core.judge import JudgeConfig, JudgeMode, JudgePhase
 from ortus.core.judge_log import (
-    _append, _clean_metadata, _common, question_version, request_fields, side_fields,
+    _append, _clean_metadata, _common, narrow_fields, question_version,
+    request_fields, side_fields,
+)
+from ortus.core.judge_questions import (
+    HAS_BASIS, NONE, basis_question, has_basis, shuffled_choice, with_none,
 )
 from ortus.core.judge_state import StateError, pack_state, sanitize_field
 from ortus.core.judge_typesafe import (
-    API_KEY_ENV, JudgeFailure, JudgeUsage, _answer, _default_client, _Invalid,
-    _mapping, _usage,
+    API_KEY_ENV, SPLIT_OVERHEAD, JudgeFailure, JudgeUsage, _default_client,
+    _Invalid, _mapping, _narrow, _usage, packed_split,
 )
 from ortus.core.pin_skew import PIN_SKEW_LABEL, classify_plan_gap
 from ortus.core.readiness import validate_issue
@@ -83,6 +87,8 @@ _CLASSES: tuple[TriageClass, ...] = (
     TriageClass.NEEDS_HUMAN, TriageClass.PIN_SKEW, TriageClass.PLANNER_FIX,
 )
 TRIAGE_CLASSES = frozenset(entry.value for entry in TriageClass)
+#: The options the triage choice presents: every class, and `none`.
+TRIAGE_OPTIONS = TRIAGE_CLASSES | {NONE}
 
 
 class _Tracker(Protocol):
@@ -118,6 +124,10 @@ class TriageVector:
     #: of the same park compare equal however long each request took.
     latency_ms: float | None = field(default=None, compare=False)
     usage: JudgeUsage | None = field(default=None, compare=False)
+    #: The narrow answers the vector was read off, and the option order the
+    #: choice presented, for the log only.
+    narrow: Mapping[str, Any] | None = field(default=None, compare=False)
+    option_order: tuple[str, ...] = field(default=(), compare=False)
 
     def vector(self) -> dict[str, float]:
         """The probability vector keyed by class value, log-ready."""
@@ -153,34 +163,44 @@ def route_triage(vector: TriageVector) -> TriageClass:
 
 
 #: The triage question set's name in a record's `question_version`.
-TRIAGE_QUESTIONS = "triage-v1"
+TRIAGE_QUESTIONS = "triage-v2"
+TRIAGE_QUESTION = "triage"
 
 
-def build_triage_questions() -> dict:
-    """The single choice question a parked bead is classified by."""
-    return {"triage": {
-        "type": "choice",
-        "instructions": (
-            "Classify why this issue is parked. Do not grant that the work is "
-            "ready or that it should be worked next."
-        ),
-        "criteria": {
-            TriageClass.PIN_SKEW.value: {"description": (
-                "A declared version, date, or toolchain value exceeds what the "
-                "installed tool supports; lowering the declared value and "
-                "filing a restore issue resolves it."
-            )},
-            TriageClass.PLANNER_FIX.value: {"description": (
-                "The work specification itself is incomplete or malformed, and "
-                "re-writing its sections resolves it without any decision only "
-                "an operator can make."
-            )},
-            TriageClass.NEEDS_HUMAN.value: {"description": (
-                "An operator must supply a credential, an access grant, or a "
-                "product decision before any worker can proceed."
-            )},
+def build_triage_questions(seed: str = "") -> dict:
+    """One shuffled choice a parked bead is classified by, plus its basis.
+
+    The options are the three classes and `none`, presented in an order
+    seeded by the bead, so a tie never resolves to whichever class was listed
+    first. The version hash sorts keys, so the order never changes it.
+    """
+    options, _ = shuffled_choice(with_none({
+        TriageClass.PIN_SKEW.value: {"description": (
+            "A declared version, date, or toolchain value exceeds what the "
+            "installed tool supports; lowering the declared value and "
+            "filing a restore issue resolves it."
+        )},
+        TriageClass.PLANNER_FIX.value: {"description": (
+            "The work specification itself is incomplete or malformed, and "
+            "re-writing its sections resolves it without any decision only "
+            "an operator can make."
+        )},
+        TriageClass.NEEDS_HUMAN.value: {"description": (
+            "An operator must supply a credential, an access grant, or a "
+            "product decision before any worker can proceed."
+        )},
+    }), seed)
+    return {
+        TRIAGE_QUESTION: {
+            "type": "choice",
+            "instructions": (
+                "Classify why this issue is parked. Do not grant that the work "
+                "is ready or that it should be worked next."
+            ),
+            "criteria": options,
         },
-    }}
+        HAS_BASIS: basis_question("this classification of the park"),
+    }
 
 
 def _clean_evidence(
@@ -208,18 +228,23 @@ def triage_parked(
     *, environ: Mapping[str, str] | None = None,
     client_factory: Callable[[JudgeConfig], Any] = _default_client,
 ) -> TriageVector:
-    """Send one bounded Choice request with sanitized state and the park's evidence.
+    """Send one bounded choice request: regex result trusted, park text not.
 
     Every failure — no key, no SDK, a timeout, a malformed answer — returns
     the fail-open vector, which argues for the human queue the bead is
     already in. The caller never has to distinguish "the judge said park it"
     from "nothing answered": both keep today's behaviour, and the record says
-    which one happened.
+    which one happened. A `none` pick, or a basis answer below 0.5, is an
+    answer and reads as the same baseline park.
     """
     environ = judge_environment(environ)
-    facts = {"park": {"evidence": _clean_evidence(evidence, config, environ)}}
-    overhead = len(json.dumps(facts, ensure_ascii=False, separators=(",", ":")).encode())
-    budget = config.total_bytes_cap - overhead
+    regex = classify_plan_gap(evidence)
+    facts = {"pin_skew_regex": {"pin_able": regex.pin_able,
+                                "evidence": list(regex.evidence)}}
+    untrusted = {"park_evidence": _clean_evidence(evidence, config, environ)}
+    overhead = len(json.dumps({**facts, **untrusted}, ensure_ascii=False,
+                              separators=(",", ":")).encode())
+    budget = config.total_bytes_cap - overhead - SPLIT_OVERHEAD
     if budget <= 0:
         return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
                         failure=JudgeFailure.INVALID_ANSWER)
@@ -229,10 +254,12 @@ def triage_parked(
     except StateError:
         return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
                         failure=JudgeFailure.INVALID_ANSWER)
-    payload = {**packed.to_payload(), **facts}
+    payload = packed_split(packed.to_payload(), facts, untrusted)
     if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()) > config.total_bytes_cap:
         return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
                         failure=JudgeFailure.INVALID_ANSWER)
+    questions = build_triage_questions(str(issue.get("id") or ""))
+    order = tuple(questions[TRIAGE_QUESTION]["criteria"])
     env = os.environ if environ is None else environ
     if not env.get(API_KEY_ENV, "").strip():
         return _certain(TriageClass.NEEDS_HUMAN, fail_open=True,
@@ -250,7 +277,7 @@ def triage_parked(
                 client = await stack.enter_async_context(client)
             elif hasattr(client, "aclose"):
                 stack.push_async_callback(client.aclose)
-            return await client.system_one(payload, build_triage_questions(),
+            return await client.system_one(payload, questions,
                                            model=config.model,
                                            timeout=config.timeout_seconds)
 
@@ -273,20 +300,18 @@ def triage_parked(
         body = _mapping(dump(mode="json") if callable(dump) else response)
         if body.get("model") != config.model:
             raise _Invalid
-        answers = _mapping(body.get("answers"))
-        if set(answers) != {"triage"}:
-            raise _Invalid
-        answer = _answer(answers, "triage", "choice")
-        choice = answer.get("choice")
-        if not isinstance(choice, str):
-            raise _Invalid
-        chosen = TriageClass(choice)
-        confidence = answer.get("confidence")
-        if type(confidence) not in (int, float) or not 0.0 <= float(confidence) <= 1.0:
-            raise _Invalid
+        narrow = _narrow(_mapping(body.get("answers")), questions)
+        choice = narrow[TRIAGE_QUESTION]
+        confidence = narrow[f"{TRIAGE_QUESTION}_confidence"]
     except Exception:  # noqa: BLE001 - a malformed answer is a park, not a route
         return timed(_certain(TriageClass.NEEDS_HUMAN, fail_open=True,
                               failure=JudgeFailure.INVALID_ANSWER))
+    usage = _usage(body.get("usage"))
+    if choice == NONE or not has_basis(narrow):
+        # No class with a basis: the answer reads as the park the bead is in.
+        return timed(_certain(TriageClass.NEEDS_HUMAN, narrow=narrow,
+                              option_order=order), usage)
+    chosen = TriageClass(choice)
     # The answer's confidence lands on the class it argues for and the rest
     # spreads uniformly, so a zero-confidence answer is the uniform vector —
     # which the tie rule reads as the park it already was.
@@ -299,7 +324,8 @@ def triage_parked(
         p_pin_skew=weights[TriageClass.PIN_SKEW],
         p_planner_fix=weights[TriageClass.PLANNER_FIX],
         p_needs_human=weights[TriageClass.NEEDS_HUMAN],
-    ), _usage(body.get("usage")))
+        narrow=narrow, option_order=order,
+    ), usage)
 
 
 def pin_directive_section(evidence: str) -> str:
@@ -402,7 +428,9 @@ def log_triage(
             question_version=(None if vector.regex_hit or not config.enabled
                               else question_version(TRIAGE_QUESTIONS,
                                                     build_triage_questions())),
+            option_order=vector.option_order or None, options=TRIAGE_OPTIONS,
         ),
+        **narrow_fields(vector.narrow, TRIAGE_OPTIONS),
         **request_fields(vector.latency_ms, vector.usage),
     })
     _append(repo, payload)

@@ -56,10 +56,13 @@ CONFIG = JudgeConfig(enabled=True, include_log_tail=True)
 INTERVAL = 300.0
 
 
-def noul(value: float) -> dict:
-    """One well-formed answer to the looping question."""
-    return {"model": "jev-1.13.0",
-            "answers": {"looping": {"type": "noul", "noul": value}}}
+def noul(value: float, basis: float = 1.0) -> dict:
+    """One well-formed progress-v2 answer set reading `value` as looping."""
+    return {"model": "jev-1.13.0", "answers": {
+        "same_failure_repeating": {"type": "noul", "noul": value},
+        "no_new_artifacts_by_facts": {"type": "noul", "noul": value},
+        "has_basis": {"type": "noul", "noul": basis},
+    }}
 
 
 def facts(elapsed: float = 12.0, advanced: bool = False) -> WorkerProgress:
@@ -230,12 +233,14 @@ def test_request_carries_the_facts_and_nothing_else() -> None:
         "worker: reading the same file again", facts(), CONFIG,
         environ=ENV, client_factory=lambda _: client([noul(0.4)], calls),
     )
-    assert verdict == ProgressVerdict(0.4, 0.6, 0.6)
+    assert verdict == ProgressVerdict(0.4, 0.6, 1.0)
     args, kwargs = calls[0]
-    assert args[0] == {"worker": facts().payload(),
-                       "log_tail": "worker: reading the same file again"}
-    assert set(args[1]) == {"looping"}
-    assert args[1]["looping"]["type"] == "noul"
+    assert args[0] == {"facts": facts().payload(),
+                       "untrusted": {"log_tail": "worker: reading the same file again"}}
+    assert set(args[1]) == {
+        "same_failure_repeating", "no_new_artifacts_by_facts", "has_basis",
+    }
+    assert all(question["type"] == "noul" for question in args[1].values())
     assert kwargs["timeout"] == CONFIG.timeout_seconds
 
 
