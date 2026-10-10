@@ -514,6 +514,24 @@ above. Neither rollback discards work or interrupts a running worker.
 
 ## Independent phases and troubleshooting
 
+`judge.collect = true`, or `ORTUS_JEV_COLLECT=1` for one run, is collection
+mode: grind treats the seat as enabled and in shadow, asks Jev at every site —
+readiness, the pre-turn route, the model router, pre_tool, progress, stuck,
+triage and post_turn — and applies only the code baseline at each. Tool calls
+go through local policy alone, the progress check never reaps, stuck applies
+`baseline_stuck_action`, triage parks, post_turn preserves the tracker result,
+and the router's tier is logged with `applied=false`. Each record keeps the
+existing shadow shape, Jev's read as `intended_*` or `action` beside the applied
+`effective_*`, and every semantic readiness decision gets a shadow outcome in
+the grind's run so `ortus judge replay` can count it. Collection overrides
+`mode = "enforce"` for the run and says so on its one startup line,
+`judge collect: shadow on <sites>`. The bounded log tail goes to the progress
+check because the operator opted in; `sensitive_paths` and secret screening
+still apply. On a backend or launch that cannot carry the pre_tool hook the line
+reports it unavailable and the other sites still run. The environment beats
+`.ortusrc`, `0` forces collection off, and a value other than `true`, `false`,
+`1` or `0` leaves the configured setting standing.
+
 `judge.pre_tool = true` installs a private, temporary Claude PreToolUse hook
 for the run. Only Claude supports it; Codex, Grok, OpenCode and Docker launches
 fail startup with this option. Disabled Claude hooks or unreadable hook context

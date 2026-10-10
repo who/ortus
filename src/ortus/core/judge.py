@@ -105,6 +105,9 @@ class JudgeConfig:
     include_issue_text: bool = True
     pre_tool: bool = False
     post_turn: bool = False
+    # Log-only collection: grind arms every site in shadow and applies only the
+    # code baseline. See ortus.core.judge_collect for what that arms.
+    collect: bool = False
 
     def allows_issue_text(self, labels: tuple[str, ...]) -> bool:
         """Private issues cannot opt into sending their text."""
@@ -170,6 +173,10 @@ class OrtusJudge(Protocol):
         ...
 
 
+#: Overrides `[judge] collect` for one run; `0` forces collection off.
+COLLECT_ENV = "ORTUS_JEV_COLLECT"
+
+
 def _boolean(key: str, value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -222,8 +229,17 @@ def _parse_judge_values(
         values["enabled"] = judge
     elif "ORTUS_JUDGE_ENABLED" in env:
         values["enabled"] = env["ORTUS_JUDGE_ENABLED"]
+    # An export that cannot be read leaves the configured value standing, the
+    # rule jev_router_enabled follows, so a typo never arms or disarms a run.
+    if COLLECT_ENV in env:
+        try:
+            values["collect"] = _boolean("collect", env[COLLECT_ENV].strip().lower())
+        except ProfileError:
+            pass
 
-    for key in ("enabled", "pre_tool", "post_turn", "include_issue_text", "include_log_tail"):
+    for key in (
+        "enabled", "pre_tool", "post_turn", "include_issue_text", "include_log_tail", "collect",
+    ):
         values[key] = _boolean(key, values[key])
     for key, enum in (
         ("failure_mode", FailureMode), ("low_confidence", LowConfidence),

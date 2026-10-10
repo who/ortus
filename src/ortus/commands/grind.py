@@ -132,6 +132,9 @@ from ortus.core.judge import (
 )
 from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
+from ortus.core.judge_collect import (
+    collecting_config, collection_arming, collection_note,
+)
 from ortus.core.judge_hooks import HookRun, check_pre_tool
 from ortus.core.judge_log import (
     DecisionEvent, JudgeLogError, ModelRouteEvent, OutcomeEvent, OutcomeStatus,
@@ -2120,6 +2123,14 @@ def grind(
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
         judge_config = parse_judge_config(config, judge=judge, judge_seat=judge_seat)
+        # Collection arms every site in shadow before anything below reads the
+        # seat, so each site takes its existing shadow path: Jev's answer is
+        # logged and the code baseline is what runs.
+        collect_arming = collection_arming(
+            target, judge_config, resolved_backend, docker=docker,
+        )
+        collect_note = collection_note(judge_config, collect_arming) if collect_arming else ""
+        judge_config = collecting_config(judge_config, collect_arming)
         enforce_judge = judge_config.enabled and judge_config.mode == JudgeMode.ENFORCE
         bind_worker = enforce_judge or judge_config.pre_tool
         if judge_config.pre_tool:
@@ -2127,7 +2138,7 @@ def grind(
         # The looping-worker signal, resolved once per run. It needs the mode
         # and the log-tail opt-in together: the tail is worker transcript text,
         # and no vector is worth sending it without the operator having said so.
-        reaper_mode = progress_mode(config)
+        reaper_mode = ProgressMode.SHADOW if collect_arming else progress_mode(config)
         reaper_interval = progress_interval(config)
         withheld = ""
         if reaper_mode is not ProgressMode.OFF:
@@ -2144,6 +2155,8 @@ def grind(
             reaper_note = f"{reaper_mode.value}, every {int(reaper_interval)}s"
             if not dry_run:
                 output.progress("grind", f"loop reaper {reaper_note}")
+        if collect_note and not dry_run:
+            output.progress("grind", collect_note)
         prompt_audit = audit_enabled(config)
         prompt_variant_note = audit_note(config)
         stable_prefix = stable_prefix_enabled(config)
@@ -2256,6 +2269,8 @@ def grind(
             f"failure={judge_config.failure_mode.value} "
             f"seat={judge_config.seat} timeout={judge_config.timeout_seconds}s"
         )
+        if collect_note:
+            output.info(collect_note)
         if judge_config.pre_tool:
             output.info("judge pre_tool: enabled (Claude run-scoped hook)")
         if judge_config.post_turn:
@@ -2678,6 +2693,7 @@ def grind(
             while True:
                 gate_turn = None
                 shadow_decision_id = None
+                readiness_decision_id = None
                 # Milestone rollover: an epic whose children are all closed
                 # is finished work, not a claimable unit — close it here so
                 # the next milestone's subtree unblocks and this iteration
@@ -2937,9 +2953,13 @@ def grind(
                     iteration_pin = _pin_directive_for(
                         bd, target_issue, write_log
                     )
-                    semantic_advice = readiness_context(
-                        evaluate_readiness(target, target_issue, judge_config)
+                    readiness_advice = evaluate_readiness(
+                        target, target_issue, judge_config,
+                        run_id=gate_run_id if collect_arming else None,
                     )
+                    semantic_advice = readiness_context(readiness_advice)
+                    if collect_arming and (readiness_advice or {}).get("decision_id"):
+                        readiness_decision_id = UUID(readiness_advice["decision_id"])
                     if judge_config.enabled and judge_config.mode == JudgeMode.SHADOW:
                         shadow_decision_id = _shadow_turn(
                             packet=target_issue, repo=target, config=config,
@@ -3255,10 +3275,14 @@ def grind(
                             hook_run.escalate(bd)
                         finally:
                             hook_run.close()
-                    if shadow_decision_id is not None:
+                    for observed_decision_id in (
+                        shadow_decision_id, readiness_decision_id,
+                    ):
+                        if observed_decision_id is None:
+                            continue
                         _shadow_outcome(
                             bd=bd, repo=target, config=judge_config, run_id=gate_run_id,
-                            decision_id=shadow_decision_id, observed_id=issue_id,
+                            decision_id=observed_decision_id, observed_id=issue_id,
                             before_claims=before.in_progress_ids,
                             before_closed=before_closed_ids,
                             resumed_id=issue_id if resuming else None,

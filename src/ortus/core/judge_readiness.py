@@ -7,7 +7,7 @@ import time
 from copy import deepcopy
 from dataclasses import asdict, replace
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from ortus.core import output
 from ortus.core.config import load_config
@@ -66,8 +66,14 @@ def readiness_questions(config: JudgeConfig, state: JudgeState) -> dict:
 
 def evaluate_readiness(
     repo: Path, issue: dict, config: JudgeConfig | None = None,
+    *, run_id: UUID | None = None,
 ) -> dict | None:
-    """Return screened advice; never change readiness, tracker state or routing."""
+    """Return screened advice; never change readiness, tracker state or routing.
+
+    A grind passes its own `run_id` so the shadow outcome it writes for this
+    decision after the worker exits pairs with it in replay; other callers
+    have no worker to observe and get a fresh id.
+    """
     report = validate_issue(issue)
     if not report.ready or report.exempt:
         return None
@@ -96,7 +102,7 @@ def evaluate_readiness(
         baseline = next(route for route in config.routes if route in WORKER_ROUTES)
         reason = GateReason.SERVICE_FAILURE if verdict.failure else GateReason.ROUTED
         decision_id = write_decision(repo, config, DecisionEvent(
-            run_id=uuid4(), seat=state.seat, issue_id=state.issue_id, phase=state.phase,
+            run_id=run_id or uuid4(), seat=state.seat, issue_id=state.issue_id, phase=state.phase,
             answers=verdict.answers, decision=GateDecision(GateAction.PROCEED, baseline, reason),
             model=config.model, criteria_version=state.criteria_version,
             criteria_hash=state.criteria_hash, latency_ms=elapsed_ms(started),
