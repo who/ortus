@@ -123,8 +123,14 @@ See [runtime prompts](prompts.md).
 Export validated, deduplicated judge events using only the logger's allowed
 fields. `--output`, `--force`.
 
-### `ortus judge replay <input>`
+### `ortus judge outcomes <repo>`
+
+Snapshot tracker outcomes read-only for the issues the Jev logs name.
+`--output`, `--log`, `--force`.
+
+### `ortus judge replay <input>...`
 
 Calculate accuracy, latency, coverage and measured costs without rerunning the
-judge. `--labels`, `--output`, `--thresholds`, `--force`. See
-[the judge pilot](judge.md).
+judge. `--labels`, `--outcomes`, `--tool-labels`, `--output`, `--thresholds`,
+`--force`. See [the judge pilot](judge.md) and
+[the preregistered rule](jev-prereg.md).

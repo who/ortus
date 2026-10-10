@@ -148,6 +148,7 @@ The full key reference, per-phase profiles, and the prototype verification bar a
 - [CodeGraph lifecycle](docs/codegraph.md) — the three policies, the index, troubleshooting
 - [Runtime prompts](docs/prompts.md) — `ortus prompt list/show/eject` and resolution order
 - [Judge pilot](docs/judge.md) — the optional Jev gate, its evidence, export and replay
+- [Jev preregistered rule](docs/jev-prereg.md) — the keep, drop or scrap thresholds replay computes
 - [Glossary](docs/glossary.md) — the vocabulary log lines and prompt contracts use
 - [Test gate](docs/testing.md) — changed-path selection, verifier expansion, release smoke
 - [Label state machine](docs/labels.md) — the interview/PRD label vocabulary

@@ -265,6 +265,16 @@ the recorded answers and reported under `calibration`. That is the calibration
 loop: propose bands, score them offline, then decide by hand whether to adopt
 one.
 
+`ortus judge outcomes <repo> --output <path>` snapshots, through
+`bd --readonly`, what happened to every bead the logs name: final status,
+labels, reopen count, the human flag, closed-at, and spec changes. Passing it to
+`ortus judge replay --outcomes <path>` makes `--labels` optional. Replay then
+reads all three logs (`jev-decisions.jsonl`, `jev-model-routes.jsonl`,
+`jev-progress.jsonl`) and adds a `sites` section that scores each of the eight
+Jev sites against the code baseline and applies
+[the preregistered rule](jev-prereg.md). `--tool-labels` supplies the
+pre_tool allow and deny labels the tracker cannot.
+
 ## Offline evidence and pilot measurements
 
 `tests/fixtures/jev/replay.jsonl` contains synthetic authored responses and

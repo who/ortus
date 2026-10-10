@@ -17,9 +17,10 @@ from uuid import UUID
 
 from ortus.core.judge import WORKER_ROUTES, GateAction, GateReason, JudgeConfig, JudgePhase, JudgeRoute
 from ortus.core.judge_log import (
-    MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, SOFT_BANDS, OutcomeStatus,
+    MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, ROUTER_TIERS, SOFT_BANDS, OutcomeStatus,
     _clean_metadata,
 )
+from ortus.core.judge_progress import _LOGGED_FACTS, PROGRESS_ACTIONS, WindowOutcome
 from ortus.core.judge_state import TRUNCATABLE_FIELDS
 from ortus.core.judge_typesafe import JudgeFailure
 from ortus.core.worker_failure import WorkerFailure
@@ -89,6 +90,23 @@ TOOL_SIDE = {"command", "narrow_answers", "soft_bands"}
 #: Each kind's action vocabulary for `baseline_action` and `jev_action`, and
 #: the choice options its `option_order` may name.
 POST_ACTIONS = {"human", "preserve"}
+#: One bead's model-routing record, from `jev-model-routes.jsonl`.
+ROUTE = COMMON | {
+    "seat", "issue_id", "backend", "tier", "reason", "model", "reasoning_effort",
+    "applied", "needs_frontier", "action_risk", "difficulty",
+}
+#: One progress check and the window it watched, from `jev-progress.jsonl`.
+#: `window_facts` is optional because checks written before the computed
+#: facts existed carry only the thin ones.
+PROGRESS = COMMON | {
+    "phase", "mode", "issue_id", "seat", "model", "elapsed_seconds", "head_advanced",
+    "bead_status", "vector", "confidence", "shrunk_looping", "failure", "would_reap", "reaped",
+}
+PROGRESS_WINDOW = COMMON | {
+    "phase", "mode", "issue_id", "seat", "outcome", "checks", "would_reap", "reaped",
+}
+#: The record kinds each log file holds, so one reader can take any of them.
+SITE_KINDS = {"model_route", "progress", "progress_window"}
 WORKER_FAILURES = {failure.value for failure in WorkerFailure}
 MAX_LABEL_BYTES = 16 * 1024 * 1024
 
@@ -146,6 +164,10 @@ def _vocabularies(kind: str) -> tuple[set[str], set[str]]:
         return STUCK_ACTIONS, STUCK_ACTIONS
     if kind == "triage":
         return TRIAGE_CLASSES, TRIAGE_CLASSES | {"none"}
+    if kind == "model_route":
+        return set(ROUTER_TIERS), set(ROUTER_TIERS)
+    if kind in ("progress", "progress_window"):
+        return set(PROGRESS_ACTIONS), set(PROGRESS_ACTIONS)
     return TOOL_ACTIONS, TOOL_ACTIONS
 
 
@@ -164,7 +186,7 @@ def _side(e: dict, kind: str) -> None:
         _require(order is None or (type(order) is list
                  and all(_choice(name, options) for name in order)
                  and len(set(order)) == len(order)))
-    if kind in ("post_turn", "stuck_decision", "triage"):
+    if kind in ("post_turn", "stuck_decision", "triage", *SITE_KINDS):
         if "latency_ms" in e:
             _require(e["latency_ms"] is None or _number(e["latency_ms"]))
         for key in ("input_tokens", "output_tokens"):
@@ -328,7 +350,81 @@ def validate_event(value: object) -> dict:
     return e
 
 
-def read_events(path: Path, *, warn: Callable[[str], None] = lambda _: None) -> Iterable[dict]:
+def _fact(value: object) -> bool:
+    """One logged window fact: a count, a flag, a short result, or a trend of them."""
+    if value is None or type(value) is bool or _number(value):
+        return True
+    if type(value) is str:
+        return len(value) <= 32 and re.fullmatch(r"[a-z0-9_.-]*", value) is not None
+    return type(value) is list and len(value) <= 16 and all(
+        type(item) is str and _fact(item) for item in value)
+
+
+def validate_site_record(value: object) -> dict:
+    """Validate a routing or progress record against its writer's allowlist."""
+    _require(type(value) is dict)
+    e = value
+    _require(type(e.get("schema_version")) is int and e["schema_version"] == 1)
+    kind = e.get("event")
+    fields = (ROUTE if kind == "model_route" else PROGRESS if kind == "progress"
+              else PROGRESS_WINDOW if kind == "progress_window" else set())
+    optional = COMPARISON_SIDE | REQUEST_SIDE | (
+        {"window_facts"} | NARROW_SIDE if kind == "progress" else set())
+    _require(bool(fields) and fields <= set(e) <= fields | optional)
+    _uuid(e["run_id"])
+    _uuid(e["decision_id"])
+    _require(type(e["timestamp"]) is str and len(e["timestamp"]) <= 40)
+    _require(datetime.fromisoformat(e["timestamp"]).utcoffset() is not None)
+    for name in ("seat", "issue_id", "backend", "reason", "model", "reasoning_effort"):
+        if name in e and not (kind == "progress" and name == "model"):
+            _metadata(e[name])
+    _side(e, kind)
+    if kind == "model_route":
+        _require(_choice(e["tier"], ROUTER_TIERS) and type(e["applied"]) is bool)
+        for key in ("needs_frontier", "action_risk", "difficulty"):
+            _require(e[key] is None or _number(e[key], 1))
+        return e
+    _require(e["phase"] == "progress" and _choice(e["mode"], {"shadow", "enforce"}))
+    _require(type(e["reaped"]) is bool)
+    if kind == "progress_window":
+        _require(_choice(e["outcome"], {o.value for o in WindowOutcome}))
+        for key in ("checks", "would_reap"):
+            _require(type(e[key]) is int and 0 <= e[key] <= 2**31 - 1)
+        return e
+    _require(e["model"] is None or (type(e["model"]) is str
+             and re.fullmatch(r"jev-\d+\.\d+\.\d+", e["model"]) is not None))
+    _require(_choice(e["failure"], JudgeFailure, nullable=True))
+    _require(_number(e["elapsed_seconds"]) and type(e["head_advanced"]) is bool)
+    _require(_choice(e["bead_status"], OutcomeStatus))
+    _require(type(e["would_reap"]) is bool)
+    _require(e["shrunk_looping"] is None or _number(e["shrunk_looping"], 1))
+    vector = e["vector"]
+    _require(type(vector) is dict and set(vector) == {"looping", "progressing"})
+    for key in ("looping", "progressing", "confidence"):
+        number = vector.get(key) if key != "confidence" else e["confidence"]
+        _require(number is None or _number(number, 1))
+    facts = e.get("window_facts")
+    _require(facts is None or (type(facts) is dict and set(facts) <= set(_LOGGED_FACTS)
+                               and all(_fact(v) for v in facts.values())))
+    return e
+
+
+def validate_record(value: object) -> dict:
+    """Validate a record from any of the three Jev logs."""
+    if type(value) is dict and value.get("event") in SITE_KINDS:
+        return validate_site_record(value)
+    return validate_event(value)
+
+
+def read_records(path: Path, *, warn: Callable[[str], None] = lambda _: None) -> Iterable[dict]:
+    """`read_events` over any of the three Jev logs: decisions, routes and progress."""
+    return read_events(path, warn=warn, validate=validate_record)
+
+
+def read_events(
+    path: Path, *, warn: Callable[[str], None] = lambda _: None,
+    validate: Callable[[object], dict] = validate_event,
+) -> Iterable[dict]:
     """Read one bounded line at a time; only a malformed final fragment is skipped."""
     try:
         with path.open("rb") as stream:
@@ -345,7 +441,7 @@ def read_events(path: Path, *, warn: Callable[[str], None] = lambda _: None) -> 
                         return
                     raise ReplayError(f"event line {line_number}: malformed JSON") from None
                 try:
-                    yield validate_event(value)
+                    yield validate(value)
                 except (ValueError, TypeError, AttributeError, KeyError, RuntimeError, RecursionError):
                     raise ReplayError(f"event line {line_number}: invalid version or event shape") from None
     except OSError:
