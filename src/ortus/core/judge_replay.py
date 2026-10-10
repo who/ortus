@@ -17,7 +17,7 @@ from uuid import UUID
 
 from ortus.core.judge import WORKER_ROUTES, GateAction, GateReason, JudgeConfig, JudgePhase, JudgeRoute
 from ortus.core.judge_log import (
-    MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, ROUTER_TIERS, SOFT_BANDS, OutcomeStatus,
+    HOOK_FAILURE, MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, ROUTER_TIERS, SOFT_BANDS, OutcomeStatus,
     _clean_metadata,
 )
 from ortus.core.judge_progress import _LOGGED_FACTS, PROGRESS_ACTIONS, WindowOutcome
@@ -85,8 +85,9 @@ COMPARISON_SIDE = {"baseline_action", "jev_action", "question_version", "option_
 REQUEST_SIDE = {"latency_ms", "input_tokens", "output_tokens"}
 #: The narrow answers a triage record's vector was read off, and their bands.
 NARROW_SIDE = {"narrow_answers", "soft_bands"}
-#: The bounded, redacted command a pre_tool record may carry.
-TOOL_SIDE = {"command", "narrow_answers", "soft_bands"}
+#: The bounded, redacted command a pre_tool record may carry, and the code of
+#: a hook-side failure the hook allowed the call through.
+TOOL_SIDE = {"command", "narrow_answers", "soft_bands", "hook_failure"}
 #: Each kind's action vocabulary for `baseline_action` and `jev_action`, and
 #: the choice options its `option_order` may name.
 POST_ACTIONS = {"human", "preserve"}
@@ -326,12 +327,17 @@ def validate_event(value: object) -> dict:
         _require(vector is None or (type(vector) is dict and set(vector) == TOOL_ACTIONS))
         for value in (vector or {}).values():
             _require(_number(value, 1))
+        hook_failure = e.get("hook_failure")
+        _require(hook_failure is None or (type(hook_failure) is str
+                                          and HOOK_FAILURE.fullmatch(hook_failure) is not None))
         # Local policy answers without a vector and only ever denies the call;
-        # shadow records what a judgment read and applies allow. Those are the
-        # only two ways the applied action differs from the decided one.
-        _require(vector is not None or e["action"] == "deny_call")
-        _require(e["effective_action"] == ("allow" if shadow and vector is not None
-                                           else e["action"]))
+        # a provider failure or a hook-side failure has no vector either.
+        _require(vector is not None or e["action"] == "deny_call"
+                 or e["failure"] is not None or hook_failure is not None)
+        # Shadow applies allow to everything; a log written before shadow
+        # stopped applying local policy still carries the denial it applied.
+        _require(e["effective_action"] == e["action"] or shadow and (
+            e["effective_action"] == "allow"))
     else:
         _require(e["phase"] == "post_turn" and _choice(e["mode"], {"shadow", "enforce"}))
         _require(type(e["exit_status"]) is int)

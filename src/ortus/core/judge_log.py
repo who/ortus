@@ -521,6 +521,11 @@ def write_tool_decision(
     command = record.get("command")
     if command is not None and not isinstance(command, str):
         _invalid()
+    hook_failure = record.get("hook_failure")
+    if hook_failure is not None and (
+        not isinstance(hook_failure, str) or not HOOK_FAILURE.fullmatch(hook_failure)
+    ):
+        _invalid()
     payload = _common("tool_decision", run_id, uuid4())
     payload.update({
         "phase": "pre_tool", "mode": config.mode.value,
@@ -539,6 +544,8 @@ def write_tool_decision(
         # The hook already redacted and bounded it; screening the text again
         # here means a hook from another version cannot widen what is logged.
         payload["command"] = _screened_command(command, config)
+    if hook_failure is not None:
+        payload["hook_failure"] = hook_failure
     if any(key in record for key in SIDE_KEYS):
         payload.update(side_fields(
             TOOL_ACTIONS, baseline_action=record.get("baseline_action"),
@@ -549,6 +556,12 @@ def write_tool_decision(
     payload.update(narrow_fields(record.get("narrow_answers")))
     _append(repo, payload)
     return UUID(payload["decision_id"])
+
+
+#: A hook-side failure code: `invalid_input:<subreason>`, `oversize_input`,
+#: `invalid_context`, `watchdog` or `internal`. Bounded so a record from
+#: another hook version cannot smuggle text into the log through it.
+HOOK_FAILURE = re.compile(r"[a-z_]{1,32}(?::[a-z_]{1,32})?")
 
 
 #: The side fields a hook record may carry; a hook that predates them omits

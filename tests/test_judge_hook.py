@@ -60,6 +60,19 @@ def save(path, data):
     path.write_text(json.dumps(data))
 
 
+def failed_open(capsys, code):
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"done (fail open: {code})" in captured.err
+    return captured
+
+
+def failure_record(path):
+    records = [json.loads(p.read_text()) for p in path.parent.glob("tool-*.json")]
+    assert len(records) == 1
+    return records[0]
+
+
 def test_subprocess_allow_preserves_native_permissions(run_context):
     _, data = run_context
     result = subprocess.run([sys.executable, "-m", "ortus.core.judge_hook"],
@@ -115,15 +128,19 @@ def test_park_signal_contains_only_safe_identity(run_context, monkeypatch, capsy
     assert not list(path.parent.glob("*.tmp"))
 
 
-@pytest.mark.parametrize("changes", [
-    {"session_id": "other"}, {"session_id": None}, {"cwd": "/"},
-    {"cwd": "."}, {"hook_event_name": "PostToolUse"}, {"tool_name": ""},
-    {"tool_use_id": ""}, {"tool_input": []},
+@pytest.mark.parametrize("changes,code", [
+    ({"session_id": "other"}, "session_mismatch"), ({"session_id": None}, "missing_field"),
+    ({"cwd": "/"}, "cwd_outside_repo"), ({"cwd": "."}, "cwd_outside_repo"),
+    ({"hook_event_name": "PostToolUse"}, "hook_event"), ({"tool_name": ""}, "missing_field"),
+    ({"tool_use_id": ""}, "missing_field"), ({"tool_input": []}, "tool_input_type"),
 ])
-def test_bad_hook_schema(run_context, monkeypatch, capsys, changes):
-    _, data = run_context
-    assert invoke(monkeypatch, data, **changes) == 2
-    assert reason(capsys) == "invalid_input"
+def test_bad_hook_schema_fails_open(run_context, monkeypatch, capsys, changes, code):
+    path, data = run_context
+    assert invoke(monkeypatch, data, **changes) == 0
+    failed_open(capsys, f"invalid_input:{code}")
+    record = failure_record(path)
+    assert record["hook_failure"] == f"invalid_input:{code}"
+    assert (record["action"], record["effective_action"]) == ("allow", "allow")
 
 
 @pytest.mark.parametrize("raw", [b"", b"[]", b"null", b"SECRET", b"\xff",
@@ -131,10 +148,11 @@ def test_bad_hook_schema(run_context, monkeypatch, capsys, changes):
                                   b" " * (hook.MAX_INPUT_BYTES + 1)])
 def test_invalid_json_is_bounded_and_not_echoed(run_context, monkeypatch, capsys, raw):
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw)))
-    assert hook.main() == 2
-    captured = capsys.readouterr()
+    assert hook.main() == 0
+    code = ("oversize_input" if len(raw) > hook.MAX_INPUT_BYTES
+            else "invalid_input:malformed_json")
+    captured = failed_open(capsys, code)
     assert "SECRET" not in captured.out + captured.err
-    assert json.loads(captured.out)["hookSpecificOutput"]["permissionDecisionReason"] == "invalid_input"
 
 
 def test_reader_accepts_exact_limit_and_reads_only_sentinel():
@@ -152,11 +170,13 @@ def test_reader_accepts_exact_limit_and_reads_only_sentinel():
     {"session_id": ""}, {"allowed_roots": ["relative"]},
     {"judge": {"endpoint": "https://bad.invalid"}}, {"credential": "SECRET"},
 ])
-def test_invalid_context_fails_closed(run_context, monkeypatch, capsys, change):
+def test_invalid_context_fails_open(run_context, monkeypatch, capsys, change):
     path, data = run_context
     save(path, {**data, **change})
-    assert invoke(monkeypatch, data) == 2
-    assert reason(capsys) == "invalid_context"
+    assert invoke(monkeypatch, data) == 0
+    failed_open(capsys, "invalid_context")
+    # Without a trusted context there is no inbox to record into.
+    assert not list(path.parent.glob("tool-*.json"))
 
 
 @pytest.mark.parametrize("target", ["file", "directory", "symlink", "missing"])
@@ -172,36 +192,35 @@ def test_context_requires_private_regular_file(run_context, monkeypatch, capsys,
         monkeypatch.setenv(hook.CONTEXT_ENV, str(alias))
     else:
         monkeypatch.delenv(hook.CONTEXT_ENV)
-    assert invoke(monkeypatch, data) == 2
-    assert reason(capsys) == "invalid_context"
+    assert invoke(monkeypatch, data) == 0
+    failed_open(capsys, "invalid_context")
 
 
-@pytest.mark.parametrize("mode,expected", [("open", "allow"), ("closed", "denied_call")])
-def test_missing_provider_key_follows_policy(run_context, monkeypatch, capsys, mode, expected):
+@pytest.mark.parametrize("mode", ["open", "closed"])
+def test_missing_provider_key_fails_open_in_every_mode(run_context, monkeypatch, capsys, mode):
     path, data = run_context
     data["judge"]["failure_mode"] = mode
     save(path, data)
     assert invoke(monkeypatch, data) == 0
-    if expected == "allow":
-        assert capsys.readouterr().out == ""
-    else:
-        assert reason(capsys) == expected
+    assert capsys.readouterr().out == ""
+    record = failure_record(path)
+    assert (record["failure"], record["effective_action"]) == ("key_missing", "allow")
     # A provider that never answered says nothing about the bead, so neither
     # failure mode parks it.
     assert not list(path.parent.glob("human-*.json"))
 
 
-def test_internal_failure_never_fails_open_or_leaks(run_context, monkeypatch, capsys):
-    _, data = run_context
+def test_internal_failure_fails_open_without_leaking(run_context, monkeypatch, capsys):
+    path, data = run_context
     def crash(*args, **kwargs):
         print("SECRET")
         print("SECRET", file=sys.stderr)
         raise RuntimeError("SECRET")
     monkeypatch.setattr(hook, "decide_tool", crash)
-    assert invoke(monkeypatch, data) == 2
-    captured = capsys.readouterr()
+    assert invoke(monkeypatch, data) == 0
+    captured = failed_open(capsys, "internal")
     assert "SECRET" not in captured.out + captured.err
-    assert json.loads(captured.out)["hookSpecificOutput"]["permissionDecisionReason"] == "internal_failure"
+    assert "SECRET" not in json.dumps(failure_record(path))
 
 
 def test_watchdog_bypasses_provider_exception_handler(run_context, monkeypatch, capsys):
@@ -213,8 +232,8 @@ def test_watchdog_bypasses_provider_exception_handler(run_context, monkeypatch, 
             return ToolDecision(ToolAction.ALLOW, "service_failure")
     monkeypatch.setattr(hook, "decide_tool", hang)
     monkeypatch.setattr(hook, "WATCHDOG_SECONDS", 0.05)
-    assert invoke(monkeypatch, data) == 2
-    assert reason(capsys) == "watchdog"
+    assert invoke(monkeypatch, data) == 0
+    failed_open(capsys, "watchdog")
 
 
 @pytest.mark.slow
@@ -224,9 +243,9 @@ def test_subprocess_watchdog_covers_idle_stdin(run_context):
                           stderr=subprocess.PIPE, text=True) as child:
         child.wait(timeout=10)
         stdout, stderr = child.communicate()
-    assert child.returncode == 2
-    assert json.loads(stdout)["hookSpecificOutput"]["permissionDecisionReason"] == "watchdog"
-    assert "done (watchdog)" in stderr
+    assert child.returncode == 0
+    assert stdout == ""
+    assert "done (fail open: watchdog)" in stderr
 
 
 def test_park_signal_write_failure_is_blocking(run_context, monkeypatch, capsys):
@@ -268,15 +287,17 @@ def test_shadow_suppresses_model_refusals(run_context, monkeypatch, capsys, acti
     ({"command": "rm -rf /"}, "recursive_root_deletion"),
     ({"command": "git push --force"}, "force_push"),
 ])
-def test_shadow_preserves_local_policy(run_context, monkeypatch, capsys, tool_input, expected):
+def test_shadow_records_local_policy_and_allows(run_context, monkeypatch, capsys,
+                                                tool_input, expected):
     path, data = run_context
     data["judge"]["mode"] = "shadow"
     save(path, data)
     assert invoke(monkeypatch, data, tool_name="Bash", tool_input=tool_input) == 0
-    assert reason(capsys) == "policy_denied"
+    assert capsys.readouterr().out == ""
     record = json.loads(next(path.parent.glob("tool-*.json")).read_text())
     assert record["reason"] == expected
-    assert record["effective_action"] == "deny_call"
+    assert (record["action"], record["baseline_action"]) == ("deny_call", "deny_call")
+    assert record["effective_action"] == "allow"
 
 
 def test_park_only_on_park_bead_and_one_call_on_deny(run_context, monkeypatch, capsys):
@@ -354,13 +375,15 @@ def test_input_cannot_add_allowed_roots(run_context, monkeypatch, capsys):
 
 
 def test_ambient_config_cannot_override_parent_snapshot(run_context, monkeypatch, capsys):
-    path, data = run_context
-    data["judge"]["failure_mode"] = "closed"
-    save(path, data)
+    _, data = run_context
+    # Collection would switch the seat to shadow and allow this call; the
+    # snapshot says enforce, so local policy still refuses it.
+    monkeypatch.setenv("ORTUS_JEV_COLLECT", "1")
     monkeypatch.setenv("ORTUS_JUDGE_ENABLED", "false")
     monkeypatch.setenv("ORTUS_JUDGE_MODEL", "invalid")
-    assert invoke(monkeypatch, data) == 0
-    assert reason(capsys) == "denied_call"
+    assert invoke(monkeypatch, data, tool_name="Bash",
+                  tool_input={"command": "git push --force"}) == 0
+    assert reason(capsys) == "policy_denied"
 
 
 def test_failed_atomic_publish_cleans_temporary_file(run_context, monkeypatch):

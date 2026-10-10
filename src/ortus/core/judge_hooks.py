@@ -42,6 +42,8 @@ _TOOL_SIDE_FIELDS = frozenset({
 })
 #: Present only on a judged call whose answers came back.
 _TOOL_NARROW = "narrow_answers"
+#: Present only on a call the hook failed open on before any decision.
+_TOOL_HOOK_FAILURE = "hook_failure"
 
 
 def check_pre_tool(repo: Path, backend: str, *, docker: bool = False) -> None:
@@ -200,7 +202,9 @@ class HookRun:
                 self.seen.add(match[2])
                 self.requested = True
             else:
-                if set(body) - _TOOL_SIDE_FIELDS - {_TOOL_NARROW} != set(identity) | _TOOL_FIELDS or (
+                if set(body) - _TOOL_SIDE_FIELDS - {_TOOL_NARROW, _TOOL_HOOK_FAILURE} != (
+                    set(identity) | _TOOL_FIELDS
+                ) or (
                     set(body) & _TOOL_SIDE_FIELDS not in (set(), _TOOL_SIDE_FIELDS)
                 ) or any(
                     body[key] != value for key, value in identity.items()

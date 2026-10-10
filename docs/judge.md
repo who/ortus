@@ -575,7 +575,9 @@ above. Neither rollback discards work or interrupts a running worker.
 mode: grind treats the seat as enabled and in shadow, asks Jev at every site —
 readiness, the pre-turn route, the model router, pre_tool, progress, stuck,
 triage and post_turn — and applies only the code baseline at each. Tool calls
-go through local policy alone, the progress check never reaps, stuck applies
+are allowed, with local policy's refusal logged as `baseline_action` rather
+than applied, so the collect arm's workers behave like the hook-less control
+arm's; the progress check never reaps, stuck applies
 `baseline_stuck_action`, triage parks, post_turn preserves the tracker result,
 and the router's tier is logged with `applied=false`. Each record keeps the
 existing shadow shape, Jev's read as `intended_*` or `action` beside the applied
@@ -595,6 +597,23 @@ fail startup with this option. Disabled Claude hooks or unreadable hook context
 also fail before launch. Existing goal hooks remain active. A park signal stops
 the worker and preserves its claim and dirty work for operator review; a denied
 call stops nothing but that call.
+
+Only a decision blocks a call, and only in enforce. The hook fails open — exit
+0 and no `permissionDecision`, so Claude's normal permission flow decides — on
+every hook-side failure in every mode: unparseable or oversize input, a missing
+or invalid context, a session mismatch, a `cwd` outside the repository, a
+missing SDK or key or any other provider failure (whatever `failure_mode` says),
+the watchdog, and an internal error. Each is logged as a `tool_decision` with
+`action` and `effective_action` both `allow` and a bounded code: `failure` for a
+provider that did not answer (`sdk_missing`, `key_missing`, ...), `hook_failure`
+for the rest (`invalid_input:<subreason>`, `oversize_input`, `watchdog`,
+`internal`). A failure that leaves no trusted context, such as
+`invalid_context`, has no inbox to record into and appears only on the hook's
+stderr progress line. The input's `cwd` may be the repository root or any
+directory under it — Claude's Bash tool keeps a `cd`, so after one the worker's
+every call arrives from the subdirectory — and relative operands are resolved
+against that directory. In shadow the hook never denies or parks: local policy
+is logged with `baseline_action = deny_call` and applied as allow.
 
 Local policy in `inspect_tool` stops a short, enumerated list of calls before
 any client is built: a recursive delete of the filesystem root, the repository

@@ -215,8 +215,13 @@ def _operands(argv: list[str]) -> tuple[set[str], list[str]]:
 
 def _delete_reason(
     argv: list[str], root: Path, roots: tuple[Path, ...], home: Path,
+    base: Path | None = None,
 ) -> str | None:
-    """The enumerated refusals for a delete: roots, home, and escapes."""
+    """The enumerated refusals for a delete: roots, home, and escapes.
+
+    Relative operands resolve against ``base``, the directory the call runs
+    in, which defaults to the repository root.
+    """
     flags, operands = _operands(argv)
     recursive = any(
         flag in _RECURSIVE
@@ -225,7 +230,7 @@ def _delete_reason(
     )
     for operand in operands:
         try:
-            lexical = root / operand
+            lexical = (base or root) / operand
             resolved = lexical.resolve()
         except (OSError, RuntimeError, ValueError):
             # A path this process cannot resolve is one it cannot prove safe.
@@ -500,8 +505,12 @@ def inspect_tool(
     allowed_roots: tuple[Path, ...] = (),
     config: JudgeConfig = JudgeConfig(),
     environ: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> ToolInspection:
     """Return an enumerated local refusal, or a bounded summary to judge.
+
+    ``cwd`` is the directory the call runs in, for relative operands; it
+    defaults to the repository root.
 
     Only deletes of a root, home or somewhere outside the allowed roots,
     history-destroying git calls, configured sensitive paths, credential
@@ -519,6 +528,7 @@ def inspect_tool(
         return _stop("unreadable_input")
     try:
         root = repo.resolve()
+        base = root if cwd is None else cwd.resolve()
         roots = (root, *(path.resolve() for path in allowed_roots))
         home = Path(env.get("HOME") or Path.home()).resolve()
     except (OSError, RuntimeError, ValueError):
@@ -530,7 +540,7 @@ def inspect_tool(
         if isinstance(value, str) and value.strip():
             literals.append(value)
             try:
-                literals.append(str((root / value).resolve()))
+                literals.append(str((base / value).resolve()))
             except (OSError, RuntimeError, ValueError):
                 pass
     command = tool.arguments.get("command")
@@ -547,7 +557,7 @@ def inspect_tool(
                 if any(secret in command for secret in secrets):
                     return _stop("secret_in_network_arguments")
             if executable == "rm":
-                reason = _delete_reason(argv, root, roots, home)
+                reason = _delete_reason(argv, root, roots, home, base)
                 if reason is not None:
                     return _stop(reason)
             elif executable == "git":
@@ -781,6 +791,7 @@ def decide_tool(
     environ: Mapping[str, str] | None = None,
     client_factory: Callable[[JudgeConfig], Any] = _default_client,
     scope: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> ToolDecision:
     """Inspect before network, then read typed answers as a three-class vector.
 
@@ -792,7 +803,7 @@ def decide_tool(
     started = time.monotonic()
     environ = judge_environment(environ)
     inspection = inspect_tool(tool, repo, config=config, allowed_roots=allowed_roots,
-                              environ=environ)
+                              environ=environ, cwd=cwd)
     if inspection.decision is not None:
         return inspection.decision
     env = os.environ if environ is None else environ

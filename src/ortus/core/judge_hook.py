@@ -20,7 +20,7 @@ import stat
 import sys
 import uuid
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import BinaryIO, Mapping
@@ -55,11 +55,19 @@ class HookReason(str, Enum):
 
 
 class InvalidInput(ValueError):
-    pass
+    """Hook input this adapter cannot read, named by a bounded subreason."""
+
+    def __init__(self, reason: str = "malformed_json") -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+    def code(self) -> str:
+        """The failure code a fail-open record carries for this input."""
+        return "oversize_input" if self.reason == "oversize" else f"invalid_input:{self.reason}"
 
 
 class WatchdogExpired(BaseException):
-    """Bypass provider exception handling: adapter failure is never fail-open."""
+    """Bypass provider exception handling, so a fired watchdog is named as one."""
 
 
 @dataclass(frozen=True)
@@ -92,7 +100,7 @@ def read_object(stream: BinaryIO) -> dict:
     """Read one bounded object, including one extra byte to detect overflow."""
     raw = stream.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
-        raise InvalidInput
+        raise InvalidInput("oversize")
     try:
         body = json.loads(raw.decode("utf-8"), object_pairs_hook=_object,
                           parse_constant=_invalid_constant)
@@ -106,7 +114,7 @@ def read_object(stream: BinaryIO) -> dict:
 def _text(body: dict, key: str) -> str:
     value = body.get(key)
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise InvalidInput
+        raise InvalidInput("missing_field")
     return value
 
 
@@ -154,20 +162,32 @@ def load_context(environ: Mapping[str, str]) -> HookContext:
                        scope)
 
 
-def parse_input(body: dict, context: HookContext) -> ToolInput:
+def parse_input(body: dict, context: HookContext) -> tuple[ToolInput, Path]:
+    """The call and the resolved directory it runs in.
+
+    Claude's Bash tool keeps a `cd`, so a worker that once changed into a
+    subdirectory sends every later call from there. Any directory inside the
+    repository is accepted and returned, and relative operands are inspected
+    against it rather than against the root.
+    """
     if body.get("hook_event_name") != "PreToolUse":
-        raise InvalidInput
+        raise InvalidInput("hook_event")
     if _text(body, "session_id") != context.session_id:
-        raise InvalidInput
-    # Relative targets would otherwise be inspected against the wrong root.
+        raise InvalidInput("session_mismatch")
     cwd = Path(_text(body, "cwd"))
-    if not cwd.is_absolute() or cwd.resolve() != context.repo:
-        raise InvalidInput
+    if not cwd.is_absolute():
+        raise InvalidInput("cwd_outside_repo")
+    try:
+        cwd = cwd.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise InvalidInput("cwd_unresolvable") from None
+    if not cwd.is_relative_to(context.repo):
+        raise InvalidInput("cwd_outside_repo")
     _text(body, "tool_use_id")
     name = _text(body, "tool_name")
     if not isinstance(body.get("tool_input"), dict):
-        raise InvalidInput
-    return ToolInput(name, body["tool_input"])
+        raise InvalidInput("tool_input_type")
+    return ToolInput(name, body["tool_input"]), cwd
 
 
 def _publish(context: HookContext, prefix: str, body: dict[str, object]) -> None:
@@ -253,6 +273,42 @@ def write_tool_record(
     })
 
 
+def write_failure_record(context: HookContext, tool: str, failure: str) -> None:
+    """Publish a hook-side failure: no decision was reached and the call went on.
+
+    The record keeps the tool-decision shape so the parent logs it like any
+    other call, with `hook_failure` naming what broke.
+    """
+    _publish(context, "tool", {
+        "reason": failure,
+        "tool": tool[:TOOL_NAME_CAP] or "unknown",
+        "action": ToolAction.ALLOW.value,
+        "effective_action": ToolAction.ALLOW.value,
+        "vector": None,
+        "failure": None,
+        "latency_ms": 0.0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "hook_failure": failure,
+    })
+
+
+def _fail_open(failure: str, context: HookContext | None = None, tool: str = "") -> int:
+    """End in the normal permission flow: exit 0 and no permission decision.
+
+    A broken hook is not a decision, so it never blocks a call. The failure is
+    recorded when the context loaded, and named on stderr either way.
+    """
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    if context is not None:
+        try:
+            write_failure_record(context, tool, failure)
+        except Exception:  # noqa: BLE001 - a lost record still allows the call
+            pass
+    progress("judge-hook", f"done (fail open: {failure})")
+    return 0
+
+
 def _deny(reason: HookReason, code: int = 0) -> int:
     json.dump({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                "permissionDecision": "deny", "permissionDecisionReason": reason.value}},
@@ -267,38 +323,56 @@ def _expire(signum: int, frame: object) -> None:
 
 
 def main() -> int:
-    """No tracker writes, prompts, raw exceptions or explicit permission grants."""
+    """No tracker writes, prompts, raw exceptions or explicit permission grants.
+
+    Only a decision blocks a call: a local-policy refusal or a judgment, and
+    only in enforce. Every hook-side failure — unreadable input, a missing
+    context, a provider that did not answer, the watchdog, an internal error —
+    fails open through :func:`_fail_open`, in every mode.
+    """
     previous = signal.signal(signal.SIGALRM, _expire)
     signal.setitimer(signal.ITIMER_REAL, WATCHDOG_SECONDS)
+    context: HookContext | None = None
+    name = ""
     try:
         progress("judge-hook", "reading tool hook input")
+        body: dict | None = None
+        failure = ""
         try:
             body = read_object(sys.stdin.buffer)
-        except InvalidInput:
-            return _deny(HookReason.INVALID_INPUT, 2)
+        except InvalidInput as error:
+            failure = error.code()
         try:
             context = load_context(os.environ)
         except Exception:
-            return _deny(HookReason.INVALID_CONTEXT, 2)
+            return _fail_open("invalid_context")
+        if body is None:
+            return _fail_open(failure, context)
+        if isinstance(body.get("tool_name"), str):
+            name = body["tool_name"]
         try:
-            tool = parse_input(body, context)
-        except (InvalidInput, OSError, ValueError, RuntimeError):
-            return _deny(HookReason.INVALID_INPUT, 2)
+            tool, cwd = parse_input(body, context)
+        except InvalidInput as error:
+            return _fail_open(error.code(), context, name)
         progress("judge-hook", "checking tool policy")
         # Provider libraries must not contaminate protocol output or leak payloads.
         with open(os.devnull, "w") as sink, redirect_stdout(sink), redirect_stderr(sink):
             inspection = inspect_tool(tool, context.repo, config=context.config,
-                                      allowed_roots=context.allowed_roots)
+                                      allowed_roots=context.allowed_roots, cwd=cwd)
             decision = inspection.decision or decide_tool(
                 tool, context.repo, config=context.config, allowed_roots=context.allowed_roots,
-                scope=context.scope,
+                scope=context.scope, cwd=cwd,
             )
         local = inspection.decision is not None
-        # Shadow suppresses only model decisions, never local policy refusals.
-        shadow = context.config.mode == JudgeMode.SHADOW and not local
+        if not local and decision.failure is not None:
+            # A provider that did not answer decided nothing about this call.
+            decision = replace(decision, action=ToolAction.ALLOW)
+        # Shadow never changes worker behavior: local policy and judgments are
+        # both recorded and allowed, so a collect arm runs like a hook-less one.
+        shadow = context.config.mode == JudgeMode.SHADOW
         applied = ToolAction.ALLOW if shadow else decision.action
         if applied not in set(ToolAction):
-            return _deny(HookReason.INTERNAL_FAILURE, 2)
+            return _fail_open("internal", context, name)
         try:
             write_tool_record(context, tool.name, decision, applied,
                               call=tool, local=local)
@@ -319,9 +393,9 @@ def main() -> int:
         progress("judge-hook", "done (normal permission flow)")
         return 0
     except WatchdogExpired:
-        return _deny(HookReason.WATCHDOG, 2)
+        return _fail_open("watchdog", context, name)
     except Exception:
-        return _deny(HookReason.INTERNAL_FAILURE, 2)
+        return _fail_open("internal", context, name)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
