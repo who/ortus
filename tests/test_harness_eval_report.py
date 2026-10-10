@@ -53,7 +53,14 @@ from ortus.core.harness_eval import (
 )
 from ortus.core import harness_eval
 from ortus.core.git import GitClient
-from ortus.core.judge_log import ROUTE_LOG_NAME
+from ortus.core.judge_log import LOG_NAME, ROUTE_LOG_NAME
+from ortus.core.judge_progress import PROGRESS_LOG_NAME
+from ortus.core.judge_scorers import SITES
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 FIXTURES = Path(__file__).parent / "fixtures"
 runner = CliRunner()
@@ -271,6 +278,7 @@ def test_treatments_are_documented_with_one_recipe_each() -> None:
         "prompt_audit",
         "stable_prompt_prefix",
         "jev_model_router",
+        "collect",
     ]
     assert ARMS == (CONTROL_ARM, *(item.key for item in TREATMENTS))
 
@@ -318,7 +326,9 @@ def test_control_cell_pins_every_treatment_key_off() -> None:
 
     lines = _appended_lines(FIXTURE_A, CONTROL_ARM)
 
-    assert lines == [f"{item.config_key} = false" for item in TREATMENTS]
+    assert lines == [
+        f"{item.config_key} = false" for item in TREATMENTS if item.table is None
+    ]
     for item in TREATMENTS:
         assert item.enable_line not in lines
 
@@ -347,7 +357,9 @@ def test_adopted_default_arm_is_not_a_second_control_arm() -> None:
         # TOML rejects a repeated key outright, so a pin cannot be written
         # twice and left to the later line to win.
         assert len(pinned) == len(set(pinned))
-        assert set(pinned) == {other.config_key for other in TREATMENTS}
+        assert set(pinned) == {
+            other.config_key for other in TREATMENTS if other.table is None
+        }
 
 
 def test_adopted_default_is_measured_on_every_pack_fixture() -> None:
@@ -1024,3 +1036,166 @@ def test_shell_executor_keeps_a_failing_commands_exit_status() -> None:
 
     assert shell_executor("exit 3", timeout=10) == 3
     assert shell_executor("true") == 0
+
+
+COLLECT_ARM = next(item.key for item in TREATMENTS if item.table == "judge")
+
+
+def test_jev_collect_matrix_arm_writes_one_valid_judge_table() -> None:
+    """AC-1: the collect arm's pins parse as one table, every other key off."""
+
+    assert COLLECT_ARM == "jev-collect"
+    assert COLLECT_ARM in ARMS
+    assert any(cell.arm == COLLECT_ARM for cell in matrix(root=Path("/seats")))
+
+    for fixture in FIXTURE_PACK:
+        lines = _appended_lines(fixture, COLLECT_ARM)
+        assert lines.count("[judge]") == 1
+        # What `ortus init` leaves in `.ortusrc` opens no table, so the pins
+        # appended to it are the whole of the file's tables.
+        parsed = tomllib.loads("\n".join(lines) + "\n")
+        assert parsed["judge"] == {"enabled": True, "collect": True}
+        assert {key: value for key, value in parsed.items() if key != "judge"} == {
+            item.config_key: False for item in TREATMENTS if item.table is None
+        }
+
+    # The control stays Jev-off: no judge table at all.
+    assert not any(
+        line.startswith("[") for line in _appended_lines(FIXTURE_A, CONTROL_ARM)
+    )
+    rendered = render_matrix(matrix(root=Path("/seats")))
+    assert "[judge] collect = true" in rendered
+
+
+def test_jev_collect_matrix_arm_leaves_the_router_arm_pins_unchanged() -> None:
+    """AC-1: table-scoped pins add a key; they do not move another arm's."""
+
+    lines = _appended_lines(FIXTURE_A, ROUTER_ARM)
+    assert lines == [
+        "prompt_audit = false",
+        "stable_prompt_prefix = false",
+        "jev_model_router = true",
+        "[judge]",
+        "enabled = true",
+        'mode = "enforce"',
+    ]
+    tomllib.loads("\n".join(lines) + "\n")
+
+
+def _jev_record(event: str, issue_id: str, **extra) -> str:
+    return json.dumps({"event": event, "issue_id": issue_id, **extra})
+
+
+def _jev_seat(root: Path) -> Path:
+    seat = root / seat_name(FIXTURE_A, COLLECT_ARM)
+    logs = seat / "logs"
+    logs.mkdir(parents=True)
+    (logs / LOG_NAME).write_text(
+        "\n".join([
+            _jev_record("decision", "ortus-aaaa", phase="semantic_readiness"),
+            _jev_record("decision", "ortus-aaaa", phase="pre_turn"),
+            _jev_record("decision", "ortus-bbbb", phase="pre_turn"),
+            _jev_record("outcome", "ortus-aaaa"),
+            _jev_record("post_turn", "ortus-aaaa"),
+            _jev_record("tool_decision", "ortus-bbbb"),
+            _jev_record("stuck_decision", "ortus-bbbb"),
+            _jev_record("triage", "ortus-bbbb"),
+            "{ half-written by a killed worker",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (logs / ROUTE_LOG_NAME).write_text(
+        _jev_record("model_route", "ortus-aaaa", applied=False) + "\n",
+        encoding="utf-8",
+    )
+    (logs / PROGRESS_LOG_NAME).write_text(
+        "\n".join([
+            _jev_record("progress", "ortus-bbbb"),
+            _jev_record("progress_window", "ortus-bbbb"),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    return seat
+
+
+def _tracker(rows):
+    def opened(seat: Path):
+        def run(args):
+            assert args[0] == "list"
+            if isinstance(rows, Exception):
+                raise rows
+            return rows
+
+        return run
+
+    return opened
+
+
+def test_jev_sites_counts_decisions_and_closed_outcomes_per_site(
+    tmp_path: Path,
+) -> None:
+    """AC-2: per-site decisions and closed-bead counts, schema v4."""
+
+    root = tmp_path / "eval"
+    _jev_seat(root)
+    (root / seat_name(FIXTURE_A, CONTROL_ARM)).mkdir(parents=True)
+    tracker = _tracker([
+        {"id": "ortus-aaaa", "status": "closed"},
+        {"id": "ortus-bbbb", "status": "open"},
+    ])
+
+    report = build_report(root, tracker=tracker)
+    assert REPORT_SCHEMA == "harness-eval-report/v4"
+
+    collected = _arm(report, FIXTURE_A.key, COLLECT_ARM)
+    counts = {row.site: (row.decisions, row.closed) for row in collected.jev_sites}
+    assert counts == {
+        "readiness": (1, 1),
+        "pre_turn": (2, 1),
+        "router": (1, 1),
+        "pre_tool": (1, 0),
+        "progress": (1, 0),
+        "stuck": (1, 0),
+        "triage": (1, 0),
+        "post_turn": (1, 1),
+    }
+    assert tuple(counts) == SITES
+    assert collected.jev_sites_reason is None
+
+    # A seat with no Jev logs counts zeros rather than erroring.
+    control = _arm(report, FIXTURE_A.key, CONTROL_ARM)
+    assert {(row.decisions, row.closed) for row in control.jev_sites} == {(0, 0)}
+
+    payload = json.loads(json.dumps(report.as_dict()))
+    assert payload["schema"] == "harness-eval-report/v4"
+    row = next(
+        item for item in payload["arms"]
+        if (item["fixture"], item["arm"]) == (FIXTURE_A.key, COLLECT_ARM)
+    )
+    assert row["jev_sites"]["pre_turn"] == {"decisions": 2, "closed": 1}
+
+    rendered = render_report(report)
+    assert "## Jev decisions per site" in rendered
+    assert f"| {FIXTURE_A.key} | {COLLECT_ARM} | 1/1 | 2/1 | 1/1 |" in rendered
+
+
+def test_jev_sites_null_when_the_tracker_or_seat_is_missing(tmp_path: Path) -> None:
+    """AC-2: an unreadable tracker or an unrun cell is null with a reason."""
+
+    root = tmp_path / "eval"
+    _jev_seat(root)
+
+    report = build_report(root, tracker=_tracker(OSError("no bd")))
+    collected = _arm(report, FIXTURE_A.key, COLLECT_ARM)
+    assert {row.site: row.decisions for row in collected.jev_sites}["pre_turn"] == 2
+    assert all(row.closed is None for row in collected.jev_sites)
+    assert collected.jev_sites_reason == "seat tracker unreadable"
+
+    unrun = _arm(report, FIXTURE_B.key, COLLECT_ARM)
+    assert unrun.jev_sites is None
+    assert unrun.jev_sites_reason == "seat not found"
+    assert unrun.as_dict()["jev_sites"] is None
+
+    rendered = render_report(report)
+    assert "null (seat not found)" in rendered
+    assert "closed counts null (seat tracker unreadable)" in rendered

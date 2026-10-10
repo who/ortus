@@ -304,6 +304,28 @@ Use actual billing and an explicit price basis for cost comparisons. Do not
 infer savings from skips alone or turn missing usage into zero cost. Review the
 pilot evidence before changing thresholds or enabling any other seat.
 
+To collect labeled decisions from every site, use the `jev-collect` arm of
+`ortus eval`. It is the same frozen recipe as the other arms. Its seat pins the
+other treatment keys off and appends one `[judge]` table with `enabled = true`
+and `collect = true`, so every site runs in shadow and plain code decides every
+action. The control arm stays Jev-off, so the collect arm's cost and guardrail
+numbers, measured against control in the same report, are Jev's own overhead.
+Get an operator check-in before starting a collection run.
+
+```bash
+ortus eval <seat-root> --matrix   # print the recipe, jev-collect cells included
+ortus eval <seat-root>            # rebuild the report from the seats' logs
+```
+
+The report's "Jev decisions per site" table shows, for each cell, how many
+decisions each site logged across `jev-decisions.jsonl`,
+`jev-model-routes.jsonl` and `jev-progress.jsonl`, and how many of those have a
+bead the seat's tracker shows closed. That tracker is read through bd in
+read-only sandbox mode. A site below the preregistered minimum of 100 labeled
+decisions needs more runs before its verdict means anything. A seat with no Jev
+logs counts zeros. A tracker that cannot be read leaves the closed counts null,
+with the reason given, and a cell that was never run has no counts.
+
 ## Threshold calibration runbook
 
 Calibration answers one question offline: if a soft band had been in place,
