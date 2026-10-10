@@ -15,6 +15,7 @@ from ortus.core.judge import (
     JudgeRoute,
     JudgeState,
 )
+from ortus.core.judge_questions import NONE, has_basis
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, route_options
 from ortus.core.profiles import ProfileError
 
@@ -96,6 +97,12 @@ def decide_pre_turn(
         return GateDecision(GateAction.HUMAN, None, reason)
 
     assert answers is not None
+    narrow = answers.narrow
+    if narrow is not None and (narrow.get("route") == NONE or not has_basis(narrow)):
+        # A `none` pick, or a pick Jev itself says has no basis, argues for no
+        # route. The code baseline runs; this is the fail-open default, not a
+        # gate, and the answer stays in the log.
+        return GateDecision(GateAction.PROCEED, baseline_backend, GateReason.ROUTED)
     # A well-formed answer never withholds the turn. Confidence below a
     # configured floor, a high needs_human probability and an elevated
     # action_risk are recorded in the typed vector and proceed anyway: a logged

@@ -194,7 +194,9 @@ def test_decisions_have_worker_backends_only_for_proceed():
         with pytest.raises(ValueError):
             GateDecision(action, backend, GateReason.ROUTED)
     answers = JudgeAnswers(JudgeRoute.CODEX, 0.9, 0.1, 0.9, 0.2, 0.9)
-    assert all(isinstance(value, (str, float)) for value in asdict(answers).values())
+    legacy = {key: value for key, value in asdict(answers).items() if key != "narrow"}
+    assert all(isinstance(value, (str, float)) for value in legacy.values())
+    assert answers.narrow is None
     assert JudgeState(issue_id="example-task").seat == "default"
 
 

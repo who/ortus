@@ -17,7 +17,8 @@ from uuid import UUID
 
 from ortus.core.judge import WORKER_ROUTES, GateAction, GateReason, JudgeConfig, JudgePhase, JudgeRoute
 from ortus.core.judge_log import (
-    MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, OutcomeStatus, _clean_metadata,
+    MAX_COMMAND_CHARS, MAX_EVENT_BYTES, QUESTION_VERSION, SOFT_BANDS, OutcomeStatus,
+    _clean_metadata,
 )
 from ortus.core.judge_state import TRUNCATABLE_FIELDS
 from ortus.core.judge_typesafe import JudgeFailure
@@ -73,7 +74,7 @@ POST_SIDE = {"worker_failure"}
 #: The issue-text fields the packer shortened for this request. Optional for
 #: the same reason: a decision written before truncation existed carries no
 #: such list and is still a valid version-1 record.
-DECISION_SIDE = {"truncated_fields"}
+DECISION_SIDE = {"truncated_fields", "narrow_answers", "soft_bands"}
 #: What plain code did beside what Jev's answer argued for, and which wording
 #: of the question it answered. Optional on every Jev record kind, so a log
 #: written before these fields existed is still a valid version-1 record.
@@ -82,7 +83,7 @@ COMPARISON_SIDE = {"baseline_action", "jev_action", "question_version", "option_
 #: when the site made no request.
 REQUEST_SIDE = {"latency_ms", "input_tokens", "output_tokens"}
 #: The bounded, redacted command a pre_tool record may carry.
-TOOL_SIDE = {"command"}
+TOOL_SIDE = {"command", "narrow_answers", "soft_bands"}
 #: Each kind's action vocabulary for `baseline_action` and `jev_action`, and
 #: the choice options its `option_order` may name.
 POST_ACTIONS = {"human", "preserve"}
@@ -136,7 +137,7 @@ def _decode(data: bytes) -> object:
 def _vocabularies(kind: str) -> tuple[set[str], set[str]]:
     """One kind's actions and the choice options its question presents."""
     if kind == "decision":
-        return {a.value for a in GateAction}, {r.value for r in JudgeRoute}
+        return {a.value for a in GateAction}, {r.value for r in JudgeRoute} | {"none"}
     if kind == "post_turn":
         return POST_ACTIONS, OUTCOMES
     if kind == "stuck_decision":
@@ -172,6 +173,13 @@ def _side(e: dict, kind: str) -> None:
                      and e["input_tokens"] is not None and e["output_tokens"] is not None))
     if "command" in e:
         _require(type(e["command"]) is str and len(e["command"]) <= MAX_COMMAND_CHARS)
+    if "narrow_answers" in e or "soft_bands" in e:
+        narrow, bands = e.get("narrow_answers"), e.get("soft_bands")
+        _require(type(narrow) is dict and type(bands) is dict and len(narrow) <= 16)
+        for key, value in narrow.items():
+            _require(re.fullmatch(r"[a-z][a-z0-9_]{0,47}", key) is not None)
+            _require(_choice(value, options) if type(value) is str else _number(value, 1))
+        _require(set(bands) <= set(narrow) and all(_choice(v, SOFT_BANDS) for v in bands.values()))
 
 
 def validate_event(value: object) -> dict:

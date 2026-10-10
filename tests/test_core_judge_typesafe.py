@@ -13,8 +13,8 @@ import pytest
 from ortus.core.judge import JudgeConfig, JudgeRoute, JudgeState
 from ortus.core.judge_state import PackedState
 from ortus.core.judge_typesafe import (
-    ACTION_RISK,
-    NEEDS_HUMAN,
+    DESTRUCTIVE_SCOPE,
+    NEEDS_OPERATOR_INPUT,
     ROUTE,
     JudgeFailure,
     JudgeUsage,
@@ -91,7 +91,7 @@ def judge(client, config=None, key=SECRET):
     )
 
 
-def test_one_pinned_request_asks_all_three_questions():
+def test_one_pinned_request_asks_every_narrow_question():
     client = FakeClient(CASES["valid"])
     verdict = judge(client).evaluate(STATE)
 
@@ -100,21 +100,25 @@ def test_one_pinned_request_asks_all_three_questions():
     call = client.calls[0]
     assert call["model"] == JudgeConfig().model == "jev-1.13.0"
     assert call["timeout"] == JudgeConfig().timeout_seconds
-    assert set(call["questions"]) == {ROUTE, NEEDS_HUMAN, ACTION_RISK}
+    assert set(call["questions"]) == {
+        ROUTE, "has_basis", NEEDS_OPERATOR_INPUT, DESTRUCTIVE_SCOPE,
+        "cross_module_reasoning", "novel_algorithm", "router_has_basis",
+    }
     assert call["questions"] == build_questions(JudgeConfig(), STATE)
 
 
-def test_state_is_the_packed_transport_shape():
+def test_state_is_the_packed_transport_shape_split_by_trust():
     client = FakeClient(CASES["valid"])
     judge(client).evaluate(STATE)
 
     from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
 
-    expected = PackedState(STATE, ()).to_payload()
-    expected.update(criteria_version=CRITERIA_VERSION,
-                    criteria_hash=criteria_hash(JudgeConfig(), build_questions(JudgeConfig(), STATE)))
-    assert client.calls[0]["state"] == expected
-    assert "ortus-1234" in json.dumps(client.calls[0]["state"])
+    flat = PackedState(STATE, ()).to_payload()
+    flat.update(criteria_version=CRITERIA_VERSION,
+                criteria_hash=criteria_hash(JudgeConfig(), build_questions(JudgeConfig(), STATE)))
+    untrusted = {key: flat.pop(key) for key in ("title", "objective", "acceptance", "proposed_tool")}
+    assert client.calls[0]["state"] == {"facts": flat, "untrusted": untrusted}
+    assert "ortus-1234" in json.dumps(client.calls[0]["state"]["facts"])
 
 
 def test_valid_answers_are_typed_and_the_noul_carries_its_own_confidence():
@@ -125,8 +129,10 @@ def test_valid_answers_are_typed_and_the_noul_carries_its_own_confidence():
     assert answers.route_confidence == 0.93
     assert answers.needs_human == 0.04
     assert answers.noul_confidence == pytest.approx(0.96)
-    assert answers.action_risk == 0.2
-    assert answers.risk_confidence == 0.88
+    assert answers.action_risk == pytest.approx(0.2)
+    assert answers.risk_confidence == pytest.approx(0.9)
+    assert answers.narrow["route"] == "claude"
+    assert answers.narrow[DESTRUCTIVE_SCOPE] == 0.1
     assert verdict.usage == JudgeUsage(input_tokens=412, output_tokens=18)
 
 
@@ -149,8 +155,8 @@ def test_usage_is_reported_only_when_the_service_reports_it(case):
         "string_confidence",
         "infinite_confidence",
         "bool_as_noul",
-        "nan_score",
-        "score_out_of_range",
+        "nan_noul",
+        "noul_out_of_range",
         "negative_confidence",
     ],
 )
@@ -180,18 +186,18 @@ def test_questions_offer_only_the_routes_this_cycle_has():
         JudgeRoute.CLAUDE, JudgeRoute.SKIP, JudgeRoute.HUMAN,
     )
     questions = build_questions(config, CLAUDE_ONLY)
-    assert set(questions[ROUTE]["criteria"]) == {"claude", "skip", "human"}
+    assert set(questions[ROUTE]["criteria"]) == {"claude", "skip", "human", "none"}
     assert all(
         {"what", "not_for"} <= set(option) for option in questions[ROUTE]["criteria"].values()
     )
-    assert set(questions[NEEDS_HUMAN]["criteria"]) == {"true", "false"}
-    assert len(questions[ACTION_RISK]["criteria"]) == 3
+    assert set(questions[NEEDS_OPERATOR_INPUT]["criteria"]) == {"true", "false"}
+    assert questions[DESTRUCTIVE_SCOPE]["type"] == "noul"
 
 
 def test_workers_only_configuration_never_offers_an_escalation_route():
     config = JudgeConfig(routes=(JudgeRoute.CLAUDE, JudgeRoute.CODEX))
 
-    assert set(build_questions(config, STATE)[ROUTE]["criteria"]) == {"claude", "codex"}
+    assert set(build_questions(config, STATE)[ROUTE]["criteria"]) == {"claude", "codex", "none"}
 
 
 def test_a_missing_key_is_reported_before_a_client_exists(monkeypatch):

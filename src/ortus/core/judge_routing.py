@@ -50,6 +50,11 @@ from ortus.core.codegraph import (
 from ortus.core.config import Config
 from ortus.core.hooks import HookConflictError, check_hooks_enabled
 from ortus.core.judge import WORKER_ROUTES, JudgeAnswers, JudgeConfig, JudgeRoute
+from ortus.core.judge_log import question_version
+from ortus.core.judge_questions import (
+    CROSS_MODULE, NOVEL_ALGORITHM, ROUTER_HAS_BASIS, ROUTER_VERSION, has_basis,
+    router_questions,
+)
 from ortus.core.local_backend import (
     LocalServerError, OpenCodeBinaryError, load_local_config,
     probe_models, resolve_opencode_binary,
@@ -309,6 +314,8 @@ class RouteReason(str, Enum):
     JUDGE_UNAVAILABLE = "judge_unavailable"
     MAPPED = "mapped"
     UNMAPPABLE_PROFILE = "unmappable_profile"
+    #: Jev said its difficulty answers had no real basis; the baseline runs.
+    NO_BASIS = "no_basis"
 
 
 @dataclass(frozen=True)
@@ -402,9 +409,37 @@ def argued_tier(route: ModelRoute) -> str | None:
     """The tier the route's vectors argue for, or None when it had no answers.
 
     Differs from ``route.tier`` only when the argued tier's profile could not
-    be mapped and the bead fell back to baseline.
+    be mapped and the bead fell back to baseline. A route whose answers claimed
+    no basis argues for the baseline whatever its vectors say.
     """
-    return None if route.difficulty is None else _tier(route.difficulty).value
+    if route.difficulty is None:
+        return None
+    if route.reason is RouteReason.NO_BASIS:
+        return RouterTier.BASELINE.value
+    return _tier(route.difficulty).value
+
+
+def router_question_version(answers: JudgeAnswers | None) -> str | None:
+    """The router question set an answer carried, for its routing record."""
+    if answers is None or not answers.narrow or CROSS_MODULE not in answers.narrow:
+        return None
+    return question_version(ROUTER_VERSION, router_questions())
+
+
+def _router_vectors(answers: JudgeAnswers) -> tuple[float, float]:
+    """The two difficulty vectors, from the router's own questions when present.
+
+    The router-v1 answers are two nouls about the bead itself, cross-module
+    reasoning and a novel algorithm, each shrunk by its own distance from the
+    coin flip. Older answer sets fall back to the shared pre_turn rubric.
+    """
+    narrow = answers.narrow
+    if narrow is not None and CROSS_MODULE in narrow:
+        cross, novel = narrow[CROSS_MODULE], narrow[NOVEL_ALGORITHM]
+        return (_shrunk(cross, max(cross, 1.0 - cross)),
+                _shrunk(novel, max(novel, 1.0 - novel)))
+    return (_shrunk(answers.needs_human, answers.noul_confidence),
+            _shrunk(answers.action_risk / RISK_CEILING, answers.risk_confidence))
 
 
 def baseline_implement_profile(config: Config, plan: RoutePlan) -> AgentProfile:
@@ -449,11 +484,15 @@ def route_implement_profile(
     if answers is None:
         return ModelRoute(RouterTier.BASELINE, RouteReason.JUDGE_UNAVAILABLE, baseline)
 
-    needs_frontier = _shrunk(answers.needs_human, answers.noul_confidence)
-    action_risk = _shrunk(answers.action_risk / RISK_CEILING, answers.risk_confidence)
+    # Record field names predate router-v1: `needs_frontier` carries the
+    # cross-module vector and `action_risk` the novel-algorithm one.
+    needs_frontier, action_risk = _router_vectors(answers)
     difficulty = max(needs_frontier, action_risk)
     tier = _tier(difficulty)
     vectors = (needs_frontier, action_risk, difficulty)
+    narrow = answers.narrow
+    if narrow is not None and CROSS_MODULE in narrow and not has_basis(narrow, ROUTER_HAS_BASIS):
+        return ModelRoute(RouterTier.BASELINE, RouteReason.NO_BASIS, baseline, *vectors)
     if tier is RouterTier.BASELINE:
         return ModelRoute(tier, RouteReason.MAPPED, baseline, *vectors)
 

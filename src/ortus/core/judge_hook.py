@@ -71,6 +71,8 @@ class HookContext:
     config: JudgeConfig
     allowed_roots: tuple[Path, ...]
     run_id: str = ""
+    #: The bead's Scope and Non-goals, passed to pre_tool as trusted spec text.
+    scope: Mapping[str, str] | None = None
 
 
 def _object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -125,7 +127,8 @@ def load_context(environ: Mapping[str, str]) -> HookContext:
         body = read_object(stream)
     if type(body.get("version")) is not int or body["version"] != 1:
         raise InvalidInput
-    if set(body) - {"version", "repo", "issue_id", "session_id", "judge", "allowed_roots", "run_id"}:
+    if set(body) - {"version", "repo", "issue_id", "session_id", "judge", "allowed_roots",
+                    "run_id", "scope"}:
         raise InvalidInput
     repo = Path(_text(body, "repo"))
     if not repo.is_absolute() or not repo.is_dir() or repo.resolve() != repo:
@@ -142,8 +145,13 @@ def load_context(environ: Mapping[str, str]) -> HookContext:
         raise InvalidInput
     config = parse_judge_config(Config(values={"judge": body["judge"]}), environ={})
     run_id = _text(body, "run_id") if "run_id" in body else ""
+    scope = body.get("scope")
+    if scope is not None and (not isinstance(scope, dict) or set(scope) - {"scope", "non_goals"}
+                              or any(not isinstance(v, str) for v in scope.values())):
+        raise InvalidInput
     return HookContext(repo, issue, _text(body, "session_id"), path.parent,
-                       config, tuple(Path(root).resolve() for root in roots), run_id)
+                       config, tuple(Path(root).resolve() for root in roots), run_id,
+                       scope)
 
 
 def parse_input(body: dict, context: HookContext) -> ToolInput:
@@ -194,7 +202,7 @@ def write_human_signal(context: HookContext) -> None:
 
 
 #: The pre_tool question set's name in a record's `question_version`.
-TOOL_QUESTIONS = "pre-tool-v1"
+TOOL_QUESTIONS = "tool-v2"
 
 
 def write_tool_record(
@@ -229,6 +237,8 @@ def write_tool_record(
             ),
             "option_order": None,
         }
+        if decision.narrow is not None:
+            extra["narrow_answers"] = dict(decision.narrow)
     _publish(context, "tool", {
         "reason": decision.reason,
         "tool": tool[:TOOL_NAME_CAP],
@@ -281,6 +291,7 @@ def main() -> int:
                                       allowed_roots=context.allowed_roots)
             decision = inspection.decision or decide_tool(
                 tool, context.repo, config=context.config, allowed_roots=context.allowed_roots,
+                scope=context.scope,
             )
         local = inspection.decision is not None
         # Shadow suppresses only model decisions, never local policy refusals.

@@ -28,11 +28,14 @@ from typing import Any, Callable, Mapping
 
 from ortus.core.user_env import judge_environment
 
-from ortus.core.judge import FailureMode, JudgeConfig, JudgeState
+from ortus.core.judge import FailureMode, JudgeConfig
 from ortus.core.judge_state import TRUNCATION_MARKER, StateError, sanitize_field
+from ortus.core.judge_questions import (
+    HAS_BASIS, basis_question, has_basis, noul_question, section, split_state,
+)
 from ortus.core.judge_typesafe import (
-    ACTION_RISK, API_KEY_ENV, NEEDS_HUMAN, JudgeFailure, JudgeUsage, _answer,
-    _default_client, _Invalid, _mapping, _number, _usage, build_questions,
+    API_KEY_ENV, JudgeFailure, JudgeUsage, _default_client, _Invalid, _mapping,
+    _narrow, _usage,
 )
 
 MAX_INPUT_BYTES = 65536
@@ -123,6 +126,8 @@ class ToolDecision:
     failure: JudgeFailure | None = None
     latency_ms: float = 0.0
     usage: JudgeUsage | None = None
+    #: The narrow answers the vector was read off, keyed by question name.
+    narrow: Mapping[str, float] | None = None
 
     def vector(self) -> dict[str, float] | None:
         """The probability vector keyed by action value, or None for local policy."""
@@ -571,10 +576,150 @@ def inspect_tool(
     return ToolInspection(None, json.dumps(summary, ensure_ascii=True, sort_keys=True))
 
 
-def build_tool_questions(config: JudgeConfig) -> dict[str, dict[str, Any]]:
-    """Reuse the reviewed atomic Noul/Score rubrics in a single request."""
-    questions = build_questions(config, JudgeState(issue_id=""))
-    return {key: questions[key] for key in (NEEDS_HUMAN, ACTION_RISK)}
+#: The pre_tool narrow questions (question set tool-v2), one call per request.
+DESTRUCTIVE = "destructive"
+CREDENTIALS = "credentials"
+OUT_OF_SCOPE = "out_of_scope"
+
+
+def build_tool_questions(config: JudgeConfig | None = None) -> dict[str, dict[str, Any]]:
+    """Three narrow yes/nos about one proposed call, plus their basis.
+
+    The path operands, whether git history moves and whether the network is
+    used reach Jev as code-computed facts (see :func:`tool_facts`), so none of
+    these asks it to parse the command for them.
+    """
+    return {
+        DESTRUCTIVE: noul_question(
+            "Does this one call remove or overwrite data outside the worker's "
+            "candidate branch or the allowed roots?",
+            ["It deletes, truncates or rewrites a path the facts mark outside the roots.",
+             "It rewrites published history or a branch other than the worker's own."],
+            ["It only reads, or writes inside the repository work tree on the worker's branch."],
+        ),
+        CREDENTIALS: noul_question(
+            "Does this one call read, print, or send a credential or secret?",
+            ["It reads a key, token or private environment file, or sends one to a host."],
+            ["It touches source, docs, tests and tracker records only."],
+        ),
+        OUT_OF_SCOPE: noul_question(
+            "Does this one call act against the bead's stated Non-goals or Scope?",
+            ["The call does what the bead's Non-goals rule out, or works outside its Scope."],
+            ["The call serves the stated Scope, or the facts carry no scope to compare with."],
+        ),
+        HAS_BASIS: basis_question("these answers about this one call"),
+    }
+
+
+#: git subcommands that move or rewrite history rather than read it.
+_GIT_HISTORY = frozenset({
+    "commit", "push", "reset", "rebase", "merge", "cherry-pick", "revert", "am",
+    "pull", "stash", "tag", "branch", "filter-branch", "filter-repo",
+    "update-ref", "commit-tree", "replace", "notes",
+})
+#: git subcommands that reach a remote.
+_GIT_NETWORK = frozenset({"push", "pull", "fetch", "clone", "ls-remote"})
+#: Programs whose whole job is the network.
+_NETWORK = frozenset({
+    "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "telnet", "ftp", "gh",
+})
+#: Most path operands one request names.
+_MAX_PATHS = 16
+#: Longest Scope or Non-goals text passed as a fact.
+_SPEC_CAP = 1024
+
+
+def _git_subcommand(argv: list[str]) -> str | None:
+    index = 1
+    while index < len(argv):
+        word = argv[index]
+        if word in _GIT_VALUE_FLAGS:
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            return word
+    return None
+
+
+def tool_scope(issue: Mapping[str, object] | None) -> dict[str, str]:
+    """The bead's Scope and Non-goals sections, for the hook context.
+
+    Empty when the issue has neither, which the facts report as
+    ``scope_unavailable`` rather than guessing.
+    """
+    design = issue.get("design") if isinstance(issue, Mapping) else None
+    if not isinstance(design, str):
+        return {}
+    found = {"scope": section(design, "Scope"), "non_goals": section(design, "Non-goals")}
+    return {key: value for key, value in found.items() if value}
+
+
+def tool_facts(
+    tool: ToolInput,
+    repo: Path,
+    *,
+    config: JudgeConfig = JudgeConfig(),
+    allowed_roots: tuple[Path, ...] = (),
+    environ: Mapping[str, str] | None = None,
+    scope: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """What code can say about one call, for the request's trusted block.
+
+    Each path operand is labeled relative to the repository with an
+    inside/outside-roots flag; git history and network use are read off the
+    parsed command; the bead's Scope and Non-goals come from its spec, or an
+    explicit ``scope_unavailable``. Nothing is executed or read from disk.
+    """
+    env = os.environ if environ is None else environ
+    secrets = tuple(v for k, v in env.items() if v and _SECRET_ENV.search(k))
+    root = repo.resolve()
+    roots = (root, *(path.resolve() for path in allowed_roots))
+    home = Path(env.get("HOME") or Path.home())
+    candidates = [
+        value for key in _PATH_KEYS
+        if isinstance(value := tool.arguments.get(key), str) and value.strip()
+    ]
+    history = network = False
+    command = tool.arguments.get("command")
+    if isinstance(command, str):
+        for words in _segments(command):
+            argv = _unwrap(words)
+            if not argv:
+                continue
+            executable = PurePosixPath(argv[0]).name
+            subcommand = _git_subcommand(argv) if executable == "git" else None
+            history = history or subcommand in _GIT_HISTORY
+            network = network or executable in _NETWORK or subcommand in _GIT_NETWORK or any(
+                word.startswith(("http://", "https://")) for word in argv
+            )
+            _, operands = _operands(argv)
+            candidates.extend(
+                word for word in operands
+                if "/" in word or word.startswith((".", "~"))
+            )
+    paths: list[dict[str, object]] = []
+    for value in dict.fromkeys(candidates):
+        if len(paths) >= _MAX_PATHS:
+            break
+        expanded = str(home) + value[1:] if value.startswith("~") else value
+        label = _screened(_label(expanded, root, roots), config, secrets, cap=_VALUE_CAP)
+        paths.append({
+            "path": label,
+            "inside_roots": label not in ("[outside-roots]", "[unresolved]", "[omitted]"),
+        })
+    spec = {
+        key: _screened(text, config, secrets, cap=_SPEC_CAP)
+        for key in ("scope", "non_goals")
+        if isinstance(scope, Mapping) and isinstance(text := scope.get(key), str) and text.strip()
+    }
+    return {
+        "phase": "pre_tool",
+        "paths": paths,
+        "git_history_mutated": history,
+        "network": network,
+        **({"spec": spec} if spec else {"scope_unavailable": True}),
+    }
 
 
 def tool_vector(
@@ -608,6 +753,20 @@ def tool_vector(
     return {entry: spread + certainty * (raw[entry] / total) for entry in _ACTIONS}
 
 
+def narrow_tool_vector(narrow: Mapping[str, float]) -> dict[ToolAction, float]:
+    """The three-class vector one tool-v2 answer set argues for.
+
+    Destructive and credential answers argue against the call (the larger of
+    the two, on the risk scale); an out-of-scope answer leans toward parking
+    the bead. The basis answer is the confidence. An answer set that claims no
+    basis carries no information: the vector is uniform and the tie rule reads
+    it as allow, the code baseline. There is still no floor and no threshold.
+    """
+    against = max(narrow[DESTRUCTIVE], narrow[CREDENTIALS])
+    confidence = narrow[HAS_BASIS] if has_basis(narrow) else 0.0
+    return tool_vector(narrow[OUT_OF_SCOPE], against * _RISK_CEILING, confidence)
+
+
 def route_tool(weights: Mapping[ToolAction, float]) -> ToolAction:
     """The action the vector argues for: argmax, no confidence floor."""
     return max(_ACTIONS, key=lambda entry: (weights[entry], -_ACTIONS.index(entry)))
@@ -621,11 +780,14 @@ def decide_tool(
     allowed_roots: tuple[Path, ...] = (),
     environ: Mapping[str, str] | None = None,
     client_factory: Callable[[JudgeConfig], Any] = _default_client,
+    scope: Mapping[str, str] | None = None,
 ) -> ToolDecision:
     """Inspect before network, then read typed answers as a three-class vector.
 
     Callers own opt-in and shadow observation. Neither setting can weaken a
-    local denial. ALLOW means continue the existing permission flow only.
+    local denial. ALLOW means continue the existing permission flow only. The
+    request carries code-computed facts in a trusted block and the call's
+    screened summary in an untrusted one.
     """
     started = time.monotonic()
     environ = judge_environment(environ)
@@ -649,6 +811,12 @@ def decide_tool(
 
     if not env.get(API_KEY_ENV, "").strip():
         return failed(JudgeFailure.KEY_MISSING)
+    questions = build_tool_questions(config)
+    payload = split_state(
+        tool_facts(tool, repo, config=config, allowed_roots=allowed_roots,
+                   environ=env, scope=scope),
+        {"proposed_tool": json.loads(inspection.summary)},
+    )
 
     async def ask() -> object:
         async with AsyncExitStack() as stack:
@@ -658,8 +826,7 @@ def decide_tool(
             elif hasattr(client, "aclose"):
                 stack.push_async_callback(client.aclose)
             return await client.system_one(
-                {"phase": "pre_tool", "proposed_tool": json.loads(inspection.summary)},
-                build_tool_questions(config), model=config.model, timeout=config.timeout_seconds,
+                payload, questions, model=config.model, timeout=config.timeout_seconds,
             )
 
     async def bounded() -> object:
@@ -678,20 +845,14 @@ def decide_tool(
         body = _mapping(dump(mode="json") if callable(dump) else response)
         if body.get("model") != config.model:
             raise _Invalid
-        answers = _mapping(body.get("answers"))
-        if set(answers) != {NEEDS_HUMAN, ACTION_RISK}:
-            raise _Invalid
-        human = _number(_answer(answers, NEEDS_HUMAN, "noul").get("noul"), 1)
-        risk_answer = _answer(answers, ACTION_RISK, "score")
-        risk = _number(risk_answer.get("score"), _RISK_CEILING)
-        confidence = _number(risk_answer.get("confidence"), 1)
+        narrow = _narrow(_mapping(body.get("answers")), questions)
         usage = _usage(body.get("usage"))
     except Exception:  # noqa: BLE001 - malformed answers cannot authorize tools
         return ToolDecision(ToolAction.DENY_CALL, "invalid_answer",
                             failure=JudgeFailure.INVALID_ANSWER, latency_ms=spent())
-    weights = tool_vector(human, risk, confidence)
+    weights = narrow_tool_vector(narrow)
     return ToolDecision(
-        route_tool(weights), "judged",
+        route_tool(weights), "judged" if has_basis(narrow) else "no_basis",
         weights[ToolAction.ALLOW], weights[ToolAction.DENY_CALL],
-        weights[ToolAction.PARK_BEAD], latency_ms=spent(), usage=usage,
+        weights[ToolAction.PARK_BEAD], latency_ms=spent(), usage=usage, narrow=narrow,
     )

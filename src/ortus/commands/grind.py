@@ -155,9 +155,10 @@ from ortus.core.judge_stuck import (
 from ortus.core.judge_routing import (
     ExecutionBundle, RouteOverrides, RoutePlan, RoutePreparationError,
     argued_tier, baseline_implement_profile, jev_router_enabled, plan_routes,
-    prepare_route, route_implement_profile,
+    prepare_route, route_implement_profile, router_question_version,
 )
 from ortus.core.judge_state import OmissionReason, PackedState, StateError, pack_state
+from ortus.core.judge_tools import tool_scope
 from ortus.core.judge_triage import pin_directive_section, triage_parked_bead
 from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
 
@@ -192,8 +193,11 @@ def _shadow_turn(
         )
         state = packed.state
         started = time.monotonic()
+        # Minted before the request: it seeds the presented option order, so a
+        # replay can rebuild what this decision saw from its id alone.
+        planned_id = uuid4()
         try:
-            verdict = TypeSafeJudge(judge_config).evaluate(state)
+            verdict = TypeSafeJudge(judge_config).evaluate(state, seed=str(planned_id))
         except Exception:
             verdict = JudgeVerdict(failure=JudgeFailure.SERVICE_ERROR)
         decision = decide_pre_turn(
@@ -207,6 +211,7 @@ def _shadow_turn(
             criteria_hash=criteria_hash(judge_config, criteria),
             latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
             truncated_fields=_truncated_fields(packed),
+            decision_id=planned_id, option_order=verdict.option_order,
         ))
         if decision_id is not None:
             _observe_route(
@@ -261,6 +266,7 @@ def _observe_route(
             needs_frontier=route.needs_frontier, action_risk=route.action_risk,
             difficulty=route.difficulty, applied=False,
             jev_tier=argued_tier(route),
+            question_version=router_question_version(answers),
         ))
     except Exception:
         output.progress("grind", "judge shadow route unavailable; continuing baseline")
@@ -383,7 +389,8 @@ def _gate_turn(
     )
     state = packed.state
     started = time.monotonic()
-    verdict = TypeSafeJudge(judge_config).evaluate(state)
+    planned_id = uuid4()
+    verdict = TypeSafeJudge(judge_config).evaluate(state, seed=str(planned_id))
     decision = decide_pre_turn(
         judge_config, state, verdict, baseline_backend=plan.baseline,
     )
@@ -395,6 +402,7 @@ def _gate_turn(
         criteria_hash=criteria_hash(judge_config, criteria),
         latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
         truncated_fields=_truncated_fields(packed),
+        decision_id=planned_id, option_order=verdict.option_order,
     ))
     turn.current_issue(bd)
     if decision.action == GateAction.HUMAN:
@@ -450,6 +458,7 @@ def _route_model(
             needs_frontier=route.needs_frontier, action_risk=route.action_risk,
             difficulty=route.difficulty, applied=True,
             jev_tier=argued_tier(route),
+            question_version=router_question_version(answers),
         ))
     return replace(bundle, implement_profile=route.profile)
 
@@ -3138,6 +3147,7 @@ def grind(
                     if judge_config.pre_tool:
                         hook_run = HookRun(
                             target, issue_id, judge_config, str(gate_run_id), runner,
+                            scope=tool_scope(target_issue),
                         )
                     if implementation_probe.available:
                         write_log("implementation CodeGraph handshake requested")

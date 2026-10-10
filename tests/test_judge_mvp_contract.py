@@ -123,18 +123,24 @@ def test_synthetic_replay_through_adapter_and_grind(gate, monkeypatch, case):
     assert result.exit_code == 0, result.output + str(result.exception)
     assert len(calls) == 1
     state, questions, request = calls[0]
-    assert state["seat"] == "ortus"
-    # Reviewed text travels by default, but only the screened first lines do.
-    assert state["title"] == ""
-    assert state["objective"] == "Ship the bounded behavior."
-    assert state["acceptance"] == (
+    facts, text = state["facts"], state["untrusted"]
+    assert facts["seat"] == "ortus"
+    # Reviewed text travels by default, but only the screened first lines do,
+    # and only in the untrusted block.
+    assert text["title"] == ""
+    assert text["objective"] == "Ship the bounded behavior."
+    assert text["acceptance"] == (
         "- AC-1: Preview performs no writes.\n- AC-2: Normal execution is unchanged."
     )
+    assert not {"title", "objective", "acceptance"} & set(facts)
     packed = json.dumps(state)
     assert "Behavioral context" not in packed and "Criterion checks" not in packed
-    assert set(questions) == {"route", "needs_human", "action_risk"}
+    assert set(questions) == {
+        "route", "has_basis", "needs_operator_input", "destructive_scope",
+        "cross_module_reasoning", "novel_algorithm", "router_has_basis",
+    }
     offered = set(questions["route"]["criteria"])
-    assert offered == set(case["available"]) | {"skip", "human"}
+    assert offered == set(case["available"]) | {"skip", "human", "none"}
     assert request["model"] == "jev-1.13.0"
     expected = case["expected"]
     decision, outcome = gate.events()

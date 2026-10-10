@@ -12,29 +12,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -47,29 +53,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -85,29 +97,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -124,29 +142,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -163,14 +187,31 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -187,33 +228,40 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
+      },
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       },
       "action_risk": {
         "type": "score",
         "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
-      },
-      "readiness": {
-        "type": "noul",
-        "noul": 0.5
+        "confidence": 0.88
       }
     }
   },
@@ -230,29 +278,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -269,29 +323,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -308,29 +368,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -347,29 +413,35 @@
         "confidence": "0.93",
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -386,29 +458,35 @@
         "confidence": Infinity,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -425,33 +503,39 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": true
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
-  "nan_score": {
+  "nan_noul": {
     "model": "jev-1.13.0",
     "usage": {
       "input_tokens": 412,
@@ -464,33 +548,39 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": NaN,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": NaN
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
-  "score_out_of_range": {
+  "noul_out_of_range": {
     "model": "jev-1.13.0",
     "usage": {
       "input_tokens": 412,
@@ -503,29 +593,35 @@
         "confidence": 0.93,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 2.5,
-        "confidence": 0.88,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
-        "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
-        }
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 1.5
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   },
@@ -539,32 +635,128 @@
       "route": {
         "type": "choice",
         "choice": "claude",
-        "confidence": 0.93,
+        "confidence": -0.1,
         "probabilities": {
           "claude": 0.93,
-          "codex": 0.05,
+          "codex": 0.04,
           "skip": 0.01,
-          "human": 0.01
+          "human": 0.01,
+          "none": 0.01
         }
       },
-      "needs_human": {
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
         "type": "noul",
         "noul": 0.04
       },
-      "action_risk": {
-        "type": "score",
-        "score": 0.2,
-        "confidence": -0.1,
-        "legend": {
-          "0": "routine",
-          "1": "elevated",
-          "2": "dangerous"
-        },
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
+      }
+    }
+  },
+  "none_pick": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.93,
         "probabilities": {
-          "0": 0.85,
-          "1": 0.13,
-          "2": 0.02
+          "claude": 0.93,
+          "codex": 0.04,
+          "skip": 0.01,
+          "human": 0.01,
+          "none": 0.01
         }
+      },
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.9
+      },
+      "needs_operator_input": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
+      }
+    }
+  },
+  "no_basis": {
+    "model": "jev-1.13.0",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 18
+    },
+    "answers": {
+      "route": {
+        "type": "choice",
+        "choice": "claude",
+        "confidence": 0.93,
+        "probabilities": {
+          "claude": 0.93,
+          "codex": 0.04,
+          "skip": 0.01,
+          "human": 0.01,
+          "none": 0.01
+        }
+      },
+      "has_basis": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "needs_operator_input": {
+        "type": "noul",
+        "noul": 0.04
+      },
+      "destructive_scope": {
+        "type": "noul",
+        "noul": 0.1
+      },
+      "cross_module_reasoning": {
+        "type": "noul",
+        "noul": 0.3
+      },
+      "novel_algorithm": {
+        "type": "noul",
+        "noul": 0.2
+      },
+      "router_has_basis": {
+        "type": "noul",
+        "noul": 0.8
       }
     }
   }

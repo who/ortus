@@ -23,13 +23,15 @@ from ortus.core.judge_typesafe import JudgeVerdict, build_questions
 from ortus.core.codegraph import CodeGraphMode, CodeGraphProbe
 from ortus.core.local_backend import LocalServerError
 from ortus.core.profiles import ProfileError
+from tests._jev import pre_turn_response
 
 
 def config_table():
     return {
         "seat": "alpha", "route_confidence": 0.6,
         "packs": {"careful": {"route_confidence": 0.9, "include_issue_text": False,
-            "question_criteria": {"needs_human": {"true": ["Needs approval"], "false": ["Approved"]}}}},
+            "question_criteria": {"route": {"claude": {
+                "what": "Needs approval", "not_for": "Approved", "examples": ["ask first"]}}}}},
         "seats": {"alpha": {"enabled": True, "pack": "careful", "route_confidence": 0.95},
                   "beta": {"enabled": False}},
     }
@@ -83,10 +85,10 @@ def test_pack_isolation_requests_and_metadata_default():
     assert not alpha.include_issue_text
     assert beta.include_issue_text and not beta.question_criteria
     request = build_questions(alpha, JudgeState("sample"))
-    assert request["needs_human"]["criteria"]["true"] == ["Needs approval"]
-    request["needs_human"]["criteria"]["true"].append("changed")
+    assert request["route"]["criteria"]["claude"]["what"] == "Needs approval"
+    request["route"]["criteria"]["claude"]["examples"].append("changed")
     assert table == original
-    assert alpha.question_criteria["needs_human"]["true"] == ["Needs approval"]
+    assert alpha.question_criteria["route"]["claude"]["examples"] == ["ask first"]
     assert beta.allows_issue_text(("task",))
     assert not beta.allows_issue_text(("judge-private",))
     assert parse_judge_config(Config(), environ={}) == JudgeConfig()
@@ -136,7 +138,7 @@ def test_hash_is_canonical_and_tracks_policy_and_criteria():
     assert digest == criteria_hash(config, dict(reversed(list(questions.items()))))
     assert digest != criteria_hash(replace(config, route_confidence=0.99), questions)
     changed = deepcopy(questions)
-    changed["needs_human"]["criteria"]["true"] = ["Different condition"]
+    changed["route"]["criteria"]["claude"]["what"] = "Different condition"
     assert digest != criteria_hash(config, changed)
     assert digest == criteria_hash(replace(config, seat="beta"), questions)
 
@@ -214,7 +216,7 @@ def test_request_policy_and_event_accept_prepared_new_routes(tmp_path, route):
     config = parse({"enabled": True, "routes": [route.value, "human"]})
     state = pack_state({"id": "sample"}, config, backends_available=(route,), environ={}).state
     questions = build_questions(config, state)
-    assert set(questions["route"]["criteria"]) == {route.value, "human"}
+    assert set(questions["route"]["criteria"]) == {route.value, "human", "none"}
     answers = JudgeAnswers(route, 0.99, 0.01, 0.99, 0, 0.99)
     decision = decide_pre_turn(config, state, JudgeVerdict(answers=answers), baseline_backend=route)
     assert decision.backend == route
@@ -252,8 +254,10 @@ def test_request_metadata_matches_event_hash_and_byte_budget():
     config = parse(config_table())
     state = pack_state({"id": "sample", "title": "reviewed text"}, config, environ={}).state
     payload = _transport_state(state, config)
-    assert payload["criteria_version"] == CRITERIA_VERSION
-    assert payload["criteria_hash"] == criteria_hash(config, build_questions(config, state))
+    assert payload["facts"]["criteria_version"] == CRITERIA_VERSION
+    assert payload["facts"]["criteria_hash"] == criteria_hash(config, build_questions(config, state))
+    # The pack opts out of issue text, so the untrusted block travels empty.
+    assert payload["untrusted"]["title"] == "" and "title" not in payload["facts"]
     assert len(json.dumps(payload).encode()) <= config.total_bytes_cap
     with pytest.raises(ValueError, match="budget"):
         _transport_state(state, replace(config, total_bytes_cap=1))
@@ -271,18 +275,14 @@ def test_provider_receives_resolved_questions_and_matching_identifiers(route):
     class Client:
         async def system_one(self, payload, questions, **kwargs):
             calls.append((payload, questions))
-            return {"model": config.model, "answers": {
-                "route": {"type": "choice", "choice": route, "confidence": 0.99},
-                "needs_human": {"type": "noul", "noul": 0.01},
-                "action_risk": {"type": "score", "score": 0, "confidence": 0.99},
-            }}
+            return pre_turn_response(config.model, route)
 
     verdict = TypeSafeJudge(config, lambda _: Client(), {"TYPESAFE_API_KEY": "fixture"}).evaluate(state)
     assert verdict.answers.route.value == route
     payload, questions = calls[0]
-    assert questions["needs_human"]["criteria"]["true"] == ["Needs approval"]
-    assert payload["criteria_hash"] == criteria_hash(config, questions)
-    assert payload["criteria_version"] == CRITERIA_VERSION
+    assert set(questions["route"]["criteria"]) == {route, "human", "none"}
+    assert payload["facts"]["criteria_hash"] == criteria_hash(config, questions)
+    assert payload["facts"]["criteria_version"] == CRITERIA_VERSION
 
 
 def test_small_state_budget_includes_identifiers():

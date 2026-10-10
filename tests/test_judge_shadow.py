@@ -197,7 +197,7 @@ def test_shadow_metadata_redacts_actual_claim(gate, monkeypatch):
 def test_shadow_observes_before_worker_without_claim_or_route_preparation(gate):
     gate.config.values['judge']['mode'] = 'shadow'
 
-    def evaluate(state):
+    def evaluate(state, **_):
         assert state.issue_id == 'demo-1'
         assert gate.bd.rows['demo-1']['status'] == 'open'
         assert gate.bd.calls == []

@@ -264,7 +264,7 @@ def test_timeout_preserves_consumed_claim_and_records_outcome(gate):
 
 @pytest.mark.parametrize('change', ['closed', 'owner', 'human'])
 def test_mutation_during_judgment_halts_without_overwriting(gate, change):
-    def evaluate(state):
+    def evaluate(state, **_):
         row = gate.bd.rows['demo-1']
         if change == 'closed':
             row['status'] = 'closed'

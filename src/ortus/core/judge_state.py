@@ -49,6 +49,10 @@ def _json(state: JudgeState) -> str:
     payload = asdict(state)
     if state.phase != JudgePhase.SEMANTIC_READINESS:
         payload.pop("design")
+    if not state.facts:
+        # Only the pre_turn and readiness packs compute facts; every other
+        # phase keeps the transport shape it always had.
+        payload.pop("facts")
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -356,11 +360,21 @@ def pack_state(
         if name:
             state = replace(state, proposed_tool=ProposedTool(name, summary))
 
-    from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
+    from ortus.core.judge_packs import criteria_hash, criteria_version
+    from ortus.core.judge_questions import spec_facts
     from ortus.core.judge_typesafe import build_questions
 
+    if phase in (JudgePhase.PRE_TURN, JudgePhase.SEMANTIC_READINESS) and (
+        config.allows_issue_text(tuple(labels))
+    ):
+        # Counts and fixed names only, computed from the whole source field, so
+        # Jev is told what code can count instead of estimating it from a slice.
+        state = replace(state, facts=spec_facts(issue, tuple(
+            omission.field for omission in omissions
+            if omission.reason is OmissionReason.TRUNCATED
+        )))
     state = replace(
-        state, criteria_version=CRITERIA_VERSION,
+        state, criteria_version=criteria_version(phase),
         criteria_hash=criteria_hash(config, build_questions(config, state)),
     )
 
@@ -368,6 +382,7 @@ def pack_state(
     # final check includes JSON escaping, keys, delimiters and multibyte text.
     for field, empty in (
         ("proposed_tool", None), ("design", ""), ("acceptance", ""), ("objective", ""),
+        ("facts", {}),
         ("title", ""), ("labels", ()), ("issue_type", ""), ("issue_id", ""),
         ("seat", ""), ("priority", None), ("backends_available", ()),
     ):

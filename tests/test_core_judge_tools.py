@@ -8,6 +8,7 @@ from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode
 from ortus.core.judge_tools import (
     _VALUE_CAP, ToolAction, ToolInput, decide_tool, inspect_tool, route_tool, tool_vector,
 )
+from tests._jev import tool_response
 
 
 @pytest.fixture
@@ -170,13 +171,12 @@ class FakeClient:
 
 
 def response(human=0.1, risk=0, confidence=0.9, usage=None):
-    body = {"model": "jev-1.13.0", "answers": {
-        "needs_human": {"type": "noul", "noul": human},
-        "action_risk": {"type": "score", "score": risk, "confidence": confidence},
-    }}
-    if usage is not None:
-        body["usage"] = usage
-    return body
+    """tool-v2 answers in the old vector's terms: out_of_scope leans toward a
+    park, destructive carries the risk (half the 0-2 scale) and the basis
+    answer is the confidence."""
+    destructive = risk / 2 if type(risk) in (int, float) else risk
+    return tool_response(usage=usage, out_of_scope=human, destructive=destructive,
+                         credentials=0.0, has_basis=confidence)
 
 
 def judged(repo, body, config=JudgeConfig(), tool=None):
@@ -310,10 +310,10 @@ def test_vector_zero_confidence_is_uniform_and_ties_to_allow(human, risk):
 
 def test_vector_has_no_confidence_floor_or_human_threshold(repo):
     # The four literals that used to sit here returned low_confidence and
-    # needs_human. Neither reason exists, and a barely-confident benign answer
-    # is allowed rather than handed over.
+    # needs_human. Neither reason exists, and an answer claiming no basis is
+    # the uniform vector, which allows rather than hands the call over.
     result = judged(repo, response(human=0.1, risk=0, confidence=0.01))[0]
-    assert (result.action, result.reason) == (ToolAction.ALLOW, "judged")
+    assert (result.action, result.reason) == (ToolAction.ALLOW, "no_basis")
     for human in (0.79, 0.8, 0.81):
         for risk in (1.49, 1.5, 1.51):
             for confidence in (0.79, 0.8, 0.81):
@@ -339,10 +339,15 @@ def test_one_atomic_request_contains_only_a_screened_summary(repo):
     assert result.action == ToolAction.ALLOW
     assert len(client.calls) == 1
     state, questions, kwargs = client.calls[0]
-    assert set(questions) == {"needs_human", "action_risk"}
-    assert {q["type"] for q in questions.values()} == {"noul", "score"}
-    assert state == {"phase": "pre_tool", "proposed_tool": {
-        "name": "Write", "arguments": "content=<str:11>; file_path=safe"}}
+    assert set(questions) == {"destructive", "credentials", "out_of_scope", "has_basis"}
+    assert {q["type"] for q in questions.values()} == {"noul"}
+    assert state == {
+        "facts": {"phase": "pre_tool", "paths": [{"path": "safe", "inside_roots": True}],
+                  "git_history_mutated": False, "network": False,
+                  "scope_unavailable": True},
+        "untrusted": {"proposed_tool": {
+            "name": "Write", "arguments": "content=<str:11>; file_path=safe"}},
+    }
     assert kwargs == {"model": "jev-1.13.0", "timeout": 1.5}
 
 

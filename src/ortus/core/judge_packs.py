@@ -15,7 +15,10 @@ from ortus.core.profiles import ProfileError
 if TYPE_CHECKING:
     from ortus.core.config import Config
 
-CRITERIA_VERSION = "pre-turn-v2"
+CRITERIA_VERSION = "pre-turn-v3"
+#: The semantic readiness question set, versioned apart from pre_turn now that
+#: the two no longer share a rubric.
+READINESS_VERSION = "readiness-v3"
 _SAFE_OVERRIDES = {
     "route_confidence", "noul_confidence", "risk_confidence", "human_threshold",
     "risk_threshold", "routes", "question_criteria", "include_issue_text",
@@ -115,8 +118,18 @@ def resolve_pack(
     return _parse_judge_values(Config(values={"judge": resolved}), judge=judge, environ=env)
 
 
+def criteria_version(phase: object) -> str:
+    """The question-set version one phase's decisions answer."""
+    return READINESS_VERSION if getattr(phase, "value", phase) == "semantic_readiness" else CRITERIA_VERSION
+
+
 def criteria_hash(config: JudgeConfig, questions: dict) -> str:
     """Hash resolved questions and policy without storing literal text in events."""
     body = {key: getattr(config, key) for key in sorted(_SAFE_OVERRIDES - {"question_criteria"})}
-    body.update(version=CRITERIA_VERSION, questions=questions)
+    body.update(version=_version_of(questions), questions=questions)
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _version_of(questions: dict) -> str:
+    # Readiness questions never carry a route choice; pre_turn always does.
+    return CRITERIA_VERSION if "route" in questions else READINESS_VERSION

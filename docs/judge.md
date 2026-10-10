@@ -101,10 +101,31 @@ A numeric directory such as `01` needs an alias such as `ortus`.
 | `total_bytes_cap` | `16384` | Serialized UTF-8 state budget |
 | `sensitive_paths` | empty | Additional literal paths to omit from text |
 
-The adapter asks Choice, Noul and Score questions in one System One request.
+The adapter asks narrow, hand-written questions about the one claimed issue
+in one System One request (`pre-turn-v3`): the `route` choice over the offered
+routes plus `none`, a `has_basis` yes/no for that pick, and two separate yes/nos,
+`needs_operator_input` (a credential, access grant or product decision) and
+`destructive_scope` (the spec asks to delete, migrate or rewrite shared data).
+The model router's own questions ride in the same request (`router-v1`):
+`cross_module_reasoning`, `novel_algorithm` and `router_has_basis`. The router
+reads its difficulty from those two answers instead of the route answers, maps
+it to a tier with the unchanged thresholds, and keeps the baseline tier (reason
+`no_basis`) when `router_has_basis` is below 0.5. The route
+options are shuffled per decision, seeded by the decision id, and the presented
+order is logged as `option_order`. The state is split in two: code-computed
+facts (metadata, section sizes, acceptance-criterion count, files and symbols
+named in Concrete locations, `estimated_minutes`, test-command count, priority,
+truncated fields) travel in a trusted `facts` block, and the screened issue
+text in a separate `untrusted` block. Jev is never asked to count or estimate.
+
 Noul supplies a probability `p`, not a separate confidence field. Ortus computes
-its confidence as `max(p, 1-p)`. A probability near 0.5 is recorded as an
-uncertain answer; it does not change what runs.
+its confidence as `max(p, 1-p)`. Each narrow answer is logged in
+`narrow_answers` with a soft band (`low` below 0.40, `high` at or above 0.70,
+`uncertain` between); the bands are labels and change nothing. The legacy
+six-field `answers` row is derived from the narrow answers in code: the route
+pick, `needs_operator_input` as `needs_human`, and `destructive_scope` on the
+0-2 risk scale. A probability near 0.5 is recorded as an uncertain answer; it
+does not change what runs.
 
 Missing keys, missing SDKs, timeouts, service errors and malformed answers
 follow `failure_mode`. In `open` mode the original worker backend proceeds
@@ -114,7 +135,8 @@ is an invalid answer and follows the same failure policy.
 
 Confidence, human-need probability and risk score are recorded in the decision
 row and change nothing about what runs. A `human` route names no worker, so the
-baseline runs and the answer stays in the log. A confident skip stops this
+baseline runs and the answer stays in the log. So does a `none` pick or a
+`has_basis` below 0.5: the code baseline runs, with no gate. A confident skip stops this
 invocation and leaves the issue available for a later run. Every other answer
 launches a worker bound to the selected id. A `human` label, an explicit policy
 denial and a fail-closed service failure remain the only pre-turn stops.
@@ -403,14 +425,15 @@ Unknown fields, missing references, invalid aliases, duplicate or empty routes,
 and nonfinite thresholds stop startup.
 
 `question_criteria.route.<route>` takes `what`, `not_for`, and an `examples`
-array. `question_criteria.needs_human` takes `true` and `false` arrays.
-`question_criteria.action_risk` takes three tables with `level` and `what`,
-ordered `routine`, `elevated`, `dangerous`. These are literal reviewed text;
-Ortus never evaluates them as code or opens referenced files. Omitted criteria
-retain their defaults. Keep credentials out of criteria text.
+array. These are literal reviewed text; Ortus never evaluates them as code or
+opens referenced files. Omitted criteria retain their defaults. Keep
+credentials out of criteria text. `question_criteria.needs_human` (`true` and
+`false` arrays) and `question_criteria.action_risk` (three `level`/`what`
+tables) still validate and load, but `pre-turn-v3` no longer asks either
+question: an override for one is named once on stderr and ignored.
 
 The resolved criteria enter the provider questions. Request metadata and decision events record
-`pre-turn-v2` and a canonical SHA-256 hash of the offered questions and resolved
+`pre-turn-v3` and a canonical SHA-256 hash of the offered questions and resolved
 threshold/text policy without recording the question text. Explicit backend,
 model and effort flags still pin the baseline. With `pre_tool = true`, only
 Claude can be offered and a non-Claude baseline fails startup.
@@ -446,18 +469,20 @@ route_confidence = 0.9
 routes = ["claude", "codex", "skip", "human"]
 sensitive_paths = ["atlas-private/"]
 
-[judge.packs.atlas_review.question_criteria.needs_human]
-true = ["The atlas change requires an unapproved product decision."]
-false = ["The atlas issue fully specifies an authorized repository change."]
+[judge.packs.atlas_review.question_criteria.route.human]
+what = "The atlas change requires an unapproved product decision."
+not_for = "An atlas issue that fully specifies an authorized repository change."
+examples = ["the issue asks which pricing tier to ship"]
 
 [judge.packs.birch_review]
 route_confidence = 0.95
 routes = ["claude", "skip", "human"]
 sensitive_paths = ["birch-private/"]
 
-[judge.packs.birch_review.question_criteria.needs_human]
-true = ["The birch change requires an unavailable credential."]
-false = ["The birch issue can be completed with existing credentials."]
+[judge.packs.birch_review.question_criteria.route.human]
+what = "The birch change requires an unavailable credential."
+not_for = "A birch issue that can be completed with existing credentials."
+examples = ["the step needs a deploy key the seat does not hold"]
 
 [judge.seats.atlas]
 enabled = true
@@ -555,7 +580,15 @@ Unfamiliar is not irreversible, and the previous allowlist treated it as though
 it were: it refused every call it did not recognise, which ended whole runs on
 their first tool use.
 
-What reaches the provider is the tool's name and a screened argument summary,
+The request (`tool-v2`) asks about one call: `destructive` (removes or
+overwrites data outside the worker's candidate branch or the allowed roots),
+`credentials` (reads, prints or sends a credential or secret), `out_of_scope`
+(acts against the bead's Non-goals or Scope), and `has_basis`. Its trusted
+`facts` block carries each path operand labeled relative to the repository with
+an inside/outside-roots flag, whether git history is mutated, whether the
+network is used, and the bead's Scope and Non-goals sections, or an explicit
+`scope_unavailable` when the bead has neither. The call itself travels in the
+separate `untrusted` block: the tool's name and a screened argument summary,
 bounded by `tool_cap`. Payload-bearing argument names are described by shape
 rather than content, longer values are replaced by their length, absolute paths
 become their repository-relative form or `[outside-roots]`, and any value
@@ -564,12 +597,13 @@ carrying a secret or a `sensitive_paths` fragment is omitted whole. Set
 
 The answers become a probability vector over `allow`, `deny_call` and
 `park_bead`, and `decide_tool` takes the argmax with no confidence floor and no
-human-need threshold. The risk score is read as the fraction of its scale that
-argues against the call; the human-need noul reports no confidence of its own,
-so only its lean past the coin flip claims mass, and an answer at 0.5 argues for
-nothing. Confidence shrinks the whole vector toward uniform, so an unsure answer
-lands nearer the middle and a zero-confidence one is uniform — which the tie
-rule, ordered least drastic first, reads as `allow`. The `human_threshold`,
+human-need threshold. The larger of `destructive` and `credentials` argues
+against the call; `out_of_scope` leans toward parking the bead, and only its
+lean past the coin flip claims mass, so an answer at 0.5 argues for nothing.
+`has_basis` shrinks the whole vector toward uniform, so an unsure answer lands
+nearer the middle; a `has_basis` below 0.5 is uniform — which the tie rule,
+ordered least drastic first, reads as `allow`, the code baseline, logged with
+reason `no_basis`. The `human_threshold`,
 `risk_threshold` and `*_confidence` settings stay inert here as they are
 pre-turn, and offline calibration has nothing in this phase to move.
 
@@ -642,16 +676,21 @@ Increase those explicit limits for longer packets after reviewing their text.
 Do not put credentials in configuration; use the process environment or the
 existing user environment file for `TYPESAFE_API_KEY`.
 
-The Choice answer assesses actionability, Noul estimates whether material
-decisions are unspecified or contradictory, and Score measures execution risk
-from ambiguity or untestable acceptance. Scores range from zero to two.
-The existing typed names are `route`, `needs_human`, and `action_risk`, with
-their confidences. Noul confidence is derived as `max(p, 1-p)` because the
-provider returns only the probability. These are advice, not launch commands.
-Literal criteria can be rewritten under `[judge.semantic_readiness_criteria]`
-using the same three schemas as `question_criteria`; this base setting is
-separate from routing criteria. The request and log hash identify the resolved
-questions so a later rewrite can be compared with earlier decisions.
+Readiness (`readiness-v3`) asks three narrow yes/nos about the one spec:
+`acceptance_observable` (does every acceptance criterion name an observable
+result for the objective), `open_product_decision` (does the spec leave a
+product decision unresolved) and `design_matches_objective` (does the design
+implement the stated objective), plus `has_basis`. Section sizes, the
+acceptance-criterion count, the number of files and symbols Concrete locations
+names and the truncated fields travel as code-computed facts, so Jev never
+counts them. The log keeps the legacy `route`, `needs_human` and `action_risk`
+fields, derived in code: `needs_human` is `open_product_decision` and the risk
+is the weaker of the other two, inverted. The narrow answers and their soft
+bands travel beside them. These are advice, not launch commands. Overrides
+under `[judge.semantic_readiness_criteria]` written for the retired rubric
+still load, are named once on stderr, and are ignored. The request and log
+hash identify the resolved questions so a later rewrite can be compared with
+earlier decisions.
 
 `ortus validate --json` exposes the vector as `semantic_readiness` on ready
 rows. Text validate, ingest and plan emit it on stderr; ingest keeps the new id

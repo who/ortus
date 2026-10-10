@@ -140,6 +140,9 @@ class JudgeState:
     proposed_tool: ProposedTool | None = None
     criteria_version: str = ""
     criteria_hash: str = ""
+    #: Code-computed facts about the spec (see judge_questions.spec_facts).
+    #: They travel in the request's trusted block, apart from the issue text.
+    facts: dict = field(default_factory=dict, hash=False)
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,9 @@ class JudgeAnswers:
     noul_confidence: float
     action_risk: float
     risk_confidence: float
+    #: The narrow answers the six legacy fields were derived from, keyed by
+    #: question name; None for an answer set that predates them.
+    narrow: dict | None = field(default=None, hash=False, compare=False)
 
 
 @dataclass(frozen=True)

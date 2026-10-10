@@ -17,6 +17,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Mapping
 from uuid import UUID, uuid4
 
 from ortus.core import hooks
@@ -39,6 +40,8 @@ _TOOL_FIELDS = frozenset({
 _TOOL_SIDE_FIELDS = frozenset({
     "command", "baseline_action", "jev_action", "question_version", "option_order",
 })
+#: Present only on a judged call whose answers came back.
+_TOOL_NARROW = "narrow_answers"
 
 
 def check_pre_tool(repo: Path, backend: str, *, docker: bool = False) -> None:
@@ -72,7 +75,7 @@ class HookRun:
     """Register before spawn, poll without tracker writes, clean up after reap."""
 
     def __init__(self, repo: Path, issue_id: str, config: JudgeConfig, run_id: str,
-                 runner: ClaudeRunner):
+                 runner: ClaudeRunner, *, scope: Mapping[str, str] | None = None):
         self.repo = repo.resolve()
         self.config = config
         self.issue_id = issue_id
@@ -107,6 +110,7 @@ class HookRun:
                 "version": 1, "repo": str(repo.resolve()), "issue_id": issue_id,
                 "session_id": self.session_id, "run_id": run_id,
                 "judge": asdict(config),
+                **({"scope": dict(scope)} if scope else {}),
             })
             # Do not resolve the interpreter symlink: that would lose its venv.
             python = os.path.abspath(sys.executable)
@@ -196,7 +200,7 @@ class HookRun:
                 self.seen.add(match[2])
                 self.requested = True
             else:
-                if set(body) - _TOOL_SIDE_FIELDS != set(identity) | _TOOL_FIELDS or (
+                if set(body) - _TOOL_SIDE_FIELDS - {_TOOL_NARROW} != set(identity) | _TOOL_FIELDS or (
                     set(body) & _TOOL_SIDE_FIELDS not in (set(), _TOOL_SIDE_FIELDS)
                 ) or any(
                     body[key] != value for key, value in identity.items()

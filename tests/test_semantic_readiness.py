@@ -112,7 +112,10 @@ def test_semantic_readiness_log_failure_preserves_ready(tmp_path, packet, judge,
     assert verdict.semantic_readiness["status"] == "unavailable"
 
 
-def test_semantic_readiness_criteria_rewrite_changes_hash_only_for_semantic(packet):
+def test_semantic_readiness_retired_override_loads_and_is_reported_once(packet, monkeypatch, capsys):
+    from ortus.core import judge_typesafe
+
+    monkeypatch.setattr(judge_typesafe, "_REPORTED", set())
     base = JudgeConfig(enabled=True)
     edited = parse_judge_config(Config(values={"judge": {
         "enabled": True,
@@ -122,8 +125,12 @@ def test_semantic_readiness_criteria_rewrite_changes_hash_only_for_semantic(pack
         }},
     }}), environ={})
     states = [pack_state(packet, cfg, phase=JudgePhase.SEMANTIC_READINESS).state for cfg in (base, edited)]
-    assert states[0].criteria_hash != states[1].criteria_hash
-    assert build_questions(edited, states[1])["needs_human"]["criteria"]["true"] == ["Acceptance has no observable outcome."]
+    # The override names a question readiness-v3 no longer asks: it loads,
+    # changes nothing and is named once on stderr.
+    assert states[0].criteria_hash == states[1].criteria_hash
+    assert "needs_human" not in build_questions(edited, states[1])
+    build_questions(edited, states[1])
+    assert capsys.readouterr().err.count("semantic_readiness_criteria.needs_human") == 1
     assert pack_state(packet, base).state.criteria_hash == pack_state(packet, edited).state.criteria_hash
 
 

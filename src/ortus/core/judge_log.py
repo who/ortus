@@ -101,6 +101,8 @@ class DecisionEvent:
     usage: JudgeUsage | None = None
     truncated_fields: tuple[str, ...] = ()
     decision_id: UUID = field(default_factory=uuid4)
+    #: The route options in the order the request presented them.
+    option_order: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,8 @@ class ModelRouteEvent:
     #: The tier the vectors argue for, before a profile that cannot be mapped
     #: sends the bead back to baseline; None when no answers reached the router.
     jev_tier: str | None = None
+    #: The router question set the vectors answered; None for legacy answers.
+    question_version: str | None = None
 
 
 def elapsed_ms(started_at: float) -> float:
@@ -249,6 +253,33 @@ def side_fields(
     }
 
 
+#: Longest narrow-answer key, and most keys one record may carry.
+_NARROW_KEY = re.compile(r"[a-z][a-z0-9_]{0,47}")
+_NARROW_MAX = 16
+#: Labels `judge_questions.soft_band` writes.
+SOFT_BANDS = frozenset({"low", "uncertain", "high"})
+
+
+def narrow_fields(narrow: Mapping[str, object] | None, options: frozenset[str] | set[str] = frozenset()) -> dict:
+    """The narrow answers a legacy answer shape was derived from, and their bands.
+
+    Values are probabilities in [0, 1], or a choice drawn from ``options``; the
+    keys are question names. The bands are logged labels and decide nothing.
+    """
+    if narrow is None:
+        return {}
+    if not isinstance(narrow, Mapping) or len(narrow) > _NARROW_MAX:
+        _invalid()
+    values: dict[str, object] = {}
+    for key, value in narrow.items():
+        if not isinstance(key, str) or not _NARROW_KEY.fullmatch(key):
+            _invalid()
+        values[key] = value if isinstance(value, str) and value in options else _number(value, 1)
+    from ortus.core.judge_questions import soft_bands
+
+    return {"narrow_answers": values, "soft_bands": soft_bands(values)}
+
+
 def request_fields(latency_ms: float | None, usage: JudgeUsage | None) -> dict:
     """Latency and token counts for a site whose record did not carry them.
 
@@ -297,6 +328,8 @@ def _truncated_fields(value: object) -> list[str]:
 
 
 GATE_ACTIONS = frozenset(action.value for action in GateAction)
+#: What a pre_turn route pick may name, `none` included.
+ROUTE_OPTIONS = frozenset({route.value for route in JudgeRoute} | {"none"})
 #: `RouterTier` values, named here because importing the router module pulls in
 #: every backend runner.
 ROUTER_TIERS = frozenset({"cheap", "baseline", "frontier"})
@@ -365,7 +398,10 @@ def _decision_payload(
             GATE_ACTIONS, baseline_action=GateAction.PROCEED.value,
             jev_action=action if answers is not None else None,
             question_version=_criteria_version(event.criteria_version, event.criteria_hash),
+            option_order=event.option_order or None, options=ROUTE_OPTIONS,
         ),
+        **narrow_fields(event.answers.narrow if event.answers is not None else None,
+                        ROUTE_OPTIONS),
     })
     if config.mode == JudgeMode.SHADOW:
         payload.update({
@@ -510,6 +546,7 @@ def write_tool_decision(
             question_version=record.get("question_version"),
             option_order=record.get("option_order"),
         ))
+    payload.update(narrow_fields(record.get("narrow_answers")))
     _append(repo, payload)
     return UUID(payload["decision_id"])
 
@@ -570,9 +607,11 @@ def write_model_route(
                 ("difficulty", event.difficulty),
             )
         },
-        # The router asks nothing of its own; it reads the gate's answers.
+        # The router's questions ride in the gate's request; their version is
+        # named here so a reworded router question never scores against the old.
         **side_fields(
             ROUTER_TIERS, baseline_action="baseline", jev_action=event.jev_tier,
+            question_version=event.question_version,
         ),
         **request_fields(None, None),
     })

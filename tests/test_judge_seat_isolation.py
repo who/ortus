@@ -16,6 +16,7 @@ from ortus.core.config import load_config
 from ortus.core.init_render import RenderContext, render_template
 from ortus.core.judge import parse_judge_config
 from ortus.core.judge_packs import criteria_hash
+from tests._jev import pre_turn_response
 from ortus.core.judge_routing import ExecutionBundle, plan_routes
 from ortus.core.judge_typesafe import TypeSafeJudge
 from ortus.core.profiles import Phase
@@ -139,11 +140,7 @@ def test_cli_invocations_keep_credentials_requests_and_logs_in_their_seat(
 
         async def system_one(self, payload, questions, **kwargs):
             calls.append((self.alias, deepcopy(payload), deepcopy(questions)))
-            return {"model": "jev-1.13.0", "answers": {
-                "route": {"type": "choice", "choice": "claude", "confidence": 0.99},
-                "needs_human": {"type": "noul", "noul": 0.01},
-                "action_risk": {"type": "score", "score": 0, "confidence": 0.99},
-            }}
+            return pre_turn_response()
 
     def adapter(cfg):
         def client_factory(config):
@@ -185,13 +182,14 @@ def test_cli_invocations_keep_credentials_requests_and_logs_in_their_seat(
     for alias in (first, "birch" if first == "atlas" else "atlas"):
         monkeypatch.setenv("TYPESAFE_API_KEY", f"synthetic-{alias}-secret")
         invoke(alias, "--judge")
-        assert calls[-1][0] == alias and calls[-1][1]["seat"] == alias
+        assert calls[-1][0] == alias and calls[-1][1]["facts"]["seat"] == alias
         _, payload, questions = calls[-1]
-        assert alias in questions["needs_human"]["criteria"]["true"][0]
+        assert alias in questions["route"]["criteria"]["human"]["what"]
         cfg = parse_judge_config(load_config(repo=repos[alias], home=home), environ={})
-        hashes[alias] = payload["criteria_hash"]
+        hashes[alias] = payload["facts"]["criteria_hash"]
         assert hashes[alias] == criteria_hash(cfg, questions)
-        assert payload["title"] == payload["objective"] == payload["acceptance"] == ""
+        text = payload["untrusted"]
+        assert text["title"] == text["objective"] == text["acceptance"] == ""
         path = repos[alias] / "logs/jev-decisions.jsonl"
         log_bytes[alias] = path.read_bytes()
         events = [json.loads(line) for line in log_bytes[alias].splitlines()]
