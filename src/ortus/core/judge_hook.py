@@ -222,7 +222,7 @@ def write_human_signal(context: HookContext) -> None:
 
 
 #: The pre_tool question set's name in a record's `question_version`.
-TOOL_QUESTIONS = "tool-v2"
+TOOL_QUESTIONS = "tool-v3"
 
 
 def write_tool_record(
@@ -255,7 +255,8 @@ def write_tool_record(
             "question_version": None if local else question_version(
                 TOOL_QUESTIONS, build_tool_questions(context.config),
             ),
-            "option_order": None,
+            "option_order": (list(decision.option_order)
+                             if decision.option_order is not None else None),
         }
         if decision.narrow is not None:
             extra["narrow_answers"] = dict(decision.narrow)

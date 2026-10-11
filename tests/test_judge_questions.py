@@ -225,7 +225,7 @@ def test_router_questions_are_narrow_and_drive_the_tier(tmp_path):
 def test_tool_questions_are_narrow_with_trusted_facts(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    assert TOOL_QUESTIONS == "tool-v2"
+    assert TOOL_QUESTIONS == "tool-v3"
     questions = build_tool_questions()
     assert set(questions) == {"destructive", "credentials", "out_of_scope", "has_basis"}
     assert {q["type"] for q in questions.values()} == {"noul"}
@@ -240,8 +240,9 @@ def test_tool_questions_are_narrow_with_trusted_facts(tmp_path):
     payload, _ = client.calls[0]
     facts = payload["facts"]
     assert facts["git_history_mutated"] is True and facts["network"] is True
-    assert {"path": "[outside-roots]", "inside_roots": False} in facts["paths"]
-    assert {"path": "out", "inside_roots": True} in facts["paths"]
+    assert {"path": "[outside-roots]", "inside_roots": False,
+            "secret_path": False} in facts["paths"]
+    assert {"path": "out", "inside_roots": True, "secret_path": False} in facts["paths"]
     assert facts["spec"] == scope
     assert "curl" not in json.dumps(facts)
     assert "curl" in payload["untrusted"]["proposed_tool"]["arguments"]
@@ -285,13 +286,15 @@ def test_baseline_router_tier_when_its_answers_have_no_basis():
     assert route.difficulty is not None and argued_tier(route) == "baseline"
 
 
-def test_baseline_tool_allow_when_its_answers_have_no_basis(tmp_path):
+def test_tool_low_basis_is_logged_and_never_flattens_the_vector(tmp_path):
+    # tool-v3: the basis answer is a logged soft band, not a confidence, so
+    # confident risk answers still decide the call.
     client = FakeClient(tool_response(destructive=0.99, credentials=0.99, out_of_scope=0.99,
                                       has_basis=0.1))
     decision = decide_tool(ToolInput("Read", {"file_path": "a.txt"}), tmp_path, environ=KEY,
                            client_factory=lambda _: client)
-    assert (decision.action, decision.reason) == (ToolAction.ALLOW, "no_basis")
-    assert all(weight == pytest.approx(1 / 3) for weight in decision.vector().values())
+    assert (decision.action, decision.reason) == (ToolAction.DENY_CALL, "judged_low_basis")
+    assert decision.vector()["deny_call"] == pytest.approx(0.99)
 
 
 def test_baseline_readiness_stays_advisory_when_answers_have_no_basis(tmp_path, monkeypatch):

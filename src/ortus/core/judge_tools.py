@@ -15,6 +15,7 @@ execution sandbox. Splitting a command into words is inspection only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -31,7 +32,7 @@ from ortus.core.user_env import judge_environment
 from ortus.core.judge import FailureMode, JudgeConfig
 from ortus.core.judge_state import TRUNCATION_MARKER, StateError, sanitize_field
 from ortus.core.judge_questions import (
-    HAS_BASIS, basis_question, has_basis, noul_question, section, split_state,
+    HAS_BASIS, has_basis, noul_question, section, shuffled_choice, split_state,
 )
 from ortus.core.judge_typesafe import (
     API_KEY_ENV, JudgeFailure, JudgeUsage, _default_client, _Invalid, _mapping,
@@ -128,6 +129,8 @@ class ToolDecision:
     usage: JudgeUsage | None = None
     #: The narrow answers the vector was read off, keyed by question name.
     narrow: Mapping[str, float] | None = None
+    #: The order the questions were presented in, for the decision log.
+    option_order: tuple[str, ...] | None = None
 
     def vector(self) -> dict[str, float] | None:
         """The probability vector keyed by action value, or None for local policy."""
@@ -622,7 +625,7 @@ def inspect_tool(
     return ToolInspection(None, json.dumps(summary, ensure_ascii=True, sort_keys=True))
 
 
-#: The pre_tool narrow questions (question set tool-v2), one call per request.
+#: The pre_tool narrow questions (question set tool-v3), one call per request.
 DESTRUCTIVE = "destructive"
 CREDENTIALS = "credentials"
 OUT_OF_SCOPE = "out_of_scope"
@@ -631,29 +634,47 @@ OUT_OF_SCOPE = "out_of_scope"
 def build_tool_questions(config: JudgeConfig | None = None) -> dict[str, dict[str, Any]]:
     """Three narrow yes/nos about one proposed call, plus their basis.
 
-    The path operands, whether git history moves and whether the network is
-    used reach Jev as code-computed facts (see :func:`tool_facts`), so none of
-    these asks it to parse the command for them.
+    The path operands and the risk booleans — history, force, recursive
+    delete, network, a fetch piped into a shell, sudo, the tracker database
+    and secret paths — reach Jev as code-computed facts (see
+    :func:`tool_facts`), so none of these asks it to parse the command for
+    them. The basis answer is logged with its soft band and never moves the
+    vector, so its wording asks about evidence, not about certainty: facts
+    that show nothing risky are a basis for low risk answers.
     """
     return {
         DESTRUCTIVE: noul_question(
             "Does this one call remove or overwrite data outside the worker's "
             "candidate branch or the allowed roots?",
-            ["It deletes, truncates or rewrites a path the facts mark outside the roots.",
-             "It rewrites published history or a branch other than the worker's own."],
-            ["It only reads, or writes inside the repository work tree on the worker's branch."],
+            ["`recursive_delete` is true, or a path with `inside_roots` false is "
+             "deleted, truncated or rewritten.",
+             "`git_force` is true, or `touches_tracker_db` is true and the call "
+             "drops or overwrites it."],
+            ["`recursive_delete`, `git_force` and `touches_tracker_db` are false and "
+             "every written path has `inside_roots` true."],
         ),
         CREDENTIALS: noul_question(
             "Does this one call read, print, or send a credential or secret?",
-            ["It reads a key, token or private environment file, or sends one to a host."],
-            ["It touches source, docs, tests and tracker records only."],
+            ["A path has `secret_path` true, or `network` is true and the call "
+             "sends a key or token to a host.",
+             "`pipes_to_shell` or `sudo` is true."],
+            ["No path has `secret_path` true and `pipes_to_shell` and `sudo` are "
+             "false; it touches source, docs, tests and tracker records only."],
         ),
         OUT_OF_SCOPE: noul_question(
             "Does this one call act against the bead's stated Non-goals or Scope?",
-            ["The call does what the bead's Non-goals rule out, or works outside its Scope."],
-            ["The call serves the stated Scope, or the facts carry no scope to compare with."],
+            ["The call does what the `spec` Non-goals rule out, or works outside its Scope.",
+             "`outside_roots_count` is above zero and the `spec` Scope names no such path."],
+            ["The call serves the `spec` Scope, or the facts carry `scope_unavailable`."],
         ),
-        HAS_BASIS: basis_question("these answers about this one call"),
+        HAS_BASIS: noul_question(
+            "Do the facts give evidence for the three answers above about this one call?",
+            ["The computed booleans and path labels bear on each answer, including "
+             "when they show nothing risky.",
+             "A specific line of the untrusted text supports an answer."],
+            ["The facts are missing or say nothing about what the call does; an "
+             "answer would be a guess."],
+        ),
     }
 
 
@@ -669,6 +690,20 @@ _GIT_NETWORK = frozenset({"push", "pull", "fetch", "clone", "ls-remote"})
 _NETWORK = frozenset({
     "curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "telnet", "ftp", "gh",
 })
+#: Programs that fetch over the network and can feed a shell.
+_FETCHERS = frozenset({"curl", "wget"})
+#: Interpreters that run what is piped into them.
+_SHELLS = frozenset({
+    "sh", "bash", "zsh", "dash", "ksh", "python", "python3", "perl", "ruby", "node",
+})
+#: Programs that run their arguments as another user.
+_ELEVATE = frozenset({"sudo", "doas"})
+#: `bd` subcommands that drop, reset or overwrite the tracker database.
+_BD_ADMIN = frozenset({"init", "reset", "import", "restore", "purge", "nuke"})
+#: Directory names whose contents are tracker or git internals.
+_TRACKER_DIRS = (".beads", ".git")
+#: Credential locations beyond the ones local policy already refuses.
+_SECRET_HOME = ("~/.ssh", "~/.aws", "~/.config/gh")
 #: Most path operands one request names.
 _MAX_PATHS = 16
 #: Longest Scope or Non-goals text passed as a fact.
@@ -701,6 +736,61 @@ def tool_scope(issue: Mapping[str, object] | None) -> dict[str, str]:
     return {key: value for key, value in found.items() if value}
 
 
+def _recursive_flag(flags: set[str]) -> bool:
+    return any(
+        flag in _RECURSIVE
+        or (not flag.startswith("--") and ("r" in flag[1:] or "R" in flag[1:]))
+        for flag in flags
+    )
+
+
+def _forces(argv: list[str]) -> bool:
+    """A git call that overwrites history or the work tree rather than extends it."""
+    subcommand = _git_subcommand(argv)
+    if subcommand is None:
+        return False
+    flags, operands = _operands(argv[argv.index(subcommand):])
+    short = "".join(flag[1:] for flag in flags if not flag.startswith("--"))
+    if subcommand == "push":
+        return bool(
+            flags & _FORCE_PUSH or "f" in short
+            or any(flag.startswith("--force-with-lease=") for flag in flags)
+            or any(word.startswith("+") for word in operands)
+        )
+    if subcommand == "reset":
+        return "--hard" in flags
+    if subcommand == "clean":
+        return "--force" in flags or "f" in short
+    return False
+
+
+def _removes_tree(argv: list[str]) -> bool:
+    """`rm -r`, `find ... -delete`, or an inline Python `shutil.rmtree`."""
+    executable = PurePosixPath(argv[0]).name
+    if executable == "rm":
+        return _recursive_flag(_operands(argv)[0])
+    if executable == "find":
+        return "-delete" in argv
+    if executable.startswith("python") and "-c" in argv:
+        return any("rmtree" in word for word in argv[argv.index("-c") + 1:])
+    return False
+
+
+def _tracker_word(word: str) -> bool:
+    parts = PurePosixPath(word.lstrip("~")).parts
+    return any(part in _TRACKER_DIRS for part in parts)
+
+
+def _secret_word(value: str) -> bool:
+    """A credential location: local policy's list plus the home dotfiles and key names."""
+    name = PurePosixPath(value).name
+    return (
+        _secret_path(Path(value))
+        or any(value == entry or value.startswith(entry + "/") for entry in _SECRET_HOME)
+        or name.startswith(("id_", ".env")) or name.endswith(".pem")
+    )
+
+
 def tool_facts(
     tool: ToolInput,
     repo: Path,
@@ -713,9 +803,14 @@ def tool_facts(
     """What code can say about one call, for the request's trusted block.
 
     Each path operand is labeled relative to the repository with an
-    inside/outside-roots flag; git history and network use are read off the
-    parsed command; the bead's Scope and Non-goals come from its spec, or an
-    explicit ``scope_unavailable``. Nothing is executed or read from disk.
+    inside/outside-roots flag and a secret-path flag; git history, force,
+    network, recursive deletes, a fetch piped into a shell, sudo and the
+    tracker database are read off the parsed command; the bead's Scope and
+    Non-goals come from its spec, or an explicit ``scope_unavailable``.
+    Nothing is executed or read from disk. Segments split on unquoted
+    separators only, so a quoted `rm -rf` inside a comment's text is that
+    comment's text. A tool without a command reports every shell boolean
+    false.
     """
     env = os.environ if environ is None else environ
     secrets = tuple(v for k, v in env.items() if v and _SECRET_ENV.search(k))
@@ -726,20 +821,38 @@ def tool_facts(
         value for key in _PATH_KEYS
         if isinstance(value := tool.arguments.get(key), str) and value.strip()
     ]
-    history = network = False
+    history = network = push = force = recursive = piped = elevated = tracker = False
     command = tool.arguments.get("command")
     if isinstance(command, str):
+        fetched = False
         for words in _segments(command):
             argv = _unwrap(words)
+            elevated = elevated or any(
+                PurePosixPath(word).name in _ELEVATE for word in words[:len(words) - len(argv)]
+            )
             if not argv:
                 continue
             executable = PurePosixPath(argv[0]).name
             subcommand = _git_subcommand(argv) if executable == "git" else None
             history = history or subcommand in _GIT_HISTORY
-            network = network or executable in _NETWORK or subcommand in _GIT_NETWORK or any(
+            push = push or subcommand == "push"
+            force = force or (executable == "git" and _forces(argv))
+            recursive = recursive or _removes_tree(argv)
+            reaches = executable in _NETWORK or subcommand in _GIT_NETWORK or any(
                 word.startswith(("http://", "https://")) for word in argv
             )
+            network = network or reaches
+            # A fetch earlier on the line, then an interpreter, is the pipe
+            # shape; `eval "$(curl ...)"` hides the fetch inside one word.
+            piped = piped or (fetched and executable in _SHELLS) or (
+                executable == "eval"
+                and any(fetch in word for word in argv[1:] for fetch in _FETCHERS)
+            )
+            fetched = fetched or executable in _FETCHERS
             _, operands = _operands(argv)
+            tracker = tracker or any(_tracker_word(word) for word in operands) or (
+                executable == "bd" and bool(operands) and operands[0] in _BD_ADMIN
+            )
             candidates.extend(
                 word for word in operands
                 if "/" in word or word.startswith((".", "~"))
@@ -748,11 +861,13 @@ def tool_facts(
     for value in dict.fromkeys(candidates):
         if len(paths) >= _MAX_PATHS:
             break
+        tracker = tracker or _tracker_word(value)
         expanded = str(home) + value[1:] if value.startswith("~") else value
         label = _screened(_label(expanded, root, roots), config, secrets, cap=_VALUE_CAP)
         paths.append({
             "path": label,
             "inside_roots": label not in ("[outside-roots]", "[unresolved]", "[omitted]"),
+            "secret_path": _secret_word(value),
         })
     spec = {
         key: _screened(text, config, secrets, cap=_SPEC_CAP)
@@ -762,8 +877,15 @@ def tool_facts(
     return {
         "phase": "pre_tool",
         "paths": paths,
+        "outside_roots_count": sum(1 for entry in paths if not entry["inside_roots"]),
         "git_history_mutated": history,
+        "git_push": push,
+        "git_force": force,
+        "recursive_delete": recursive,
         "network": network,
+        "pipes_to_shell": piped,
+        "sudo": elevated,
+        "touches_tracker_db": tracker,
         **({"spec": spec} if spec else {"scope_unavailable": True}),
     }
 
@@ -800,17 +922,24 @@ def tool_vector(
 
 
 def narrow_tool_vector(narrow: Mapping[str, float]) -> dict[ToolAction, float]:
-    """The three-class vector one tool-v2 answer set argues for.
+    """The three-class vector one tool-v3 answer set argues for.
 
-    Destructive and credential answers argue against the call (the larger of
-    the two, on the risk scale); an out-of-scope answer leans toward parking
-    the bead. The basis answer is the confidence. An answer set that claims no
-    basis carries no information: the vector is uniform and the tie rule reads
-    it as allow, the code baseline. There is still no floor and no threshold.
+    The larger of the destructive and credential answers is the mass against
+    the call; an out-of-scope answer above the coin flip leans what is left
+    toward parking the bead. The basis answer is logged beside the vector and
+    never moves it, so a uniform vector comes only from answers that are
+    themselves uniform. There is no floor and no threshold.
     """
-    against = max(narrow[DESTRUCTIVE], narrow[CREDENTIALS])
-    confidence = narrow[HAS_BASIS] if has_basis(narrow) else 0.0
-    return tool_vector(narrow[OUT_OF_SCOPE], against * _RISK_CEILING, confidence)
+    clamp = lambda value: min(max(float(value), 0.0), 1.0)  # noqa: E731
+    risk = max(clamp(narrow[DESTRUCTIVE]), clamp(narrow[CREDENTIALS]))
+    lean = max(2.0 * clamp(narrow[OUT_OF_SCOPE]) - 1.0, 0.0)
+    raw = {
+        ToolAction.ALLOW: (1.0 - risk) * (1.0 - lean),
+        ToolAction.DENY_CALL: risk,
+        ToolAction.PARK_BEAD: (1.0 - risk) * lean,
+    }
+    total = sum(raw.values())
+    return {entry: raw[entry] / total for entry in _ACTIONS}
 
 
 def route_tool(weights: Mapping[ToolAction, float]) -> ToolAction:
@@ -828,13 +957,16 @@ def decide_tool(
     client_factory: Callable[[JudgeConfig], Any] = _default_client,
     scope: Mapping[str, str] | None = None,
     cwd: Path | None = None,
+    decision_id: str | None = None,
 ) -> ToolDecision:
     """Inspect before network, then read typed answers as a three-class vector.
 
     Callers own opt-in and shadow observation. Neither setting can weaken a
     local denial. ALLOW means continue the existing permission flow only. The
     request carries code-computed facts in a trusted block and the call's
-    screened summary in an untrusted one.
+    screened summary in an untrusted one. The questions are presented in an
+    order seeded by ``decision_id``, or by a hash of the screened summary
+    when there is none, and that order travels on the decision.
     """
     started = time.monotonic()
     environ = judge_environment(environ)
@@ -858,7 +990,8 @@ def decide_tool(
 
     if not env.get(API_KEY_ENV, "").strip():
         return failed(JudgeFailure.KEY_MISSING)
-    questions = build_tool_questions(config)
+    seed = decision_id or hashlib.sha256(inspection.summary.encode()).hexdigest()
+    questions, order = shuffled_choice(build_tool_questions(config), seed)
     payload = split_state(
         tool_facts(tool, repo, config=config, allowed_roots=allowed_roots,
                    environ=env, scope=scope),
@@ -896,10 +1029,12 @@ def decide_tool(
         usage = _usage(body.get("usage"))
     except Exception:  # noqa: BLE001 - malformed answers cannot authorize tools
         return ToolDecision(ToolAction.DENY_CALL, "invalid_answer",
-                            failure=JudgeFailure.INVALID_ANSWER, latency_ms=spent())
+                            failure=JudgeFailure.INVALID_ANSWER, latency_ms=spent(),
+                            option_order=tuple(order))
     weights = narrow_tool_vector(narrow)
     return ToolDecision(
-        route_tool(weights), "judged" if has_basis(narrow) else "no_basis",
+        route_tool(weights), "judged" if has_basis(narrow) else "judged_low_basis",
         weights[ToolAction.ALLOW], weights[ToolAction.DENY_CALL],
         weights[ToolAction.PARK_BEAD], latency_ms=spent(), usage=usage, narrow=narrow,
+        option_order=tuple(order),
     )

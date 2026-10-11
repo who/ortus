@@ -65,6 +65,9 @@ TOOL = COMMON | USAGE | {
 STUCK_ACTIONS = {"continue", "replan", "escalate"}
 TRIAGE_CLASSES = {"pin_skew", "planner_fix", "needs_human"}
 TOOL_ACTIONS = {"allow", "deny_call", "park_bead"}
+#: The tool-v3 questions a pre_tool `option_order` presents, in shuffled order.
+#: A tool-v2 record logs no order, so the actions stay accepted beside them.
+TOOL_QUESTIONS = {"destructive", "credentials", "out_of_scope", "has_basis"}
 OUTCOMES = {"done", "plan_gap", "flake", "auth", "needs_human", "continue"}
 #: The worker-failure class a post-turn record may also carry. Optional, and
 #: read beside `reason` rather than folded into `OUTCOMES`: a log written
@@ -169,7 +172,7 @@ def _vocabularies(kind: str) -> tuple[set[str], set[str]]:
         return set(ROUTER_TIERS), set(ROUTER_TIERS)
     if kind in ("progress", "progress_window"):
         return set(PROGRESS_ACTIONS), set(PROGRESS_ACTIONS)
-    return TOOL_ACTIONS, TOOL_ACTIONS
+    return TOOL_ACTIONS, TOOL_ACTIONS | TOOL_QUESTIONS
 
 
 def _side(e: dict, kind: str) -> None:

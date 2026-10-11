@@ -33,7 +33,7 @@ from ortus.core.judge import JudgeRoute
 from ortus.core.judge_state import (
     TRUNCATABLE_FIELDS, StateError, environment_secrets, sanitize_field,
 )
-from ortus.core.judge_tools import ToolAction, _screened, cap_command
+from ortus.core.judge_tools import ToolAction, _screened, build_tool_questions, cap_command
 from ortus.core.judge_typesafe import JudgeFailure, JudgeUsage
 
 MAX_EVENT_BYTES = 8192
@@ -42,6 +42,9 @@ LOG_NAME = "jev-decisions.jsonl"
 #: The pre_tool outcome vocabulary, taken from the enum that produces it so a
 #: new action cannot be written here without the code that decided it.
 TOOL_ACTIONS = frozenset(action.value for action in ToolAction)
+#: The names a pre_tool `option_order` lists: the tool-v3 questions, in the
+#: shuffled order they were presented.
+TOOL_QUESTIONS = frozenset(build_tool_questions())
 
 #: Per-bead model-routing records. A separate file rather than a fourth event
 #: kind in LOG_NAME: the replay reader rejects any record whose event name it
@@ -551,7 +554,7 @@ def write_tool_decision(
             TOOL_ACTIONS, baseline_action=record.get("baseline_action"),
             jev_action=record.get("jev_action"),
             question_version=record.get("question_version"),
-            option_order=record.get("option_order"),
+            option_order=record.get("option_order"), options=TOOL_QUESTIONS,
         ))
     payload.update(narrow_fields(record.get("narrow_answers")))
     _append(repo, payload)

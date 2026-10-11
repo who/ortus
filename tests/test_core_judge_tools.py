@@ -6,7 +6,8 @@ import pytest
 
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode
 from ortus.core.judge_tools import (
-    _VALUE_CAP, ToolAction, ToolInput, decide_tool, inspect_tool, route_tool, tool_vector,
+    _VALUE_CAP, ToolAction, ToolInput, decide_tool, inspect_tool, narrow_tool_vector,
+    route_tool, tool_vector,
 )
 from tests._jev import tool_response
 
@@ -340,16 +341,19 @@ def test_vector_zero_confidence_is_uniform_and_ties_to_allow(human, risk):
 
 def test_vector_has_no_confidence_floor_or_human_threshold(repo):
     # The four literals that used to sit here returned low_confidence and
-    # needs_human. Neither reason exists, and an answer claiming no basis is
-    # the uniform vector, which allows rather than hands the call over.
+    # needs_human. Neither reason exists, and an answer claiming little basis
+    # is logged as such while its risk answers still decide the call.
     result = judged(repo, response(human=0.1, risk=0, confidence=0.01))[0]
-    assert (result.action, result.reason) == (ToolAction.ALLOW, "no_basis")
+    assert (result.action, result.reason) == (ToolAction.ALLOW, "judged_low_basis")
+    assert result.vector()["allow"] == pytest.approx(1.0)
     for human in (0.79, 0.8, 0.81):
         for risk in (1.49, 1.5, 1.51):
             for confidence in (0.79, 0.8, 0.81):
                 decision = judged(repo, response(human, risk, confidence))[0]
                 assert decision.reason == "judged"
-                assert decision.action == route_tool(tool_vector(human, risk, confidence))
+                assert decision.action == route_tool(narrow_tool_vector({
+                    "destructive": risk / 2, "credentials": 0.0,
+                    "out_of_scope": human, "has_basis": confidence}))
 
 
 def test_vector_travels_with_the_decision(repo):
@@ -372,9 +376,12 @@ def test_one_atomic_request_contains_only_a_screened_summary(repo):
     assert set(questions) == {"destructive", "credentials", "out_of_scope", "has_basis"}
     assert {q["type"] for q in questions.values()} == {"noul"}
     assert state == {
-        "facts": {"phase": "pre_tool", "paths": [{"path": "safe", "inside_roots": True}],
-                  "git_history_mutated": False, "network": False,
-                  "scope_unavailable": True},
+        "facts": {"phase": "pre_tool",
+                  "paths": [{"path": "safe", "inside_roots": True, "secret_path": False}],
+                  "outside_roots_count": 0, "git_history_mutated": False,
+                  "git_push": False, "git_force": False, "recursive_delete": False,
+                  "network": False, "pipes_to_shell": False, "sudo": False,
+                  "touches_tracker_db": False, "scope_unavailable": True},
         "untrusted": {"proposed_tool": {
             "name": "Write", "arguments": "content=<str:11>; file_path=safe"}},
     }
