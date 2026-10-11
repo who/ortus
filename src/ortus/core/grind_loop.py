@@ -142,7 +142,9 @@ def queue_drained(snapshot: StateSnapshot) -> bool:
     return snapshot.open == 0 and snapshot.in_progress == 0
 
 
-def read_work_issue_condition(*, audited: bool = False) -> str:
+def read_work_issue_condition(
+    *, audited: bool = False, issue_ref: str = "subject"
+) -> str:
     """Load the per-iteration work-this-issue condition template.
 
     Issue SELECTION is done by the harness, not the worker, and the worker is
@@ -153,8 +155,12 @@ def read_work_issue_condition(*, audited: bool = False) -> str:
     ``audited`` serves the audited variant of the same contract — the rewrite
     the `prompt_audit` flag selects. Both variants carry the two placeholders,
     so injection is identical either way.
+
+    ``issue_ref`` is the repository's `commit_issue_ref`: its subject clause
+    replaces the `<ISSUE_ID>: ` prefix rule, and `subject` leaves the text
+    exactly as bundled.
     """
-    from ortus.core.prompts import AUDITED_PROMPT_PACKAGE
+    from ortus.core.prompts import AUDITED_PROMPT_PACKAGE, condition_message_rules
 
     package = AUDITED_PROMPT_PACKAGE if audited else CONDITIONS_PACKAGE
     res = files(package).joinpath(WORK_ISSUE_CONDITION_FILE)
@@ -163,7 +169,7 @@ def read_work_issue_condition(*, audited: bool = False) -> str:
     text = res.read_text(encoding="utf-8")
     if text.lstrip().startswith("TODO PLACEHOLDER"):
         raise FileNotFoundError("work-issue condition is still a TODO placeholder")
-    return text
+    return condition_message_rules(text, issue_ref)
 
 
 def select_ready_issue(

@@ -264,3 +264,131 @@ def substitute(text: str, /, **values: str) -> str:
     """
 
     return Template(text).safe_substitute(**values)
+
+
+#: The session-close sequence the bundled goal prompts carry in step 4. It is
+#: the anchor the stealth rewrite replaces, so a bundle that loses it is
+#: caught by `session_close_steps(False, None)` no longer matching the text.
+_SESSION_CLOSE_ANCHOR = (
+    "completion comment, commit, `bd close`, `git pull --rebase --autostash`, "
+    "`bd dolt push`, `git push`"
+)
+
+
+def session_close_steps(stealth: bool, tracker_remote: str | None) -> str:
+    """The session-close sequence a goal prompt tells the worker to run.
+
+    Outside stealth this is the bundled text byte for byte. A stealth
+    repository has no Dolt remote on origin, and a bare `bd dolt push` would
+    derive one from origin and land `refs/dolt/data` on the fork, so the step
+    is dropped, or pointed at the private tracker remote when one is set.
+    """
+    if not stealth:
+        return _SESSION_CLOSE_ANCHOR
+    from ortus.core.stealth import TRACKER_REMOTE_NAME
+
+    steps = [
+        "completion comment",
+        "commit",
+        "`bd close`",
+        "`git pull --rebase --autostash`",
+    ]
+    if tracker_remote:
+        steps.append(f"`bd dolt push --remote {TRACKER_REMOTE_NAME}`")
+    steps.append("`git push`")
+    return ", ".join(steps)
+
+
+def apply_session_close(
+    resolved: ResolvedPrompt, *, stealth: bool, tracker_remote: str | None
+) -> tuple[ResolvedPrompt, str | None]:
+    """The resolved prompt with its session-close step fitted to stealth.
+
+    Only a bundled text is rewritten. An override is the operator's own
+    contract and is served untouched; in stealth one that still carries the
+    bundled anchor gets a warning back, because its `bd dolt push` would
+    publish the tracker to origin.
+    """
+    if not stealth:
+        return resolved, None
+    if resolved.source not in ("bundled", "audited"):
+        if _SESSION_CLOSE_ANCHOR in resolved.text:
+            return resolved, (
+                f"stealth: {resolved.source} override {resolved.path} keeps "
+                "`bd dolt push` in its session-close step; served unchanged"
+            )
+        return resolved, None
+    text = resolved.text.replace(
+        _SESSION_CLOSE_ANCHOR, session_close_steps(stealth, tracker_remote)
+    )
+    return ResolvedPrompt(
+        name=resolved.name, source=resolved.source, path=resolved.path, text=text
+    ), None
+
+
+#: The subject clause each commit issue-reference style states. `subject` is
+#: the clause grind has always written; the other two keep the issue id out
+#: of the subject an upstream maintainer reads.
+_SUBJECT_CLAUSES: dict[str, str] = {
+    "subject": (
+        "an imperative subject of at most 72 characters counted with the "
+        "`{id}: ` prefix"
+    ),
+    "none": (
+        "a plain imperative subject of at most 72 characters with no issue id "
+        "anywhere in the message"
+    ),
+    "trailer": (
+        "a plain imperative subject of at most 72 characters, with the issue "
+        "id nowhere in the message but a final git trailer line "
+        "`Ortus-Issue: {id}`"
+    ),
+}
+
+#: The subject clause as the work-issue conditions phrase it today. Only this
+#: clause is replaced when a repository names its issue another way.
+_CONDITION_SUBJECT_CLAUSE = (
+    "an imperative subject of at most 72 characters counted over the whole "
+    "line including the `<ISSUE_ID>: ` prefix"
+)
+
+
+def subject_clause(issue_ref: str, id_token: str = "<issue-id>") -> str:
+    """How the commit subject names the issue, for one `commit_issue_ref`."""
+    try:
+        return _SUBJECT_CLAUSES[issue_ref].format(id=id_token)
+    except KeyError:
+        raise ValueError(f"unknown commit_issue_ref {issue_ref!r}") from None
+
+
+def message_rules(issue_ref: str = "subject") -> str:
+    """The commit-message rule set every writer-facing contract carries.
+
+    `subject` is the exact text tests/test_grind_prompt_content.py pins.
+    """
+    return (
+        "Commit-message rules (a message that breaks one is replaced by a weaker "
+        "deterministic assembly; only an over-long subject is repaired in place): "
+        + subject_clause(issue_ref)
+        + " — describe the change, do not restate the issue "
+        "title, no trailing period, no `...` — then a body of at least two "
+        "paragraphs of plain-text prose, under 8,000 characters in all, naming in "
+        "backticks at least one function, class, or file that actually appears in "
+        "your diff and none that does not (a diff with no nameable symbol still "
+        "names one of its files), never an inventory of the files touched, and "
+        "never narration of how the commit was produced (attempt counts, "
+        "criterion results, step names, owned-path hashes)."
+    )
+
+
+def condition_message_rules(text: str, issue_ref: str) -> str:
+    """A work-issue condition with its subject clause fitted to `issue_ref`.
+
+    `subject` returns the condition unchanged, so the bundled text is what a
+    non-stealth worker reads.
+    """
+    if issue_ref == "subject":
+        return text
+    return text.replace(
+        _CONDITION_SUBJECT_CLAUSE, subject_clause(issue_ref, "<ISSUE_ID>")
+    )

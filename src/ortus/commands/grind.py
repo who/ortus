@@ -37,6 +37,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -67,12 +68,13 @@ from ortus.core.codegraph import (
 )
 from ortus.core.prompt_audit import audit_enabled, audit_note
 from ortus.core.prompt_prefix import stable_prefix_note
-from ortus.core.prompts import resolve_named_prompt
+from ortus.core.prompts import message_rules, resolve_named_prompt
 from ortus.core.config import (
     DEFAULT_MERGE_GATE_TIMEOUT,
     DEFAULT_VERIFICATION_MODE,
     VERIFICATION_PROTOTYPE,
     load_config,
+    resolve_commit_issue_ref,
 )
 from ortus.core.profiles import ProfileError
 from ortus.core.readiness import (
@@ -80,6 +82,7 @@ from ortus.core.readiness import (
     ReadinessReport,
 )
 from ortus.core.git import GitClient
+from ortus.core.stealth import is_stealth
 from ortus.core.grind_logic import (
     FlockBusy,
     build_condition,
@@ -182,12 +185,17 @@ def _checkpoint_codex_preflight(
     allowed_dirty: frozenset[str] = frozenset(),
     accept_baseline: bool = False,
     checkpoint_tracker: bool = True,
+    stealth: bool = False,
 ) -> frozenset[str]:
     """Checkpoint tracker exports and classify remaining dirty paths.
 
     Beads can update and stage its JSONL exports while Grind reads queue state.
     At startup, source changes are returned as handoff context instead of
     blocking Codex. Later calls accept the active candidate context.
+
+    A stealth repository never gets the housekeeping commit: its tracker is
+    excluded from git, and a "chore: sync beads state" commit on the fork is
+    exactly the trace stealth exists to keep off it.
     """
     if not git.is_git_repo():
         return frozenset()
@@ -213,6 +221,12 @@ def _checkpoint_codex_preflight(
         raise typer.Exit(code=1)
 
     tracker_paths = dirty & _TRACKER_EXPORT_PATHS if checkpoint_tracker else frozenset()
+    if tracker_paths and stealth:
+        write_log(
+            "preflight: stealth; skipping tracker housekeeping commit: "
+            + ", ".join(sorted(tracker_paths))
+        )
+        tracker_paths = frozenset()
     if tracker_paths:
         write_log(
             "preflight: tracker changes detected; creating housekeeping commit: "
@@ -250,19 +264,7 @@ def _checkpoint_codex_preflight(
 #: autonomous landings both had their messages rejected for breaking rules
 #: the contract never stated, so every writer-facing contract carries this
 #: same rule set; tests/test_grind_prompt_content.py pins the phrasing.
-_MESSAGE_RULES = (
-    "Commit-message rules (a message that breaks one is replaced by a weaker "
-    "deterministic assembly; only an over-long subject is repaired in place): "
-    "an imperative subject of at most 72 characters counted with the "
-    "`<issue-id>: ` prefix — describe the change, do not restate the issue "
-    "title, no trailing period, no `...` — then a body of at least two "
-    "paragraphs of plain-text prose, under 8,000 characters in all, naming in "
-    "backticks at least one function, class, or file that actually appears in "
-    "your diff and none that does not (a diff with no nameable symbol still "
-    "names one of its files), never an inventory of the files touched, and "
-    "never narration of how the commit was produced (attempt counts, "
-    "criterion results, step names, owned-path hashes)."
-)
+_MESSAGE_RULES = message_rules("subject")
 
 #: The implementation phase rules injected ahead of the worker's condition.
 #: Module-level so the prompt-content tests can hold its message guidance to
@@ -271,6 +273,110 @@ _IMPLEMENTATION_INSTRUCTION = (
     "Follow the one-issue goal-prompt loop. Session-close that id per "
     "AGENTS.md. " + _MESSAGE_RULES + " Do not pick a second issue."
 )
+
+#: The staging rule a stealth worker reads. Upstream must never see an Ortus
+#: path, and the exclude block is the only thing hiding them, so a forced add
+#: or an edited ignore file is how one leaks.
+_STEALTH_STAGING_RULE = (
+    " Stage by explicit path, never `git add -f`/`--force`, never edit "
+    "`.gitignore` or `.git/info/exclude` unless the issue scope names that "
+    "file, and keep scratch outside the repo or under an already-excluded path."
+)
+
+
+def _implementation_instruction(issue_ref: str, stealth: bool) -> str:
+    """The implementation instruction for one repository's commit style.
+
+    A non-stealth repository on the default `subject` style gets
+    `_IMPLEMENTATION_INSTRUCTION` itself.
+    """
+    if issue_ref == "subject" and not stealth:
+        return _IMPLEMENTATION_INSTRUCTION
+    instruction = (
+        "Follow the one-issue goal-prompt loop. Session-close that id per "
+        "AGENTS.md. " + message_rules(issue_ref) + " Do not pick a second issue."
+    )
+    if stealth:
+        instruction += _STEALTH_STAGING_RULE
+    return instruction
+
+
+#: The env var that tells bead 3/4's pre-commit hook a `.gitignore` edit is
+#: this window's sanctioned work.
+_ALLOW_GITIGNORE_ENV = "ORTUS_STEALTH_ALLOW_GITIGNORE"
+
+
+def _scope_names_gitignore(issue: dict | None) -> bool:
+    """Whether the issue's design `## Scope` section names `.gitignore`.
+
+    The literal string is the whole test. A design with no Scope section, or
+    no issue at all, names nothing.
+    """
+    design = str((issue or {}).get("design") or "")
+    match = re.search(r"^## Scope[ \t]*$(.*?)(?=^## |\Z)", design, re.M | re.S)
+    return match is not None and ".gitignore" in match.group(1)
+
+
+def _window_gitignore_paths(git: GitClient, pre_window_head: str) -> tuple[str, ...]:
+    """Every `.gitignore`, at any depth, a worker window changed.
+
+    Commits since `pre_window_head` and the tree left dirty both count, and a
+    deleted file is still a change.
+    """
+    changed: set[str] = set(git.dirty_paths() or ())
+    if pre_window_head:
+        changed |= git.changed_paths(pre_window_head) or frozenset()
+    return tuple(sorted(path for path in changed if Path(path).name == ".gitignore"))
+
+
+def _stealth_gitignore_guard(
+    git: GitClient,
+    bd: BdClient,
+    issue: dict | None,
+    pre_window_head: str,
+    write_log: Callable[[str], None],
+) -> None:
+    """HALT a stealth window that edited `.gitignore` outside its scope.
+
+    The fork's tracked `.gitignore` is upstream's file, and stealth keeps its
+    own exclusions in `.git/info/exclude`, so an edit there is only this
+    window's to make when the bead's Scope names it. History is never
+    rewritten: the bead goes to the human queue with the commits and paths,
+    and the run stops before grind pushes anything.
+    """
+    if _scope_names_gitignore(issue):
+        return
+    paths = _window_gitignore_paths(git, pre_window_head)
+    if not paths:
+        return
+    post_window_head = git.head_oid()
+    rendered = ", ".join(paths)
+    commits = (
+        f"{pre_window_head[:12]}..{post_window_head[:12]}"
+        if pre_window_head and post_window_head != pre_window_head
+        else "uncommitted"
+    )
+    issue_id = str((issue or {}).get("id") or "")
+    write_log(
+        f"stealth: HALT — {issue_id or 'window'} changed {rendered} "
+        f"({commits}) and its Scope does not name .gitignore"
+    )
+    if issue_id:
+        bd.add_comment(
+            issue_id,
+            f"STEALTH-GITIGNORE: this window changed {rendered} ({commits}) "
+            "but the Scope section does not name `.gitignore`. Stealth keeps "
+            "Ortus exclusions in `.git/info/exclude`; revert the edit or add "
+            "`.gitignore` to the Scope, then unlabel human.",
+        )
+        bd.add_label(issue_id, "human")
+    output.error(
+        f"grind: stealth: {rendered} changed outside the issue scope ({commits})",
+        hint="revert the .gitignore edit (stealth excludes live in "
+        ".git/info/exclude) or name .gitignore in the issue Scope, then "
+        "re-run grind",
+    )
+    raise typer.Exit(code=1)
 
 
 def _resolve_merge_gate(config: Any) -> tuple[bool, float]:
@@ -1549,6 +1655,9 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
+        stealth = is_stealth(target)
+        issue_ref = resolve_commit_issue_ref(config, stealth)
+        implementation_instruction = _implementation_instruction(issue_ref, stealth)
         prompt_audit = audit_enabled(config)
         prompt_variant_note = audit_note(config)
         prefix_order_note = stable_prefix_note(config)
@@ -1577,7 +1686,7 @@ def grind(
                 verify_model, verify_reasoning_effort,
             ),
         )
-    except (BackendError, ProfileError) as exc:
+    except (BackendError, ProfileError, ValueError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
 
@@ -1635,7 +1744,9 @@ def grind(
 
     harness_select = condition is None
     work_template = (
-        read_work_issue_condition(audited=prompt_audit) if harness_select else ""
+        read_work_issue_condition(audited=prompt_audit, issue_ref=issue_ref)
+        if harness_select
+        else ""
     )
 
     if dry_run:
@@ -1683,7 +1794,7 @@ def grind(
                 {"id": "<ISSUE_ID>", "title": "<ISSUE_DETAILS>",
                  "status": "in_progress", "assignee": "preview"},
                 resolved_backend,
-                phase_instruction=_IMPLEMENTATION_INSTRUCTION,
+                phase_instruction=implementation_instruction,
                 phase_contract_text=phase_contract(
                     CodeGraphPhase.IMPLEMENTATION, codegraph_probe
                 ),
@@ -1766,7 +1877,9 @@ def grind(
                 "=== ortus grind started "
                 f"(subprocess-per-task shape; backend={resolved_backend}; "
                 f"verification={verification_note}; "
-                f"prompt={prompt_variant_note}) ==="
+                f"prompt={prompt_variant_note}"
+                + (f"; stealth=on; commit_issue_ref={issue_ref}" if stealth else "")
+                + ") ==="
             )
             if verification_text:
                 write_log(
@@ -1787,6 +1900,9 @@ def grind(
             if not git.is_git_repo():
                 output.error("grind: working tree is not a git repository")
                 raise typer.Exit(code=1)
+            if stealth:
+                git.stealth = True
+                git.log = write_log
             # Re-assert branch discipline before anything else: a stray branch
             # left by a prior crashed grind (or a manual checkout) is caught
             # here and either re-checked-out or halted on, so we never start
@@ -1950,8 +2066,8 @@ def grind(
                 return
 
             # Phase 3 — cache env vars (relocate ~/.cache into project-local).
-            cache.ensure_cache_dirs(target)
-            cache_env = cache.env_overrides(target)
+            cache.ensure_cache_dirs(target, stealth)
+            cache_env = cache.env_overrides(target, stealth)
             # Preserve the zero-argument seam used by existing Claude test and
             # plugin overrides. Any non-Claude backend (codex, grok, local) is
             # passed through with the repo so make_runner can return the
@@ -1971,6 +2087,10 @@ def grind(
             runner.extra_env.setdefault(
                 "BEADS_DIR", str((target / ".beads").resolve())
             )
+            # A stealth tracker has no Dolt remote of its own, and bd would
+            # otherwise adopt origin as one and push the tracker to the fork.
+            if stealth:
+                runner.extra_env.setdefault("BD_NO_REMOTE_ADOPT", "1")
 
             def triage_park(issue_id: str, evidence: str) -> None:
                 """Release one bead that has just reached the human queue as a pin."""
@@ -2041,6 +2161,7 @@ def grind(
                         integration_branch,
                         write_log,
                         accept_baseline=True,
+                        stealth=stealth,
                     )
 
                 # Default path: select + claim the next ready issue IN-HARNESS,
@@ -2263,7 +2384,6 @@ def grind(
                     implementation_probe = codegraph_probe
                     if callable(configure_codegraph):
                         configure_codegraph(implementation_probe.capability)
-                    implementation_instruction = _IMPLEMENTATION_INSTRUCTION
                     iteration_lessons = _selected_lessons(bd, write_log)
                     iteration_lessons_text = _lessons_section(iteration_lessons)
                     try:
@@ -2334,6 +2454,12 @@ def grind(
                 # worker spawn; leftover in_progress still runs one.
                 implementation_worker_ran = True
                 worker_timed_out = False
+                window_issue = target_issue if harness_select else None
+                pre_window_head = git.head_oid() if stealth else ""
+                if stealth and _scope_names_gitignore(window_issue):
+                    runner.extra_env[_ALLOW_GITIGNORE_ENV] = "1"
+                else:
+                    runner.extra_env.pop(_ALLOW_GITIGNORE_ENV, None)
                 phase_offset = log.stat().st_size if log.exists() else 0
                 impl_handshake_logged = False
                 implementation_summary = parse_transcript(
@@ -2469,6 +2595,12 @@ def grind(
                     # labels — all describe one state and take one reading of
                     # it.
                     bd.open_snapshot()
+                # Before anything below can push: a stealth window that
+                # edited `.gitignore` outside its scope stops the run here.
+                if stealth:
+                    _stealth_gitignore_guard(
+                        git, bd, window_issue, pre_window_head, write_log
+                    )
                 if (
                     reap_reasons
                     and reap_reasons[-1].startswith(_FLAGGED_REASON)
@@ -2769,6 +2901,7 @@ def grind(
                     integration_branch,
                     write_log,
                     accept_baseline=True,
+                    stealth=stealth,
                 )
             write_log(
                 f"=== ortus grind ended; closed {tasks_completed} "

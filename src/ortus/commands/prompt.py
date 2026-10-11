@@ -24,11 +24,13 @@ from ortus.core.prompts import (
     PROMPT_REGISTRY,
     PromptNotFound,
     ResolvedPrompt,
+    apply_session_close,
     bundled_prompt_text,
     eject_stamp,
     registry_entry,
     resolve_named_prompt,
 )
+from ortus.core.stealth import is_stealth
 
 prompt_app = typer.Typer(
     name="prompt",
@@ -77,6 +79,28 @@ def _resolve(name: str, *, repo: Path, audited: bool) -> ResolvedPrompt:
     return resolve_named_prompt(name, repo=repo)
 
 
+def _fit_session_close(resolved: ResolvedPrompt, repo: Path) -> ResolvedPrompt:
+    """The goal text with its session-close step fitted to a stealth repo.
+
+    A stealth repository must not `bd dolt push` to origin, so the bundled
+    step is rewritten for it; outside stealth the text is served as resolved.
+    An override that still pushes is served untouched with a warning on
+    stderr.
+    """
+    if not is_stealth(repo):
+        return resolved
+    try:
+        tracker_remote = load_config(repo=repo).get("tracker_remote")
+    except Exception:
+        tracker_remote = None
+    fitted, warning = apply_session_close(
+        resolved, stealth=True, tracker_remote=tracker_remote
+    )
+    if warning:
+        typer.echo(warning, err=True)
+    return fitted
+
+
 @prompt_app.command("list")
 def list_prompts(
     repo: Path = typer.Argument(
@@ -115,6 +139,8 @@ def show_prompt(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2)
     resolved = _resolve(entry.name, repo=repo, audited=_audited(repo))
+    if entry.name == "goal" and not origin:
+        resolved = _fit_session_close(resolved, repo)
     if origin:
         if resolved.path is None:
             # Zip-backed install: no filesystem path, name the package resource.

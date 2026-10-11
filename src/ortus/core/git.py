@@ -28,7 +28,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from ortus.core.grind_loop import BranchState, DEFAULT_INTEGRATION_BRANCH
 
@@ -161,6 +161,12 @@ class GitClient:
 
     repo: Path
     binary: str = "git"
+    #: A stealth repository: `commit_paths` and `amend_paths` drop every
+    #: excluded path and any `.gitignore`, so no commit grind makes can carry
+    #: an Ortus file or an ignore-file edit to the fork.
+    stealth: bool = False
+    #: Where a stealth commit reports the paths it dropped.
+    log: Callable[[str], None] | None = None
 
     def _run(
         self, *args: str, hooks: bool = True
@@ -799,6 +805,32 @@ class GitClient:
             == 0
         )
 
+    def _stealth_filter(self, paths: frozenset[str], verb: str) -> frozenset[str]:
+        """`paths` less what a stealth commit must never carry.
+
+        That is any `.gitignore`, at any depth, and anything the repository's
+        ignore rules match, tracked or not (`--no-index`), which is where the
+        stealth exclude block hides every Ortus file. Outside stealth the
+        paths come back unchanged.
+        """
+        if not self.stealth or not paths:
+            return paths
+        dropped = {path for path in paths if Path(path).name == ".gitignore"}
+        rest = sorted(paths - dropped)
+        if rest:
+            proc = self._run("check-ignore", "--no-index", "--", *rest)
+            # Exit 1 means nothing matched; anything else but 0 is an error,
+            # and an error keeps the path rather than guessing it away. A
+            # name git had to quote does not match its input and is kept too.
+            if proc.returncode == 0:
+                dropped |= set(proc.stdout.splitlines()) & set(rest)
+        if dropped and self.log is not None:
+            self.log(
+                f"stealth: {verb} dropped excluded paths: "
+                + ", ".join(sorted(dropped))
+            )
+        return paths - dropped
+
     def amend_paths(self, paths: frozenset[str]) -> bool:
         """Fold the named worktree paths into HEAD, keeping its message.
 
@@ -806,6 +838,7 @@ class GitClient:
         close step rewrites — so an issue still lands as one commit instead of
         stacking a housekeeping commit on top of the worker's.
         """
+        paths = self._stealth_filter(paths, "amend")
         if not paths:
             return True
         ordered = sorted(paths)
@@ -855,6 +888,7 @@ class GitClient:
         for different reasons, and the caller can only say something useful
         about a refused commit if it knows which one refused and why.
         """
+        paths = self._stealth_filter(paths, "commit")
         if not paths:
             return _COMMIT_OK
         ordered = sorted(paths)
