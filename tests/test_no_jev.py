@@ -98,9 +98,10 @@ def test_docs_drop_the_jev_pages_and_keep_one_removal_note():
 def test_changelog_records_the_removal_without_rewriting_040():
     text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = text.index("## [Unreleased]")
+    removal = text.index("## [0.5.0]")
     released = text.index("## [0.4.0]")
-    assert unreleased < released
-    entry = text[unreleased:released]
+    assert unreleased < removal < released
+    entry = text[removal:released]
     assert "### Removed" in entry
     assert "Jev" in entry and "TypeSafe" in entry
     section = text[released : text.index("## [0.3.0]")]
