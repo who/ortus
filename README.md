@@ -109,7 +109,7 @@ Required: **[CodeGraph](https://github.com/colbymchenry/codegraph)**. `ortus ini
 | `ortus tail <repo>` | Follow `logs/grind-*.log` with stream-json filtering |
 | `ortus dashboard <repo>` | Watch one grind run in a read-only live view |
 
-Eight more verbs — `interview`, `human`, `unlock`, `spec`, `cost`, `eval`, `prompt` and `judge` — and every flag are in [the command reference](docs/commands.md). Run `ortus <verb> --help` for flags, `ortus --version` for the installed version.
+Seven more verbs — `interview`, `human`, `unlock`, `spec`, `cost`, `eval` and `prompt` — and every flag are in [the command reference](docs/commands.md). Run `ortus <verb> --help` for flags, `ortus --version` for the installed version.
 
 ## Why ortus
 
@@ -147,8 +147,6 @@ The full key reference, per-phase profiles, and the prototype verification bar a
 - [Cost and evaluation](docs/cost.md) — per-bead billing buckets and the frozen evaluation set
 - [CodeGraph lifecycle](docs/codegraph.md) — the three policies, the index, troubleshooting
 - [Runtime prompts](docs/prompts.md) — `ortus prompt list/show/eject` and resolution order
-- [Judge pilot](docs/judge.md) — the optional Jev gate, its evidence, export and replay
-- [Jev preregistered rule](docs/jev-prereg.md) — the keep, drop or scrap thresholds replay computes
 - [Glossary](docs/glossary.md) — the vocabulary log lines and prompt contracts use
 - [Test gate](docs/testing.md) — changed-path selection, verifier expansion, release smoke
 - [Label state machine](docs/labels.md) — the interview/PRD label vocabulary

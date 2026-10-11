@@ -57,7 +57,7 @@ Drive the bd queue via backend-neutral subprocess-per-task workers.
 `--tasks`, `--iterations`, `--condition`, `--orphan-policy`, `--idle-sleep`,
 `--worker-timeout`, `--integration-branch`, `--fast`, `--implement-model`,
 `--implement-reasoning-effort`, `--verify-model`, `--verify-reasoning-effort`,
-`--docker`, `--dry-run`, `--judge`, `--judge-seat`, `--backend`, `--codegraph`,
+`--docker`, `--dry-run`, `--backend`, `--codegraph`,
 `--prototype`.
 
 ### `ortus unlock <repo>`
@@ -115,22 +115,3 @@ Resolved prompt text on stdout, header on stderr. `--origin`.
 
 Copy the bundled default to `<repo>/.ortus/prompts/`. `--user`, `--force`.
 See [runtime prompts](prompts.md).
-
-## Judge evidence
-
-### `ortus judge export <input>`
-
-Export validated, deduplicated judge events using only the logger's allowed
-fields. `--output`, `--force`.
-
-### `ortus judge outcomes <repo>`
-
-Snapshot tracker outcomes read-only for the issues the Jev logs name.
-`--output`, `--log`, `--force`.
-
-### `ortus judge replay <input>...`
-
-Calculate accuracy, latency, coverage and measured costs without rerunning the
-judge. `--labels`, `--outcomes`, `--tool-labels`, `--output`, `--thresholds`,
-`--force`. See [the judge pilot](judge.md) and
-[the preregistered rule](jev-prereg.md).

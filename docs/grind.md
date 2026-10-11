@@ -16,7 +16,6 @@ sequenceDiagram
     G->>B: snapshot open, claimed and closed counts
     G->>B: select_ready_issue
     G->>G: readiness guard on the selected work spec
-    G->>G: optional Jev pre-turn gate
     G->>W: compose the work prompt and launch
     W->>W: implement, then run the issue's checks
     W->>R: commit the owned paths

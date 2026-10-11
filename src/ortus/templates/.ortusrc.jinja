@@ -38,57 +38,6 @@ codegraph = "{{ codegraph }}"
 # `ortus grind --prototype` sets it for one run.
 # verification = "full"
 
-# Optional judge gate. Disabled until explicitly enabled. CLI --judge/--no-judge
-# overrides ORTUS_JUDGE_ENABLED, which overrides enabled below.
-# ORTUS_JUDGE_MODEL overrides model. Keep TYPESAFE_API_KEY in the environment,
-# never in this file. Service failures follow failure_mode; invalid config fails.
-# The gate routes and logs; it never holds a claim back for low confidence,
-# human need or risk. low_confidence, route_confidence, noul_confidence,
-# risk_confidence, human_threshold and risk_threshold are still validated so
-# existing tables load, but no value of theirs changes a pre-turn decision.
-# [judge]
-# enabled = false
-# model = "jev-1.13.0"
-# mode = "enforce"
-# failure_mode = "open" # open | closed
-# low_confidence = "human" # human | skip
-# seat = "default" # explicit alias; "ortus" is an example, never inferred
-# timeout_seconds = 1.5
-# route_confidence = 0.8
-# noul_confidence = 0.8
-# risk_confidence = 0.8
-# human_threshold = 0.8 # 0..1
-# risk_threshold = 1.5 # 0..2
-# routes = ["claude", "codex", "skip", "human"]
-# objective_cap = 4096 # characters
-# acceptance_cap = 4096
-# title_cap = 160
-# tool_cap = 512
-# total_bytes_cap = 16384 # serialized UTF-8 bytes
-# include_log_tail = false
-# sensitive_paths = []
-# include_issue_text = true # judge-private always suppresses issue text
-# pre_tool = false # independent Claude-only hooks; not disabled by --no-judge
-# post_turn = false # independent advisory outcomes; never closes an issue
-# collect = false # log-only: arm every site in shadow, apply code baselines (ORTUS_JEV_COLLECT wins)
-#
-# For a shadow rollout, set mode = "shadow" above and select seat = "atlas".
-# Explicit aliases are required for numeric directories; paths select no seat.
-# Keep both phase toggles false until separately reviewed. See docs/judge.md.
-# Packs cannot enable a seat. CLI/env enable overrides still win over seat false.
-# [judge.packs.atlas_review]
-# route_confidence = 0.9
-# sensitive_paths = ["atlas-private/"]
-# [judge.packs.birch_review]
-# route_confidence = 0.95
-# sensitive_paths = ["birch-private/"]
-# [judge.seats.atlas]
-# enabled = false
-# pack = "atlas_review"
-# [judge.seats.birch]
-# enabled = false
-# pack = "birch_review"
-
 {% if backend in ["local", "opencode"] -%}
 # The operator-served model `ortus grind` drives through opencode, whose
 # provider entry lives in opencode.json; backend = "local" is opencode's older

@@ -49,7 +49,6 @@ DIAGRAM_PAGES = (
     "docs/authoring.md",
     "docs/backends.md",
     "docs/cost.md",
-    "docs/judge.md",
 )
 
 #: Root pages that moved under docs/. Their old paths must not be linked by

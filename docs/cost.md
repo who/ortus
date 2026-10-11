@@ -91,9 +91,8 @@ the provider priced, how many this table priced, and how many went unpriced.
 ## `ortus eval`
 
 Cost per closed bead is the primary metric for the harness-efficiency
-comparisons: the judge-gated-versus-plain A/B, the work on choosing a model and
-reasoning effort per bead, and the fixed evaluation set that runs those
-comparisons on a stable workload. Each of those asks the same question — did
+comparisons: the work on choosing a model and reasoning effort per bead, and
+the fixed evaluation set that runs those comparisons on a stable workload. Each of those asks the same question — did
 this change make a bead cheaper without making it worse — and each reads the
 answer from this rollup rather than instrumenting the worker again.
 `--runs 0 --json` is the shape those comparisons consume.

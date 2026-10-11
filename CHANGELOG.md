@@ -4,6 +4,21 @@ All notable changes to Ortus are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Ortus uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Removed
+
+- **Jev, the TypeSafe judge.** Every judge site is gone: the pre-turn gate,
+  readiness advice, the `pre_tool` hook and its tool screening, the progress
+  reaper, `post_turn`, the stuck-claim decision, triage, the model router,
+  collect mode, replay and its scorers, and the Jev arms of the harness eval.
+  So are the `ortus judge` command, the `--judge` and `--judge-seat` flags on
+  `ortus grind`, and the `judge` install extra. A `[judge]` table or `jev_*`
+  key left in a user or project `.ortusrc` is dropped on load with one
+  deprecation warning on stderr, as are `ORTUS_JUDGE_*` and `ORTUS_JEV_*`
+  environment variables, so other repositories' configs keep loading. An eval
+  script that still passes `--judge` now gets a usage error.
+
 ## [0.4.0] - 2026-09-07
 
 ### Added

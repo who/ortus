@@ -22,7 +22,7 @@ under different inclusion rules:
   ``cache_read_input_tokens`` beside it rather than inside it.
 
 Normalizing those into one set of buckets is the whole point: an operator
-comparing a judge-gated run against a plain one must be comparing the same
+comparing one run against another must be comparing the same
 quantity on both sides.
 
 Every bucket is ``None`` until a provider reports it. A turn that omits a field

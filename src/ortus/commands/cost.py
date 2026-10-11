@@ -2,8 +2,8 @@
 
 The rollup is read-only and offline: it re-reads `logs/grind-*.log`, so it can
 be run long after a grind finished and costs nothing to re-run. Default is the
-newest run; `--runs 0` sweeps every log in the directory, which is how a
-judge-gated stretch of runs gets compared against a plain one.
+newest run; `--runs 0` sweeps every log in the directory, which is how one
+stretch of runs gets compared against another.
 
 Rows carry `-` wherever a provider never reported the number. That is
 deliberate: a null bucket and a zero bucket mean very different things when the

@@ -47,10 +47,13 @@ model = "unsloth/Qwen3.8-27B-GGUF:Q4_K_M"  # the id GET {base_url}/models report
 # api_key_env = "LLAMA_API_KEY"        # the NAME of a variable holding a bearer key, never the key itself
 ```
 
-The `[judge]` table and its seats are documented separately in the
-[judge pilot guide](judge.md), which also covers the privacy, failure and
-rollback posture the gate is opt-in for. The optional pre-turn Jev gate is
-disabled by default.
+### Removed: Jev
+
+Jev, the TypeSafe judge, is no longer part of Ortus. A `[judge]` table or a
+`jev_*` key left in a user or project `.ortusrc` still loads: it is dropped
+before validation, and one deprecation warning on stderr names the file and
+the keys it ignored. `ORTUS_JUDGE_*` and `ORTUS_JEV_*` environment variables
+are ignored the same way and named in that same warning.
 
 ## Key reference
 
@@ -69,7 +72,7 @@ disabled by default.
 | `merge_gate_timeout` | `1800` | seconds to wait for those checks; a timeout blocks, never passes |
 | `condition` | none | legacy custom per-iteration `/goal` condition |
 
-Keys whose names begin with `prompt_` or `jev_` gate in-flight harness
+Keys whose names begin with `prompt_` gate in-flight harness
 experiments. Each is off, or in shadow, until its comparison has a verdict, and
 each reads an `ORTUS_*` environment variable so one run can flip it without
 editing a tracked file.
