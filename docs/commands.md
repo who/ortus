@@ -17,10 +17,26 @@ provisioning-only and pins a concrete run backend), `--codegraph`, `--prefix`,
 `--project-type`, `--package-manager`, `--framework`, `--linter`,
 `--local-model`, `--local-base-url`, `--force`.
 
+Stealth flags for a fork that must stay mergeable with upstream (see
+[stealth mode](configuration.md#stealth-mode-forks)): `--stealth` (alias
+`--local-only`) keeps every Ortus file out of git through `.git/info/exclude`
+and makes no commit, `.gitignore` edit, or `core.hooksPath` change.
+`--tracker-remote <url>` registers a private Dolt remote as `ortus-private`
+and is accepted only with `--stealth`. `--commit-issue-ref`
+(`none|trailer|subject`) sets how commits name their bd issue.
+
 ### `ortus check <repo>`
 
 Verify bd, the run backend, sandbox, backend config, and managed agent files.
-WARN rows cover provisioned siblings. Strictly read-only. `--backend`.
+WARN rows cover provisioned siblings. In a stealth repository it adds rows
+for the exclude block, tracked Ortus paths, hooks, `no-git-ops`, and the Dolt
+remote. Strictly read-only. `--backend`.
+
+### `ortus guard pre-push` / `ortus guard pre-commit`
+
+The checks the stealth hooks run. They aren't meant for typing by hand. Each
+prints every violation and exits 1, or exits 0 silently, and both always exit
+0 outside stealth.
 
 ## Authoring work
 

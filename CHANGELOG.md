@@ -6,6 +6,20 @@ All notable changes to Ortus are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Stealth mode for forks.** `ortus init --stealth` (alias `--local-only`)
+  sets Ortus up in a fork that must stay mergeable with upstream: no commit,
+  no `.gitignore` edit, no `core.hooksPath`, and every Ortus, beads, and agent
+  file kept out of git by one fenced block in `.git/info/exclude`. bd runs with
+  `no-git-ops`, agent blocks go to `AGENTS.override.md` or `CLAUDE.local.md`
+  when upstream tracks the originals, and `--tracker-remote` gives the tracker
+  a private Dolt remote. `pre-push` and `pre-commit` hooks (`ortus guard`),
+  plus the same check in grind's own push, refuse a force-added Ortus path, a
+  commit naming a bead id or an agent, and tracker refs bound for origin.
+  `--commit-issue-ref` picks how commits name their issue, and grind keeps its
+  caches out of the tree. See the stealth section in `docs/configuration.md`.
+
 ### Removed
 
 - **Jev, the TypeSafe judge.** Every judge site is gone: the pre-turn gate,
