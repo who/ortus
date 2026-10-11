@@ -250,6 +250,9 @@ def _registered_invocations() -> list[str]:
         for command in app.registered_commands
     ]
     for group in app.registered_groups:
+        if group.hidden:
+            # Hook plumbing (`ortus guard`) is run by git, not typed by a user.
+            continue
         for command in group.typer_instance.registered_commands:
             leaf = command.name or command.callback.__name__
             invocations.append(f"ortus {group.name} {leaf}")

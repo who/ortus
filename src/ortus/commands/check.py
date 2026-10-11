@@ -38,6 +38,7 @@ from ortus.core.agent_files import (
     duplicate_headings_message,
     duplicated_headings,
     gitignore_match,
+    parse_hash_blocks,
     read_block,
     render_block,
 )
@@ -83,7 +84,21 @@ from ortus.core.prompts import (
     resolve_prompt,
 )
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_command
-from ortus.core.stealth import AGENT_FILE_REDIRECTS, TRACKED_IGNORE_SOURCES, is_stealth
+from ortus.core.stealth import (
+    AGENT_FILE_REDIRECTS,
+    STEALTH_BLOCK,
+    STEALTH_HOOK_MARKER,
+    STEALTH_SCHEMA,
+    TRACKED_IGNORE_SOURCES,
+    bd_hooks_path,
+    exclude_path,
+    is_stealth,
+    remote_url,
+    same_remote_url,
+    stealth_patterns,
+    tracked_excluded_paths,
+    tracked_ortus_paths,
+)
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -266,6 +281,151 @@ def check_tracker_hooks(repo: Path) -> CheckResult:
             level="info",
         )
     return CheckResult(name, True, str(hook))
+
+
+STEALTH_REINIT_HINT = "re-run ortus init --stealth --force"
+
+
+def _bd_json(repo: Path, *args: str) -> Any:
+    """`bd <args> --json` parsed, for the read-only stealth rows."""
+    proc = subprocess.run(
+        ["bd", *args, "--json"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def _stealth_exclude_row(repo: Path) -> CheckResult:
+    name = "stealth exclude block"
+    try:
+        path = exclude_path(repo)
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        block = parse_hash_blocks(text, path=path).get(STEALTH_BLOCK)
+    except (AgentFileError, OSError, RuntimeError) as exc:
+        return CheckResult(name, False, f"unreadable — {exc}")
+    if block is None:
+        return CheckResult(name, False, f"missing from {path} — {STEALTH_REINIT_HINT}")
+    if block.schema > STEALTH_SCHEMA:
+        return CheckResult(name, True, f"schema={block.schema} from a newer ortus; left alone")
+    body = set(block.text.splitlines())
+    # A default pattern init dropped because upstream tracks its file is not
+    # drift; every other pattern must be in the block.
+    missing = [
+        pattern
+        for pattern in stealth_patterns(repo)
+        if pattern not in body and not tracked_ortus_paths(repo, (pattern,))
+    ]
+    if block.schema < STEALTH_SCHEMA or missing:
+        detail = f"missing {', '.join(missing)}" if missing else f"schema={block.schema}"
+        return CheckResult(name, False, f"stale ({detail}) — {STEALTH_REINIT_HINT}")
+    return CheckResult(name, True, str(path))
+
+
+def _stealth_tracked_row(repo: Path) -> CheckResult:
+    name = "stealth tracked paths"
+    leaks = tracked_excluded_paths(repo, stealth_patterns(repo))
+    if leaks:
+        return CheckResult(
+            name, False, f"git tracks {', '.join(leaks)} — untrack with git rm --cached"
+        )
+    return CheckResult(name, True, "no ortus path is tracked")
+
+
+def _stealth_hooks_path_row(repo: Path) -> CheckResult:
+    name = "stealth core.hooksPath"
+    stale = bd_hooks_path(repo)
+    if stale:
+        return CheckResult(
+            name, False, f"points at bd's {stale} — git config --local --unset core.hooksPath"
+        )
+    return CheckResult(name, True, "not bd's hooks")
+
+
+def _stealth_pre_push_row(repo: Path) -> CheckResult:
+    name = "stealth pre-push hook"
+    git = GitClient(repo=repo)
+    configured = git.config_value("core.hooksPath")
+    if configured and not bd_hooks_path(repo):
+        return CheckResult(
+            name,
+            False,
+            f"core.hooksPath is {configured}; grind's in-process guard still covers its pushes",
+            level="info",
+        )
+    hooks = git.hooks_dir()
+    hook = hooks / "pre-push" if hooks is not None else None
+    try:
+        text = hook.read_text(encoding="utf-8", errors="replace") if hook else ""
+    except OSError:
+        text = ""
+    if STEALTH_HOOK_MARKER not in text:
+        return CheckResult(name, False, f"not installed in {hooks} — {STEALTH_REINIT_HINT}")
+    if hook is None or not os.access(hook, os.X_OK):
+        return CheckResult(name, False, f"{hook} is not executable — chmod +x it")
+    return CheckResult(name, True, str(hook))
+
+
+def _stealth_no_git_ops_row(repo: Path) -> CheckResult:
+    name = "bd no-git-ops"
+    try:
+        value = str(_bd_json(repo, "config", "get", "no-git-ops").get("value", ""))
+    except (OSError, RuntimeError, ValueError, AttributeError, subprocess.TimeoutExpired) as exc:
+        return CheckResult(name, False, f"bd config get failed: {exc}")
+    if value.lower() != "true":
+        return CheckResult(
+            name, False, f"is {value or 'unset'} — bd config set no-git-ops true"
+        )
+    return CheckResult(name, True, "true")
+
+
+def _stealth_dolt_remote_row(repo: Path) -> CheckResult:
+    name = "stealth tracker remote"
+    origin = remote_url(repo, "origin")
+    try:
+        remotes = _bd_json(repo, "dolt", "remote", "list") or []
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+        return CheckResult(name, False, f"bd dolt remote list failed: {exc}")
+    for remote in remotes:
+        url = str(remote.get("url", "")) if isinstance(remote, dict) else ""
+        if same_remote_url(url, origin):
+            return CheckResult(
+                name,
+                False,
+                f"Dolt remote {remote.get('name')!r} is origin ({url}) — "
+                f"bd dolt remote remove {remote.get('name')}",
+            )
+    return CheckResult(name, True, "no Dolt remote points at origin")
+
+
+def _stealth_no_adopt_row(repo: Path) -> CheckResult:
+    value = os.environ.get("BD_NO_REMOTE_ADOPT", "")
+    detail = f"set ({value})" if value else "unset here; grind sets it for its workers"
+    return CheckResult("BD_NO_REMOTE_ADOPT", True, detail, level="info")
+
+
+def check_stealth_rows(repo: Path) -> list[CheckResult]:
+    """The stealth health rows, or none outside stealth.
+
+    Read-only and local: git config and refs, the exclude file, the hooks
+    directory, and bd's own config and remote list. Nothing is fetched.
+    """
+    if not is_stealth(repo):
+        return []
+    return [
+        _stealth_exclude_row(repo),
+        _stealth_tracked_row(repo),
+        _stealth_hooks_path_row(repo),
+        _stealth_pre_push_row(repo),
+        _stealth_no_git_ops_row(repo),
+        _stealth_dolt_remote_row(repo),
+        _stealth_no_adopt_row(repo),
+    ]
 
 
 def check_readiness_memory(repo: Path) -> CheckResult:
@@ -1242,6 +1402,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     repo_checks: list[tuple[Callable[[Path], CheckResult | list[CheckResult]], str]] = [
         (check_beads_dir, ".beads/"),
         (check_tracker_hooks, "tracker git hooks"),
+        (check_stealth_rows, "stealth"),
         (check_readiness_memory, "bd readiness memory"),
         (settings_check, settings_label),
     ]

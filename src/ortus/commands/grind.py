@@ -82,7 +82,7 @@ from ortus.core.readiness import (
     ReadinessReport,
 )
 from ortus.core.git import GitClient
-from ortus.core.stealth import is_stealth
+from ortus.core.stealth import ZERO_SHA, is_stealth, push_violations
 from ortus.core.grind_logic import (
     FlockBusy,
     build_condition,
@@ -393,7 +393,9 @@ def _resolve_merge_gate(config: Any) -> tuple[bool, float]:
     return enabled, timeout
 
 
-def _announced_push(git: GitClient, branch: str) -> bool:
+def _announced_push(
+    git: GitClient, branch: str, write_log: Callable[[str], None] | None = None
+) -> bool:
     """`git push origin <branch>`, announced on the console as it happens.
 
     A push is the one act in a grind run that changes the world outside the
@@ -422,6 +424,27 @@ def _announced_push(git: GitClient, branch: str) -> bool:
         else:
             noun = "commit" if count == 1 else "commits"
             span = f"{old[:7]}..{new[:7]}, {count} {noun}"
+    if getattr(git, "stealth", False):
+        # The same guard the stealth pre-push hook runs, in process, so a
+        # repository whose hooks path is not Ortus's is still covered.
+        violations = push_violations(
+            git.repo,
+            "origin",
+            [(f"refs/heads/{branch}", new, f"refs/heads/{branch}", old or ZERO_SHA)],
+        )
+        if violations:
+            for violation in violations:
+                line = f"stealth-guard: BLOCKED {violation}"
+                output.progress("grind", line)
+                if write_log is not None:
+                    write_log(line)
+            output.error(
+                f"grind: stealth guard refused to push {branch} to origin: "
+                + "; ".join(violations),
+                hint="fix the named paths (git rm --cached) and commits by hand; "
+                "ortus never rewrites history automatically",
+            )
+            return False
     output.progress("grind", f"pushing {branch} → origin ({span})")
     pushed = git.push(branch)
     if pushed:
@@ -484,7 +507,7 @@ def _enforce_branch_discipline(
                 "(no remote configured; nothing to push)"
             )
             return
-        pushed = _announced_push(git, integration_branch)
+        pushed = _announced_push(git, integration_branch, write_log)
         write_log(
             f"branch-guard [{phase}]: {decision.reason} "
             f"({'pushed' if pushed else 'PUSH FAILED'})"

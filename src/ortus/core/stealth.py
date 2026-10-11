@@ -13,10 +13,11 @@ enough, so a clobbered `.ortusrc` does not quietly turn it off.
 from __future__ import annotations
 
 import fnmatch
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from ortus import __version__ as ORTUS_VERSION
 from ortus.core.agent_files import BlockOutcome, apply_hash_block
@@ -233,3 +234,256 @@ def status_ortus_paths(
         if any(pattern_matches(path, pattern) for pattern in patterns):
             paths.append(path)
     return tuple(paths)
+
+
+#: The id git writes for "no object" on a pre-push stdin line.
+ZERO_SHA = "0" * 40
+
+#: What a stealth push must never send to origin: the tracker's Dolt data,
+#: which bd keeps under `refs/dolt/` on whatever git remote it syncs through.
+_DOLT_REF_PREFIX = "refs/dolt/"
+_DOLT_REMOTE_INFO_REF = "refs/heads/__dolt_remote_info__"
+
+#: Agent attribution lines that name the machinery behind a commit.
+_ATTRIBUTION_LINE = re.compile(
+    r"^\s*(co-authored-by:\s*claude\b|executed-by:)", re.IGNORECASE | re.MULTILINE
+)
+_ISSUE_TRAILER_LINE = re.compile(r"^\s*Ortus-Issue:.*$", re.MULTILINE)
+
+#: The marker every hook Ortus writes carries, so a re-install knows its own.
+STEALTH_HOOK_MARKER = "# ortus stealth hook v1"
+STEALTH_HOOKS: dict[str, str] = {
+    "pre-push": 'ortus guard pre-push "$@"',
+    "pre-commit": "ortus guard pre-commit",
+}
+ALLOW_GITIGNORE_ENV = "ORTUS_STEALTH_ALLOW_GITIGNORE"
+
+
+def _stealth_patterns(facts: Mapping) -> tuple[str, ...]:
+    extras = facts.get("stealth_extra_excludes") or []
+    return STEALTH_EXCLUDE_PATTERNS + tuple(str(p) for p in extras)
+
+
+def stealth_patterns(repo: Path) -> tuple[str, ...]:
+    """The default stealth patterns plus the repository's recorded extras."""
+    from ortus.core.config import read_recorded_facts
+
+    try:
+        return _stealth_patterns(read_recorded_facts(repo))
+    except (OSError, ValueError):
+        return STEALTH_EXCLUDE_PATTERNS
+
+
+def tracked_excluded_paths(repo: Path, patterns: Sequence[str]) -> tuple[str, ...]:
+    """Tracked files the exclude rules would hide, limited to Ortus patterns.
+
+    `git ls-files -ci --exclude-standard` names every tracked path an ignore
+    rule matches; filtering it to `patterns` keeps upstream's own
+    force-tracked ignored files out of the answer, and leaves out a default
+    pattern init dropped because upstream tracks that file.
+    """
+    proc = _git(repo, "ls-files", "-z", "-ci", "--exclude-standard")
+    if proc.returncode != 0:
+        return ()
+    return tuple(
+        path
+        for path in proc.stdout.split("\0")
+        if path and any(pattern_matches(path, p) for p in patterns)
+    )
+
+
+def remote_url(repo: Path, name: str) -> str:
+    """The URL of git remote `name`, or "" when there is none."""
+    proc = _git(repo, "remote", "get-url", name)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def same_remote_url(a: str, b: str) -> bool:
+    """Whether two remote URLs name one repository.
+
+    Ignores a trailing `/` or `.git` and Dolt's `git+` scheme prefix, so a
+    tracker remote registered as `git+https://host/repo.git` matches the
+    origin `https://host/repo`.
+    """
+
+    def norm(url: str) -> str:
+        url = url.strip().removeprefix("git+").rstrip("/")
+        return url[: -len(".git")] if url.endswith(".git") else url
+
+    return bool(a and b) and norm(a) == norm(b)
+
+
+def _targets_origin(repo: Path, remote: str, url: str | None) -> bool:
+    """Whether a push to `remote` (a name or a URL) lands on origin."""
+    origin = remote_url(repo, "origin")
+    if not origin:
+        return False
+    if remote == "origin":
+        return True
+    candidate = url or remote_url(repo, remote) or remote
+    return same_remote_url(candidate, origin)
+
+
+def _pushed_messages(
+    repo: Path, local_sha: str, remote_sha: str
+) -> list[tuple[str, str]]:
+    """(sha, message) for every commit a push of `local_sha` would send.
+
+    A first push (or a remote tip this clone has never fetched) has no range
+    to name, so it scans everything not already on some remote.
+    """
+    ranges: list[list[str]] = []
+    if remote_sha != ZERO_SHA:
+        ranges.append([f"{remote_sha}..{local_sha}"])
+    ranges.append([local_sha, "--not", "--remotes"])
+    for rev_args in ranges:
+        proc = _git(repo, "log", "--format=%H%x00%B%x1e", *rev_args)
+        if proc.returncode != 0:
+            continue
+        commits = []
+        for record in proc.stdout.split("\x1e"):
+            sha, sep, body = record.strip("\n").partition("\0")
+            if sep:
+                commits.append((sha, body))
+        return commits
+    return []
+
+
+def _message_violations(
+    sha: str, message: str, id_pattern: re.Pattern[str] | None, issue_ref: str
+) -> list[str]:
+    short = sha[:7]
+    found: list[str] = []
+    if id_pattern is not None:
+        scanned = message
+        if issue_ref == "trailer":
+            scanned = _ISSUE_TRAILER_LINE.sub("", message)
+        ids = sorted(set(m.group(0) for m in id_pattern.finditer(scanned)))
+        if ids:
+            found.append(f"commit {short} names bead id {', '.join(ids)}")
+    for match in _ATTRIBUTION_LINE.finditer(message):
+        found.append(f"commit {short} carries a {match.group(1).strip()!r} line")
+    return found
+
+
+def push_violations(
+    repo: Path,
+    remote: str,
+    refspecs: Sequence[tuple[str, str, str, str]],
+    *,
+    url: str | None = None,
+) -> list[str]:
+    """Every reason a stealth push of `refspecs` to `remote` must not happen.
+
+    `refspecs` are `(local_ref, local_sha, remote_ref, remote_sha)`, the four
+    fields git hands a pre-push hook on each stdin line. Three things leak a
+    stealth repository: a tracked Ortus path (a `git add -f` past the exclude
+    block), a commit message naming a bead id or the agent behind it, and the
+    tracker's Dolt refs landing on origin. An empty list means the push is
+    clean. Nothing here rewrites history or touches a remote.
+    """
+    from ortus.core.config import read_recorded_facts, resolve_commit_issue_ref
+
+    try:
+        facts = read_recorded_facts(repo)
+    except (OSError, ValueError):
+        facts = {}
+    violations: list[str] = []
+
+    for path in tracked_excluded_paths(repo, _stealth_patterns(facts)):
+        violations.append(
+            f"tracked ortus path {path} (untrack it: git rm --cached {path})"
+        )
+
+    try:
+        issue_ref = resolve_commit_issue_ref(facts, stealth=True)
+    except ValueError:
+        issue_ref = "none"
+    prefix = facts.get("prefix")
+    id_pattern = (
+        re.compile(rf"\b{re.escape(str(prefix))}-[a-z0-9]+(\.[0-9]+)*\b")
+        if prefix and issue_ref != "subject"
+        else None
+    )
+    seen: set[str] = set()
+    for _local_ref, local_sha, _remote_ref, remote_sha in refspecs:
+        if local_sha == ZERO_SHA:
+            continue  # a deletion sends no commits
+        for sha, message in _pushed_messages(repo, local_sha, remote_sha):
+            if sha in seen:
+                continue
+            seen.add(sha)
+            violations.extend(_message_violations(sha, message, id_pattern, issue_ref))
+
+    if _targets_origin(repo, remote, url):
+        for _local_ref, _local_sha, remote_ref, _remote_sha in refspecs:
+            if remote_ref.startswith(_DOLT_REF_PREFIX) or remote_ref == _DOLT_REMOTE_INFO_REF:
+                violations.append(f"{remote_ref} is tracker data and must not go to origin")
+    return violations
+
+
+def staged_gitignore_violation(repo: Path, env: Mapping[str, str]) -> str | None:
+    """Why a stealth commit staging a `.gitignore` is refused, or None.
+
+    The fork's `.gitignore` files are upstream's; stealth keeps its excludes
+    in `.git/info/exclude`. An operator who means the edit sets
+    `ORTUS_STEALTH_ALLOW_GITIGNORE=1` for that one commit.
+    """
+    if env.get(ALLOW_GITIGNORE_ENV) == "1":
+        return None
+    proc = _git(repo, "diff", "--cached", "--name-only", "-z")
+    if proc.returncode != 0:
+        return None
+    staged = [p for p in proc.stdout.split("\0") if p and p.split("/")[-1] == ".gitignore"]
+    if not staged:
+        return None
+    return (
+        f"staged {', '.join(staged)}: stealth keeps excludes in .git/info/exclude; "
+        f"set {ALLOW_GITIGNORE_ENV}=1 to commit an upstream .gitignore change"
+    )
+
+
+def _hook_script(command: str) -> str:
+    return (
+        "#!/bin/sh\n"
+        f"{STEALTH_HOOK_MARKER}\n"
+        "if ! command -v ortus >/dev/null 2>&1; then\n"
+        '    echo "ortus stealth guard: ortus is not on PATH; refusing (fail closed)" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        f"exec {command}\n"
+    )
+
+
+def install_stealth_hooks(repo: Path) -> list[str]:
+    """Write the stealth `pre-push` and `pre-commit` hooks; return warnings.
+
+    Only into git's own hooks directory, and only when `core.hooksPath` is
+    unset: a hooks path belongs to whatever set it, and grind's in-process
+    guard covers its pushes either way. A hook Ortus did not write is never
+    overwritten.
+    """
+    configured = _git(repo, "config", "--get", "core.hooksPath")
+    if configured.returncode == 0 and configured.stdout.strip():
+        return [
+            f"core.hooksPath is {configured.stdout.strip()}; stealth hooks not "
+            "installed (grind's in-process push guard still runs)"
+        ]
+    proc = _git(repo, "rev-parse", "--git-path", "hooks")
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return ["git resolved no hooks directory; stealth hooks not installed"]
+    hooks = Path(proc.stdout.strip())
+    if not hooks.is_absolute():
+        hooks = repo / hooks
+    hooks.mkdir(parents=True, exist_ok=True)
+    warnings: list[str] = []
+    for name, command in STEALTH_HOOKS.items():
+        hook = hooks / name
+        if hook.exists():
+            text = hook.read_text(encoding="utf-8", errors="replace")
+            if STEALTH_HOOK_MARKER not in text:
+                warnings.append(f"{hook} is not an ortus hook; left untouched")
+                continue
+        hook.write_text(_hook_script(command), encoding="utf-8")
+        hook.chmod(0o755)
+    return warnings

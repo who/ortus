@@ -75,6 +75,7 @@ from ortus.core.stealth import (
     TRACKED_IGNORE_SOURCES,
     TRACKER_REMOTE_NAME,
     bd_hooks_path,
+    install_stealth_hooks,
     merge_exclude,
     pattern_matches,
     status_ortus_paths,
@@ -1288,6 +1289,11 @@ def init(
                 capture_output=True,
             )
             output.success(f"unset core.hooksPath (was {stale_hooks}, bd's hooks)")
+        hook_warnings = install_stealth_hooks(target)
+        for warning in hook_warnings:
+            output.warn(f"stealth hooks: {warning}")
+        if not hook_warnings:
+            output.success("installed stealth pre-push and pre-commit guard hooks")
     elif not already_initialized:
         output.progress("init", f"creating .beads/ workspace (prefix={resolved_prefix})")
         try:
