@@ -1,4 +1,4 @@
-"""The frozen evaluation set: two fixtures, five arms, one report.
+"""The frozen evaluation set: two fixtures, three arms, one report.
 
 A harness change is only worth keeping if it pays for itself, and the only
 way to know is to run the same work twice and compare. This module freezes
@@ -10,11 +10,6 @@ The primary metric is cost per closed bead. Everything else is a guardrail:
 a treatment that halves the bill by closing half as many beads, burning twice
 the turns, or failing twice as often has not paid for itself, and the report
 puts those numbers beside the primary one rather than leaving them to memory.
-
-A treatment that picks a different model per bead is measured one level
-deeper: the tier each bead was routed to is read from the seat's own routing
-log and joined to that bead's outcome, so a tier that closes fewer beads than
-the others is visible as the place a threshold is wrong.
 
 Null is a result. A provider that never reports dollars (Codex) leaves the
 primary metric unset for its arm, and an arm whose seat was never run leaves
@@ -33,12 +28,11 @@ run, because there is only one construction path for the commands.
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -54,12 +48,6 @@ from ortus.core.cost import (
     rollup_beads,
 )
 from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
-from ortus.core.bd import BdError
-from ortus.core.judge_log import LOG_NAME, ROUTE_LOG_NAME
-from ortus.core.judge_outcomes import BdRunner, bd_runner
-from ortus.core.judge_progress import PROGRESS_LOG_NAME
-from ortus.core.judge_routing import RouterTier
-from ortus.core.judge_scorers import SITES
 
 #: Package holding the fixture PRDs. Installed with the wheel, so the paths
 #: the recipe hands to `ortus plan` resolve outside a checkout too.
@@ -261,30 +249,6 @@ TREATMENTS: tuple[Treatment, ...] = (
         ),
         measured_by="ortus-nudo",
         measured_on=(FIXTURE_A.key, FIXTURE_B.key),
-    ),
-    Treatment(
-        key="model-router",
-        config_key="jev_model_router",
-        summary="Let the judge pick the per-bead worker model tier.",
-        measured_by="ortus-ib1w",
-        measured_on=(FIXTURE_A.key, FIXTURE_B.key),
-        # The router is only ever consulted from the enforcing pre-turn gate,
-        # and a fresh seat ships that gate off. Without these two lines the arm
-        # is the control arm with an unread flag in its config.
-        requires=("[judge]", "enabled = true", 'mode = "enforce"'),
-    ),
-    Treatment(
-        key="jev-collect",
-        config_key="collect",
-        summary=(
-            "Arm every Jev site in shadow and let code decide, so the run "
-            "only collects labeled decisions."
-        ),
-        measured_by="ortus-zho1",
-        # Collection forces the judge on for the run, but the seat states it
-        # too, so its `.ortusrc` reads as the configuration it actually ran.
-        table="judge",
-        requires=("enabled = true",),
     ),
 )
 
@@ -683,81 +647,6 @@ def run_matrix(
     return tuple(records)
 
 
-#: Tier rows print in the order the router declares them, weakest model
-#: first, so two arms' tables line up row for row.
-_TIER_ORDER: tuple[str, ...] = tuple(tier.value for tier in RouterTier)
-
-
-@dataclass(frozen=True)
-class TierMetrics:
-    """How one router tier fared in a cell: beads routed to it, beads closed."""
-
-    tier: str
-    beads: int = 0
-    closed_beads: int = 0
-    close_rate: float | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "tier": self.tier,
-            "beads": self.beads,
-            "closed_beads": self.closed_beads,
-            "close_rate": self.close_rate,
-        }
-
-
-def _tier_rows(
-    beads: Sequence[BeadCost], routes: Mapping[str, str]
-) -> tuple[TierMetrics, ...]:
-    """Close rate per tier, for the beads the routing log actually names.
-
-    A bead with no routing record belongs to no tier. The cell's own close
-    rate already counts it, and filing it under `baseline` would credit a
-    tier with a bead the router never sent there. A tier the log never names
-    gets no row either: an empty table says this arm routed nothing, which is
-    a different answer from every tier closing nothing.
-    """
-
-    grouped: dict[str, list[BeadCost]] = {}
-    for bead in beads:
-        tier = routes.get(bead.issue_id or "")
-        if tier is not None:
-            grouped.setdefault(tier, []).append(bead)
-
-    ordered = [tier for tier in _TIER_ORDER if tier in grouped]
-    ordered.extend(sorted(tier for tier in grouped if tier not in _TIER_ORDER))
-    rows: list[TierMetrics] = []
-    for tier in ordered:
-        group = grouped[tier]
-        closed = sum(1 for bead in group if bead.closed)
-        rows.append(
-            TierMetrics(
-                tier=tier,
-                beads=len(group),
-                closed_beads=closed,
-                close_rate=closed / len(group),
-            )
-        )
-    return tuple(rows)
-
-
-@dataclass(frozen=True)
-class SiteCounts:
-    """How many decisions one Jev site logged in a cell, and how many resolved.
-
-    `closed` counts the decisions whose bead the seat's tracker shows closed:
-    the ones an outcome can label. None means the tracker could not be read,
-    which is a different answer from a site none of whose beads closed.
-    """
-
-    site: str
-    decisions: int = 0
-    closed: int | None = 0
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"decisions": self.decisions, "closed": self.closed}
-
-
 @dataclass(frozen=True)
 class ArmMetrics:
     """What one cell cost and how well it went. None means never reported."""
@@ -773,12 +662,6 @@ class ArmMetrics:
     turns: int | None = None
     wall_seconds: float | None = None
     cache_hit_rate: float | None = None
-    #: Empty when this cell's seat recorded no routing decisions.
-    tiers: tuple[TierMetrics, ...] = ()
-    #: One row per Jev site, or None when the cell has no seat to read.
-    jev_sites: tuple[SiteCounts, ...] | None = None
-    #: Why `jev_sites`, or the closed counts inside it, are null.
-    jev_sites_reason: str | None = None
 
     @property
     def null_metrics(self) -> tuple[str, ...]:
@@ -800,13 +683,6 @@ class ArmMetrics:
             "turns": self.turns,
             "wall_seconds": self.wall_seconds,
             "cache_hit_rate": self.cache_hit_rate,
-            "tiers": [row.as_dict() for row in self.tiers],
-            "jev_sites": (
-                None
-                if self.jev_sites is None
-                else {row.site: row.as_dict() for row in self.jev_sites}
-            ),
-            "jev_sites_reason": self.jev_sites_reason,
             "null_metrics": list(self.null_metrics),
         }
 
@@ -815,14 +691,8 @@ def measure_arm(
     fixture: EvalFixture,
     arm: str,
     runs: Sequence[RunCost],
-    routes: Mapping[str, str] | None = None,
 ) -> ArmMetrics:
-    """Roll one cell's grind logs into the primary metric and its guardrails.
-
-    `routes` is that cell's bead-to-tier map. It is optional because a cell
-    whose arm never routed has none, and the metrics that do not depend on
-    routing are measured the same either way.
-    """
+    """Roll one cell's grind logs into the primary metric and its guardrails."""
 
     sessions: tuple[SessionCost, ...] = tuple(
         session for run in runs for session in run.sessions
@@ -853,7 +723,6 @@ def measure_arm(
         turns=int(turns) if turns is not None else None,
         wall_seconds=wall,
         cache_hit_rate=usage.cache_hit_rate,
-        tiers=_tier_rows(beads, routes or {}),
     )
 
 
@@ -862,153 +731,6 @@ def collect_runs(root: Path, fixture: EvalFixture, arm: str) -> tuple[RunCost, .
 
     seat = root / seat_name(fixture, arm)
     return tuple(parse_grind_log(path) for path in find_grind_logs(seat, newest=0))
-
-
-def collect_routes(root: Path, fixture: EvalFixture, arm: str) -> dict[str, str]:
-    """Each bead's tier from one cell's routing log, the newest record winning.
-
-    A bead can be routed more than once, because every resumed window writes
-    its own record, and the tier that last ran it is the one its outcome
-    belongs to. Observations are skipped: a shadow seat records the tier it
-    would have picked, and crediting a bead's outcome to a tier that never ran
-    it would read a control arm's numbers as the router's. The log is read
-    defensively: it is appended to by workers a timeout may kill mid-line, so
-    an undecodable line is skipped rather than failing the whole report, and a
-    seat without the log simply routes nothing.
-    """
-
-    path = root / seat_name(fixture, arm) / "logs" / ROUTE_LOG_NAME
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-
-    routes: dict[str, str] = {}
-    for line in text.splitlines():
-        try:
-            record = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(record, dict):
-            continue
-        if record.get("applied") is False:
-            continue
-        issue_id = record.get("issue_id")
-        tier = record.get("tier")
-        if isinstance(issue_id, str) and issue_id and isinstance(tier, str) and tier:
-            routes[issue_id] = tier
-    return routes
-
-
-#: The three logs a seat's Jev sites append to.
-JEV_LOG_NAMES: tuple[str, ...] = (LOG_NAME, ROUTE_LOG_NAME, PROGRESS_LOG_NAME)
-
-#: The site each record kind belongs to. A gate `decision` is filed by its
-#: phase instead, and kinds named in neither table (outcomes, progress
-#: windows) are facts about a decision rather than decisions themselves.
-_SITE_BY_EVENT: dict[str, str] = {
-    "model_route": "router",
-    "tool_decision": "pre_tool",
-    "progress": "progress",
-    "stuck_decision": "stuck",
-    "triage": "triage",
-    "post_turn": "post_turn",
-}
-_SITE_BY_PHASE: dict[str, str] = {
-    "semantic_readiness": "readiness",
-    "pre_turn": "pre_turn",
-}
-
-
-def _record_site(record: Mapping[str, Any]) -> str | None:
-    """The Jev site a logged record is a decision of, or None."""
-
-    event = record.get("event")
-    if event == "decision":
-        return _SITE_BY_PHASE.get(str(record.get("phase")))
-    return _SITE_BY_EVENT.get(str(event))
-
-
-def _closed_issue_ids(run: BdRunner) -> set[str] | None:
-    """Every issue the seat's tracker shows closed, or None when unreadable."""
-
-    try:
-        rows = run(("list", "--all", "--json", "--limit", "0"))
-    except (BdError, OSError, ValueError):
-        return None
-    if not isinstance(rows, list):
-        return None
-    return {
-        row["id"]
-        for row in rows
-        if isinstance(row, dict)
-        and isinstance(row.get("id"), str)
-        and row.get("status") == "closed"
-    }
-
-
-def collect_jev_sites(
-    root: Path,
-    fixture: EvalFixture,
-    arm: str,
-    *,
-    tracker: Callable[[Path], BdRunner] = bd_runner,
-) -> tuple[tuple[SiteCounts, ...] | None, str | None]:
-    """Decisions per Jev site in one cell, and how many reached a closed bead.
-
-    These are the numbers that say whether a collection run reached the
-    preregistered minimum of labeled decisions per site, or whether it needs
-    another run. The logs are read as defensively as the routing log, for the
-    same reason, and a seat with no Jev logs counts zeros rather than failing.
-    The tracker is read through bd in read-only sandbox mode, and only when
-    there is a decision to join: a seat that logged nothing has no outcome to
-    look up. A tracker that cannot be read leaves the closed counts null with
-    the reason beside them; a cell with no seat has no counts at all.
-    """
-
-    seat = root / seat_name(fixture, arm)
-    if not seat.is_dir():
-        return None, "seat not found"
-
-    issues: dict[str, list[str]] = {site: [] for site in SITES}
-    for name in JEV_LOG_NAMES:
-        try:
-            text = (seat / "logs" / name).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            try:
-                record = json.loads(line)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(record, dict):
-                continue
-            site = _record_site(record)
-            if site in issues:
-                issue_id = record.get("issue_id")
-                issues[site].append(issue_id if isinstance(issue_id, str) else "")
-
-    if not any(issues.values()):
-        return tuple(SiteCounts(site=site) for site in SITES), None
-
-    closed = _closed_issue_ids(tracker(seat))
-    if closed is None:
-        rows = tuple(
-            SiteCounts(site=site, decisions=len(ids), closed=None)
-            for site, ids in issues.items()
-        )
-        return rows, "seat tracker unreadable"
-    return (
-        tuple(
-            SiteCounts(
-                site=site,
-                decisions=len(ids),
-                closed=sum(1 for issue_id in ids if issue_id in closed),
-            )
-            for site, ids in issues.items()
-        ),
-        None,
-    )
 
 
 #: What a comparison says about the treatment cell it read.
@@ -1155,7 +877,6 @@ def build_report(
     root: Path,
     *,
     executions: Sequence[CellExecution] = (),
-    tracker: Callable[[Path], BdRunner] = bd_runner,
 ) -> EvalReport:
     """Measure every cell under `root`, including the ones that never ran.
 
@@ -1163,21 +884,13 @@ def build_report(
     ran this arm" into "this arm has nothing to say", and those are different
     answers to the same comparison. A sweep passes its own records in, so a
     row whose metrics are null can be read against whether its cell failed,
-    was skipped, or ran and reported nothing. `tracker` opens a seat's bd,
-    read-only, for the closed counts beside each Jev site.
+    was skipped, or ran and reported nothing.
     """
 
     arms = []
     for fixture in FIXTURE_PACK:
         for arm in ARMS:
-            sites, reason = collect_jev_sites(root, fixture, arm, tracker=tracker)
-            row = measure_arm(
-                fixture,
-                arm,
-                collect_runs(root, fixture, arm),
-                routes=collect_routes(root, fixture, arm),
-            )
-            arms.append(replace(row, jev_sites=sites, jev_sites_reason=reason))
+            arms.append(measure_arm(fixture, arm, collect_runs(root, fixture, arm)))
     return EvalReport(root=root, arms=tuple(arms), executions=tuple(executions))
 
 
@@ -1202,15 +915,13 @@ def _status_cell(record: CellExecution | None) -> str:
 
 
 def render_report(report: EvalReport) -> str:
-    """The report as markdown: one table, the comparison, the tiers, the nulls.
+    """The report as markdown: one table, the comparison, the nulls.
 
     A swept report gains one trailing status column. A report rebuilt from
     logs has no records to show and keeps the table it always had. The
     comparison block is what a default gets flipped on, so it puts each
     treatment beside the control of its own fixture rather than leaving the
-    subtraction to a reader scanning two rows of a wide table. The per-tier
-    section is where a threshold gets rewritten from outcomes rather than from
-    taste, so it names the arms that routed and says so plainly when none did.
+    subtraction to a reader scanning two rows of a wide table.
     """
 
     columns = ["fixture", "arm", "beads", "closed", PRIMARY_METRIC]
@@ -1246,43 +957,6 @@ def render_report(report: EvalReport) -> str:
             f"wall_seconds {_cell(item.control_wall_seconds)} -> "
             f"{_cell(item.arm_wall_seconds)} — {item.verdict}"
         )
-
-    lines.extend(["", "## Per-tier close rate", ""])
-    routed = tuple(arm for arm in report.arms if arm.tiers)
-    if not routed:
-        lines.append("No cell recorded a routing decision.")
-    else:
-        for arm in routed:
-            for row in arm.tiers:
-                lines.append(
-                    f"- {arm.fixture} / {arm.arm} / {row.tier}: "
-                    f"{row.closed_beads}/{row.beads} closed "
-                    f"({_cell(row.close_rate)})"
-                )
-
-    lines.extend(["", "## Jev decisions per site", ""])
-    lines.append("| fixture | arm | " + " | ".join(SITES) + " |")
-    lines.append("| --- " * (len(SITES) + 2) + "|")
-    for arm in report.arms:
-        if arm.jev_sites is None:
-            counts = [f"null ({arm.jev_sites_reason or 'not measured'})"] * len(SITES)
-        else:
-            by_site = {row.site: row for row in arm.jev_sites}
-            counts = [
-                f"{by_site[site].decisions}/{_cell(by_site[site].closed)}"
-                if site in by_site
-                else "null"
-                for site in SITES
-            ]
-        lines.append("| " + " | ".join([arm.fixture, arm.arm, *counts]) + " |")
-    lines.append("")
-    lines.append("Each cell is decisions logged / decisions whose bead closed.")
-    for arm in report.arms:
-        if arm.jev_sites is not None and arm.jev_sites_reason:
-            lines.append(
-                f"- {arm.fixture} / {arm.arm}: closed counts null "
-                f"({arm.jev_sites_reason})"
-            )
 
     lines.extend(["", "## Null results", ""])
     if not report.null_results:

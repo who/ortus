@@ -5,12 +5,9 @@ travel into System Two as context. Calibration reads recorded answers and
 reports bands; it cannot restore the scrapped hard escalate, and the pre-tool
 floors are out of its reach entirely.
 """
-import json
 
 import pytest
-from typer.testing import CliRunner
 
-from ortus.cli import app
 from ortus.core.judge import (
     FailureMode, GateAction, GateReason, JudgeAnswers, JudgeConfig, JudgeRoute, JudgeState,
 )
@@ -180,45 +177,3 @@ def test_pilot_latency_bars_are_measurable_from_replay(replay):
     assert metrics["measured_cost_usd"]["judge"] is None
 
 
-def test_cli_reports_candidates_and_writes_nothing_else(tmp_path, request):
-    events = (request.config.rootpath / FIXTURE).read_text(encoding="utf-8")
-    source = write(tmp_path, "events.jsonl", events)
-    labels = {}
-    for line in events.splitlines():
-        event = json.loads(line)
-        if event["event"] == "decision":
-            labels[event["decision_id"]] = {
-                "expected_action": "proceed", "needs_human": "human" in event["issue_id"],
-            }
-    write(tmp_path, "labels.json", json.dumps(labels))
-    write(tmp_path, "candidates.toml", BANDS)
-    config = write(tmp_path, ".ortusrc", '[judge]\nenabled = true\nrisk_confidence = 0.8\n')
-    before = config.read_bytes()
-    result = CliRunner().invoke(app, [
-        "judge", "replay", str(source), "--labels", str(tmp_path / "labels.json"),
-        "--output", str(tmp_path / "metrics.json"), "--thresholds", str(tmp_path / "candidates.toml"),
-    ])
-    assert result.exit_code == 0, result.output
-    metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
-    assert metrics["calibration"]["policy"].endswith("no hard escalate")
-    assert [c["name"] for c in metrics["calibration"]["candidates"]] == [
-        "route-band", "human-band", "risk-band",
-    ]
-    assert config.read_bytes() == before
-    assert sorted(p.name for p in tmp_path.iterdir()) == [
-        ".ortusrc", "candidates.toml", "events.jsonl", "labels.json", "metrics.json",
-    ]
-
-
-def test_cli_rejects_a_hard_escalate_document_before_writing(tmp_path, request):
-    source = write(tmp_path, "events.jsonl",
-                   (request.config.rootpath / FIXTURE).read_text(encoding="utf-8"))
-    write(tmp_path, "labels.json", "{}")
-    write(tmp_path, "candidates.toml",
-          '[[candidate]]\nname = "hard"\naction = "human"\nneeds_human_max = 0.8\n')
-    result = CliRunner().invoke(app, [
-        "judge", "replay", str(source), "--labels", str(tmp_path / "labels.json"),
-        "--output", str(tmp_path / "metrics.json"), "--thresholds", str(tmp_path / "candidates.toml"),
-    ])
-    assert result.exit_code == 1
-    assert not (tmp_path / "metrics.json").exists()

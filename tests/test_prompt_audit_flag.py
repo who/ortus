@@ -248,28 +248,6 @@ def test_grind_still_injects_the_issue_id_into_the_audited_condition() -> None:
     assert "body text" in injected
 
 
-def test_the_audited_goal_prompt_supports_the_bound_issue_contract() -> None:
-    """Judge binding validates the served goal text before it claims."""
-    from ortus.commands.grind import _IMPLEMENTATION_INSTRUCTION, _compose_work_prompt
-    from ortus.core.judge_claim import validate_bound_goal
-
-    validate_bound_goal(audited_goal_text())
-    prompt = _compose_work_prompt(
-        "",
-        {
-            "id": "ortus-abcd",
-            "status": "in_progress",
-            "assignee": "run-1",
-            "labels": [],
-        },
-        "claude",
-        bound_issue_id="ortus-abcd",
-        goal_template=audited_goal_text(),
-        phase_instruction=_IMPLEMENTATION_INSTRUCTION,
-    )
-    assert "Never run bd ready or claim another id" in prompt
-
-
 def test_grind_dry_run_names_the_arm_it_would_serve(tmp_path: Path) -> None:
     """A run log or preview that cannot say which arm it is has no A/B value."""
     from tests.test_grind import _fixture_repo, _plain

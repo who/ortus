@@ -20,32 +20,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RALPH_PROMPT = REPO_ROOT / "ortus" / "prompts" / "ralph-prompt.md"
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex"])
-def test_bound_prompt_never_selects_another_issue(backend):
-    import json
-
-    from ortus.commands.grind import _IMPLEMENTATION_INSTRUCTION, _compose_work_prompt
-    from ortus.core.prompts import bundled_prompt_text
-
-    issue_id = 'repo-1; $(touch forbidden) "quoted"\n## data'
-    prompt = _compose_work_prompt(
-        "", {"id": issue_id, "status": "in_progress", "assignee": "run-1"}, backend,
-        bound_issue_id=issue_id,
-        goal_template=bundled_prompt_text("goal-prompt"),
-        phase_instruction=_IMPLEMENTATION_INSTRUCTION,
-        phase_contract_text="\n\n## CodeGraph phase contract v1\nRequired",
-        lessons_text="x" * 4000,
-    )
-    assert "Never run bd ready or claim another id" in prompt
-    assert "Continue leftover in_progress" not in prompt
-    assert "stop on mismatch" in prompt
-    assert "Session-close" in prompt
-    assert json.dumps(issue_id) in prompt
-    assert issue_id not in prompt
-    if backend == "claude":
-        assert len(prompt.removeprefix("/goal ")) <= 4000
-
-
 def test_bound_goal_checks_owner_status_human_and_skips_selection():
     from ortus.core.judge_claim import BOUND_SELECTION_RULE
     from ortus.core.prompts import bundled_prompt_text
@@ -55,20 +29,6 @@ def test_bound_goal_checks_owner_status_human_and_skips_selection():
     assert "assignee matches BEADS_ACTOR" in BOUND_SELECTION_RULE
     assert "multiple non-human in_progress" in BOUND_SELECTION_RULE
     assert "skip bd ready and claiming" in BOUND_SELECTION_RULE
-
-
-@pytest.mark.parametrize("changes", [
-    {"id": "other"}, {"status": "open"}, {"labels": ["human"]}, {"assignee": ""},
-])
-def test_bound_prompt_rejects_invalid_claim(changes):
-    from ortus.commands.grind import _compose_work_prompt
-    from ortus.core.agent import BackendError
-    from ortus.core.prompts import bundled_prompt_text
-
-    issue = {"id": "repo-1", "status": "in_progress", "assignee": "run-1", **changes}
-    with pytest.raises(BackendError):
-        _compose_work_prompt("", issue, bound_issue_id="repo-1",
-                             goal_template=bundled_prompt_text("goal-prompt"))
 
 
 def test_ungated_prompt_bytes_unchanged():

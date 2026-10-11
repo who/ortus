@@ -27,6 +27,7 @@ from ortus.core.pin_skew import (
     classify_plan_gap,
     latest_plan_gap,
     pin_skew_note,
+    release_pin_skew_park,
     tag_pin_skew_claims,
 )
 
@@ -83,6 +84,11 @@ class _FakeBd:
         if self.fail == "comment":
             raise RuntimeError("tracker down")
         self.notes.append((issue_id, body))
+
+    def remove_label(self, issue_id: str, label: str) -> None:
+        if self.fail == "unlabel":
+            raise RuntimeError("tracker down")
+        self.issues[issue_id][0].remove(label)
 
 
 def _tag(bd: _FakeBd, ids: list[str]) -> tuple[set[str], list[str]]:
@@ -227,3 +233,47 @@ def test_grind_runs_the_pass_after_a_flagged_claim() -> None:
     from ortus.commands import grind as grind_mod
 
     assert grind_mod.tag_pin_skew_claims is tag_pin_skew_claims
+
+
+def _release(bd: _FakeBd, issue_id: str, evidence: str) -> tuple[bool, list[str]]:
+    logged: list[str] = []
+    released = release_pin_skew_park(
+        bd, issue_id, evidence=evidence, write_log=logged.append  # type: ignore[arg-type]
+    )
+    return released, logged
+
+
+def test_pin_able_park_is_released_back_to_the_queue() -> None:
+    """A park that reads as skew is tagged, explained, and loses its human label."""
+    bd = _FakeBd({"ortus-g": (["human"], [])})
+    released, logged = _release(bd, "ortus-g", _SKEW)
+
+    assert released
+    assert bd.labels == [("ortus-g", PIN_SKEW_LABEL)]
+    assert bd.issues["ortus-g"][0] == []
+    assert len(bd.notes) == 1 and "2026-09-01" in bd.notes[0][1]
+    assert logged and "released ortus-g" in logged[0]
+
+
+def test_a_true_gap_stays_parked() -> None:
+    bd = _FakeBd({"ortus-h": (["human"], [])})
+    released, _ = _release(bd, "ortus-h", _TRUE_GAP)
+
+    assert not released
+    assert bd.labels == [] and bd.notes == []
+    assert bd.issues["ortus-h"][0] == ["human"]
+
+
+@pytest.mark.parametrize("fail", ["show", "label", "comment", "unlabel"])
+def test_a_release_tracker_error_is_logged_not_raised(fail: str) -> None:
+    bd = _FakeBd({"ortus-i": (["human"], [])}, fail=fail)
+    released, logged = _release(bd, "ortus-i", _SKEW)
+
+    assert not released
+    assert logged
+
+
+def test_grind_releases_parks_through_the_same_function() -> None:
+    from ortus.commands import grind as grind_mod
+
+    assert grind_mod.release_pin_skew_park is release_pin_skew_park

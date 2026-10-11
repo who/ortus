@@ -1,11 +1,13 @@
 """Route discovery and preparation never launch a worker or acquire a claim."""
 
+import ast
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
-from ortus.core import judge_routing as routing
+from ortus.core import routing
 from ortus.core.agent import CodexRunner
 from ortus.core.claude import ClaudeRunner
 from ortus.core.codegraph import (
@@ -16,8 +18,55 @@ from ortus.core.codegraph import (
 )
 from ortus.core.config import Config
 from ortus.core.hooks import HookConflictError
-from ortus.core.judge import JudgeConfig, JudgeRoute
 from ortus.core.profiles import Phase
+from ortus.core.routing import WorkerRoute
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "ortus"
+
+
+def _judge_imports(path: Path) -> list[str]:
+    """Every `ortus.core.judge*` module a file imports, at any depth."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+            if node.module == "ortus.core":
+                names = [f"ortus.core.{alias.name}" for alias in node.names]
+        elif isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        else:
+            continue
+        found.extend(
+            name for name in names
+            if name == "ortus.core.judge" or name.startswith("ortus.core.judge_")
+        )
+    return found
+
+
+def test_no_judge_imports_in_commands_prefix_eval_or_routing():
+    paths = sorted((SRC / "commands").glob("*.py")) + [
+        SRC / "core" / "prompt_prefix.py",
+        SRC / "core" / "harness_eval.py",
+        SRC / "core" / "routing.py",
+    ]
+    offenders = {
+        str(path.relative_to(SRC)): imports
+        for path in paths
+        if (imports := _judge_imports(path))
+    }
+    assert offenders == {}
+
+
+def test_grind_resolves_its_profiles_through_routing():
+    grind = SRC / "commands" / "grind.py"
+    tree = ast.parse(grind.read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "ortus.core.routing"
+        for alias in node.names
+    }
+    assert {"RouteOverrides", "phase_profiles"} <= imported
 
 
 @pytest.fixture
@@ -68,39 +117,71 @@ def prepare(config, adapter, tmp_path, plan, backend, **kwargs):
     )
 
 
-@pytest.mark.parametrize(
-    "baseline,selected", [("claude", "codex"), ("codex", "claude")]
-)
-def test_switch_uses_selected_runner_profiles_prompt_and_preflights(
-    setup_routes, tmp_path, baseline, selected
+@pytest.mark.parametrize("baseline", ["claude", "codex"])
+def test_baseline_uses_its_runner_profiles_prompt_and_preflights(
+    setup_routes, tmp_path, baseline
 ):
     config, hooks, adapter = setup_routes
-    plan = routing.plan_routes(config, JudgeConfig(enabled=True), baseline)
-    bundle = prepare(config, adapter, tmp_path, plan, JudgeRoute(selected))
-    assert type(bundle.runner) is (CodexRunner if selected == "codex" else ClaudeRunner)
-    assert bundle.runner.claude_binary == f"/bin/{selected}"
+    plan = routing.plan_routes(config, baseline)
+    assert plan.available_workers == (WorkerRoute(baseline),)
+    bundle = prepare(config, adapter, tmp_path, plan, WorkerRoute(baseline))
+    assert type(bundle.runner) is (CodexRunner if baseline == "codex" else ClaudeRunner)
+    assert bundle.runner.claude_binary == f"/bin/{baseline}"
     for profile, phase in (
         (bundle.implement_profile, "implement"),
         (bundle.verify_profile, "verify"),
         (bundle.finalize_profile, "finalize"),
     ):
-        assert profile.backend == selected
-        assert profile.model == f"{selected}-{phase}"
+        assert profile.backend == baseline
+        assert profile.model == f"{baseline}-{phase}"
         assert profile.reasoning_effort == "high"
+    assert bundle.implement_profile == routing.baseline_implement_profile(config, plan)
     adapter.probe.assert_called_once_with(
-        tmp_path, CodeGraphMode.REQUIRED, backend=selected
+        tmp_path, CodeGraphMode.REQUIRED, backend=baseline
     )
-    if selected == "claude":
+    if baseline == "claude":
         hooks.assert_called_once_with(tmp_path)
     else:
         hooks.assert_not_called()
         assert bundle.runner.codegraph == adapter.probe.return_value.capability
-    prompt = bundle.compose_prompt("Do the bound task")
-    assert prompt.startswith("/goal ") == (selected == "claude")
+    prompt = bundle.compose_prompt("Do the task")
+    assert prompt.startswith("/goal ") == (baseline == "claude")
     assert prompt.count("CodeGraph phase contract") == 1
     assert "Phase: implementation; policy: required" in prompt
     argv = bundle.runner.build_argv(prompt, profile=bundle.implement_profile)
-    assert f"{selected}-implement" in argv
+    assert f"{baseline}-implement" in argv
+
+
+def test_other_configured_backends_are_never_offered(setup_routes):
+    config, _, _ = setup_routes
+    plan = routing.plan_routes(config, "claude")
+    assert plan.available_workers == (WorkerRoute.CLAUDE,)
+
+
+def test_overrides_resolve_independently_on_baseline(setup_routes, tmp_path):
+    config, _, adapter = setup_routes
+    overrides = routing.RouteOverrides(
+        implement_model="selected-model",
+        verify_reasoning_effort="low",
+    )
+    plan = routing.plan_routes(config, "codex", overrides=overrides)
+    bundle = prepare(config, adapter, tmp_path, plan, WorkerRoute.CODEX)
+    assert bundle.implement_profile.model == "selected-model"
+    assert bundle.implement_profile.reasoning_effort == "high"
+    assert bundle.verify_profile.model == "codex-verify"
+    assert bundle.verify_profile.reasoning_effort == "low"
+    assert bundle.finalize_profile.model == "codex-finalize"
+    assert routing.phase_profiles(config, "codex", overrides) == (
+        bundle.implement_profile, bundle.verify_profile, bundle.finalize_profile,
+    )
+
+
+def test_phase_profiles_match_config_resolution(setup_routes):
+    config, _, _ = setup_routes
+    implement, verify, finalize = routing.phase_profiles(config, "claude")
+    assert implement == config.resolve_profile("claude", Phase.IMPLEMENT)
+    assert verify == config.resolve_profile("claude", Phase.VERIFY)
+    assert finalize == config.resolve_profile("claude", Phase.FINALIZE)
 
 
 @pytest.mark.parametrize(
@@ -113,74 +194,18 @@ def test_switch_uses_selected_runner_profiles_prompt_and_preflights(
         ("verify_reasoning_effort", "low"),
     ],
 )
-def test_each_explicit_flag_pins_baseline(setup_routes, field, value):
-    config, _, _ = setup_routes
-    overrides = routing.RouteOverrides(**{field: value})
-    plan = routing.plan_routes(
-        config, JudgeConfig(enabled=True), "claude", overrides=overrides
-    )
-    assert plan.available_workers == (JudgeRoute.CLAUDE,)
-    assert plan.offered_routes == (JudgeRoute.CLAUDE, JudgeRoute.SKIP, JudgeRoute.HUMAN)
+def test_each_explicit_flag_reads_as_pinned(field, value):
+    assert routing.RouteOverrides(**{field: value}).pinned({})
+    assert not routing.RouteOverrides().pinned({})
+    assert routing.RouteOverrides().pinned({"ORTUS_BACKEND": "codex"})
 
 
-def test_environment_backend_pins_but_config_backend_does_not(
-    setup_routes, monkeypatch
-):
-    config, _, _ = setup_routes
-    config.values["backend"] = "codex"
-    assert (
-        len(routing.plan_routes(config, JudgeConfig(), "codex").available_workers) == 2
-    )
-    monkeypatch.setenv("ORTUS_BACKEND", "codex")
-    plan = routing.plan_routes(config, JudgeConfig(), "codex")
-    assert plan.available_workers == (JudgeRoute.CODEX,)
-    assert plan.offered_routes == (JudgeRoute.CODEX, JudgeRoute.SKIP, JudgeRoute.HUMAN)
-
-
-def test_overrides_resolve_independently_on_baseline(setup_routes, tmp_path):
-    config, _, adapter = setup_routes
-    plan = routing.plan_routes(
-        config,
-        JudgeConfig(),
-        "codex",
-        overrides=routing.RouteOverrides(
-            implement_model="selected-model",
-            verify_reasoning_effort="low",
-        ),
-    )
-    bundle = prepare(config, adapter, tmp_path, plan, JudgeRoute.CODEX)
-    assert bundle.implement_profile.model == "selected-model"
-    assert bundle.implement_profile.reasoning_effort == "high"
-    assert bundle.verify_profile.model == "codex-verify"
-    assert bundle.verify_profile.reasoning_effort == "low"
-    assert bundle.finalize_profile.model == "codex-finalize"
-
-
-@pytest.mark.parametrize("backend", ["unknown"])
-def test_unsupported_baseline_fails_before_preflights(setup_routes, backend):
+def test_unsupported_baseline_fails_before_preflights(setup_routes):
     config, hooks, adapter = setup_routes
     with pytest.raises(routing.RoutePreparationError, match="not a supported worker"):
-        routing.plan_routes(config, JudgeConfig(enabled=True), backend)
+        routing.plan_routes(config, "unknown")
     hooks.assert_not_called()
     adapter.probe.assert_not_called()
-
-
-@pytest.mark.parametrize("fault", ["missing", "implement", "verify", "finalize"])
-def test_unavailable_optional_candidate_is_not_offered(
-    setup_routes, monkeypatch, fault
-):
-    config, _, _ = setup_routes
-    if fault == "missing":
-        monkeypatch.setattr(
-            routing.shutil,
-            "which",
-            lambda name, **kw: None if name == "codex" else "/bin/claude",
-        )
-    else:
-        config.values["profiles"]["codex"][fault]["reasoning_effort"] = "invalid"
-    plan = routing.plan_routes(config, JudgeConfig(), "claude")
-    assert plan.available_workers == (JudgeRoute.CLAUDE,)
-    assert JudgeRoute.CODEX not in plan.offered_routes
 
 
 @pytest.mark.parametrize("fault", ["missing", "profile"])
@@ -191,46 +216,17 @@ def test_invalid_baseline_is_startup_error(setup_routes, monkeypatch, fault):
     else:
         config.values["profiles"]["claude"]["verify"]["model"] = "invalid model"
     with pytest.raises(routing.RoutePreparationError):
-        routing.plan_routes(config, JudgeConfig(), "claude")
-
-
-def test_configured_routes_filter_workers_and_keep_baseline_for_failure(
-    setup_routes, tmp_path
-):
-    config, _, adapter = setup_routes
-    judge = JudgeConfig(routes=(JudgeRoute.CODEX, JudgeRoute.HUMAN))
-    plan = routing.plan_routes(config, judge, "claude")
-    assert plan.offered_routes == (JudgeRoute.CODEX, JudgeRoute.HUMAN)
-    assert JudgeRoute.CLAUDE in plan.available_workers
-    assert (
-        prepare(config, adapter, tmp_path, plan, JudgeRoute.CLAUDE).backend
-        == JudgeRoute.CLAUDE
-    )
-    only_baseline = routing.plan_routes(
-        config, JudgeConfig(routes=(JudgeRoute.CLAUDE,)), "claude"
-    )
-    assert only_baseline.available_workers == (JudgeRoute.CLAUDE,)
-
-
-def test_no_offered_worker_is_startup_error(setup_routes):
-    config, _, _ = setup_routes
-    with pytest.raises(routing.RoutePreparationError, match="at least one"):
-        routing.plan_routes(
-            config,
-            JudgeConfig(routes=(JudgeRoute.CODEX, JudgeRoute.HUMAN)),
-            "claude",
-            overrides=routing.RouteOverrides(requested_backend="claude"),
-        )
+        routing.plan_routes(config, "claude")
 
 
 @pytest.mark.parametrize(
     "failure", ["hooks", "codegraph", "false_probe", "binary", "profile"]
 )
-def test_selected_route_failure_never_tries_another_backend(
+def test_route_failure_never_tries_another_backend(
     setup_routes, tmp_path, monkeypatch, failure
 ):
     config, hooks, adapter = setup_routes
-    plan = routing.plan_routes(config, JudgeConfig(), "codex")
+    plan = routing.plan_routes(config, "claude")
     if failure == "hooks":
         hooks.side_effect = HookConflictError(tmp_path / "settings.json")
     elif failure == "codegraph":
@@ -246,48 +242,39 @@ def test_selected_route_failure_never_tries_another_backend(
     factory = Mock(wraps=routing.make_runner)
     monkeypatch.setattr(routing, "make_runner", factory)
     with pytest.raises(routing.RoutePreparationError):
-        prepare(config, adapter, tmp_path, plan, JudgeRoute.CLAUDE)
+        prepare(config, adapter, tmp_path, plan, WorkerRoute.CLAUDE)
     factory.assert_not_called()
     assert all(
         call.kwargs["backend"] == "claude" for call in adapter.probe.call_args_list
     )
 
 
-@pytest.mark.parametrize(
-    "selected", [JudgeRoute.CODEX, JudgeRoute.HUMAN, JudgeRoute.SKIP]
-)
-def test_unoffered_selection_cannot_bypass_pin(setup_routes, tmp_path, selected):
+def test_unplanned_route_cannot_be_prepared(setup_routes, tmp_path):
     config, hooks, adapter = setup_routes
-    plan = routing.plan_routes(
-        config,
-        JudgeConfig(),
-        "claude",
-        overrides=routing.RouteOverrides(requested_backend="claude"),
-    )
+    plan = routing.plan_routes(config, "claude")
     with pytest.raises(routing.RoutePreparationError, match="unavailable"):
-        prepare(config, adapter, tmp_path, plan, selected)
+        prepare(config, adapter, tmp_path, plan, WorkerRoute.CODEX)
     hooks.assert_not_called()
     adapter.probe.assert_not_called()
 
 
-def test_each_iteration_rechecks_and_copies_environment(setup_routes, tmp_path):
+def test_each_preparation_rechecks_and_copies_environment(setup_routes, tmp_path):
     config, hooks, adapter = setup_routes
-    plan = routing.plan_routes(config, JudgeConfig(), "claude")
+    plan = routing.plan_routes(config, "claude")
     env = {
         "UV_CACHE_DIR": "/cache/uv",
         "BEADS_DIR": "/tracker",
         "BEADS_ACTOR": "claim-owner",
     }
-    first = prepare(config, adapter, tmp_path, plan, JudgeRoute.CODEX, extra_env=env)
+    first = prepare(config, adapter, tmp_path, plan, WorkerRoute.CLAUDE, extra_env=env)
     first.runner.extra_env["LEAK"] = "no"
-    second = prepare(config, adapter, tmp_path, plan, JudgeRoute.CLAUDE, extra_env=env)
-    third = prepare(config, adapter, tmp_path, plan, JudgeRoute.CODEX, extra_env=env)
-    assert first.runner is not third.runner
-    assert second.runner.extra_env == third.runner.extra_env == env
+    second = prepare(config, adapter, tmp_path, plan, WorkerRoute.CLAUDE, extra_env=env)
+    assert first.runner is not second.runner
+    assert second.runner.extra_env == env
     assert "LEAK" not in env
-    assert adapter.probe.call_count == 3
-    assert hooks.call_count == 1
-    default = prepare(config, adapter, tmp_path, plan, JudgeRoute.CLAUDE)
+    assert adapter.probe.call_count == 2
+    assert hooks.call_count == 2
+    default = prepare(config, adapter, tmp_path, plan, WorkerRoute.CLAUDE)
     assert default.runner.extra_env["BEADS_DIR"] == str((tmp_path / ".beads").resolve())
 
 
@@ -297,10 +284,10 @@ def test_optional_codegraph_uses_selected_probe_policy(setup_routes, tmp_path, m
     adapter.probe.return_value = CodeGraphProbe(
         mode, False, False, False, "not available"
     )
-    plan = routing.plan_routes(config, JudgeConfig(), "codex")
+    plan = routing.plan_routes(config, "codex")
     bundle = routing.prepare_route(
         plan,
-        JudgeRoute.CODEX,
+        WorkerRoute.CODEX,
         repo=tmp_path,
         config=config,
         codegraph_mode=mode,

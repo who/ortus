@@ -51,7 +51,7 @@ from ortus.core.judge_typesafe import (
     API_KEY_ENV, SPLIT_OVERHEAD, JudgeFailure, JudgeUsage, _default_client,
     _Invalid, _mapping, _narrow, _usage, packed_split,
 )
-from ortus.core.pin_skew import PIN_SKEW_LABEL, classify_plan_gap
+from ortus.core.pin_skew import PIN_SKEW_LABEL, classify_plan_gap, pin_release_note
 from ortus.core.readiness import validate_issue
 from ortus.core.user_env import judge_environment
 
@@ -65,9 +65,6 @@ HUMAN_LABEL = "human"
 #: older markers are re-read by newer grinds.
 RESPEC_MARKER = "ortus-grind: triage re-spec attempted"
 
-#: Heading of the section the work prompt carries for a bead the triage
-#: released as pin-able skew.
-PIN_DIRECTIVE_HEADER = "\n\n## Pin directive\n"
 
 _SECRET_NAME = re.compile(
     r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH", re.IGNORECASE
@@ -326,34 +323,6 @@ def triage_parked(
         p_needs_human=weights[TriageClass.NEEDS_HUMAN],
         narrow=narrow, option_order=order,
     ), usage)
-
-
-def pin_directive_section(evidence: str) -> str:
-    """The prompt section a released pin-skew bead carries into its window."""
-    detail = f" The park named: {evidence}." if evidence else ""
-    return (
-        f"{PIN_DIRECTIVE_HEADER}"
-        "This issue was parked on a declared version, date, or toolchain "
-        "value the installed tool cannot honour, and the harness released it "
-        "as a pin rather than a planning gap." + detail + " Lower the declared "
-        "value to what the installed tool supports, file a follow-up bead "
-        "recording the value you lowered and the condition for restoring it, "
-        "and carry on with the claim. Do not park this issue again for the "
-        "same mismatch."
-    )
-
-
-def pin_release_note(issue_id: str, evidence: tuple[str, ...] | None = None) -> str:
-    """The comment that records the pin-skew route and the release it made."""
-    detail = f" (evidence: {', '.join(evidence)})" if evidence else ""
-    return (
-        f"triage: {issue_id} reads as an environment or version skew a pin "
-        f"resolves{detail}, not as a gap an operator has to answer. The "
-        f"{HUMAN_LABEL} label is removed and the {PIN_SKEW_LABEL} label "
-        "records the reading; the next worker is told to lower the declared "
-        "value to what the installed tool supports and to file a follow-up "
-        "bead for restoring it."
-    )
 
 
 def respec_release_note(issue_id: str) -> str:

@@ -3532,3 +3532,21 @@ def test_snapshot_keeps_excluding_human_from_loop_control() -> None:
     assert snapshot.in_progress_ids == frozenset({"ortus-b"})
     # `closed` is historical and never gates the loop, so it is verbatim.
     assert snapshot.closed == 1
+
+
+def test_judge_flags_removed() -> None:
+    """Grind runs every bead on the configured backend; no judge flag remains."""
+    result = runner.invoke(app, ["grind", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    help_text = _plain(result.output)
+    for flag in ("--judge", "--no-judge", "--judge-seat"):
+        assert flag not in help_text
+    rejected = runner.invoke(app, ["grind", "--no-judge", "--dry-run"])
+    assert rejected.exit_code != 0
+
+
+def test_judge_command_removed() -> None:
+    result = runner.invoke(app, ["judge", "--help"])
+    assert result.exit_code != 0
+    listing = _plain(runner.invoke(app, ["--help"], env={"COLUMNS": "200"}).output)
+    assert not re.search(r"^\W*judge\b", listing, re.MULTILINE)

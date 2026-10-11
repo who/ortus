@@ -1,14 +1,10 @@
 """Offline replay contracts, using real logger records rather than invented schemas."""
 from dataclasses import replace
 import json
-import os
 from uuid import uuid4
 
 import pytest
-from typer.testing import CliRunner
 
-from ortus.cli import app
-from ortus.commands.judge import _write_atomic
 from ortus.core.judge import (
     GateAction, GateDecision, GateReason, JudgeAnswers, JudgeConfig, JudgeMode, JudgePhase, JudgeRoute,
 )
@@ -208,74 +204,6 @@ def test_post_turn_from_real_logger(tmp_path):
     assert summarize(join_events(events), {})["post_turn_events"] == 1
 
 
-def test_cli_export_replay_and_overwrite(tmp_path, records, monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail("offline command attempted provider call")
-    monkeypatch.setattr("ortus.core.judge_typesafe.TypeSafeJudge.evaluate", forbidden)
-    events = records()
-    source = save(tmp_path, events, b"{")
-    target = tmp_path / "export.jsonl"
-    runner = CliRunner()
-    args = ["judge", "export", str(source), "--output", str(target)]
-    result = runner.invoke(app, args)
-    assert result.exit_code == 0, result.output
-    assert result.stdout == ""
-    assert "done (2 events exported)" in result.stderr
-    assert "ignored incomplete" in result.stderr
-    assert list(read_events(target)) == list(join_events(events).events)
-    assert os.stat(target).st_mode & 0o777 == 0o600
-    before = target.read_bytes()
-    assert runner.invoke(app, args).exit_code == 1
-    assert target.read_bytes() == before
-    assert runner.invoke(app, args + ["--force"]).exit_code == 0
-    labels = tmp_path / "labels.json"
-    labels.write_text(json.dumps(label(events[0])))
-    metrics = tmp_path / "metrics.json"
-    result = runner.invoke(app, ["judge", "replay", str(target), "--labels", str(labels), "--output", str(metrics)])
-    assert result.exit_code == 0, result.output
-    assert result.stdout == "" and "done (1 decisions, 1 labeled)" in result.stderr
-    assert json.loads(metrics.read_text())["accuracy"]["rate"] == 1
-
-
-def test_invalid_event_preserves_output_and_hides_path(tmp_path, records):
-    source = save(tmp_path, [dict(records(outcome=False)[0], secret="private")])
-    target = tmp_path / "output.jsonl"
-    target.write_text("original")
-    result = CliRunner().invoke(app, ["judge", "export", str(source), "--output", str(target), "--force"])
-    assert result.exit_code == 1
-    assert target.read_text() == "original"
-    assert str(source) not in result.output and "private" not in result.output
-
-
-def test_atomic_write_failure_leaves_original_and_no_temp(tmp_path, monkeypatch):
-    target = tmp_path / "out"
-    target.write_text("original")
-    def broken(*args):
-        raise OSError("private")
-    monkeypatch.setattr(os, "replace", broken)
-    with pytest.raises(ReplayError, match="cannot write output"):
-        _write_atomic(target, ["new"], True)
-    assert target.read_text() == "original"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["out"]
-
-
-def test_no_clobber_race_and_symlink(tmp_path, monkeypatch):
-    target = tmp_path / "out"
-    real_link = os.link
-    def race(src, dst):
-        dst.write_text("other writer")
-        real_link(src, dst)
-    monkeypatch.setattr(os, "link", race)
-    with pytest.raises(ReplayError, match="output exists"):
-        _write_atomic(target, ["new"], False)
-    assert target.read_text() == "other writer"
-    link = tmp_path / "link"
-    link.symlink_to(target)
-    with pytest.raises(ReplayError):
-        _write_atomic(link, ["new"], True)
-    assert target.read_text() == "other writer"
-
-
 @pytest.mark.parametrize("shadow", [False, True])
 def test_logger_failure_event_is_supported(records, shadow):
     events = records(shadow=shadow, failure=True)
@@ -312,17 +240,6 @@ def test_labels_bound_and_duplicate_key(tmp_path, monkeypatch):
     path.write_text('{"' + key + '":{},"' + key + '":{}}')
     with pytest.raises(ReplayError):
         read_labels(path)
-
-
-def test_cli_refuses_input_replacement_and_missing_input(tmp_path, records):
-    path = save(tmp_path, records())
-    before = path.read_bytes()
-    runner = CliRunner()
-    result = runner.invoke(app, ["judge", "export", str(path), "--output", str(path), "--force"])
-    assert result.exit_code == 1 and path.read_bytes() == before
-    result = runner.invoke(app, ["judge", "export", str(tmp_path / "missing"), "--output", str(path), "--force"])
-    assert result.exit_code == 1 and path.read_bytes() == before
-    assert str(tmp_path) not in result.output
 
 
 class _OpenTracker:

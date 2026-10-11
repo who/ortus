@@ -32,6 +32,10 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 #: not release it.
 PIN_SKEW_LABEL = "pin-skew"
 
+#: Heading of the section the work prompt carries for a bead released as
+#: pin-able skew.
+PIN_DIRECTIVE_HEADER = "\n\n## Pin directive\n"
+
 #: A dotted version (`0.22.0`, `3.12`) or an ISO date (`2026-08-22`) — the two
 #: shapes a pin-able knob is written in.
 _LITERAL = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d+\.\d+(?:\.\d+)*\b")
@@ -91,6 +95,8 @@ class _Tracker(Protocol):
     def add_label(self, issue_id: str, label: str) -> None: ...
 
     def add_comment(self, issue_id: str, body: str) -> None: ...
+
+    def remove_label(self, issue_id: str, label: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -213,3 +219,73 @@ def tag_pin_skew_claims(
             f"labelled {PIN_SKEW_LABEL}"
         )
     return tagged
+
+
+def pin_directive_section(evidence: str) -> str:
+    """The prompt section a released pin-skew bead carries into its window."""
+    detail = f" The park named: {evidence}." if evidence else ""
+    return (
+        f"{PIN_DIRECTIVE_HEADER}"
+        "This issue was parked on a declared version, date, or toolchain "
+        "value the installed tool cannot honour, and the harness released it "
+        "as a pin rather than a planning gap." + detail + " Lower the declared "
+        "value to what the installed tool supports, file a follow-up bead "
+        "recording the value you lowered and the condition for restoring it, "
+        "and carry on with the claim. Do not park this issue again for the "
+        "same mismatch."
+    )
+
+
+def pin_release_note(issue_id: str, evidence: tuple[str, ...] | None = None) -> str:
+    """The comment that records a pin-skew release."""
+    detail = f" (evidence: {', '.join(evidence)})" if evidence else ""
+    return (
+        f"triage: {issue_id} reads as an environment or version skew a pin "
+        f"resolves{detail}, not as a gap an operator has to answer. The "
+        f"human label is removed and the {PIN_SKEW_LABEL} label "
+        "records the reading; the next worker is told to lower the declared "
+        "value to what the installed tool supports and to file a follow-up "
+        "bead for restoring it."
+    )
+
+
+def release_pin_skew_park(
+    bd: _Tracker,
+    issue_id: str,
+    *,
+    evidence: str,
+    write_log: Callable[[str], None],
+) -> bool:
+    """Release one just-parked bead when its park reads as pin-able skew.
+
+    `evidence` is the park's own words: the readiness diagnostic, or the
+    latest PLAN-GAP comment. A park the regex does not recognise, an epic, a
+    bead closed since the park and a bead the tracker cannot read all stay
+    exactly as parked. The comment goes on before the human label comes off,
+    so a tracker that dies between the two leaves a parked bead carrying an
+    explanation. Returns whether the bead was released.
+    """
+    try:
+        issue = bd.show(issue_id)
+    except Exception as exc:  # noqa: BLE001 - a tracker hiccup never ends the run
+        write_log(f"triage: could not read {issue_id} ({exc}); it stays as it is")
+        return False
+    if str(issue.get("status") or "") == "closed":
+        return False
+    if str(issue.get("issue_type") or issue.get("type") or "") == "epic":
+        return False
+    verdict = classify_plan_gap(evidence)
+    if not verdict.pin_able:
+        return False
+    labels = {str(label) for label in (issue.get("labels") or ())}
+    try:
+        if PIN_SKEW_LABEL not in labels:
+            bd.add_label(issue_id, PIN_SKEW_LABEL)
+        bd.add_comment(issue_id, pin_release_note(issue_id, verdict.evidence))
+        if "human" in labels:
+            bd.remove_label(issue_id, "human")
+    except Exception as exc:  # noqa: BLE001
+        write_log(f"triage: could not release {issue_id} as pin-skew ({exc})")
+        return False
+    write_log(f"triage: released {issue_id} as pin-able skew; human label removed")
+    return True

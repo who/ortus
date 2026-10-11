@@ -21,7 +21,6 @@ from uuid import uuid4
 
 import pytest
 
-from ortus.commands import grind as grind_mod
 from ortus.core import judge_progress as progress_mod
 from ortus.core.config import DEFAULTS, load_config
 from ortus.core.judge import JudgeConfig
@@ -316,28 +315,6 @@ def test_enforce_reaps_the_second_looping_reading(tmp_path: Path) -> None:
     assert len(calls) == 2
 
 
-def test_enforce_reap_reason_reaches_the_grind_poll(tmp_path: Path) -> None:
-    """`_reap_reason` answers with the looping reason once the rule fires, and
-    with None on the readings before it."""
-    clock, logged, calls = Clock(), [], []
-    running = watch(tmp_path, ProgressMode.ENFORCE, [noul(0.9), noul(0.9)],
-                    clock=clock, logged=logged, calls=calls)
-    bd = SimpleNamespace(in_progress_ids=lambda **_: set())
-
-    def poll() -> str | None:
-        return grind_mod._reap_reason(
-            bd, SimpleNamespace(), baseline_closed=None,
-            flagged_at_start=frozenset(), integration_branch="main",
-            progress=running,
-        )
-
-    clock.advance(INTERVAL)
-    assert poll() is None
-    clock.advance(INTERVAL)
-    reason = poll()
-    assert reason is not None and reason.startswith(JEV_LOOPING_REASON)
-
-
 def test_enforce_does_not_reap_a_window_that_advanced_the_branch(
     tmp_path: Path,
 ) -> None:
@@ -507,15 +484,3 @@ def test_an_enforcing_project_loads_its_cadence(tmp_path: Path) -> None:
     assert progress_interval(cfg) == 45.0
 
 
-@pytest.mark.parametrize("status,timed_out,reaped,expected", [
-    ("closed", True, True, WindowOutcome.CLOSED),
-    ("in_progress", True, False, WindowOutcome.TIMEOUT),
-    ("in_progress", False, True, WindowOutcome.REAPED),
-    ("open", False, False, WindowOutcome.EXITED),
-])
-def test_window_outcome_reads_a_close_before_a_manner_of_death(
-    status: str, timed_out: bool, reaped: bool, expected: WindowOutcome
-) -> None:
-    assert grind_mod._window_outcome(
-        status, timed_out=timed_out, reaped=reaped
-    ) is expected

@@ -4,8 +4,7 @@ Every grind worker receives one prompt string that Ortus assembles from
 several segments. Some of those bytes are identical for every issue in a run
 — the goal pointer, the implementation instruction, the CodeGraph phase
 contract, the prototype verification section, the stored prior lessons — and
-some change with the claimed bead: the readiness advice vector and the Bound
-issue contract. A provider prefix cache can only serve the run of bytes that
+some change with the claimed bead: the issue id and its packet. A provider prefix cache can only serve the run of bytes that
 is byte-identical across requests, so a per-bead segment sitting in the
 middle of the prompt truncates the cacheable prefix at that point no matter
 how much stable text follows it.
@@ -113,18 +112,6 @@ INJECTED_CONTEXT: tuple[InjectedSegment, ...] = (
         note="The backend's own framing, appended last by the wrapper.",
     ),
     InjectedSegment(
-        name="readiness advice",
-        entry_point="ortus.core.judge_readiness:readiness_context",
-        stability=PER_BEAD,
-        note="A JSON vector describing the claimed issue's work spec.",
-    ),
-    InjectedSegment(
-        name="bound issue contract",
-        entry_point="ortus.core.judge_claim:bound_issue_section",
-        stability=PER_BEAD,
-        note="The claimed id as a JSON string, under an enforced judge gate.",
-    ),
-    InjectedSegment(
         name="work-issue template",
         entry_point="ortus.core.grind_loop:read_work_issue_condition",
         stability=STABLE,
@@ -147,13 +134,10 @@ INJECTED_CONTEXT: tuple[InjectedSegment, ...] = (
     ),
 )
 
-#: Openings of the per-bead segments, used to find where a composed prompt
-#: stops being byte-identical across beads. Each is the literal head of what
-#: its entry point returns.
-PER_BEAD_MARKERS: tuple[str, ...] = (
-    "\n\nJev semantic readiness advice",
-    "\n\n## Bound issue contract v1",
-)
+#: Openings of the per-bead segments a composed worker prompt can carry, used
+#: to find where it stops being byte-identical across beads. The composed
+#: goal condition injects no per-bead segment, so there is none to find.
+PER_BEAD_MARKERS: tuple[str, ...] = ()
 
 #: The billing-bucket fields that decide whether this change paid off. They
 #: are attributes of `ortus.core.cost.UsageBuckets`, which normalizes every
@@ -283,8 +267,8 @@ def stable_prefix_of(prompt: str) -> str:
     """The leading run of a composed prompt that is not bead-specific.
 
     The prefix ends at the earliest per-bead marker the prompt carries. A
-    prompt with no per-bead segment at all — an unbound worker in a run with
-    no readiness advice — is stable end to end and returns unchanged.
+    prompt with no per-bead segment at all is stable end to end and returns
+    unchanged.
     """
     cut = len(prompt)
     for marker in PER_BEAD_MARKERS:

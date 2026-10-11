@@ -9,9 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from typer.testing import CliRunner
 
-from ortus.cli import app
 from ortus.core import judge_outcomes, judge_scorers
 from ortus.core.bd import BdError
 from ortus.core.judge import (
@@ -193,21 +191,6 @@ def test_outcomes_document_is_validated(tmp_path, body):
         read_outcomes(path)
 
 
-def test_outcomes_cli_snapshots_issues_the_logs_reference(tmp_path, monkeypatch, templates):
-    calls = []
-    monkeypatch.setattr(judge_outcomes, "bd_runner", lambda repo: fake_bd(calls))
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / LOG_NAME).write_text(json.dumps(make(templates, "pre_turn", "a")) + "\n")
-    (logs / ROUTE_LOG_NAME).write_text(json.dumps(make(templates, "model_route", "b")) + "\n")
-    target = tmp_path / "out.json"
-    result = CliRunner().invoke(app, ["judge", "outcomes", str(tmp_path), "--output", str(target)])
-    assert result.exit_code == 0, result.output
-    assert set(read_outcomes(target)) == {"a", "b"}
-    assert "done (2 issues)" in result.stderr
-    assert sorted(call[1] for call in calls if call[0] == "history") == ["a", "b"]
-
-
 # --- AC-2: a sites entry for every site ---------------------------------------------
 
 
@@ -296,27 +279,6 @@ def test_sites_tool_rubric_and_older_records_use_documented_baselines(templates)
     assert scored["pre_tool"][0].label == {"deny_call"}
     assert scored["stuck"][0].baseline_action == "escalate"
     assert scored["stuck"][0].jev_action == stuck["action"]
-
-
-def test_sites_replay_cli_with_outcomes_and_no_labels(tmp_path, templates):
-    records, outcomes = corpus(templates)
-    decisions, routes, progress_log = (tmp_path / n for n in (LOG_NAME, ROUTE_LOG_NAME, PROGRESS_LOG_NAME))
-    for path, kinds in ((decisions, {"decision", "post_turn", "stuck_decision", "triage", "tool_decision"}),
-                        (routes, {"model_route"}), (progress_log, {"progress", "progress_window"})):
-        path.write_text("".join(json.dumps(r) + "\n" for r in records if r["event"] in kinds))
-    snapshot = tmp_path / "outcomes.json"
-    snapshot.write_text(json.dumps({"schema_version": 1, "issues": outcomes}))
-    metrics = tmp_path / "metrics.json"
-    result = CliRunner().invoke(app, ["judge", "replay", str(decisions), str(routes), str(progress_log),
-                                      "--outcomes", str(snapshot), "--output", str(metrics)])
-    assert result.exit_code == 0, result.output
-    report = json.loads(metrics.read_text())
-    assert set(report["sites"]) == set(SITES)
-    assert report["sites"] == json.loads(json.dumps(summarize_sites([records], outcomes)))
-    assert report["labeled"] == 0 and report["decisions"] == 5
-    missing = CliRunner().invoke(app, ["judge", "replay", str(decisions), "--output", str(metrics),
-                                       "--force"])
-    assert missing.exit_code == 1 and "pass --labels, --outcomes, or both" in missing.stderr
 
 
 def test_sites_metrics_mcnemar_auc_and_edges():

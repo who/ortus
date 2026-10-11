@@ -1,7 +1,7 @@
 """Offline outcome policy, transport, and grind lifecycle checks."""
 import asyncio
+from copy import deepcopy
 import json
-import subprocess
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,7 +9,6 @@ from uuid import uuid4
 
 import pytest
 
-from ortus.commands import grind as grind_mod
 from ortus.core.config import Config
 from ortus.core.judge import FailureMode, JudgeConfig, JudgeMode, parse_judge_config
 from ortus.core.judge_log import JudgeLogError, LogFailure, OutcomeStatus
@@ -23,7 +22,30 @@ from ortus.core.judge_stuck import (
 from ortus.core.judge_state import StateError
 from ortus.core.judge_typesafe import JudgeFailure
 from ortus.core.profiles import ProfileError
-from tests.test_grind_judge import Tracker, answer, gate  # noqa: F401 - shared CLI fixture
+from tests.test_readiness import ready_issue
+
+
+class Tracker:
+    """The tracker surface the outcome policy writes to."""
+
+    def __init__(self):
+        self.rows = {"demo-1": dict(ready_issue(), status="open", labels=[])}
+        self.calls = []
+        self.issue_comments = {}
+
+    def show(self, issue_id):
+        return deepcopy(self.rows[issue_id])
+
+    def add_label(self, issue_id, label):
+        self.calls.append('label')
+        self.rows[issue_id]['labels'].append(label)
+
+    def add_comment(self, issue_id, text):
+        self.calls.append(('comment', text))
+        self.issue_comments.setdefault(issue_id, []).append({'text': text})
+
+    def comments(self, issue_id):
+        return deepcopy(self.issue_comments.get(issue_id, []))
 
 
 ENV = {'TYPESAFE_API_KEY': 'secret-test-credential'}
@@ -49,12 +71,6 @@ def response(choice='continue', confidence=.9):
     values['has_basis'] = confidence
     return {'model': 'jev-1.13.0', 'answers': {
         name: {'type': 'noul', 'noul': value} for name, value in values.items()}}
-
-
-def post_turn_events(gate):
-    """The post-turn records only. The stuck decision writes its own
-    record to the same log, so 'the last event' is no longer this phase."""
-    return [e for e in gate.events() if e['event'] == 'post_turn']
 
 
 def client(body, calls):
@@ -285,136 +301,3 @@ def test_log_failure_prevents_annotations(tmp_path, monkeypatch):
     assert bd.calls == []
 
 
-@pytest.mark.parametrize('enabled', [False, True])
-def test_grind_independent_post_switch(gate, monkeypatch, enabled):
-    gate.config.values['judge'].update(enabled=False, post_turn=enabled)
-    evaluate = Mock(return_value=OutcomeVerdict(Outcome.AUTH, .99))
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
-    result = gate.invoke('--tasks', '1')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    assert evaluate.call_count == int(enabled)
-    assert gate.bd.rows['demo-1']['status'] == 'closed'
-    assert 'human' not in gate.bd.rows['demo-1']['labels']
-    if enabled:
-        assert gate.events()[-1]['reason'] == 'tracker_closed'
-    gate.judge.evaluate.assert_not_called()
-
-
-@pytest.mark.parametrize('choice', [Outcome.FLAKE, Outcome.CONTINUE, Outcome.PLAN_GAP, Outcome.DONE])
-def test_grind_leaves_claim_and_counter_for_next_window(gate, monkeypatch, choice):
-    gate.config.values['judge']['post_turn'] = True
-    gate.bd.rows['demo-1'].update(status='in_progress', assignee='prior')
-    gate.worker.run.side_effect = lambda *a, **kw: 0
-    evaluate = Mock(return_value=OutcomeVerdict(choice, .99))
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
-    counter = Mock()
-    monkeypatch.setattr(grind_mod, '_record_no_close_window', counter)
-    result = gate.invoke('--iterations', '1')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    gate.worker.run.assert_called_once()
-    evaluate.assert_called_once()
-    assert counter.call_args.args[2] == 1
-    assert gate.bd.rows['demo-1']['status'] == 'in_progress'
-    assert 'release' not in gate.bd.calls
-
-
-def test_no_worker_no_post_request(gate, monkeypatch):
-    gate.config.values['judge']['post_turn'] = True
-    gate.judge.evaluate.return_value = answer('skip')
-    evaluate = Mock()
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
-    result = gate.invoke()
-    assert result.exit_code == 0, result.output
-    gate.worker.run.assert_not_called()
-    evaluate.assert_not_called()
-
-
-def test_grind_watchdog_is_a_fact_and_handshake_failure_wins(gate, monkeypatch):
-    gate.config.values['judge']['post_turn'] = True
-    gate.worker.run.side_effect = subprocess.TimeoutExpired('worker', 1)
-    evaluate = Mock(return_value=OutcomeVerdict(Outcome.DONE, .99))
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
-    result = gate.invoke('--worker-timeout', '1', '--iterations', '1')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    facts = evaluate.call_args.args[1]
-    assert facts.watchdog and facts.exit_status == 143
-    assert gate.bd.rows['demo-1']['status'] == 'in_progress'
-    assert post_turn_events(gate)[-1]['reason'] == 'worker_timeout'
-
-    from ortus.core.codegraph import CodeGraphUnavailable
-    evaluate.reset_mock()
-    monkeypatch.setattr(grind_mod, 'require_handshake', Mock(side_effect=CodeGraphUnavailable('missing')))
-    result = gate.invoke('--worker-timeout', '1', '--iterations', '1')
-    assert result.exit_code != 0
-    evaluate.assert_not_called()
-
-
-def test_grind_shadow_preserves_baseline(gate, monkeypatch):
-    gate.config.values['judge'].update(enabled=False, post_turn=True, mode='shadow')
-    gate.worker.run.side_effect = lambda *a, **kw: gate.bd.rows['demo-1'].update(status='in_progress') or 0
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
-                        Mock(return_value=OutcomeVerdict(Outcome.PLAN_GAP, .99)))
-    result = gate.invoke('--iterations', '1')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    assert gate.bd.rows['demo-1']['labels'] == []
-    assert post_turn_events(gate)[-1]['effective_action'] == 'baseline'
-
-
-def test_grind_log_error_reports_without_mutation(gate, monkeypatch):
-    gate.config.values['judge'].update(enabled=False, post_turn=True)
-    gate.worker.run.side_effect = lambda *a, **kw: 0
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
-                        Mock(return_value=OutcomeVerdict(Outcome.AUTH, .99)))
-    monkeypatch.setattr(grind_mod, 'apply_outcome',
-                        Mock(side_effect=JudgeLogError(LogFailure.IO_ERROR)))
-    result = gate.invoke('--iterations', '4', '--idle-sleep', '1')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    gate.worker.run.assert_called_once()
-    assert gate.bd.rows['demo-1']['status'] == 'open'
-    assert gate.bd.rows['demo-1']['labels'] == []
-    assert 'preserving worker result' in result.output
-
-
-@pytest.mark.parametrize('choice', [Outcome.FLAKE, Outcome.CONTINUE])
-def test_open_outcome_does_not_retry_same_window(gate, monkeypatch, choice):
-    gate.config.values['judge'].update(enabled=False, post_turn=True)
-    gate.worker.run.side_effect = lambda *a, **kw: 0
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
-                        Mock(return_value=OutcomeVerdict(choice, .99)))
-    result = gate.invoke('--iterations', '4', '--idle-sleep', '1')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    gate.worker.run.assert_called_once()
-    assert gate.bd.rows['demo-1']['status'] == 'open'
-
-
-@pytest.mark.parametrize('mode', ['open', 'closed'])
-@pytest.mark.parametrize('iterations', [1, 0])
-def test_grind_post_service_failure_keeps_claim(gate, monkeypatch, mode, iterations):
-    gate.config.values['judge'].update(post_turn=True, failure_mode=mode)
-    gate.worker.run.side_effect = lambda *a, **kw: 0
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome',
-                        Mock(return_value=OutcomeVerdict(failure=JudgeFailure.SERVICE_ERROR)))
-    result = gate.invoke('--iterations', str(iterations))
-    assert result.exit_code == 0, result.output + str(result.exception)
-    assert gate.bd.rows['demo-1']['status'] == 'in_progress'
-    assert ('human' in gate.bd.rows['demo-1']['labels']) == (mode == 'closed' or not iterations)
-    # Fail-open resumes in this process until the persisted stall counter
-    # escalates. An iteration cap or fail-closed policy stops after one window.
-    windows = 3 if mode == 'open' and not iterations else 1
-    assert gate.worker.run.call_count == windows
-    assert gate.bd.calls.count('claim') == 1
-    if windows == 3:
-        assert grind_mod._no_close_window_count(gate.bd, 'demo-1') == 2
-    assert 'release' not in gate.bd.calls
-
-
-def test_dry_run_has_no_post_request(gate, monkeypatch):
-    gate.config.values['judge'].update(enabled=False, post_turn=True)
-    evaluate = Mock()
-    monkeypatch.setattr(grind_mod, 'evaluate_outcome', evaluate)
-    result = gate.invoke('--dry-run')
-    assert result.exit_code == 0, result.output + str(result.exception)
-    assert 'judge post_turn: enabled' in result.output
-    evaluate.assert_not_called()
-    gate.worker.run.assert_not_called()
-    assert gate.events() == []

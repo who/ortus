@@ -23,7 +23,6 @@ import typer
 
 from ortus.core import output
 from ortus.core.bd import BdClient, BdError
-from ortus.core.judge_readiness import evaluate_readiness, readiness_context
 from ortus.core.readiness import READINESS_SCHEMA_VERSION, validate_issue
 from ortus.core.repo import resolve_repo
 
@@ -40,7 +39,6 @@ class IssueVerdict:
     issue_id: str
     status: str
     detail: str
-    semantic_readiness: dict | None = None
 
     @property
     def ok(self) -> bool:
@@ -56,8 +54,6 @@ class IssueVerdict:
             "ok": self.ok,
             "detail": self.detail,
         }
-        if self.semantic_readiness is not None:
-            payload["semantic_readiness"] = self.semantic_readiness
         return payload
 
 
@@ -72,7 +68,7 @@ def _bd_reason(exc: BdError) -> str:
     return lines[-1].strip() if lines else f"bd exited {exc.returncode}"
 
 
-def _verdict_for(issue: dict[str, Any], repo: Path | None = None) -> IssueVerdict:
+def _verdict_for(issue: dict[str, Any]) -> IssueVerdict:
     """Run the claim-time validator on one fetched issue.
 
     A payload malformed enough to make the validator raise is reported as
@@ -87,10 +83,7 @@ def _verdict_for(issue: dict[str, Any], repo: Path | None = None) -> IssueVerdic
     if report.exempt:
         return IssueVerdict(report.issue_id, STATUS_EXEMPT, f"{report.issue_id} (epic)")
     if report.ready:
-        advice = evaluate_readiness(repo, issue) if repo is not None else None
-        if advice is not None:
-            output.progress("validate", readiness_context(advice).strip())
-        return IssueVerdict(report.issue_id, STATUS_READY, report.issue_id, advice)
+        return IssueVerdict(report.issue_id, STATUS_READY, report.issue_id)
     return IssueVerdict(report.issue_id, STATUS_UNREADY, report.diagnostic())
 
 
@@ -109,7 +102,7 @@ def _named_verdicts(bd: BdClient, issue_ids: list[str]) -> list[IssueVerdict]:
                 IssueVerdict(issue_id, STATUS_ERROR, f"{issue_id}: {_bd_reason(exc)}")
             )
             continue
-        verdicts.append(_verdict_for(issue, bd.repo))
+        verdicts.append(_verdict_for(issue))
     return verdicts
 
 

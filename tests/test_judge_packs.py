@@ -8,7 +8,6 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
-from typer.testing import CliRunner
 
 from ortus.core import judge_routing as routing
 from ortus.core.config import Config, load_config
@@ -229,19 +228,6 @@ def test_request_policy_and_event_accept_prepared_new_routes(tmp_path, route):
     assert event["backend"] == route.value
     assert event["criteria_version"] == CRITERIA_VERSION
     assert "questions" not in event
-
-
-@pytest.mark.parametrize("force_color", [False, True])
-def test_cli_exposes_seat_override(monkeypatch, force_color):
-    from rich.text import Text
-    from ortus.cli import app
-    if force_color:
-        monkeypatch.setenv("FORCE_COLOR", "1")
-    else:
-        monkeypatch.delenv("FORCE_COLOR", raising=False)
-    result = CliRunner().invoke(app, ["grind", "--help"])
-    assert result.exit_code == 0
-    assert "--judge-seat" in Text.from_ansi(result.stdout).plain
 
 
 def test_resolved_hook_config_roundtrips_without_registry():

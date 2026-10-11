@@ -39,11 +39,8 @@ import json
 import os
 import subprocess
 import time
-from contextlib import ExitStack
-from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
-from uuid import UUID, uuid4
+from typing import Any, Callable, Optional
 
 import typer
 
@@ -69,20 +66,18 @@ from ortus.core.codegraph import (
     require_handshake,
 )
 from ortus.core.prompt_audit import audit_enabled, audit_note
-from ortus.core.prompt_prefix import stable_prefix_enabled, stable_prefix_note
+from ortus.core.prompt_prefix import stable_prefix_note
 from ortus.core.prompts import resolve_named_prompt
 from ortus.core.config import (
-    Config,
     DEFAULT_MERGE_GATE_TIMEOUT,
     DEFAULT_VERIFICATION_MODE,
     VERIFICATION_PROTOTYPE,
     load_config,
 )
-from ortus.core.profiles import Phase, ProfileError
+from ortus.core.profiles import ProfileError
 from ortus.core.readiness import (
     READINESS_MEMORY_KEY,
     ReadinessReport,
-    spec_markdown,
 )
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import (
@@ -124,344 +119,12 @@ from ortus.core.pin_skew import (
     PIN_SKEW_LABEL,
     classify_plan_gap,
     latest_plan_gap,
+    pin_directive_section,
+    release_pin_skew_park,
     tag_pin_skew_claims,
 )
 from ortus.core.worker_failure import classify_worker_window, failure_log_line
-from ortus.core.judge import (
-    GateAction, JudgeAnswers, JudgeConfig, JudgeMode, JudgeState, parse_judge_config,
-)
-from ortus.core.judge_readiness import evaluate_readiness, readiness_context
-from ortus.core.judge_claim import BoundIssue, prepare_bound_issue, validate_bound_goal
-from ortus.core.judge_collect import (
-    collecting_config, collection_arming, collection_note,
-)
-from ortus.core.judge_hooks import HookRun, check_pre_tool
-from ortus.core.judge_log import (
-    DecisionEvent, JudgeLogError, ModelRouteEvent, OutcomeEvent, OutcomeStatus,
-    elapsed_ms, write_decision, write_model_route, write_outcome, write_shadow_outcome,
-)
-from ortus.core.judge_policy import decide_pre_turn
-from ortus.core.judge_progress import (
-    ProgressMode, ProgressWatch, WindowOutcome, last_check_result,
-    progress_interval, progress_mode,
-)
-from ortus.core.judge_packs import CRITERIA_VERSION, criteria_hash
-from ortus.core.judge_post import (
-    OutcomeVerdict, WorkerOutcome, apply_outcome, evaluate_outcome,
-)
-from ortus.core.judge_stuck import (
-    WEDGED_WINDOW_THRESHOLD, StuckAction, StuckDecision, baseline_stuck_action,
-    decide_stuck_claim, log_stuck_decision,
-)
-from ortus.core.judge_routing import (
-    ExecutionBundle, RouteOverrides, RoutePlan, RoutePreparationError,
-    argued_tier, baseline_implement_profile, jev_router_enabled, plan_routes,
-    prepare_route, route_implement_profile, router_question_version,
-)
-from ortus.core.judge_state import OmissionReason, PackedState, StateError, pack_state
-from ortus.core.judge_tools import tool_scope
-from ortus.core.judge_triage import pin_directive_section, triage_parked_bead
-from ortus.core.judge_typesafe import JudgeFailure, JudgeVerdict, TypeSafeJudge, build_questions
-
-
-def _truncated_fields(packed: PackedState) -> tuple[str, ...]:
-    """The issue-text fields this pack shortened, sorted by name.
-
-    A decision row that stays silent about a cut field reads exactly like one
-    written from the whole field, so a replay cannot tell a judgment made on a
-    slice from a judgment made on everything. The packer already reports each
-    cut as an omission; both pre-turn writes carry those names so every phase
-    in the log answers that question the same way.
-    """
-    return tuple(sorted(
-        omission.field for omission in packed.omissions
-        if omission.reason is OmissionReason.TRUNCATED
-    ))
-
-
-def _shadow_turn(
-    *, packet: dict, repo: Path, config: Config, judge_config: JudgeConfig,
-    baseline: str, overrides: RouteOverrides, run_id: UUID,
-) -> UUID | None:
-    """Observe the readiness head without preparing a runner or owning its claim."""
-    try:
-        plan = plan_routes(config, judge_config, baseline, overrides=overrides)
-        packing_config = replace(
-            judge_config, routes=tuple(dict.fromkeys((*judge_config.routes, plan.baseline))),
-        )
-        packed = pack_state(
-            packet, packing_config, backends_available=plan.available_workers,
-        )
-        state = packed.state
-        started = time.monotonic()
-        # Minted before the request: it seeds the presented option order, so a
-        # replay can rebuild what this decision saw from its id alone.
-        planned_id = uuid4()
-        try:
-            verdict = TypeSafeJudge(judge_config).evaluate(state, seed=str(planned_id))
-        except Exception:
-            verdict = JudgeVerdict(failure=JudgeFailure.SERVICE_ERROR)
-        decision = decide_pre_turn(
-            judge_config, state, verdict, baseline_backend=plan.baseline,
-        )
-        criteria = build_questions(judge_config, state)
-        decision_id = write_decision(repo, judge_config, DecisionEvent(
-            run_id=run_id, seat=state.seat, issue_id=packet["id"], phase=state.phase,
-            answers=verdict.answers, decision=decision, model=judge_config.model,
-            criteria_version=CRITERIA_VERSION,
-            criteria_hash=criteria_hash(judge_config, criteria),
-            latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
-            truncated_fields=_truncated_fields(packed),
-            decision_id=planned_id, option_order=verdict.option_order,
-        ))
-        if decision_id is not None:
-            _observe_route(
-                repo=repo, config=config, judge_config=judge_config, plan=plan,
-                state=state, answers=verdict.answers, decision_id=decision_id,
-                run_id=run_id,
-            )
-        return decision_id
-    except Exception:
-        # Observation failures cannot change baseline execution. Never print
-        # exception bodies, which may carry provider or issue text.
-        output.progress("grind", "judge shadow observation unavailable; continuing baseline")
-        return None
-
-
-def _observe_route(
-    *, repo: Path, config: Config, judge_config: JudgeConfig, plan: RoutePlan,
-    state: JudgeState, answers: JudgeAnswers | None, decision_id: UUID,
-    run_id: UUID,
-) -> None:
-    """Record the tier a shadow seat would have run this bead on.
-
-    The router is asked unconditionally here rather than through the flag. A
-    shadow rollout is exactly the case where the flag is still off, and a seat
-    that logged nothing until someone turned the flag on would only ever have
-    evidence for the arm that no longer needs it. Nothing is applied: the
-    record carries ``applied=False`` and the worker keeps the pinned profile,
-    so an observation can never change what runs.
-
-    A judge that answered nothing is not observed at all. The enforcing path
-    logs those beads because its arm has to account for every bead it ran, but
-    an observation that records no tier and no vector is not evidence of
-    anything and would only dilute the rows that are.
-
-    A failure to observe is not a failure to run. The decision record is
-    already written by the time this is reached, and losing a tier line costs
-    the shadow seat one row of evidence and the bead nothing.
-    """
-    if answers is None:
-        return
-    try:
-        backend = plan.execution_backend(plan.baseline)
-        route = route_implement_profile(
-            config, backend, baseline_implement_profile(config, plan), answers,
-            overrides=plan.overrides, enabled=True,
-        )
-        write_model_route(repo, judge_config, ModelRouteEvent(
-            run_id=run_id, decision_id=decision_id, seat=state.seat,
-            issue_id=state.issue_id, backend=backend, tier=route.tier.value,
-            reason=route.reason.value, model=route.profile.model,
-            reasoning_effort=route.profile.reasoning_effort,
-            needs_frontier=route.needs_frontier, action_risk=route.action_risk,
-            difficulty=route.difficulty, applied=False,
-            jev_tier=argued_tier(route),
-            question_version=router_question_version(answers),
-        ))
-    except Exception:
-        output.progress("grind", "judge shadow route unavailable; continuing baseline")
-
-
-def _shadow_outcome(
-    *, bd: BdClient, repo: Path, config: JudgeConfig, run_id: UUID,
-    decision_id: UUID, observed_id: str, before_claims: set[str],
-    before_closed: set[str], resumed_id: str | None, worker_ms: float,
-) -> None:
-    """Attribute only a single observable claim, including a resumed worker."""
-    try:
-        current = bd.in_progress_ids(exclude_labels=())
-        closed = bd.closed_ids()
-        candidates = (current - before_claims) | (closed - before_closed)
-        if resumed_id and resumed_id in current | closed:
-            candidates.add(resumed_id)
-        actual = next(iter(candidates)) if len(candidates) == 1 else None
-        status = OutcomeStatus.UNKNOWN
-        if actual == observed_id:
-            status = OutcomeStatus(bd.show(actual).get("status"))
-        write_shadow_outcome(repo, config, OutcomeEvent(
-            run_id, decision_id, status, worker_ms,
-        ), observed_issue_id=observed_id, actual_claimed_id=actual)
-    except Exception:
-        output.progress("grind", "judge shadow outcome unavailable; continuing baseline")
-
-
-@dataclass
-class _GateTurn:
-    """Keep fresh claims recoverable until the worker takes responsibility."""
-
-    bound: BoundIssue
-    launched: bool = False
-    decision_id: UUID | None = None
-    cleaned: bool = False
-
-    def cleanup(self, bd: BdClient) -> None:
-        if not self.launched and not self.cleaned:
-            try:
-                self.bound.release(bd)
-                self.cleaned = True
-            except Exception:
-                raise BackendError(
-                    "judge claim cleanup failed; inspect the owned claim"
-                ) from None
-
-    def current_issue(self, bd: BdClient) -> dict:
-        issue = bd.show(self.bound.issue["id"])
-        if (
-            issue.get("id") != self.bound.issue["id"]
-            or issue.get("status") != "in_progress"
-            or issue.get("assignee") != self.bound.assignee
-            or "human" in (issue.get("labels") or [])
-        ):
-            raise BackendError("judge bound claim changed before worker launch")
-        return issue
-
-    def record_outcome(
-        self, bd: BdClient, repo: Path, config: JudgeConfig,
-        run_id: UUID, worker_ms: float,
-    ) -> None:
-        try:
-            observed = OutcomeStatus(bd.show(self.bound.issue["id"]).get("status"))
-        except Exception:
-            observed = OutcomeStatus.UNKNOWN
-        if self.decision_id is not None:
-            write_outcome(repo, config, OutcomeEvent(
-                run_id, self.decision_id, observed, worker_ms,
-            ))
-
-
-def _gate_turn(
-    *,
-    bd: BdClient,
-    issue_id: str,
-    repo: Path,
-    config: Config,
-    judge_config: JudgeConfig,
-    baseline: str,
-    overrides: RouteOverrides,
-    codegraph_mode: CodeGraphMode,
-    adapter: CodeGraphAdapter,
-    extra_env: Mapping[str, str],
-    goal_template: str,
-    cleanup: ExitStack,
-    run_id: UUID,
-) -> tuple[_GateTurn, ExecutionBundle | None]:
-    """Preflight, own, judge and log before a worker may consume the claim."""
-    try:
-        plan = plan_routes(config, judge_config, baseline, overrides=overrides)
-        # Prepare every offered worker before acquiring a claim, including the
-        # baseline needed for service fail-open. No route inherits another's setup.
-        bundles = {
-            route: prepare_route(
-                plan, route, repo=repo, config=config, codegraph_mode=codegraph_mode,
-                extra_env=extra_env, adapter=adapter,
-            )
-            for route in plan.available_workers
-        }
-    except RoutePreparationError:
-        bd.add_label(issue_id, "human")
-        bd.add_comment(issue_id, "judge pre_turn: human reason=route_preparation_failed")
-        output.progress(
-            "grind", f"judge requires human handling for {issue_id}: route_preparation_failed"
-        )
-        raise
-    turn = _GateTurn(prepare_bound_issue(
-        bd, issue_id, goal_template=goal_template,
-    ))
-    cleanup.callback(turn.cleanup, bd)
-    packet = turn.current_issue(bd)
-    # The baseline remains available for fail-open even when not offered to the
-    # provider. Question construction still filters through configured routes.
-    packing_config = replace(
-        judge_config, routes=tuple(dict.fromkeys((*judge_config.routes, plan.baseline))),
-    )
-    packed = pack_state(
-        packet, packing_config, backends_available=plan.available_workers,
-    )
-    state = packed.state
-    started = time.monotonic()
-    planned_id = uuid4()
-    verdict = TypeSafeJudge(judge_config).evaluate(state, seed=str(planned_id))
-    decision = decide_pre_turn(
-        judge_config, state, verdict, baseline_backend=plan.baseline,
-    )
-    criteria = build_questions(judge_config, state)
-    turn.decision_id = write_decision(repo, judge_config, DecisionEvent(
-        run_id=run_id, seat=state.seat, issue_id=state.issue_id, phase=state.phase,
-        answers=verdict.answers, decision=decision, model=judge_config.model,
-        criteria_version=CRITERIA_VERSION,
-        criteria_hash=criteria_hash(judge_config, criteria),
-        latency_ms=elapsed_ms(started), failure=verdict.failure, usage=verdict.usage,
-        truncated_fields=_truncated_fields(packed),
-        decision_id=planned_id, option_order=verdict.option_order,
-    ))
-    turn.current_issue(bd)
-    if decision.action == GateAction.HUMAN:
-        bd.add_label(issue_id, "human")
-        bd.add_comment(issue_id, f"judge pre_turn: human reason={decision.reason.value}")
-        output.progress(
-            "grind", f"judge requires human handling for {issue_id}: {decision.reason.value}"
-        )
-    if decision.action != GateAction.PROCEED:
-        turn.cleanup(bd)
-        turn.record_outcome(bd, repo, judge_config, run_id, 0)
-        return turn, None
-    bundle = bundles[decision.backend]
-    bundle = _route_model(
-        bundle, plan,
-        repo=repo, config=config, judge_config=judge_config, state=state,
-        answers=verdict.answers, decision_id=turn.decision_id, run_id=run_id,
-    )
-    bundle.runner.extra_env.update(turn.bound.worker_env(bundle.runner.extra_env))
-    return turn, bundle
-
-
-def _route_model(
-    bundle: ExecutionBundle,
-    plan: RoutePlan,
-    *,
-    repo: Path,
-    config: Config,
-    judge_config: JudgeConfig,
-    state: JudgeState,
-    answers: JudgeAnswers | None,
-    decision_id: UUID | None,
-    run_id: UUID,
-) -> ExecutionBundle:
-    """Let the judge's vectors pick the implementation model for this bead.
-
-    The chosen route's own overrides apply only when it is the baseline, the
-    same rule preparation used to resolve its profiles, so a fallback backend
-    never inherits a pin meant for another one.
-    """
-    overrides = plan.overrides if bundle.backend == plan.baseline else RouteOverrides()
-    backend = bundle.execution_backend or bundle.backend.value
-    route = route_implement_profile(
-        config, backend, bundle.implement_profile, answers,
-        overrides=overrides, enabled=jev_router_enabled(config),
-    )
-    if decision_id is not None:
-        write_model_route(repo, judge_config, ModelRouteEvent(
-            run_id=run_id, decision_id=decision_id, seat=state.seat,
-            issue_id=state.issue_id, backend=backend, tier=route.tier.value,
-            reason=route.reason.value, model=route.profile.model,
-            reasoning_effort=route.profile.reasoning_effort,
-            needs_frontier=route.needs_frontier, action_risk=route.action_risk,
-            difficulty=route.difficulty, applied=True,
-            jev_tier=argued_tier(route),
-            question_version=router_question_version(answers),
-        ))
-    return replace(bundle, implement_profile=route.profile)
+from ortus.core.routing import RouteOverrides, phase_profiles
 
 
 _TRACKER_EXPORT_PATHS = frozenset(
@@ -939,35 +602,6 @@ def _lessons_section(lessons: tuple[tuple[str, str], ...]) -> str:
     return _LESSONS_HEADER + "".join(f"\n- {key}: {body}" for key, body in lessons)
 
 
-def _respec_prompt(issue_id: str) -> str:
-    """The one bounded planner turn a planner-fix triage route spends.
-
-    It re-specifies a single parked bead and nothing else: no implementation,
-    no new beads, no other id. The turn does not decide whether the repair
-    worked — it writes the packet, and `validate_issue` in the triage route
-    is the only thing that can put the bead back in the queue, so a turn that
-    talks itself into success changes nothing.
-    """
-    return (
-        f"Re-specify the bd issue {issue_id} so its work spec passes readiness "
-        "schema v1, then stop.\n\n"
-        f"Read it with: bd show {issue_id} --json. Read its comments with: "
-        f"bd comments {issue_id} --json — the newest ones say why it was "
-        "parked. Rewrite its description, design, and acceptance criteria to "
-        f"the contract below with: bd update {issue_id} --description ... "
-        "--design ... --acceptance ...\n\n"
-        "Constraints. Do not change any other issue, do not create issues, do "
-        "not implement anything, do not commit, and do not close or relabel "
-        f"{issue_id} — the harness re-validates the packet and decides. Keep "
-        "the objective the issue already has; you are repairing how it is "
-        "specified, not choosing different work. If the packet cannot be "
-        "completed without a decision only an operator can make — a missing "
-        "credential, an unmade product choice, a contradiction between the "
-        "objective and the design — leave the issue as it is and stop.\n\n"
-        f"{spec_markdown()}"
-    )
-
-
 def _pin_directive_for(
     bd: BdClient, issue: dict, write_log: Callable[[str], None]
 ) -> str:
@@ -992,31 +626,6 @@ def _pin_directive_for(
         return pin_directive_section("")
     return pin_directive_section(
         ", ".join(verdict.evidence) if verdict.pin_able else ""
-    )
-
-
-_REPLAN_HEADER = "\n\n## Re-plan directive\n"
-
-
-def _replan_section(windows: int, integration_branch: str) -> str:
-    """The directive a re-plan decision injects into the next window's prompt.
-
-    It names the stalled-window facts rather than describing them in the
-    abstract, because the worker reading it is fresh and has no memory of the
-    windows that produced it. It asks for a different route through the same
-    issue; it does not authorize abandoning the claim, and it deliberately
-    says nothing about leaving edits for a later phase.
-    """
-    return (
-        f"{_REPLAN_HEADER}"
-        f"This claim has ended {windows} worker window(s) still in_progress "
-        f"with no new commits on {integration_branch}. Do not repeat the "
-        "approach that stalled. Before editing, re-read the issue's own "
-        "comments for what was already tried, then pick a different route "
-        "through the same issue — a smaller first cut that can be verified, "
-        "or the one blocking sub-problem solved on its own. If the spec "
-        "itself is what cannot be executed, record PLAN-GAP on the issue and "
-        "flag it human instead of burning another window."
     )
 
 
@@ -1179,20 +788,13 @@ def _compose_work_prompt(
     phase_contract_text: str = "",
     verification_text: str = "",
     lessons_text: str = "",
-    bound_issue_id: str | None = None,
-    goal_template: str | None = None,
-    semantic_advice: str = "",
-    stable_prefix: bool = False,
-    replan_text: str = "",
     pin_text: str = "",
 ) -> str:
     """Build one backend-appropriate prompt for a single goal-prompt iteration.
 
     The /goal condition is ``_GOAL_POINTER`` (worker fetches the loop body
-    via ``ortus prompt show goal``). Ordinary calls do not inject a claimed id.
-    ``template`` and ``issue`` remain for compatibility with existing callers.
-    Only an explicit ``bound_issue_id`` uses the issue, with a validated
-    ``goal_template`` that supports binding. Ungated callers ignore both.
+    via ``ortus prompt show goal``). No claimed id is injected; ``template``
+    and ``issue`` remain for compatibility with existing callers.
 
     ``verification_text`` is the prototype verification section. When it is
     present the pointer carries the prototype framing — lint and syntax are
@@ -1204,64 +806,25 @@ def _compose_work_prompt(
     push the Claude ``/goal`` condition past the cap it is dropped rather
     than halting the run. The 4,000-character cap is Claude-only.
 
-    ``stable_prefix`` selects the cache-friendly ordering. Off, the sections
-    compose in today's order byte for byte. On, the two segments that carry
-    the claimed bead — the readiness advice and the Bound issue contract —
-    move behind every segment that is identical across the beads of a run,
-    so a provider prefix cache sees the same leading bytes each iteration
-    instead of losing them to a bead id sitting in the middle.
-
-    ``replan_text`` is the re-plan directive a stuck decision injects. Like
-    the bound contract it is never droppable — it is the whole reason this
-    window differs from the one that stalled — so its length comes out of the
-    cap before the optional sections are measured, and it composes behind
-    them in both orderings because it describes this window, not the run.
-
-    ``pin_text`` is the pin directive a bead the triage released as pin-able
-    skew carries. It is non-droppable for the same reason: the bead is in
-    this queue at all because the harness decided the mismatch that parked it
-    is the claim's to pin, and a worker that never reads that is one that
-    parks it again.
+    ``pin_text`` is the pin directive a bead released as pin-able skew
+    carries. It is never droppable — the bead is in this queue at all because
+    the harness decided the mismatch that parked it is the claim's to pin,
+    and a worker that never reads that is one that parks it again — so its
+    length comes out of the cap before the lessons are measured.
     """
-    del template
+    del template, issue
 
     task = _PROTOTYPE_GOAL_POINTER if verification_text else _GOAL_POINTER
-    bound_text = ""
-    if bound_issue_id is not None:
-        from ortus.core.judge_claim import bound_issue_section, validate_bound_goal
-
-        validate_bound_goal(goal_template or "")
-        task = task.replace(
-            "Continue leftover in_progress, else run bd ready and claim the first non-epic.",
-            "Continue only the injected bound issue; do not select or claim another id.",
-            1,
-        )
-        bound_text = bound_issue_section(issue, bound_issue_id)
-        if not stable_prefix:
-            task += bound_text
-            bound_text = ""
     if phase_instruction:
         task = phase_instruction.rstrip() + "\n\n" + task
     task += phase_contract_text + verification_text
     wrap_limit = _CLAUDE_GOAL_CONDITION_LIMIT if backend == "claude" else None
-    # A bound contract names the only id the worker may touch, so it is never
-    # droppable: its length comes out of the cap before the optional sections
-    # are measured against what remains.
-    headroom = (
-        wrap_limit - len(bound_text) - len(replan_text) - len(pin_text)
-        if wrap_limit is not None else None
-    )
-    optional = (
-        (lessons_text, semantic_advice)
-        if stable_prefix
-        else (semantic_advice, lessons_text)
-    )
-    for section in optional:
-        if section and (headroom is None or len(task) + len(section) <= headroom):
-            task += section
+    headroom = wrap_limit - len(pin_text) if wrap_limit is not None else None
+    if lessons_text and (
+        headroom is None or len(task) + len(lessons_text) <= headroom
+    ):
+        task += lessons_text
     task += pin_text
-    task += replan_text
-    task += bound_text
     if wrap_limit is not None and len(task) > wrap_limit:
         raise BackendError(
             "internal Claude /goal condition exceeds the 4,000-character limit "
@@ -1320,7 +883,6 @@ def _done_bar_met(
     git: GitClient,
     baseline_closed: int,
     integration_branch: str,
-    bound_issue_id: str | None = None,
 ) -> str | None:
     """Label when closed-count grew, HEAD is in sync, and the tree is clean.
 
@@ -1339,48 +901,12 @@ def _done_bar_met(
         dirty = git.dirty_paths()
         if dirty != frozenset():
             return None
-        if bound_issue_id is not None:
-            return (
-                f"closed {bound_issue_id}"
-                if bd.show(bound_issue_id).get("status") == "closed"
-                else None
-            )
         closed = bd.count_by_status("closed")
     except Exception:
         return None
     if closed > baseline_closed:
         return f"closed {baseline_closed}->{closed}"
     return None
-
-
-def _claim_status(bd: BdClient, issue_id: str) -> OutcomeStatus:
-    """The claim's tracker status as a typed fact, unknown when unreadable.
-
-    Read on the reap poll's own cadence, where a tracker hiccup must cost the
-    poll a fact rather than the worker its window, so every failure — a bd
-    error, a missing field, a status this vocabulary does not know — answers
-    unknown.
-    """
-    try:
-        return OutcomeStatus(str(bd.show(issue_id).get("status") or ""))
-    except Exception:  # noqa: BLE001 - an unread status is not a verdict
-        return OutcomeStatus.UNKNOWN
-
-
-def _window_outcome(
-    status: str, *, timed_out: bool, reaped: bool
-) -> WindowOutcome:
-    """How a watched window ended, in the vocabulary the progress log scores.
-
-    Closed wins over every other fate: the done bar reaps a healthy Claude
-    worker on its way out, so a window whose claim is closed is a close however
-    the process itself was stopped. Only then does the manner of death decide.
-    """
-    if status == "closed":
-        return WindowOutcome.CLOSED
-    if timed_out:
-        return WindowOutcome.TIMEOUT
-    return WindowOutcome.REAPED if reaped else WindowOutcome.EXITED
 
 
 def _flagged_claims(bd: BdClient) -> set[str]:
@@ -1431,8 +957,6 @@ def _reap_reason(
     baseline_closed: int | None,
     flagged_at_start: frozenset[str] | None,
     integration_branch: str,
-    bound_issue_id: str | None = None,
-    progress: ProgressWatch | None = None,
 ) -> str | None:
     """Why the running worker should be reaped now, or None to let it run.
 
@@ -1446,43 +970,21 @@ def _reap_reason(
     was excluded at startup and is not this worker's. A check whose baseline
     could not be read is skipped, and a tracker or git error during the poll
     is an unanswered poll, never a reap.
-
-    A third fact describes the opposite worker: one with plenty left to say and
-    nothing left to accomplish. When an armed :class:`ProgressWatch` reads its
-    own log as a loop, this returns its reason rather than letting the window
-    burn to the watchdog. It is asked last and only on an answered poll: the
-    deterministic facts are cheaper and surer, and a tracker the poll could not
-    read is not a repository to judge a worker's progress in.
     """
 
-    if baseline_closed is not None or bound_issue_id is not None:
-        label = _done_bar_met(
-            bd, git, baseline_closed or 0, integration_branch, bound_issue_id,
-        )
+    if baseline_closed is not None:
+        label = _done_bar_met(bd, git, baseline_closed, integration_branch)
         if label:
             return f"{_DONE_BAR_REASON} ({label}, in sync)"
-    if bound_issue_id is not None:
-        try:
-            issue = bd.show(bound_issue_id)
-            if "human" in (issue.get("labels") or []):
-                return f"{_FLAGGED_REASON} ({bound_issue_id})"
-        except Exception:
-            pass
-        return _looping_reason(progress)
     if flagged_at_start is None:
-        return _looping_reason(progress)
+        return None
     try:
         flagged = _flagged_claims(bd) - flagged_at_start
     except Exception:
         return None
     if flagged:
         return f"{_FLAGGED_REASON} ({', '.join(sorted(flagged))})"
-    return _looping_reason(progress)
-
-
-def _looping_reason(progress: ProgressWatch | None) -> str | None:
-    """The progress watch's reason, when one is armed for this window."""
-    return None if progress is None else progress.reason()
+    return None
 
 
 def _hand_back_comment(window: int) -> str:
@@ -1703,15 +1205,11 @@ def _flag_unready_for_human(
 #: because old markers are re-read by newer grinds.
 _NO_CLOSE_MARKER_PREFIX = "ortus-grind: no-close window "
 
-#: Marker-comment prefix for the re-plan directives a claim has already been
-#: given. Same cross-process store and same lenient parse as the no-close
-#: counter, kept separate so the older marker's format is untouched.
-_REPLAN_MARKER_PREFIX = "ortus-grind: replan window "
-
-#: The fail-open baseline's threshold, re-exported for the log lines and
-#: tests that name it. The rule itself now lives beside the decision it is
-#: the fallback for.
-_WEDGED_WINDOW_THRESHOLD = WEDGED_WINDOW_THRESHOLD
+#: Consecutive resumed windows a leftover claim may end still in_progress with
+#: no new commits on the integration branch before it is handed to the human
+#: queue. The field case (fh-aqi) burned exactly two workers before a human
+#: stepped in.
+_WEDGED_WINDOW_THRESHOLD = 2
 
 
 def _marker_count(bd: BdClient, issue_id: str, prefix: str) -> int:
@@ -1748,16 +1246,6 @@ def _no_close_window_count(bd: BdClient, issue_id: str) -> int:
     return _marker_count(bd, issue_id, _NO_CLOSE_MARKER_PREFIX)
 
 
-def _replan_window_count(bd: BdClient, issue_id: str) -> int:
-    """How many re-plan directives this claim has already been given.
-
-    A directive that did not work the first time is weak evidence for a
-    second one, so the stuck decision reads this and shifts replan mass
-    toward escalate — a slope, never a floor.
-    """
-    return _marker_count(bd, issue_id, _REPLAN_MARKER_PREFIX)
-
-
 def _record_no_close_window(
     bd: BdClient, issue_id: str, count: int, write_log: Callable[[str], None]
 ) -> None:
@@ -1772,24 +1260,6 @@ def _record_no_close_window(
         write_log(
             f"wedged-claim counter: could not record no-close window {count} "
             f"on {issue_id} ({exc}); the previous count stands"
-        )
-
-
-def _record_replan_window(
-    bd: BdClient, issue_id: str, count: int, write_log: Callable[[str], None]
-) -> None:
-    """Persist how many re-plan directives this claim has been given.
-
-    A failed write warns and moves on: the decision that follows simply reads
-    a lower count and is that much readier to try another directive, which is
-    the safe direction to be wrong in.
-    """
-    try:
-        bd.add_comment(issue_id, f"{_REPLAN_MARKER_PREFIX}{count}")
-    except Exception as exc:
-        write_log(
-            f"stuck decision: could not record replan window {count} on "
-            f"{issue_id} ({exc}); the previous count stands"
         )
 
 
@@ -1856,55 +1326,6 @@ def _escalate_wedged_claim(
         )
     except Exception as exc:
         write_log(f"wedged claim: could not comment on {issue_id} ({exc})")
-
-
-def _decide_stuck(
-    bd: BdClient,
-    repo: Path,
-    config: JudgeConfig,
-    run_id: UUID,
-    issue_id: str,
-    verdict: OutcomeVerdict | None,
-    windows: int,
-    branch_advanced: bool,
-    write_log: Callable[[str], None],
-) -> tuple[StuckDecision, StuckAction]:
-    """Read what to do with a claim whose window ended without a close.
-
-    Returns the decision and the action actually applied. Shadow mode reads
-    the vector and applies the fail-open baseline, so a seat can watch the
-    decision it would have taken for a whole run before letting it move a
-    claim. Without the post-turn phase there is no verdict to read and no
-    decision log to write: the baseline runs and nothing new is recorded, so
-    a repository with Jev off keeps the run it had.
-
-    A decision log that cannot be written is not a reason to strand a claim.
-    The action stands and the failure goes to the run log, where the operator
-    is already reading.
-    """
-    decision = decide_stuck_claim(
-        verdict, windows, branch_advanced,
-        replans=_replan_window_count(bd, issue_id),
-    )
-    applied = decision.action
-    if config.mode == JudgeMode.SHADOW and not decision.fail_open:
-        applied = baseline_stuck_action(windows)
-    if config.post_turn:
-        try:
-            log_stuck_decision(repo, config, run_id, issue_id, decision, applied)
-        except Exception as exc:
-            write_log(
-                f"stuck decision: could not log the decision for {issue_id} "
-                f"({exc}); the action still stands"
-            )
-    vector = ", ".join(
-        f"{name}={value:.3f}" for name, value in decision.vector().items()
-    )
-    write_log(
-        f"stuck decision for {issue_id}: {applied.value} (windows={windows}, "
-        f"advanced={branch_advanced}, fail_open={decision.fail_open}, {vector})"
-    )
-    return decision, applied
 
 
 def _scan_for_result(log_path: Path, offset: int) -> tuple[int, bool]:
@@ -2098,12 +1519,6 @@ def grind(
         "--dry-run",
         help="Print resolved flags + composed per-iteration prompt; do not spawn claude.",
     ),
-    judge: Optional[bool] = typer.Option(
-        None, "--judge/--no-judge", help="Enable or disable the pre-turn judge gate."
-    ),
-    judge_seat: Optional[str] = typer.Option(
-        None, "--judge-seat", help="Select an explicit configured judge seat alias."
-    ),
     backend: Optional[str] = typer.Option(
         None,
         "--backend",
@@ -2134,51 +1549,9 @@ def grind(
     try:
         resolved_backend = resolve_backend(backend, repo=target)
         config = load_config(repo=target)
-        judge_config = parse_judge_config(config, judge=judge, judge_seat=judge_seat)
-        # Collection arms every site in shadow before anything below reads the
-        # seat, so each site takes its existing shadow path: Jev's answer is
-        # logged and the code baseline is what runs.
-        collect_arming = collection_arming(
-            target, judge_config, resolved_backend, docker=docker,
-        )
-        collect_note = collection_note(judge_config, collect_arming) if collect_arming else ""
-        judge_config = collecting_config(judge_config, collect_arming)
-        enforce_judge = judge_config.enabled and judge_config.mode == JudgeMode.ENFORCE
-        bind_worker = enforce_judge or judge_config.pre_tool
-        if judge_config.pre_tool:
-            check_pre_tool(target, resolved_backend, docker=docker)
-        # The looping-worker signal, resolved once per run. It needs the mode
-        # and the log-tail opt-in together: the tail is worker transcript text,
-        # and no vector is worth sending it without the operator having said so.
-        reaper_mode = ProgressMode.SHADOW if collect_arming else progress_mode(config)
-        reaper_interval = progress_interval(config)
-        withheld = ""
-        if reaper_mode is not ProgressMode.OFF:
-            if not judge_config.enabled:
-                withheld = "judge is disabled"
-            elif not judge_config.include_log_tail:
-                withheld = "judge.include_log_tail is false"
-        if withheld:
-            reaper_mode = ProgressMode.OFF
-            reaper_note = f"off ({withheld})"
-        elif reaper_mode is ProgressMode.OFF:
-            reaper_note = "off"
-        else:
-            reaper_note = f"{reaper_mode.value}, every {int(reaper_interval)}s"
-            if not dry_run:
-                output.progress("grind", f"loop reaper {reaper_note}")
-        if collect_note and not dry_run:
-            output.progress("grind", collect_note)
         prompt_audit = audit_enabled(config)
         prompt_variant_note = audit_note(config)
-        stable_prefix = stable_prefix_enabled(config)
         prefix_order_note = stable_prefix_note(config)
-        goal_template = ""
-        if bind_worker:
-            goal_template = resolve_named_prompt(
-                "goal", repo=target, audited=prompt_audit
-            ).text
-            validate_bound_goal(goal_template, condition)
         # Only the operator-served backends have a server to reach. The
         # table's rules run here so a missing [local] fails with one message
         # whether the backend came from the flag, the environment, or .ortusrc.
@@ -2194,25 +1567,16 @@ def grind(
         verification_mode, verification_note = _resolve_verification(
             config, prototype
         )
-        implement_profile = config.resolve_profile(
+        # Every bead runs on the configured backend with these profiles; an
+        # explicit flag pins its own field and leaves the rest configured.
+        implement_profile, verify_profile, finalize_profile = phase_profiles(
+            config,
             resolved_backend,
-            Phase.IMPLEMENT,
-            model=implement_model,
-            reasoning_effort=implement_reasoning_effort,
+            RouteOverrides(
+                backend, implement_model, implement_reasoning_effort,
+                verify_model, verify_reasoning_effort,
+            ),
         )
-        verify_profile = config.resolve_profile(
-            resolved_backend,
-            Phase.VERIFY,
-            model=verify_model,
-            reasoning_effort=verify_reasoning_effort,
-        )
-        finalize_profile = config.resolve_profile(
-            resolved_backend, Phase.FINALIZE
-        )
-        # The planning profile, resolved here beside the others so a triage
-        # route that re-specifies a parked bead spends the model the operator
-        # configured for planning rather than the implementation model.
-        respec_profile = config.resolve_profile(resolved_backend, Phase.PLAN)
     except (BackendError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)
@@ -2275,23 +1639,6 @@ def grind(
     )
 
     if dry_run:
-        output.info(
-            f"judge:          {'enabled' if judge_config.enabled else 'disabled'} "
-            f"mode={judge_config.mode.value} model={judge_config.model} "
-            f"failure={judge_config.failure_mode.value} "
-            f"seat={judge_config.seat} timeout={judge_config.timeout_seconds}s"
-        )
-        if collect_note:
-            output.info(collect_note)
-        if judge_config.pre_tool:
-            output.info("judge pre_tool: enabled (Claude run-scoped hook)")
-        if judge_config.post_turn:
-            output.info("judge post_turn: enabled (advisory outcome)")
-        if judge_config.enabled:
-            output.info(
-                "judge routes:   " + ", ".join(route.value for route in judge_config.routes)
-            )
-            output.info(f"judge text:     {judge_config.include_issue_text}")
         output.info(f"repo:           {target}")
         output.info(f"tasks:          {tasks}")
         output.info(f"iterations:     {iterations}")
@@ -2312,7 +1659,6 @@ def grind(
         output.info(f"verify:         {verify_profile.display_name}")
         output.info(f"finalize:       {finalize_profile.display_name}")
         output.info(f"codegraph:      {codegraph_mode.value}")
-        output.info(f"loop reaper:    {reaper_note}")
         output.info(f"verification:   {verification_note}")
         output.info(f"prompt text:    {prompt_variant_note}")
         output.info(f"prefix order:   {prefix_order_note}")
@@ -2326,7 +1672,6 @@ def grind(
         )
         output.info(
             "select:         " + (
-                "judge-bound issue" if bind_worker else
                 "worker (goal-prompt claim)" if harness_select else
                 "worker (legacy --condition)"
             )
@@ -2343,9 +1688,6 @@ def grind(
                     CodeGraphPhase.IMPLEMENTATION, codegraph_probe
                 ),
                 verification_text=verification_text,
-                bound_issue_id="<ISSUE_ID>" if bind_worker else None,
-                goal_template=goal_template if bind_worker else None,
-                stable_prefix=stable_prefix,
             )
             conflict = _stale_completion_contract_diagnostic(
                 dry_prompt, repo=target, audited=prompt_audit
@@ -2355,14 +1697,8 @@ def grind(
                 raise typer.Exit(code=1)
             output.info(
                 dry_prompt
-                + (
-                    "\n(grind judges and binds one owned issue before worker launch.)"
-                    if enforce_judge else
-                    "\n(grind binds one owned issue before installing tool hooks.)"
-                    if judge_config.pre_tool else
-                    "\n(the worker orients, continues leftover in_progress or "
-                    "runs bd ready, and claims; grind only decides whether to spawn.)"
-                )
+                + "\n(the worker orients, continues leftover in_progress or "
+                "runs bd ready, and claims; grind only decides whether to spawn.)"
             )
         else:
             output.info(_legacy_prompt(condition, resolved_backend))
@@ -2423,13 +1759,7 @@ def grind(
 
     # Phase 2 — flock so two grinds can't race for the same repo.
     try:
-        with grind_flock(target), ExitStack() as gate_cleanup:
-            gate_run_id = uuid4()
-            baseline_backend = resolved_backend
-            route_overrides = RouteOverrides(
-                backend, implement_model, implement_reasoning_effort,
-                verify_model, verify_reasoning_effort,
-            )
+        with grind_flock(target):
             log = _log_path(target)
             write_log = _log_writer(log)
             write_log(
@@ -2475,11 +1805,6 @@ def grind(
             with bd.snapshot():
                 leftover_claims = bd.in_progress_ids(exclude_labels=EXCLUDED_LABELS)
                 startup_snapshot = _snapshot(bd)
-            if bind_worker and len(leftover_claims) > 1:
-                for claimed_id in sorted(leftover_claims):
-                    bd.add_label(claimed_id, "human")
-                    bd.add_comment(claimed_id, "PLAN-GAP: multiple leftover claims require human handling")
-                raise BackendError("multiple leftover claims require human handling")
             resume_issue_id = (
                 next(iter(leftover_claims)) if len(leftover_claims) == 1 else None
             )
@@ -2596,20 +1921,9 @@ def grind(
             # reach the threshold before the run ends; every escalation keeps
             # its own end-of-run hint.
             escalated_claims: list[tuple[str, int]] = []
-            #: The re-plan directive the next window's prompt carries, set by
-            #: the stuck decision that left the claim resumable. Startup has
-            #: no verdict of its own, so it never opens with one.
-            replan_directive = ""
             if resume_issue_id is not None:
                 resume_no_close_count = _no_close_window_count(bd, resume_issue_id)
-                # No window has run in this process yet, so there is no
-                # verdict to read: this call always fails open to the
-                # threshold rule a leftover claim met before grind restarted.
-                _, startup_action = _decide_stuck(
-                    bd, target, judge_config, gate_run_id, resume_issue_id,
-                    None, resume_no_close_count, False, write_log,
-                )
-                if startup_action is StuckAction.ESCALATE:
+                if resume_no_close_count >= _WEDGED_WINDOW_THRESHOLD:
                     _escalate_wedged_claim(
                         bd,
                         resume_issue_id,
@@ -2658,35 +1972,10 @@ def grind(
                 "BEADS_DIR", str((target / ".beads").resolve())
             )
 
-            def respec_bead(issue_id: str) -> bool:
-                """Spend one planning-profile turn re-specifying one parked bead.
-
-                Returns only whether the turn ran; whether it repaired
-                anything is the readiness validator's call, made by the
-                triage route on the packet the turn left behind.
-                """
-                write_log(f"triage: re-specifying {issue_id} in one planner turn")
-                with bd.no_snapshot():
-                    rc = runner.run(
-                        _respec_prompt(issue_id),
-                        repo=target,
-                        log_path=log,
-                        profile=respec_profile,
-                    )
-                write_log(f"triage: the re-spec turn for {issue_id} exited {rc}")
-                return rc == 0
-
             def triage_park(issue_id: str, evidence: str) -> None:
-                """Route one bead that has just reached the human queue."""
-                triage_parked_bead(
-                    bd,
-                    issue_id,
-                    evidence=evidence,
-                    repo=target,
-                    config=judge_config,
-                    run_id=gate_run_id,
-                    write_log=write_log,
-                    respec=respec_bead,
+                """Release one bead that has just reached the human queue as a pin."""
+                release_pin_skew_park(
+                    bd, issue_id, evidence=evidence, write_log=write_log
                 )
 
             tasks_completed = 0
@@ -2703,9 +1992,6 @@ def grind(
             resumed_tip = ""
 
             while True:
-                gate_turn = None
-                shadow_decision_id = None
-                readiness_decision_id = None
                 # Milestone rollover: an epic whose children are all closed
                 # is finished work, not a claimable unit — close it here so
                 # the next milestone's subtree unblocks and this iteration
@@ -2818,10 +2104,6 @@ def grind(
                         unready.append(report)
                         title = str(candidate.get("title") or "").strip()
                         unready_titles[report.issue_id] = title
-                        if enforce_judge:
-                            # A ready leaf later in this queue wins without
-                            # changing unrelated unready packets this iteration.
-                            return
                         diagnostic = report.diagnostic()
                         write_log(
                             f"readiness skip (labeled human for repair): "
@@ -2864,10 +2146,6 @@ def grind(
                     # does either. What remains is the no-ready-issue exit
                     # when nothing at all was claimable.
                     if target_issue is None:
-                        if enforce_judge:
-                            _flag_unready_for_human(
-                                bd, unready, write_log, triage=triage_park
-                            )
                         # Queue is non-empty (not drained) but nothing is ready —
                         # everything left is blocked or human-flagged. We hold the
                         # flock, so no other actor will unblock it; stop rather
@@ -2939,12 +2217,6 @@ def grind(
                     # worker claims via goal-prompt. A leftover in_progress
                     # is already claimed; spawn a new process for it.
                     resuming = resume_issue_id is not None
-                    # Consume the directive the previous window's decision
-                    # left, the same way the resume id itself is consumed: one
-                    # window carries it, and a window that is not that resume
-                    # never inherits it.
-                    iteration_replan = replan_directive if resuming else ""
-                    replan_directive = ""
                     if resuming:
                         resumed_claim_id = issue_id
                         resumed_tip = git.branch_tip(integration_branch)
@@ -2965,46 +2237,6 @@ def grind(
                     iteration_pin = _pin_directive_for(
                         bd, target_issue, write_log
                     )
-                    readiness_advice = evaluate_readiness(
-                        target, target_issue, judge_config,
-                        run_id=gate_run_id if collect_arming else None,
-                    )
-                    semantic_advice = readiness_context(readiness_advice)
-                    if collect_arming and (readiness_advice or {}).get("decision_id"):
-                        readiness_decision_id = UUID(readiness_advice["decision_id"])
-                    if judge_config.enabled and judge_config.mode == JudgeMode.SHADOW:
-                        shadow_decision_id = _shadow_turn(
-                            packet=target_issue, repo=target, config=config,
-                            judge_config=judge_config, baseline=baseline_backend,
-                            overrides=route_overrides, run_id=gate_run_id,
-                        )
-                    if enforce_judge:
-                        gate_turn, bundle = _gate_turn(
-                            bd=bd, issue_id=issue_id, repo=target, config=config,
-                            judge_config=judge_config, baseline=baseline_backend,
-                            overrides=route_overrides, codegraph_mode=codegraph_mode,
-                            adapter=codegraph_adapter, extra_env=cache_env,
-                            goal_template=goal_template, cleanup=gate_cleanup,
-                            run_id=gate_run_id,
-                        )
-                        if bundle is None:
-                            break
-                        target_issue = gate_turn.bound.issue
-                        runner = bundle.runner
-                        resolved_backend = bundle.execution_backend or bundle.backend.value
-                        implement_profile = bundle.implement_profile
-                        verify_profile = bundle.verify_profile
-                        finalize_profile = bundle.finalize_profile
-                        codegraph_probe = bundle.codegraph_probe
-                    elif judge_config.pre_tool:
-                        gate_turn = _GateTurn(prepare_bound_issue(
-                            bd, issue_id, goal_template=goal_template,
-                        ))
-                        gate_cleanup.callback(gate_turn.cleanup, bd)
-                        target_issue = gate_turn.bound.issue
-                        runner.extra_env = gate_turn.bound.worker_env(runner.extra_env)
-                    if judge_config.pre_tool:
-                        check_pre_tool(target, resolved_backend, docker=docker)
                     # f2he.4: work on the primary checkout (main). Do not cut
                     # ortus/<id> or clone logs/grind-workspaces/<id>.
                     if git.has_commits():
@@ -3045,11 +2277,6 @@ def grind(
                             ),
                             verification_text=verification_text,
                             lessons_text=iteration_lessons_text,
-                            bound_issue_id=issue_id if gate_turn else None,
-                            goal_template=goal_template if gate_turn else None,
-                            semantic_advice=semantic_advice,
-                            stable_prefix=stable_prefix,
-                            replan_text=iteration_replan,
                             pin_text=iteration_pin,
                         )
                     except BackendError as exc:
@@ -3079,9 +2306,7 @@ def grind(
                     # asserts; the id the worker actually claimed is read
                     # back from bd after the iteration (ortus-ts3z).
                     iter_title = target_issue.get("title") or "untitled"
-                    if gate_turn:
-                        output.progress("grind", f"judge bound worker to {issue_id} ({resolved_backend})")
-                    elif resuming:
+                    if resuming:
                         output.progress(
                             "grind",
                             f'continuing leftover claim "{iter_title}" '
@@ -3097,8 +2322,6 @@ def grind(
                 else:
                     iteration_prompt = _legacy_prompt(condition, resolved_backend)
 
-                if gate_turn:
-                    gate_turn.current_issue(bd)
                 # A stuck-but-alive worker would otherwise block the entire
                 # loop forever (only a human kill recovers it). --worker-timeout
                 # hard-caps the iteration: on exceed the runner SIGTERM/SIGKILLs
@@ -3111,11 +2334,7 @@ def grind(
                 # worker spawn; leftover in_progress still runs one.
                 implementation_worker_ran = True
                 worker_timed_out = False
-                post_start_tip = (
-                    git.branch_tip(integration_branch) if judge_config.post_turn else None
-                )
                 phase_offset = log.stat().st_size if log.exists() else 0
-                impl_started = time.monotonic()
                 impl_handshake_logged = False
                 implementation_summary = parse_transcript(
                     log,
@@ -3142,14 +2361,7 @@ def grind(
                             log, CodeGraphPhase.IMPLEMENTATION, success=True
                         )
 
-                hook_run = None
-                progress_watch: ProgressWatch | None = None
                 try:
-                    if judge_config.pre_tool:
-                        hook_run = HookRun(
-                            target, issue_id, judge_config, str(gate_run_id), runner,
-                            scope=tool_scope(target_issue),
-                        )
                     if implementation_probe.available:
                         write_log("implementation CodeGraph handshake requested")
                     else:
@@ -3193,24 +2405,8 @@ def grind(
                                 )
                             except Exception:
                                 human_open_at_start = None
-                        if reaper_mode is not ProgressMode.OFF:
-                            progress_watch = ProgressWatch(
-                                repo=target,
-                                config=judge_config,
-                                mode=reaper_mode,
-                                run_id=gate_run_id,
-                                issue_id=issue_id,
-                                log_path=log,
-                                head_oid=lambda: git.branch_tip(integration_branch),
-                                bead_status=lambda: _claim_status(bd, issue_id),
-                                write_log=write_log,
-                                interval=reaper_interval,
-                                start_offset=phase_offset,
-                            )
 
                         def _reap_worker() -> bool:
-                            if hook_run is not None and hook_run.poll():
-                                return True
                             # One tick asks the tracker several questions —
                             # the closed count, the claims, a claim's labels —
                             # about a single instant. One reading per tick
@@ -3223,12 +2419,6 @@ def grind(
                                     baseline_closed=baseline_closed,
                                     flagged_at_start=flagged_at_start,
                                     integration_branch=integration_branch,
-                                    bound_issue_id=(
-                                        gate_turn.bound.issue["id"]
-                                        if gate_turn
-                                        else None
-                                    ),
-                                    progress=progress_watch,
                                 )
                             if reason is None:
                                 return False
@@ -3249,9 +2439,6 @@ def grind(
                             return True
 
                         reap_when = _reap_worker
-                    if gate_turn:
-                        gate_turn.current_issue(bd)
-                        gate_turn.launched = True
                     iters_run += 1
                     write_log(
                         f"iter {iters_run}: spawning {resolved_backend} "
@@ -3278,55 +2465,10 @@ def grind(
                 finally:
                     # The worker is gone and this process is the tracker's
                     # only writer again, so the post-mortem reads that follow
-                    # — the shadow outcome, the mis-claim hand-back, the
-                    # parked claims and their labels — all describe one state
-                    # and take one reading of it.
+                    # — the mis-claim hand-back, the parked claims and their
+                    # labels — all describe one state and take one reading of
+                    # it.
                     bd.open_snapshot()
-                    if hook_run is not None:
-                        try:
-                            hook_run.poll()
-                            hook_run.escalate(bd)
-                        finally:
-                            hook_run.close()
-                    for observed_decision_id in (
-                        shadow_decision_id, readiness_decision_id,
-                    ):
-                        if observed_decision_id is None:
-                            continue
-                        _shadow_outcome(
-                            bd=bd, repo=target, config=judge_config, run_id=gate_run_id,
-                            decision_id=observed_decision_id, observed_id=issue_id,
-                            before_claims=before.in_progress_ids,
-                            before_closed=before_closed_ids,
-                            resumed_id=issue_id if resuming else None,
-                            worker_ms=elapsed_ms(impl_started),
-                        )
-                    if gate_turn and gate_turn.launched:
-                        gate_turn.record_outcome(
-                            bd, target, judge_config, gate_run_id, elapsed_ms(impl_started),
-                        )
-                if hook_run is not None and hook_run.requested:
-                    # A park takes one bead out of the queue; it does not end
-                    # the run. `escalate` has already labelled this id human in
-                    # the block above, so selection skips it from here and the
-                    # rest of the queue still gets its windows. Only the
-                    # iteration cap stops the loop, and it is checked here
-                    # because this path does not reach the one at the bottom.
-                    write_log(
-                        f"iter {iters_run}: judge pre_tool park_bead; {issue_id} "
-                        "flagged human, worker reaped, queue continues"
-                    )
-                    output.progress(
-                        "grind",
-                        f"judge parked {issue_id} for human handling: needs_human",
-                    )
-                    if iterations > 0 and iters_run >= iterations:
-                        write_log(
-                            f"--iterations cap reached: {iters_run}/{iterations}; "
-                            "exiting outer loop"
-                        )
-                        break
-                    continue
                 if (
                     reap_reasons
                     and reap_reasons[-1].startswith(_FLAGGED_REASON)
@@ -3337,15 +2479,13 @@ def grind(
                     # operator's before the window began goes back, and what
                     # it parked on its own is read for a pin it could have
                     # made instead.
-                    handed_back: set[str] = set()
-                    if gate_turn is None:
-                        handed_back = _hand_back_misclaims(
-                            bd,
-                            flagged_at_start=flagged_at_start,
-                            human_open_at_start=human_open_at_start,
-                            window=iters_run,
-                            write_log=write_log,
-                        )
+                    handed_back = _hand_back_misclaims(
+                        bd,
+                        flagged_at_start=flagged_at_start,
+                        human_open_at_start=human_open_at_start,
+                        window=iters_run,
+                        write_log=write_log,
+                    )
                     try:
                         parked = _flagged_claims(bd) - flagged_at_start - handed_back
                     except Exception as exc:
@@ -3357,11 +2497,11 @@ def grind(
                     tag_pin_skew_claims(
                         bd, parked, window=iters_run, write_log=write_log
                     )
-                    # The tag is an annotation; the route is the decision.
-                    # Each park is re-read through the same regex first pass
-                    # inside the triage, so a bead the tagging pass already
-                    # recognised is released without a request, and only what
-                    # the regex cannot classify reaches the judge.
+                    # The tag is an annotation; the release is the decision.
+                    # Each park is re-read through the same regex, so a bead
+                    # the tagging pass recognised goes back to the queue as a
+                    # pin its next window owes, and anything else stays
+                    # parked.
                     for parked_id in sorted(parked):
                         try:
                             gap = latest_plan_gap(bd.comments(parked_id))
@@ -3443,8 +2583,8 @@ def grind(
                 # in_progress claim.
                 # The worker has exited, so from here to the end of the step
                 # this process is the tracker's only writer again: the
-                # read-back, the judge's packet and the stuck decision all
-                # describe one post-window state. They take one reading of
+                # read-back and the stuck handling both describe one
+                # post-window state. They take one reading of
                 # it, which a write of ours drops. It is opened by hand
                 # rather than with a block because the step's own reads
                 # straddle the try/finally the worker spawn sits in; the
@@ -3464,9 +2604,7 @@ def grind(
                     )
                     if not claimed_ids and after_state.closed > before.closed:
                         claimed_ids = sorted(bd.closed_ids() - before_closed_ids)
-                    if gate_turn:
-                        judged_id = gate_turn.bound.issue["id"]
-                    elif claimed_ids:
+                    if claimed_ids:
                         attribution = ", ".join(claimed_ids)
                         write_log(
                             f"iter {iters_run}: worker claimed {attribution} "
@@ -3498,49 +2636,6 @@ def grind(
                     else:
                         judged_status = "open"
                         judged_id = "issue"
-                if progress_watch is not None:
-                    progress_watch.record_window(_window_outcome(
-                        judged_status,
-                        timed_out=worker_timed_out,
-                        reaped=bool(reap_reasons),
-                    ))
-                post_stop = False
-                # The verdict outlives `apply_outcome` because the stuck
-                # decision below reads the same answer: its confidence shapes
-                # a vector there rather than parking the bead here.
-                post_verdict: OutcomeVerdict | None = None
-                if judge_config.post_turn and harness_select and implementation_worker_ran:
-                    try:
-                        # Attribution and the required handshake precede advisory judgment.
-                        packet = bd.show(judged_id)
-                        post_end_tip = git.branch_tip(integration_branch)
-                        observation = WorkerOutcome(
-                            exit_status=rc, watchdog=worker_timed_out,
-                            observed_status=OutcomeStatus(packet.get("status", "unknown")),
-                            branch_advanced=bool(
-                                post_start_tip
-                                and post_end_tip and post_end_tip != post_start_tip
-                            ),
-                            # Named once above; the record carries that class
-                            # rather than the judge deriving a second opinion.
-                            worker_failure=(
-                                window_failure.failure
-                                if window_failure is not None else None
-                            ),
-                            last_check=last_check_result(
-                                log, start_offset=phase_offset
-                            ),
-                        )
-                        verdict = evaluate_outcome(packet, observation, judge_config)
-                        post_verdict = verdict
-                        post_stop = apply_outcome(
-                            bd, target, judged_id, observation, verdict,
-                            judge_config, gate_run_id,
-                        )
-                    except Exception:  # noqa: BLE001 - preserve state, never echo provider/tracker text
-                        output.progress("grind", "judge post_turn unavailable; preserving worker result")
-                        # A broken log or tracker cannot authorize another worker window.
-                        post_stop = judge_config.mode == JudgeMode.ENFORCE
                 if judged_status == "closed":
                     tasks_completed += closed_delta
                     write_log(
@@ -3565,7 +2660,6 @@ def grind(
                     # the threshold). Fresh claims are outside the counter;
                     # their first no-close window is resumed by the next
                     # iteration below, which counts from there.
-                    window_advanced = False
                     if resuming and judged_id == resumed_claim_id:
                         head_now = git.branch_tip(integration_branch)
                         window_advanced = bool(head_now and head_now != resumed_tip)
@@ -3589,34 +2683,13 @@ def grind(
                                 f"{integration_branch} (no-close window "
                                 f"{burned} of {_WEDGED_WINDOW_THRESHOLD})"
                             )
-                    elif post_start_tip is not None:
-                        # A fresh claim keeps no counter, but the decision
-                        # below still wants to know whether the window it just
-                        # spent moved the integration branch at all.
-                        end_tip = git.branch_tip(integration_branch)
-                        window_advanced = bool(end_tip and end_tip != post_start_tip)
                     # A claim that outlived its window is routed here and now:
                     # the human queue takes it at the threshold, an excluded
                     # label parks it, and anything else is resumed by the next
                     # iteration of this same process.
                     pending = _no_close_window_count(bd, judged_id)
                     blocked = _claim_excluded_labels(bd, judged_id)
-                    _, stuck_action = _decide_stuck(
-                        bd, target, judge_config, gate_run_id, judged_id,
-                        post_verdict, pending, window_advanced, write_log,
-                    )
-                    if post_stop:
-                        # A post-turn answer no longer halts the loop on its
-                        # own. It is one input to the decision just taken,
-                        # which has already chosen what this claim gets next —
-                        # including the human queue, when that is what the
-                        # vector argued for.
-                        write_log(
-                            f"iter {iters_run}: judge post_turn would have "
-                            "withheld another window; the stuck decision "
-                            f"({stuck_action.value}) governs {judged_id}"
-                        )
-                    if stuck_action is StuckAction.ESCALATE:
+                    if pending >= _WEDGED_WINDOW_THRESHOLD:
                         _escalate_wedged_claim(
                             bd,
                             judged_id,
@@ -3627,7 +2700,6 @@ def grind(
                         )
                         escalated_claims.append((judged_id, pending))
                         resume_no_close_count = 0
-                        replan_directive = ""
                     elif blocked:
                         # Feeding an excluded issue to a worker arms the
                         # ortus-lf02 trap: the worker runs, verification
@@ -3650,25 +2722,9 @@ def grind(
                             write_log=write_log,
                         )
                         resume_no_close_count = 0
-                        replan_directive = ""
                     else:
                         resume_issue_id = judged_id
                         resume_no_close_count = pending
-                        replan_directive = ""
-                        if stuck_action is StuckAction.REPLAN:
-                            # The directive is what makes the next window
-                            # different from the one that stalled; the marker
-                            # is what stops a third and fourth from being the
-                            # same bet at the same odds.
-                            spent = _replan_window_count(bd, judged_id) + 1
-                            _record_replan_window(bd, judged_id, spent, write_log)
-                            replan_directive = _replan_section(
-                                pending, integration_branch
-                            )
-                            write_log(
-                                f"iter {iters_run}: re-planning {judged_id} in "
-                                f"a fresh window (replan {spent})"
-                            )
                         write_log(
                             f"iter {iters_run}: left {judged_id} in_progress "
                             "for the next window"
@@ -3684,8 +2740,6 @@ def grind(
                         f"iter {iters_run}: WARN no bd-state change "
                         f"({judged_id} is {judged_status})"
                     )
-                    if post_stop:
-                        break
                     if idle_sleep > 0:
                         time.sleep(idle_sleep)
                     else:
@@ -3741,6 +2795,6 @@ def grind(
     except FlockBusy as exc:
         output.error(str(exc), hint="another `ortus grind` is already running here")
         raise typer.Exit(code=1)
-    except (BackendError, BdError, JudgeLogError, StateError, ProfileError) as exc:
+    except (BackendError, BdError, ProfileError) as exc:
         output.error(str(exc))
         raise typer.Exit(code=1)

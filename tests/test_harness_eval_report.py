@@ -53,22 +53,15 @@ from ortus.core.harness_eval import (
 )
 from ortus.core import harness_eval
 from ortus.core.git import GitClient
-from ortus.core.judge_log import LOG_NAME, ROUTE_LOG_NAME
-from ortus.core.judge_progress import PROGRESS_LOG_NAME
-from ortus.core.judge_scorers import SITES
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 FIXTURES = Path(__file__).parent / "fixtures"
 runner = CliRunner()
 
-#: The arm whose beads carry a tier, named through the treatment rather than
-#: by position so a reordered pack cannot silently point these tests elsewhere.
-ROUTER_ARM = next(
-    item.key for item in TREATMENTS if item.config_key == "jev_model_router"
+#: The treatment arm the comparison tests read against the control, named
+#: through the treatment rather than by position so a reordered pack cannot
+#: silently point these tests elsewhere.
+TREATMENT_ARM = next(
+    item.key for item in TREATMENTS if item.config_key == "stable_prompt_prefix"
 )
 
 
@@ -277,8 +270,6 @@ def test_treatments_are_documented_with_one_recipe_each() -> None:
     assert [item.config_key for item in TREATMENTS] == [
         "prompt_audit",
         "stable_prompt_prefix",
-        "jev_model_router",
-        "collect",
     ]
     assert ARMS == (CONTROL_ARM, *(item.key for item in TREATMENTS))
 
@@ -614,153 +605,31 @@ def _routed_lines() -> list[str]:
     ]
 
 
-def _seat_routes(root: Path, fixture, arm: str, records: list[str]) -> Path:
-    """Write one cell's routing log the way a worker launch appends to it."""
+def _treatment_seat(root: Path, lines: list[str]) -> None:
+    """Give fixture A's treatment arm a cell of its own."""
 
-    path = root / seat_name(fixture, arm) / "logs" / ROUTE_LOG_NAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(records) + "\n", encoding="utf-8")
-    return path
+    _seat_log(root, FIXTURE_A, TREATMENT_ARM, lines)
 
 
-def _route(issue_id: str, tier: str) -> str:
-    return json.dumps(
-        {
-            "schema_version": 1,
-            "event": "model_route",
-            "seat": "eval",
-            "issue_id": issue_id,
-            "backend": "claude",
-            "tier": tier,
-            "reason": "mapped",
-            "model": "claude-opus-5[1m]",
-            "reasoning_effort": "high",
-        }
-    )
-
-
-def _routed_root(tmp_path: Path) -> Path:
-    """A seat root whose router arm ran two beads on two different tiers."""
-
-    root = _seeded_root(tmp_path)
-    _seat_log(root, FIXTURE_A, ROUTER_ARM, _routed_lines())
-    _seat_routes(
-        root,
-        FIXTURE_A,
-        ROUTER_ARM,
-        [
-            _route("ortus-abcd", "cheap"),
-            # The bead was re-routed on its second window; the tier that ran
-            # it last owns its outcome.
-            _route("ortus-efgh", "baseline"),
-            _route("ortus-efgh", "frontier"),
-            "{ this line was half-written when a worker was killed",
-        ],
-    )
-    return root
-
-
-def test_per_tier_close_rate_joins_the_routing_log_to_bead_outcomes(
-    tmp_path: Path,
-) -> None:
-    """Which tier closed which bead, so a threshold is rewritten from outcomes."""
-
-    report = build_report(_routed_root(tmp_path))
-    routed = _arm(report, FIXTURE_A.key, ROUTER_ARM)
-
-    # The cell's own numbers are unchanged by the join: two beads, one closed.
-    assert (routed.beads, routed.closed_beads) == (2, 1)
-    assert routed.close_rate == pytest.approx(0.5)
-
-    # Rows come back weakest model first, and a tier nothing routed to has
-    # no row at all.
-    assert [row.tier for row in routed.tiers] == ["cheap", "frontier"]
-
-    cheap, frontier = routed.tiers
-    assert (cheap.beads, cheap.closed_beads) == (1, 1)
-    assert cheap.close_rate == pytest.approx(1.0)
-    # The tier that closed nothing is where the threshold is wrong, and a
-    # zero close rate is a measurement rather than a missing one.
-    assert (frontier.beads, frontier.closed_beads) == (1, 0)
-    assert frontier.close_rate == pytest.approx(0.0)
-
-    rendered = render_report(report)
-    assert "## Per-tier close rate" in rendered
-    assert f"{FIXTURE_A.key} / {ROUTER_ARM} / cheap: 1/1 closed" in rendered
-    assert f"{FIXTURE_A.key} / {ROUTER_ARM} / frontier: 0/1 closed" in rendered
-
-    payload = json.loads(json.dumps(report.as_dict()))
-    rows = [
-        row
-        for row in payload["arms"]
-        if row["fixture"] == FIXTURE_A.key and row["arm"] == ROUTER_ARM
-    ]
-    assert rows[0]["tiers"] == [
-        {"tier": "cheap", "beads": 1, "closed_beads": 1, "close_rate": 1.0},
-        {"tier": "frontier", "beads": 1, "closed_beads": 0, "close_rate": 0.0},
-    ]
-
-
-def test_a_cell_that_routed_nothing_reports_no_tier_rather_than_a_zero(
-    tmp_path: Path,
-) -> None:
-    """An unrouted arm is not a tier that closed nothing."""
-
-    report = build_report(_seeded_root(tmp_path))
-
-    # The control arm ran a bead and closed it, and still has no tier: its
-    # seat never recorded a routing decision.
-    control = _arm(report, FIXTURE_A.key, CONTROL_ARM)
-    assert control.closed_beads == 1
-    assert control.tiers == ()
-    assert render_report(report).count("No cell recorded a routing decision.") == 1
-
-    payload = json.loads(json.dumps(report.as_dict()))
-    assert all(row["tiers"] == [] for row in payload["arms"])
-
-
-def test_the_tier_breakdown_reaches_the_eval_verb(tmp_path: Path) -> None:
-    """The operator reads the breakdown from the CLI, not from a library call."""
-
-    result = runner.invoke(app, ["eval", str(_routed_root(tmp_path)), "--json"])
-
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    tiers = {
-        (row["fixture"], row["arm"]): row["tiers"] for row in payload["arms"]
-    }
-    assert [row["tier"] for row in tiers[(FIXTURE_A.key, ROUTER_ARM)]] == [
-        "cheap",
-        "frontier",
-    ]
-
-
-def _router_seat(root: Path, lines: list[str]) -> None:
-    """Give fixture A's router arm a cell of its own, with its tier recorded."""
-
-    _seat_log(root, FIXTURE_A, ROUTER_ARM, lines)
-    _seat_routes(root, FIXTURE_A, ROUTER_ARM, [_route("ortus-abcd", "cheap")])
-
-
-def test_model_router_is_read_against_the_control_of_its_own_fixture(
+def test_treatment_is_read_against_the_control_of_its_own_fixture(
     tmp_path: Path,
 ) -> None:
     """The comparison a default gets flipped on, computed rather than eyeballed."""
 
     root = _seeded_root(tmp_path)
-    # Same beads, same spend, half the wall clock: the router arm wins on the
+    # Same beads, same spend, half the wall clock: the treatment arm wins on the
     # one guardrail it moved and matched the control on the rest.
     lines = _claude_lines()
     lines[-1] = lines[-1].replace("09:10:03", "09:05:03")
-    _router_seat(root, lines)
+    _treatment_seat(root, lines)
 
     report = build_report(root)
     control = _arm(report, FIXTURE_A.key, CONTROL_ARM)
-    routed = _arm(report, FIXTURE_A.key, ROUTER_ARM)
-    comparison = _record(report.comparisons, FIXTURE_A.key, ROUTER_ARM)
+    treated = _arm(report, FIXTURE_A.key, TREATMENT_ARM)
+    comparison = _record(report.comparisons, FIXTURE_A.key, TREATMENT_ARM)
 
     assert comparison.control_cost_per_closed_bead == control.cost_per_closed_bead
-    assert comparison.arm_cost_per_closed_bead == routed.cost_per_closed_bead
+    assert comparison.arm_cost_per_closed_bead == treated.cost_per_closed_bead
     assert comparison.control_close_rate == comparison.arm_close_rate == 1.0
     assert comparison.arm_wall_seconds < comparison.control_wall_seconds
     assert comparison.faster and not comparison.cheaper
@@ -768,21 +637,21 @@ def test_model_router_is_read_against_the_control_of_its_own_fixture(
 
     rendered = render_report(report)
     assert "## Control versus treatment" in rendered
-    assert f"{FIXTURE_A.key} / {ROUTER_ARM}: {PRIMARY_METRIC} " in rendered
-    assert f"{ROUTER_ARM}: {PRIMARY_METRIC} " in rendered
+    assert f"{FIXTURE_A.key} / {TREATMENT_ARM}: {PRIMARY_METRIC} " in rendered
+    assert f"{TREATMENT_ARM}: {PRIMARY_METRIC} " in rendered
     assert f"— {ADOPT}" in rendered
 
 
-def test_model_router_that_closed_less_loses_however_cheap_it_was(
+def test_treatment_that_closed_less_loses_however_cheap_it_was(
     tmp_path: Path,
 ) -> None:
     """Close rate is the guardrail: a cheaper arm that closes fewer beads lost."""
 
     root = _seeded_root(tmp_path)
-    _router_seat(root, _routed_lines())
+    _treatment_seat(root, _routed_lines())
 
     comparison = _record(
-        build_report(root).comparisons, FIXTURE_A.key, ROUTER_ARM
+        build_report(root).comparisons, FIXTURE_A.key, TREATMENT_ARM
     )
 
     assert comparison.arm_close_rate == pytest.approx(0.5)
@@ -790,13 +659,13 @@ def test_model_router_that_closed_less_loses_however_cheap_it_was(
     assert comparison.verdict == KEEP_CONTROL
 
 
-def test_model_router_without_a_cell_reports_unmeasured_not_a_loss(
+def test_treatment_without_a_cell_reports_unmeasured_not_a_loss(
     tmp_path: Path,
 ) -> None:
     """An arm that never ran has no verdict; a missing number is not a zero."""
 
     comparison = _record(
-        build_report(_seeded_root(tmp_path)).comparisons, FIXTURE_A.key, ROUTER_ARM
+        build_report(_seeded_root(tmp_path)).comparisons, FIXTURE_A.key, TREATMENT_ARM
     )
 
     assert comparison.arm_close_rate is None
@@ -804,39 +673,21 @@ def test_model_router_without_a_cell_reports_unmeasured_not_a_loss(
     assert not comparison.cheaper and not comparison.faster
 
 
-def test_model_router_comparison_reaches_the_eval_verb(tmp_path: Path) -> None:
+def test_treatment_comparison_reaches_the_eval_verb(tmp_path: Path) -> None:
     """The operator reads the verdict from the CLI, not from a library call."""
 
     root = _seeded_root(tmp_path)
-    _router_seat(root, _routed_lines())
+    _treatment_seat(root, _routed_lines())
 
     result = runner.invoke(app, ["eval", str(root), "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     rows = {(row["fixture"], row["arm"]): row for row in payload["comparisons"]}
-    assert rows[(FIXTURE_A.key, ROUTER_ARM)]["verdict"] == KEEP_CONTROL
+    assert rows[(FIXTURE_A.key, TREATMENT_ARM)]["verdict"] == KEEP_CONTROL
     assert set(rows) == {
         (fixture.key, item.key) for fixture in FIXTURE_PACK for item in TREATMENTS
     }
-
-
-def test_model_router_arm_enables_the_gate_it_is_routed_from(tmp_path: Path) -> None:
-    """The flag alone leaves the arm running the control's configuration."""
-
-    item = next(t for t in TREATMENTS if t.key == ROUTER_ARM)
-    commands = arm_commands(FIXTURE_A, ROUTER_ARM, root=Path("/seats"))
-    appended = next(command for command in commands if ".ortusrc" in command)
-
-    for line in ("jev_model_router = true", "[judge]", "enabled = true"):
-        assert line in appended
-    # The flag is a top-level key, so it has to be written above the table
-    # header or TOML swallows it into `[judge]`.
-    assert appended.index("jev_model_router") < appended.index("[judge]")
-    assert item.config_lines[0] == item.enable_line
-
-    rendered = render_matrix(matrix(root=Path("/seats")))
-    assert "jev_model_router = true" in rendered
 
 
 def _origin_setup(commands: tuple[str, ...]) -> list[str]:
@@ -1036,166 +887,3 @@ def test_shell_executor_keeps_a_failing_commands_exit_status() -> None:
 
     assert shell_executor("exit 3", timeout=10) == 3
     assert shell_executor("true") == 0
-
-
-COLLECT_ARM = next(item.key for item in TREATMENTS if item.table == "judge")
-
-
-def test_jev_collect_matrix_arm_writes_one_valid_judge_table() -> None:
-    """AC-1: the collect arm's pins parse as one table, every other key off."""
-
-    assert COLLECT_ARM == "jev-collect"
-    assert COLLECT_ARM in ARMS
-    assert any(cell.arm == COLLECT_ARM for cell in matrix(root=Path("/seats")))
-
-    for fixture in FIXTURE_PACK:
-        lines = _appended_lines(fixture, COLLECT_ARM)
-        assert lines.count("[judge]") == 1
-        # What `ortus init` leaves in `.ortusrc` opens no table, so the pins
-        # appended to it are the whole of the file's tables.
-        parsed = tomllib.loads("\n".join(lines) + "\n")
-        assert parsed["judge"] == {"enabled": True, "collect": True}
-        assert {key: value for key, value in parsed.items() if key != "judge"} == {
-            item.config_key: False for item in TREATMENTS if item.table is None
-        }
-
-    # The control stays Jev-off: no judge table at all.
-    assert not any(
-        line.startswith("[") for line in _appended_lines(FIXTURE_A, CONTROL_ARM)
-    )
-    rendered = render_matrix(matrix(root=Path("/seats")))
-    assert "[judge] collect = true" in rendered
-
-
-def test_jev_collect_matrix_arm_leaves_the_router_arm_pins_unchanged() -> None:
-    """AC-1: table-scoped pins add a key; they do not move another arm's."""
-
-    lines = _appended_lines(FIXTURE_A, ROUTER_ARM)
-    assert lines == [
-        "prompt_audit = false",
-        "stable_prompt_prefix = false",
-        "jev_model_router = true",
-        "[judge]",
-        "enabled = true",
-        'mode = "enforce"',
-    ]
-    tomllib.loads("\n".join(lines) + "\n")
-
-
-def _jev_record(event: str, issue_id: str, **extra) -> str:
-    return json.dumps({"event": event, "issue_id": issue_id, **extra})
-
-
-def _jev_seat(root: Path) -> Path:
-    seat = root / seat_name(FIXTURE_A, COLLECT_ARM)
-    logs = seat / "logs"
-    logs.mkdir(parents=True)
-    (logs / LOG_NAME).write_text(
-        "\n".join([
-            _jev_record("decision", "ortus-aaaa", phase="semantic_readiness"),
-            _jev_record("decision", "ortus-aaaa", phase="pre_turn"),
-            _jev_record("decision", "ortus-bbbb", phase="pre_turn"),
-            _jev_record("outcome", "ortus-aaaa"),
-            _jev_record("post_turn", "ortus-aaaa"),
-            _jev_record("tool_decision", "ortus-bbbb"),
-            _jev_record("stuck_decision", "ortus-bbbb"),
-            _jev_record("triage", "ortus-bbbb"),
-            "{ half-written by a killed worker",
-        ]) + "\n",
-        encoding="utf-8",
-    )
-    (logs / ROUTE_LOG_NAME).write_text(
-        _jev_record("model_route", "ortus-aaaa", applied=False) + "\n",
-        encoding="utf-8",
-    )
-    (logs / PROGRESS_LOG_NAME).write_text(
-        "\n".join([
-            _jev_record("progress", "ortus-bbbb"),
-            _jev_record("progress_window", "ortus-bbbb"),
-        ]) + "\n",
-        encoding="utf-8",
-    )
-    return seat
-
-
-def _tracker(rows):
-    def opened(seat: Path):
-        def run(args):
-            assert args[0] == "list"
-            if isinstance(rows, Exception):
-                raise rows
-            return rows
-
-        return run
-
-    return opened
-
-
-def test_jev_sites_counts_decisions_and_closed_outcomes_per_site(
-    tmp_path: Path,
-) -> None:
-    """AC-2: per-site decisions and closed-bead counts, schema v4."""
-
-    root = tmp_path / "eval"
-    _jev_seat(root)
-    (root / seat_name(FIXTURE_A, CONTROL_ARM)).mkdir(parents=True)
-    tracker = _tracker([
-        {"id": "ortus-aaaa", "status": "closed"},
-        {"id": "ortus-bbbb", "status": "open"},
-    ])
-
-    report = build_report(root, tracker=tracker)
-    assert REPORT_SCHEMA == "harness-eval-report/v4"
-
-    collected = _arm(report, FIXTURE_A.key, COLLECT_ARM)
-    counts = {row.site: (row.decisions, row.closed) for row in collected.jev_sites}
-    assert counts == {
-        "readiness": (1, 1),
-        "pre_turn": (2, 1),
-        "router": (1, 1),
-        "pre_tool": (1, 0),
-        "progress": (1, 0),
-        "stuck": (1, 0),
-        "triage": (1, 0),
-        "post_turn": (1, 1),
-    }
-    assert tuple(counts) == SITES
-    assert collected.jev_sites_reason is None
-
-    # A seat with no Jev logs counts zeros rather than erroring.
-    control = _arm(report, FIXTURE_A.key, CONTROL_ARM)
-    assert {(row.decisions, row.closed) for row in control.jev_sites} == {(0, 0)}
-
-    payload = json.loads(json.dumps(report.as_dict()))
-    assert payload["schema"] == "harness-eval-report/v4"
-    row = next(
-        item for item in payload["arms"]
-        if (item["fixture"], item["arm"]) == (FIXTURE_A.key, COLLECT_ARM)
-    )
-    assert row["jev_sites"]["pre_turn"] == {"decisions": 2, "closed": 1}
-
-    rendered = render_report(report)
-    assert "## Jev decisions per site" in rendered
-    assert f"| {FIXTURE_A.key} | {COLLECT_ARM} | 1/1 | 2/1 | 1/1 |" in rendered
-
-
-def test_jev_sites_null_when_the_tracker_or_seat_is_missing(tmp_path: Path) -> None:
-    """AC-2: an unreadable tracker or an unrun cell is null with a reason."""
-
-    root = tmp_path / "eval"
-    _jev_seat(root)
-
-    report = build_report(root, tracker=_tracker(OSError("no bd")))
-    collected = _arm(report, FIXTURE_A.key, COLLECT_ARM)
-    assert {row.site: row.decisions for row in collected.jev_sites}["pre_turn"] == 2
-    assert all(row.closed is None for row in collected.jev_sites)
-    assert collected.jev_sites_reason == "seat tracker unreadable"
-
-    unrun = _arm(report, FIXTURE_B.key, COLLECT_ARM)
-    assert unrun.jev_sites is None
-    assert unrun.jev_sites_reason == "seat not found"
-    assert unrun.as_dict()["jev_sites"] is None
-
-    rendered = render_report(report)
-    assert "null (seat not found)" in rendered
-    assert "closed counts null (seat tracker unreadable)" in rendered
