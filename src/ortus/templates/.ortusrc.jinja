@@ -11,6 +11,32 @@ backend = "{{ backend }}"
 # probe the `codegraph` CLI plus the local `.codegraph/` index before launching
 # an agent; under `required` a missing prerequisite aborts the run.
 codegraph = "{{ codegraph }}"
+{%- if stealth %}
+
+# Stealth (`ortus init --stealth`): no Ortus, beads or agent file reaches git.
+# Every such path is listed in the ortus block of .git/info/exclude, and
+# `git config --local ortus.stealth true` keeps stealth on if this file is lost.
+stealth = true
+{%- endif %}
+{%- if commit_issue_ref %}
+
+# How a commit names its bd issue: none | trailer | subject.
+commit_issue_ref = "{{ commit_issue_ref }}"
+{%- endif %}
+{%- if tracker_remote %}
+
+# Private Dolt remote the tracker syncs to, never the fork's origin or upstream.
+tracker_remote = "{{ tracker_remote }}"
+{%- endif %}
+{%- if stealth %}
+
+# Extra patterns for the .git/info/exclude block, on top of the defaults.
+{% if stealth_extra_excludes -%}
+stealth_extra_excludes = {{ stealth_extra_excludes | tojson }}
+{%- else -%}
+# stealth_extra_excludes = ["/notes/"]
+{%- endif %}
+{%- endif %}
 
 # Optional phase-specific agent profiles. Omit any field to use the selected
 # provider's default. Project values override matching fields in ~/.ortusrc.

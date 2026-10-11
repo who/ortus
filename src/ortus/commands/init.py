@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,7 @@ from ortus.core.agent_files import (
 )
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import (
+    COMMIT_ISSUE_REF_CHOICES,
     DEFAULT_CODEGRAPH_MODE,
     INIT_ONLY_BACKEND_MESSAGE,
     read_recorded_facts,
@@ -65,6 +67,19 @@ from ortus.core.readiness import (
     readiness_memory_command,
     readiness_memory_text,
 )
+from ortus.core.stealth import (
+    AGENT_FILE_REDIRECTS,
+    CLAUDE_LOCAL_SETTINGS,
+    STEALTH_EXCLUDE_PATTERNS,
+    STEALTH_GIT_CONFIG_KEY,
+    TRACKED_IGNORE_SOURCES,
+    TRACKER_REMOTE_NAME,
+    bd_hooks_path,
+    merge_exclude,
+    pattern_matches,
+    status_ortus_paths,
+    tracked_ortus_paths,
+)
 
 
 def _bd_init(repo: Path, prefix: str | None) -> None:
@@ -87,6 +102,41 @@ def _bd_init(repo: Path, prefix: str | None) -> None:
     if prefix:
         args.extend(["--prefix", prefix])
     subprocess.run(args, cwd=str(repo), check=True)
+
+
+def _bd_init_stealth(repo: Path, prefix: str | None) -> None:
+    """Run `bd init --stealth` inside `repo`: no commit, hooks or `.gitignore`.
+
+    Streams like `_bd_init` for the same reasons. `--stealth` keeps bd's own
+    files in `.git/info/exclude` and turns on `no-git-ops`; `--skip-agents`
+    leaves the agent files to Ortus, which knows when upstream tracks them.
+    """
+    args = ["bd", "init", "--stealth", "--non-interactive", "--skip-agents"]
+    if prefix:
+        args.extend(["--prefix", prefix])
+    subprocess.run(args, cwd=str(repo), check=True)
+
+
+def _bd_no_git_ops(repo: Path) -> None:
+    """Turn on bd's `no-git-ops` for a workspace a stealth `--force` keeps."""
+    subprocess.run(
+        ["bd", "config", "set", "no-git-ops", "true"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _bd_add_tracker_remote(repo: Path, url: str) -> None:
+    """Register the private Dolt remote a stealth tracker syncs to."""
+    subprocess.run(
+        ["bd", "dolt", "remote", "add", TRACKER_REMOTE_NAME, url],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _bd_remember(repo: Path) -> None:
@@ -141,16 +191,20 @@ def _remove_bd_claude_scaffold(repo: Path) -> None:
         claude_dir.rmdir()
 
 
-def _require_tracked_agent_files(repo: Path) -> None:
+def _require_tracked_agent_files(repo: Path, *, stealth: bool = False) -> None:
     """Refuse to manage an agent file the repo has told git to forget.
 
     A gitignored `AGENTS.md` is a repo that treats agent instructions as
     scratch. Ortus would then write a block every collaborator's clone lacks,
     so the honest move is to fail while nothing has been written and let the
-    operator decide which of the two conventions wins.
+    operator decide which of the two conventions wins. A stealth repository
+    keeps its agent files out of git on purpose, so there only the tracked
+    `.gitignore` counts and `.git/info/exclude` is the expected home.
     """
     for managed in MANAGED_FILES:
-        pattern = gitignore_match(repo, managed.filename)
+        pattern = gitignore_match(
+            repo, managed.filename, sources=TRACKED_IGNORE_SOURCES if stealth else None
+        )
         if pattern is None:
             continue
         output.error(
@@ -164,33 +218,37 @@ def _require_tracked_agent_files(repo: Path) -> None:
         raise typer.Exit(code=1)
 
 
-def _write_agent_files(repo: Path, codegraph: str) -> None:
+def _write_agent_files(
+    repo: Path, codegraph: str, redirects: dict[str, str] | None = None
+) -> None:
     """Apply the managed block to `AGENTS.md` and `CLAUDE.md`.
 
     Every backend gets both files: the block is about how work is tracked and
     closed in this repo, which does not change because the agent driving it
-    does.
+    does. `redirects` sends a block to another file, which a stealth init
+    uses when upstream already tracks the usual one.
     """
     for managed in MANAGED_FILES:
-        path = repo / managed.filename
+        filename = (redirects or {}).get(managed.filename, managed.filename)
+        path = repo / filename
         try:
             outcome = apply_block(
                 path, managed.block, render_block(managed.block, codegraph=codegraph)
             )
         except AgentFileError as exc:
             output.error(
-                f"{managed.filename} has a malformed ortus block: {exc}",
+                f"{filename} has a malformed ortus block: {exc}",
                 hint="repair the BEGIN/END markers by hand, then re-run ortus init",
             )
             raise typer.Exit(code=1)
         if outcome is BlockOutcome.AHEAD:
             output.warn(
-                f"{managed.filename} carries a block from a newer ortus; left untouched"
+                f"{filename} carries a block from a newer ortus; left untouched"
             )
         elif outcome is BlockOutcome.UNCHANGED:
-            output.success(f"{managed.filename} ortus block already current")
+            output.success(f"{filename} ortus block already current")
         else:
-            output.success(f"{outcome.value} {managed.filename} ortus block")
+            output.success(f"{outcome.value} {filename} ortus block")
         # apply_block just parsed this file, so the re-read cannot fail; the
         # stale copies live outside the markers and are never cleaned up
         # automatically, so the operator hears about them while present.
@@ -198,7 +256,7 @@ def _write_agent_files(repo: Path, codegraph: str) -> None:
             path.read_text(encoding="utf-8"), path=path
         )
         if duplicates:
-            output.warn(duplicate_headings_message(managed.filename, duplicates))
+            output.warn(duplicate_headings_message(filename, duplicates))
 
 
 def _normalize_initial_branch(repo: Path, branch: str = "main") -> None:
@@ -385,7 +443,7 @@ def _summarize_backends(run_backend: str) -> None:
     output.success(f'pinned run backend "{run_backend}" in .ortusrc')
 
 
-def _recorded_facts(target: Path) -> dict[str, str]:
+def _recorded_facts(target: Path) -> dict[str, Any]:
     """Facts recorded in an existing project `.ortusrc`, or {} on a first init.
 
     Omitted flags resolve to these instead of first-init detection, so a
@@ -404,9 +462,16 @@ def _recorded_facts(target: Path) -> dict[str, str]:
         )
         raise typer.Exit(code=1)
     for key, value in facts.items():
-        if not isinstance(value, str):
+        if key == "stealth":
+            ok, expected = isinstance(value, bool), "a boolean"
+        elif key == "stealth_extra_excludes":
+            ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
+            expected = "a list of strings"
+        else:
+            ok, expected = isinstance(value, str), "a string"
+        if not ok:
             output.error(
-                f"{target / '.ortusrc'} records {key} = {value!r}, which is not a string",
+                f"{target / '.ortusrc'} records {key} = {value!r}, which is not {expected}",
                 hint=f"fix .ortusrc or pass an explicit --{key.replace('_', '-')}",
             )
             raise typer.Exit(code=1)
@@ -703,6 +768,231 @@ def _resolve_choice(
     return cli_value
 
 
+#: The subject of the commit a plain `bd init` makes. Found at HEAD of a fork
+#: and on no remote, it is a stealth init's cue that the repository was
+#: already touched by the non-stealth path.
+BD_INIT_COMMIT_SUBJECT = "bd init: initialize beads issue tracking"
+
+#: The keys a stealth init merges into `.claude/settings.local.json`, so a
+#: Claude session neither credits itself on a commit nor brands a PR.
+CLAUDE_STEALTH_SETTINGS: dict[str, Any] = {
+    "includeCoAuthoredBy": False,
+    "attribution": {"commit": "", "pr": ""},
+}
+
+
+def _git_out(repo: Path, *args: str) -> tuple[int, str]:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    return proc.returncode, proc.stdout.strip()
+
+
+def _normalized_remote_url(url: str) -> str:
+    url = url.strip().rstrip("/")
+    return url[: -len(".git")] if url.endswith(".git") else url
+
+
+def _stealth_preflight(target: Path, tracker_remote: str | None) -> None:
+    """Every refusal a stealth init owes, while nothing has been written.
+
+    The target must already be a git checkout with history, because stealth
+    exists for a fork. A HEAD that is a plain `bd init` commit no remote has
+    seen means an earlier non-stealth run touched the fork: the undo is
+    printed, never run, since it moves the operator's branch.
+    """
+    if not target.is_dir() or _git_out(target, "rev-parse", "--is-inside-work-tree") != (0, "true"):
+        output.error(
+            f"{target} is not a git work tree",
+            hint="--stealth sets up an existing checkout (a fork); clone it first",
+        )
+        raise typer.Exit(code=1)
+    if _git_out(target, "rev-parse", "--verify", "--quiet", "HEAD")[0] != 0:
+        output.error(
+            f"{target} has no commits",
+            hint="--stealth keeps Ortus out of an existing history; commit something first",
+        )
+        raise typer.Exit(code=1)
+    _, subject = _git_out(target, "log", "-1", "--format=%s")
+    _, remote_refs = _git_out(target, "branch", "-r", "--contains", "HEAD")
+    if subject == BD_INIT_COMMIT_SUBJECT and not remote_refs:
+        _, branch = _git_out(target, "symbolic-ref", "--short", "HEAD")
+        remote = "upstream" if _git_out(target, "remote", "get-url", "upstream")[0] == 0 else "origin"
+        output.error(
+            f"HEAD is an unpushed `{BD_INIT_COMMIT_SUBJECT}` commit",
+            hint=(
+                "undo it first, then re-run with --stealth:\n"
+                "       git reset --soft HEAD~1\n"
+                f"       git checkout {remote}/{branch or '<branch>'} -- .gitignore"
+            ),
+        )
+        raise typer.Exit(code=1)
+    if tracker_remote is None:
+        return
+    wanted = _normalized_remote_url(tracker_remote)
+    for remote in ("origin", "upstream"):
+        code, url = _git_out(target, "remote", "get-url", remote)
+        if code == 0 and url and _normalized_remote_url(url) == wanted:
+            output.error(
+                f"--tracker-remote {tracker_remote} is the git {remote} remote",
+                hint="tracker data must never reach the fork's public remotes; pass a private URL",
+            )
+            raise typer.Exit(code=1)
+
+
+def _stealth_layout(
+    target: Path,
+    run_backend: str,
+    backends: tuple[str, ...],
+    extra_excludes: tuple[str, ...],
+    write_opencode: bool,
+) -> tuple[list[str], dict[str, str], set[str], bool]:
+    """Fit the stealth block and Ortus's writes around what upstream tracks.
+
+    Returns the exclude patterns, the agent-file redirects, the rendered
+    paths to skip, and whether `.claude/settings.local.json` may be written.
+    A default pattern that matches a tracked file is dropped, because an
+    exclude line cannot hide a tracked file and Ortus must not modify one.
+    """
+    candidates = list(dict.fromkeys((*STEALTH_EXCLUDE_PATTERNS, *extra_excludes)))
+    dropped = {
+        pattern for pattern in candidates if tracked_ortus_paths(target, (pattern,))
+    }
+    patterns = [pattern for pattern in candidates if pattern not in dropped]
+
+    def blocked(path: str) -> bool:
+        return any(pattern_matches(path, pattern) for pattern in dropped)
+
+    redirects: dict[str, str] = {}
+    for name, redirect in AGENT_FILE_REDIRECTS.items():
+        if not blocked(name):
+            continue
+        if blocked(redirect):
+            output.error(
+                f"upstream tracks both {name} and {redirect}",
+                hint="ortus has no untracked file left for its agent block",
+            )
+            raise typer.Exit(code=1)
+        output.warn(f"upstream tracks {name}; the ortus block goes to {redirect}")
+        redirects[name] = redirect
+
+    skip: set[str] = set()
+    claude_local = True
+    if blocked(BACKEND_TEMPLATES["claude"]) and "claude" in backends:
+        output.warn(
+            f"upstream tracks .claude/; writing only {CLAUDE_LOCAL_SETTINGS}"
+        )
+        skip.add(BACKEND_TEMPLATES["claude"])
+        if tracked_ortus_paths(target, (f"/{CLAUDE_LOCAL_SETTINGS}",)):
+            output.warn(f"upstream tracks {CLAUDE_LOCAL_SETTINGS}; left untouched")
+            claude_local = False
+        else:
+            patterns.append(f"/{CLAUDE_LOCAL_SETTINGS}")
+
+    if blocked(".ortusrc"):
+        output.error(
+            "upstream tracks .ortusrc",
+            hint="a stealth init cannot write its config over a tracked file",
+        )
+        raise typer.Exit(code=1)
+    outputs = {BACKEND_TEMPLATES[b]: b for b in backends if b != "claude"}
+    if write_opencode:
+        outputs.setdefault(OPENCODE_CONFIG_FILE, run_backend)
+    for path, owner in outputs.items():
+        if not blocked(path):
+            continue
+        if owner == run_backend:
+            output.error(
+                f"upstream tracks {path}, the {run_backend} backend's config",
+                hint="pick another --backend, or drop --stealth",
+            )
+            raise typer.Exit(code=1)
+        output.warn(f"upstream tracks {path}; skipped")
+        skip.add(path)
+    return patterns, redirects, skip, claude_local
+
+
+def _write_claude_local_settings(target: Path) -> None:
+    """Merge the no-attribution keys into `.claude/settings.local.json`."""
+    path = target / CLAUDE_LOCAL_SETTINGS
+    try:
+        current = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError) as exc:
+        output.error(
+            f"{CLAUDE_LOCAL_SETTINGS} is not readable JSON: {exc}",
+            hint="repair or delete it, then re-run ortus init",
+        )
+        raise typer.Exit(code=1)
+    if not isinstance(current, dict):
+        output.error(f"{CLAUDE_LOCAL_SETTINGS} is not a JSON object")
+        raise typer.Exit(code=1)
+    merged = dict(current)
+    merged["includeCoAuthoredBy"] = CLAUDE_STEALTH_SETTINGS["includeCoAuthoredBy"]
+    attribution = merged.get("attribution")
+    merged["attribution"] = {
+        **(attribution if isinstance(attribution, dict) else {}),
+        **CLAUDE_STEALTH_SETTINGS["attribution"],
+    }
+    if merged == current:
+        output.success(f"{CLAUDE_LOCAL_SETTINGS} attribution already off")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    output.success(f"wrote {CLAUDE_LOCAL_SETTINGS} (co-author and attribution off)")
+
+
+def _finish_stealth(
+    target: Path,
+    patterns: list[str],
+    tracker_remote: str | None,
+    add_tracker_remote: bool,
+) -> None:
+    """Exclude block, git-config marker, tracker remote, then the self-check."""
+    try:
+        outcome = merge_exclude(target, patterns)
+    except (AgentFileError, RuntimeError) as exc:
+        output.error(
+            f".git/info/exclude could not take the ortus block: {exc}",
+            hint="repair the BEGIN/END markers by hand, then re-run ortus init",
+        )
+        raise typer.Exit(code=1)
+    if outcome is BlockOutcome.AHEAD:
+        output.warn(".git/info/exclude carries a block from a newer ortus; left untouched")
+    elif outcome is BlockOutcome.UNCHANGED:
+        output.success(".git/info/exclude ortus block already current")
+    else:
+        output.success(f"{outcome.value} .git/info/exclude ortus block")
+    subprocess.run(
+        ["git", "config", "--local", STEALTH_GIT_CONFIG_KEY, "true"],
+        cwd=str(target),
+        check=True,
+        capture_output=True,
+    )
+    output.success(f"git config --local {STEALTH_GIT_CONFIG_KEY} true")
+
+    if tracker_remote is not None and add_tracker_remote:
+        try:
+            _bd_add_tracker_remote(target, tracker_remote)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            output.error(f"could not add the {TRACKER_REMOTE_NAME} Dolt remote: {exc}")
+            raise typer.Exit(code=1)
+        output.success(f"tracker remote {TRACKER_REMOTE_NAME} -> {tracker_remote}")
+
+    leaks = tracked_ortus_paths(target, patterns) + status_ortus_paths(target)
+    if leaks:
+        output.error(
+            "stealth self-check failed; git can still see: " + ", ".join(sorted(set(leaks))),
+            hint="untrack or exclude those paths, then re-run ortus init --stealth --force",
+        )
+        raise typer.Exit(code=1)
+    output.success("stealth self-check: no ortus path is visible to git")
+
+
 def init(
     repo: Optional[Path] = typer.Argument(
         None,
@@ -771,6 +1061,32 @@ def init(
             f"recorded local value, else {DEFAULT_LOCAL_BASE_URL}."
         ),
     ),
+    stealth: bool = typer.Option(
+        False,
+        "--stealth",
+        "--local-only",
+        help=(
+            "Keep every Ortus, beads and agent file out of git (for a fork that "
+            "must stay mergeable with upstream): no commit, no hooks, no "
+            ".gitignore edit; paths go to .git/info/exclude."
+        ),
+    ),
+    tracker_remote: Optional[str] = typer.Option(
+        None,
+        "--tracker-remote",
+        help=(
+            "Private Dolt remote URL the stealth tracker syncs to, registered as "
+            f"{TRACKER_REMOTE_NAME}. Only with --stealth; never origin or upstream."
+        ),
+    ),
+    commit_issue_ref: Optional[str] = typer.Option(
+        None,
+        "--commit-issue-ref",
+        help=(
+            "How commits name their bd issue (none|trailer|subject), recorded in "
+            ".ortusrc. Defaults to none under --stealth, else subject."
+        ),
+    ),
 ) -> None:
     """Bootstrap a new repo with bd, backend config, .ortusrc, and AGENTS.md."""
     if project_type is not None and project_type not in PROJECT_TYPES:
@@ -791,11 +1107,32 @@ def init(
         )
         raise typer.Exit(code=1)
 
+    if commit_issue_ref is not None and commit_issue_ref not in COMMIT_ISSUE_REF_CHOICES:
+        output.error(
+            f"--commit-issue-ref={commit_issue_ref!r} is not recognized",
+            hint=f"choices: {', '.join(COMMIT_ISSUE_REF_CHOICES)}",
+        )
+        raise typer.Exit(code=1)
+
     target = (repo if repo is not None else Path.cwd()).resolve()
     # Precedence per recorded key: explicit flag > recorded `.ortusrc` value >
     # first-init detection default. A recorded value that fails validation is
     # an error, never a silent fall-through to detection.
     recorded = _recorded_facts(target)
+    # A recorded `stealth = true` keeps a forced re-init stealthy without the
+    # flag; this release has no way to turn it back off from the command line.
+    stealth = stealth or recorded.get("stealth") is True
+    if tracker_remote is not None and not stealth:
+        output.error(
+            "--tracker-remote is only accepted with --stealth",
+            hint="a non-stealth tracker syncs through the repository's own git remote",
+        )
+        raise typer.Exit(code=1)
+    resolved_tracker_remote = tracker_remote or recorded.get("tracker_remote")
+    resolved_commit_ref = commit_issue_ref or recorded.get("commit_issue_ref")
+    if resolved_commit_ref is None and stealth:
+        resolved_commit_ref = "none"
+    extra_excludes = tuple(recorded.get("stealth_extra_excludes") or ())
 
     resolved_project_type = project_type or recorded.get("project_type") or "polyglot"
     if resolved_project_type not in PROJECT_TYPES:
@@ -902,6 +1239,16 @@ def init(
     _require_codegraph_cli(resolved_codegraph)
     if local is not None:
         _require_mergeable_opencode_config(target)
+    if stealth:
+        _stealth_preflight(target, tracker_remote)
+        output.progress("init", "stealth: checking what upstream tracks")
+        exclude_patterns, agent_redirects, render_skip, claude_local = _stealth_layout(
+            target,
+            run_backend,
+            PROVISIONABLE_BACKENDS if provision_all else (run_backend,),
+            extra_excludes,
+            write_opencode=local is not None,
+        )
 
     output.progress("init", f"target: {target}")
     target.mkdir(parents=True, exist_ok=True)
@@ -914,7 +1261,34 @@ def init(
         )
         raise typer.Exit(code=1)
 
-    if not already_initialized:
+    if stealth:
+        if not already_initialized:
+            output.progress(
+                "init", f"creating stealth .beads/ workspace (prefix={resolved_prefix})"
+            )
+            try:
+                _bd_init_stealth(target, resolved_prefix)
+            except subprocess.CalledProcessError as exc:
+                output.error(f"bd init failed (exit {exc.returncode})")
+                raise typer.Exit(code=1)
+            output.success(f"stealth bd workspace initialized (prefix={resolved_prefix})")
+        else:
+            output.warn(".beads/ exists; skipping bd init and setting bd no-git-ops")
+            try:
+                _bd_no_git_ops(target)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                output.error(f"could not set bd no-git-ops: {exc}")
+                raise typer.Exit(code=1)
+        stale_hooks = bd_hooks_path(target)
+        if stale_hooks:
+            subprocess.run(
+                ["git", "config", "--local", "--unset", "core.hooksPath"],
+                cwd=str(target),
+                check=True,
+                capture_output=True,
+            )
+            output.success(f"unset core.hooksPath (was {stale_hooks}, bd's hooks)")
+    elif not already_initialized:
         output.progress("init", f"creating .beads/ workspace (prefix={resolved_prefix})")
         try:
             _bd_init(target, resolved_prefix)
@@ -932,7 +1306,7 @@ def init(
             # remove them before rendering the selected backend's config.
             _remove_bd_claude_scaffold(target)
     elif force:
-        output.warn(f".beads/ exists; skipping bd init (--force re-renders templates only)")
+        output.warn(".beads/ exists; skipping bd init (--force re-renders templates only)")
 
     # The workspace exists on both paths above, so the memory is seeded for a
     # fresh repo and retrofitted into an existing one under --force. A failure
@@ -951,17 +1325,19 @@ def init(
 
     # Same treatment as the memory above, and for the same reason: a repo
     # without the tracker's git hooks still grinds, so a failure here is a
-    # warning naming the command an operator can run later.
-    output.progress("init", "installing the tracker's git hooks")
-    try:
-        _bd_hooks_install(target)
-    except (subprocess.CalledProcessError, OSError) as exc:
-        output.warn(
-            f"could not install the beads git hooks: {exc}\n"
-            "       install them later with: bd hooks install"
-        )
-    else:
-        output.success("beads git hooks installed")
+    # warning naming the command an operator can run later. A stealth repo
+    # runs no tracker hook at all: its hooks would live in an excluded tree.
+    if not stealth:
+        output.progress("init", "installing the tracker's git hooks")
+        try:
+            _bd_hooks_install(target)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            output.warn(
+                f"could not install the beads git hooks: {exc}\n"
+                "       install them later with: bd hooks install"
+            )
+        else:
+            output.success("beads git hooks installed")
 
     # Indexing runs before rendering so a failure leaves no half-written Ortus
     # config behind.
@@ -969,7 +1345,7 @@ def init(
 
     # Read the repo's own ignore rules before any rendering touches
     # `.gitignore`, so the refusal reflects what the operator wrote.
-    _require_tracked_agent_files(target)
+    _require_tracked_agent_files(target, stealth=stealth)
 
     output.progress(
         "init",
@@ -988,13 +1364,20 @@ def init(
         local_base_url=local_table.get("base_url", DEFAULT_LOCAL_BASE_URL),
         local_model=local_table.get("model"),
         local_api_key_env=local_table.get("api_key_env"),
+        stealth=stealth,
+        commit_issue_ref=resolved_commit_ref,
+        tracker_remote=resolved_tracker_remote if stealth else None,
+        stealth_extra_excludes=extra_excludes if stealth else (),
     )
     written = render_all(
-        target, ctx, backends=PROVISIONABLE_BACKENDS if provision_all else None
+        target,
+        ctx,
+        backends=PROVISIONABLE_BACKENDS if provision_all else None,
+        skip=render_skip if stealth else (),
     )
     for p in written:
         output.success(f"wrote {p.relative_to(target)}")
-    if local is not None:
+    if local is not None and not (stealth and OPENCODE_CONFIG_FILE in render_skip):
         # Pinned to opencode, or to `local`, its older name: either way the
         # served model is registered in opencode's file, and so is the
         # CodeGraph server opencode runs for the worker, unless the policy
@@ -1006,23 +1389,36 @@ def init(
         ):
             written.append(target / OPENCODE_CONFIG_FILE)
 
-    try:
-        gitignore_outcome = merge_gitignore(target, ctx)
-    except AgentFileError as exc:
-        output.error(
-            f".gitignore has a malformed ortus block: {exc}",
-            hint="repair the BEGIN/END markers by hand, then re-run ortus init",
+    if stealth:
+        output.progress("init", "applying managed agent-file blocks (stealth)")
+        _write_agent_files(target, resolved_codegraph, agent_redirects)
+        if claude_local and (provision_all or run_backend == "claude"):
+            _write_claude_local_settings(target)
+        _finish_stealth(
+            target,
+            exclude_patterns,
+            resolved_tracker_remote,
+            add_tracker_remote=tracker_remote is not None
+            and tracker_remote != recorded.get("tracker_remote"),
         )
-        raise typer.Exit(code=1)
-    if gitignore_outcome is BlockOutcome.AHEAD:
-        output.warn(".gitignore carries a section from a newer ortus; left untouched")
-    elif gitignore_outcome is BlockOutcome.UNCHANGED:
-        output.success(".gitignore ortus section already current")
     else:
-        output.success(f"{gitignore_outcome.value} .gitignore ortus section")
+        try:
+            gitignore_outcome = merge_gitignore(target, ctx)
+        except AgentFileError as exc:
+            output.error(
+                f".gitignore has a malformed ortus block: {exc}",
+                hint="repair the BEGIN/END markers by hand, then re-run ortus init",
+            )
+            raise typer.Exit(code=1)
+        if gitignore_outcome is BlockOutcome.AHEAD:
+            output.warn(".gitignore carries a section from a newer ortus; left untouched")
+        elif gitignore_outcome is BlockOutcome.UNCHANGED:
+            output.success(".gitignore ortus section already current")
+        else:
+            output.success(f"{gitignore_outcome.value} .gitignore ortus section")
 
-    output.progress("init", "applying managed AGENTS.md and CLAUDE.md blocks")
-    _write_agent_files(target, resolved_codegraph)
+        output.progress("init", "applying managed AGENTS.md and CLAUDE.md blocks")
+        _write_agent_files(target, resolved_codegraph)
 
     if local is not None:
         _probe_local_server(local)

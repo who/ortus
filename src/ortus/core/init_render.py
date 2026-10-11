@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Collection
 
 from jinja2 import Environment, StrictUndefined
 
@@ -153,6 +153,12 @@ class RenderContext:
     local_base_url: str = DEFAULT_LOCAL_BASE_URL
     local_model: str | None = None
     local_api_key_env: str | None = None
+    # Rendered into `.ortusrc` only when set, so a repository that never asked
+    # for stealth or a commit style gets the file it always got.
+    stealth: bool = False
+    commit_issue_ref: str | None = None
+    tracker_remote: str | None = None
+    stealth_extra_excludes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +174,10 @@ class RenderContext:
             "local_base_url": self.local_base_url,
             "local_model": self.local_model,
             "local_api_key_env": self.local_api_key_env,
+            "stealth": self.stealth,
+            "commit_issue_ref": self.commit_issue_ref,
+            "tracker_remote": self.tracker_remote,
+            "stealth_extra_excludes": list(self.stealth_extra_excludes),
         }
 
 
@@ -194,12 +204,15 @@ def render_all(
     target: Path,
     ctx: RenderContext,
     backends: tuple[str, ...] | None = None,
+    skip: Collection[str] = (),
 ) -> list[Path]:
     """Render every bundled template into `target`. Returns list of written paths.
 
     `backends` widens the backend-config slot to several backends at once
     (`ortus init --backend all`); the shared files still render from `ctx`,
-    whose `backend` is the concrete run backend `.ortusrc` pins.
+    whose `backend` is the concrete run backend `.ortusrc` pins. `skip` names
+    relative paths left unwritten, which a stealth init uses for a config
+    file upstream already tracks.
     """
     written: list[Path] = []
     selected = backends if backends is not None else (ctx.backend,)
@@ -216,7 +229,7 @@ def render_all(
                 if name == ".claude/settings.json"
                 else (name,)
             )
-            if rendered not in MERGED_CONFIGS
+            if rendered not in MERGED_CONFIGS and rendered not in skip
         )
     )
     for name in names:

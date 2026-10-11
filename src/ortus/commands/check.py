@@ -83,6 +83,7 @@ from ortus.core.prompts import (
     resolve_prompt,
 )
 from ortus.core.readiness import READINESS_MEMORY_KEY, readiness_memory_command
+from ortus.core.stealth import AGENT_FILE_REDIRECTS, TRACKED_IGNORE_SOURCES, is_stealth
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -217,6 +218,10 @@ def check_tracker_hooks(repo: Path) -> CheckResult:
     not a checkout passes, because there is no hook it could have had.
     """
     name = "tracker git hooks"
+    if is_stealth(repo):
+        # Stealth keeps the tracker's hooks out of git on purpose: they would
+        # run from an excluded `.beads/hooks/` that no clone of the fork has.
+        return CheckResult(name, True, "disabled (stealth)", level="info")
     git = GitClient(repo=repo)
     try:
         checkout = git.is_git_repo()
@@ -954,12 +959,21 @@ def check_agent_file(repo: Path, managed: ManagedFile) -> CheckResult:
     contract nobody refreshed.
     """
     name = managed.filename
-    ignored = gitignore_match(repo, name)
+    stealth = is_stealth(repo)
+    # Stealth wants agent files in `.git/info/exclude`, so only the tracked
+    # `.gitignore` can still disqualify one there. A block init redirected
+    # because upstream tracks the usual file is read from the redirect.
+    ignored = gitignore_match(
+        repo, name, sources=TRACKED_IGNORE_SOURCES if stealth else None
+    )
     if ignored is not None:
         return CheckResult(
             name, False, f"gitignored by {ignored!r} — ortus manages it as tracked source"
         )
     path = repo / name
+    redirect = AGENT_FILE_REDIRECTS.get(name)
+    if stealth and redirect is not None and (repo / redirect).is_file():
+        name, path = redirect, repo / redirect
     if not path.is_file():
         return CheckResult(name, False, f"missing at {path} — run `ortus init --force`")
     try:

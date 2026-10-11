@@ -158,8 +158,43 @@ def _load_toml(path: Path) -> dict[str, Any]:
 
 
 # The init facts `ortus init` records into a project `.ortusrc` and must
-# preserve on a forced re-init.
-RECORDED_INIT_KEYS: tuple[str, ...] = ("prefix", "project_type", "backend", "codegraph")
+# preserve on a forced re-init. Every one is a string except `stealth`, a bool,
+# and `stealth_extra_excludes`, a list of exclude patterns. A non-stealth init
+# writes neither. The extras are a top-level key rather than a `[stealth]`
+# table because TOML cannot hold a `stealth` bool and a `stealth` table at once.
+RECORDED_INIT_KEYS: tuple[str, ...] = (
+    "prefix",
+    "project_type",
+    "backend",
+    "codegraph",
+    "stealth",
+    "commit_issue_ref",
+    "tracker_remote",
+    "stealth_extra_excludes",
+)
+
+#: How a commit names the bd issue it lands: not at all, in a trailer, or as
+#: the `<issue-id>: ` subject prefix grind has always written.
+COMMIT_ISSUE_REF_CHOICES: tuple[str, ...] = ("none", "trailer", "subject")
+
+
+def resolve_commit_issue_ref(config: Any, stealth: bool) -> str:
+    """The commit issue-reference style for a repository.
+
+    An explicit `commit_issue_ref` wins. Otherwise a stealth repository names
+    no issue at all, because an upstream maintainer has no use for an id from
+    a tracker they cannot see, and every other repository keeps the subject
+    prefix. `config` is a `Config` or any mapping with a `get`.
+    """
+    value = config.get("commit_issue_ref")
+    if value is None:
+        return "none" if stealth else "subject"
+    if value not in COMMIT_ISSUE_REF_CHOICES:
+        raise ValueError(
+            f"commit_issue_ref = {value!r} is not recognized; "
+            f"choices: {', '.join(COMMIT_ISSUE_REF_CHOICES)}"
+        )
+    return value
 
 
 def read_recorded_facts(repo: Path) -> dict[str, Any]:
@@ -191,6 +226,7 @@ def read_recorded_local(repo: Path) -> dict[str, Any]:
         return {}
     table = _load_toml(path).get("local")
     return dict(table) if isinstance(table, dict) else {}
+
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:

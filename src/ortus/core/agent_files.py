@@ -386,18 +386,22 @@ def _apply_block(
 _IGNORE_SOURCES = (Path(".git") / "info" / "exclude", Path(".gitignore"))
 
 
-def gitignore_match(repo: Path, name: str) -> str | None:
+def gitignore_match(
+    repo: Path, name: str, *, sources: Sequence[Path] | None = None
+) -> str | None:
     """The last ignore pattern that would exclude top-level `name`, if any.
 
     Deliberately a small matcher over the repo's own ignore files rather than
     a `git check-ignore` subprocess: `ortus check` is strictly read-only and
     must not spawn processes, and the patterns that matter here — `AGENTS.md`,
     `/AGENTS.md`, `*.md`, and their `!` negations — are exactly what a repo
-    reaches for when it decides an agent file is generated scratch.
+    reaches for when it decides an agent file is generated scratch. `sources`
+    narrows the files consulted, relative to `repo`; the default reads both
+    `.git/info/exclude` and `.gitignore`.
     """
 
     verdict: str | None = None
-    for relative in _IGNORE_SOURCES:
+    for relative in _IGNORE_SOURCES if sources is None else sources:
         source = repo / relative
         if not source.is_file():
             continue
