@@ -86,6 +86,10 @@ def _make_fork(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # conftest points GIT_CONFIG_GLOBAL at one shared empty file, and it wins
+    # over HOME, so `config --global` below would leak this identity into
+    # every later test in the worker. Point it at this fork's own home.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
     # The hooks a stealth init installs exec `ortus`, so the interpreter's own
     # bin directory has to be on PATH for a push to reach the guard.
     monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
