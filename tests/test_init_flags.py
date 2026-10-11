@@ -354,10 +354,13 @@ def test_help_advertises_new_flags() -> None:
     # through flag names in option tables, which otherwise break the literal
     # substring assertions below in CI's terminal.
     result = runner.invoke(
-        app, ["init", "--help"], env={"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "240"}
+        app, ["init", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
     )
     assert result.exit_code == 0
-    out = result.stdout
+    # Typer forces a Rich terminal under GITHUB_ACTIONS, which pins help to 80
+    # columns and ignores COLUMNS, so phrases wrap across table rows. Drop the
+    # box borders and collapse whitespace before matching phrases.
+    out = " ".join(result.stdout.replace("\u2502", " ").split())
     assert "--package-manager" in out
     assert "--framework" in out
     assert "--linter" in out
@@ -368,7 +371,7 @@ def test_help_advertises_new_flags() -> None:
 
 def test_help_advertises_local_flags() -> None:
     result = runner.invoke(
-        app, ["init", "--help"], env={"NO_COLOR": "1", "TERM": "dumb", "COLUMNS": "240"}
+        app, ["init", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"}
     )
     assert result.exit_code == 0
     out = result.stdout
