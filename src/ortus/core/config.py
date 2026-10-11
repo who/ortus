@@ -12,13 +12,13 @@ are silently skipped.
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ortus.core.grind_loop import DEFAULT_INTEGRATION_BRANCH
-from ortus.core.judge import parse_judge_config
 from ortus.core.local_backend import LOCAL_TABLE_BACKENDS, parse_local_table
 from ortus.core.profiles import (
     BACKEND_NAMES_PROSE,
@@ -43,13 +43,6 @@ DEFAULT_CODEGRAPH_MODE = "required"
 
 # Seconds. Used when `.ortusrc` omits `merge_gate_timeout`.
 DEFAULT_MERGE_GATE_TIMEOUT = 1800
-
-# The looping-worker signal's mode and cadence when `.ortusrc` omits them.
-# Spelled here rather than imported so loading a config does not pull the judge
-# transport in; `tests/test_judge_progress.py` pins both against the module
-# that owns the vocabulary.
-DEFAULT_PROGRESS_MODE = "shadow"
-DEFAULT_PROGRESS_INTERVAL = 300
 
 # The bar `ortus grind` holds each issue to before the worker may session-close
 # it. `full` is the issue's criterion-check commands; `prototype` is the
@@ -110,25 +103,6 @@ DEFAULTS: dict[str, Any] = {
     # still compose, and `ORTUS_STABLE_PREFIX=0` restores the legacy one for a
     # single run without editing a tracked file.
     "stable_prompt_prefix": True,
-    # Whether the judge's probability vectors pick the implementation model and
-    # reasoning effort for the claimed bead, instead of every worker inheriting
-    # the pinned `[profiles.<backend>.implement]` values. On by default since
-    # the hello-world comparison adopted the routed arm: it held the control's
-    # close rate while spending 1.1181 against 1.6794 per closed bead. Turning
-    # it on costs an unjudged run nothing, because a bead whose vectors never
-    # arrived still resolves the pinned profile, and `ORTUS_JEV_ROUTER=0`
-    # forces it off for one run without editing a tracked file.
-    "jev_model_router": True,
-    # How much the looping-worker signal may do: `off` is today's reaper,
-    # `shadow` records the decision it would have taken, `enforce` lets it end
-    # a looping worker before the watchdog does. Shadow by default so the
-    # signal is measured before it acts, and `ORTUS_JEV_PROGRESS` flips one run
-    # without editing a tracked file. The checks also need
-    # `judge.include_log_tail`, which is what sends a worker's log text.
-    "jev_progress_reaper": DEFAULT_PROGRESS_MODE,
-    # Seconds between those checks. Long enough that a slow-but-working step is
-    # not read as a loop, short enough to save most of a worker timeout.
-    "jev_progress_interval_s": DEFAULT_PROGRESS_INTERVAL,
     # Branch `grind` pins the working tree to and re-asserts each iteration.
     # "main" fits a fresh `ortus init`; a repo whose default branch is named
     # something else (e.g. "master") pins it here instead of passing
@@ -277,47 +251,6 @@ def _validate_stable_prompt_prefix(values: dict[str, Any]) -> None:
         )
 
 
-def _validate_jev_model_router(values: dict[str, Any]) -> None:
-    """Reject a `jev_model_router` value that is not a boolean.
-
-    The key decides whether a bead's implementation model and effort come from
-    the judge's vectors or from the pinned profile, and the A/B it exists for
-    compares cost per closed bead between those two arms. A string that merely
-    looks true would resolve to the pinned arm and spoil the comparison
-    silently, so it fails here instead.
-    """
-    value = values.get("jev_model_router", False)
-    if not isinstance(value, bool):
-        raise ProfileError(
-            f"invalid jev_model_router {value!r}; expected true or false"
-        )
-
-
-def _validate_jev_progress(values: dict[str, Any]) -> None:
-    """Reject a progress-reaper mode or interval the run could not honor.
-
-    The mode decides whether a probability may end a live worker, so a value
-    that merely looks like a mode fails here rather than resolving to shadow
-    and leaving an operator who asked for enforcement without it. The interval
-    is a cadence in seconds: zero or negative would ask Jev about every poll.
-    """
-    from ortus.core.judge_progress import ProgressMode
-
-    mode = values.get("jev_progress_reaper", DEFAULT_PROGRESS_MODE)
-    try:
-        ProgressMode(mode)
-    except (ValueError, TypeError):
-        raise ProfileError(
-            f"invalid jev_progress_reaper {mode!r}; expected "
-            + ", ".join(item.value for item in ProgressMode)
-        ) from None
-    interval = values.get("jev_progress_interval_s", DEFAULT_PROGRESS_INTERVAL)
-    if type(interval) not in (int, float) or interval <= 0:
-        raise ProfileError(
-            f"invalid jev_progress_interval_s {interval!r}; expected seconds > 0"
-        )
-
-
 def _validate_profiles(values: dict[str, Any]) -> None:
     profiles = values.get("profiles", {})
     if not isinstance(profiles, dict):
@@ -368,6 +301,54 @@ def _validate_local(values: dict[str, Any]) -> None:
     parse_local_table(table)
 
 
+# Jev, the TypeSafe judge, is gone from Ortus, but other repositories still pin
+# its `[judge]` table and `jev_*` keys and must keep loading. This shim is the
+# one place in `src/` allowed to name that config, and only to drop it before
+# validation and say so once on stderr.
+LEGACY_JUDGE_TABLE = "judge"
+LEGACY_JEV_KEY_PREFIX = "jev_"
+LEGACY_ENV_PREFIXES: tuple[str, ...] = ("ORTUS_JUDGE_", "ORTUS_JEV_")
+_legacy_judge_warned = False
+
+
+def _drop_legacy_judge(values: dict[str, Any], source: Path) -> list[str]:
+    """Pop a `[judge]` table and every `jev_*` key from one config layer.
+
+    Returns one description naming the file and the keys it dropped, or an
+    empty list when the layer carried none. Never raises: a legacy key in some
+    other bot's `.ortusrc` must not turn into a config error.
+    """
+    dropped: list[str] = []
+    if LEGACY_JUDGE_TABLE in values:
+        values.pop(LEGACY_JUDGE_TABLE)
+        dropped.append(f"[{LEGACY_JUDGE_TABLE}]")
+    for key in sorted(k for k in values if k.startswith(LEGACY_JEV_KEY_PREFIX)):
+        values.pop(key)
+        dropped.append(key)
+    return [f"{source}: {', '.join(dropped)}"] if dropped else []
+
+
+def _warn_legacy_judge(ignored: list[str]) -> None:
+    """Name the dropped keys and any legacy env vars once per process."""
+    global _legacy_judge_warned
+    env = sorted(
+        name for name in os.environ if name.startswith(LEGACY_ENV_PREFIXES)
+    )
+    if _legacy_judge_warned or not (ignored or env):
+        return
+    _legacy_judge_warned = True
+    from ortus import __version__
+    from ortus.core.output import warn
+
+    parts = list(ignored)
+    if env:
+        parts.append(f"env {', '.join(env)}")
+    warn(
+        f"ignoring legacy Jev config (removed in {__version__}): "
+        + "; ".join(parts)
+    )
+
+
 def load_config(
     *,
     repo: Path | None = None,
@@ -377,12 +358,14 @@ def load_config(
     if home is None:
         home = Path.home()
     cfg = Config()
+    ignored: list[str] = []
     cfg.values.update(DEFAULTS)
     cfg.layers.append(LoadedLayer("defaults", None, dict(DEFAULTS)))
 
     user_path = home / ".ortusrc"
     if user_path.is_file():
         data = _load_toml(user_path)
+        ignored.extend(_drop_legacy_judge(data, user_path))
         _merge(cfg.values, data)
         cfg.layers.append(LoadedLayer("user", user_path, data))
 
@@ -390,6 +373,7 @@ def load_config(
         project_path = repo / ".ortusrc"
         if project_path.is_file():
             data = _load_toml(project_path)
+            ignored.extend(_drop_legacy_judge(data, project_path))
             _merge(cfg.values, data)
             cfg.layers.append(LoadedLayer("project", project_path, data))
 
@@ -397,9 +381,7 @@ def load_config(
     _validate_verification(cfg.values)
     _validate_prompt_audit(cfg.values)
     _validate_stable_prompt_prefix(cfg.values)
-    _validate_jev_model_router(cfg.values)
-    _validate_jev_progress(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
-    parse_judge_config(cfg, environ={})
+    _warn_legacy_judge(ignored)
     return cfg

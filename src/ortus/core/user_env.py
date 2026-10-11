@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 from pathlib import Path
-from typing import Mapping
 
 from ortus.core.output import warn
 
@@ -35,10 +34,3 @@ def load_user_ortus_env(home: Path | None = None) -> None:
         if not os.environ.get(key):
             os.environ[key] = value
 
-
-def judge_environment(environ: Mapping[str, str] | None = None) -> Mapping[str, str]:
-    """Explicit environments remain isolated from the operator's defaults."""
-    if environ is not None:
-        return environ
-    load_user_ortus_env()
-    return os.environ

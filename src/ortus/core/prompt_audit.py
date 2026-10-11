@@ -103,24 +103,10 @@ class MovedRule:
 #: the legacy bundle, and every entry point resolves — `check_worker_prompt`
 #: and the flag's tests both hold that.
 #: An entry point here is the one thing that holds its rule, never a broader
-#: judgement the rule happens to fall under. The wrapped-`bd` rule was
-#: unowned for a while because it had been claimed by the pre-tool hook as a
-#: whole, which refused every compound shell line and then stopped doing so;
-#: it is named below by the check written for it alone, which cannot lapse
-#: that quietly.
+#: judgement the rule happens to fall under. The wrapped-`bd` rule is not
+#: here: the pre-tool hook that once held it is gone, so the audited worker
+#: prompt states it again.
 MOVED_RULES: tuple[MovedRule, ...] = (
-    MovedRule(
-        rule=(
-            "a bd invocation is the whole command, never a stage of a "
-            "pipeline, a segment of a compound line, or an argument handed to "
-            "another program"
-        ),
-        legacy_phrase=(
-            "Never wrap `bd` in a pipe, `xargs`, `&&`, `;`, or `bash -c`."
-        ),
-        entry_point="ortus.core.judge_tools:wrapped_bd_reason",
-        kind="hook",
-    ),
     MovedRule(
         rule=(
             "a queue orchestrator started from inside a worker session cannot "

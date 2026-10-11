@@ -21,14 +21,13 @@ RALPH_PROMPT = REPO_ROOT / "ortus" / "prompts" / "ralph-prompt.md"
 
 
 def test_bound_goal_checks_owner_status_human_and_skips_selection():
-    from ortus.core.judge_claim import BOUND_SELECTION_RULE
     from ortus.core.prompts import bundled_prompt_text
 
     text = bundled_prompt_text("goal-prompt")
-    assert BOUND_SELECTION_RULE in text
-    assert "assignee matches BEADS_ACTOR" in BOUND_SELECTION_RULE
-    assert "multiple non-human in_progress" in BOUND_SELECTION_RULE
-    assert "skip bd ready and claiming" in BOUND_SELECTION_RULE
+    assert "When a Bound issue contract v1 is injected" in text
+    assert "assignee matches BEADS_ACTOR" in text
+    assert "multiple non-human in_progress" in text
+    assert "skip bd ready and claiming" in text
 
 
 def test_ungated_prompt_bytes_unchanged():
