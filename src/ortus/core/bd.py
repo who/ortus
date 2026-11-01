@@ -198,14 +198,23 @@ def scrub_protected_terms(text: str, terms: Sequence[str]) -> str:
     )
 
 
+#: The provenance tail Dream appends to a memory body it drafted. It names the
+#: decision bead for the operator; a worker has no use for it, so it is cut
+#: before the clip rather than spending lesson characters.
+SRC_TAIL = re.compile(r"\s*\[src:[^\]\s]+\]\s*$")
+
+
 def _clip_lesson(text: str, max_chars: int) -> str:
     """Collapse a lesson body to one line and truncate on a word boundary.
 
-    Collapsing removes every newline, so a lesson carrying phase-contract
-    delimiters (`## ...` headings) can never open a section of its own once
-    composed. Truncation is marked with `[…]` rather than silent, and falls
-    back to a hard cut only when the first word alone exceeds the bound.
+    A trailing ``[src:<id>]`` provenance tail is removed first; the same
+    token anywhere else in the body is kept. Collapsing removes every
+    newline, so a lesson carrying phase-contract delimiters (`## ...`
+    headings) can never open a section of its own once composed. Truncation
+    is marked with `[…]` rather than silent, and falls back to a hard cut
+    only when the first word alone exceeds the bound.
     """
+    text = SRC_TAIL.sub("", text)
     flat = " ".join(text.split())
     if len(flat) <= max_chars:
         return flat

@@ -491,6 +491,34 @@ def test_lessons_are_bounded() -> None:
     assert len(section) < 1_200
 
 
+def test_src_tail_is_stripped_before_clipping() -> None:
+    """A Dream provenance tail costs none of the lesson budget: a body that
+    fits on its own comes through whole, without the tail."""
+    from ortus.commands.grind import _LESSON_MAX_CHARS
+    from ortus.core.bd import select_lessons
+
+    body = ("x" * 9 + " ") * 21 + "y" * 4
+    assert len(body) == 214
+    selected = select_lessons(
+        {"a-lesson": f"{body} [src:ortus-abcd]\n"},
+        limit=1,
+        max_chars=_LESSON_MAX_CHARS,
+    )
+    assert selected == (("a-lesson", body),)
+
+
+def test_mid_body_src_text_is_kept() -> None:
+    """Only a trailing tail is provenance; `[src:` text mid-body is content."""
+    from ortus.core.bd import select_lessons
+
+    selected = select_lessons(
+        {"a-lesson": "see [src:ortus-abcd] for the decision"},
+        limit=1,
+        max_chars=220,
+    )
+    assert selected == (("a-lesson", "see [src:ortus-abcd] for the decision"),)
+
+
 def test_lessons_are_labelled_as_priors() -> None:
     """AC-3: the contract labels lessons as prior lessons, not instructions."""
     section = _lessons_text({"a-lesson": "look at the sandbox first"})
