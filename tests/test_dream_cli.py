@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import dream as dream_module
-from ortus.commands.dream import NOTES_DIR, READER_STUB_MESSAGE, reader_key
+from ortus.commands.dream import NOTES_DIR, ORCHESTRATOR_STUB_MESSAGE, reader_key
 from ortus.core.config import load_config
 from ortus.core.dream_transcripts import window_key
 from ortus.core.grind_logic import grind_flock
@@ -197,11 +197,42 @@ def test_refuse_over_budget_in_a_real_run(repo: Path) -> None:
     assert summary["over_budget"] is True
 
 
-def test_real_run_stops_at_the_reader_stub(repo: Path) -> None:
+def test_real_run_stops_at_the_orchestrator_stub(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Reader:
+        def run(self, prompt, *, log_path, **kwargs):
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": 'ORTUS_DREAM_WINDOW: {"outcome": "ok", "notes": 0}',
+                                }
+                            ]
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        def preflight_readonly(self, repo, **kwargs):
+            return None
+
+    monkeypatch.setattr(dream_module, "make_runner", lambda backend, repo=None: Reader())
+    monkeypatch.setattr(
+        dream_module, "load_bead_header", lambda bd, bead: f"[bead {bead}]\n[/bead]"
+    )
     result = runner.invoke(app, ["dream", str(repo)])
 
     assert result.exit_code == 1
-    assert READER_STUB_MESSAGE in result.output
+    assert ORCHESTRATOR_STUB_MESSAGE in result.output
+    assert len(list((repo / NOTES_DIR).glob("*.json"))) == 2
 
 
 def test_real_run_with_no_logs_exits_nothing(repo: Path) -> None:

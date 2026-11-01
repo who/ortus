@@ -3,9 +3,10 @@
 Dream reads finished grind logs out of band. This module owns the first two
 stages: every window of every grind log is prepared (and cached), the windows
 that still need a reader are selected newest first under the caps, and the
-token cost of reading them is estimated before any model is called. The
-reader and orchestrator stages are later work; until they exist a real run
-stops after preparation and only `--dry-run` reports.
+token cost of reading them is estimated before any model is called. A real
+run then hands each candidate to a read-only reader (`dream_readers`) and
+caches its notes; the orchestrator stage is later work, so until it exists
+a real run stops after the readers.
 
 The verb holds the grind flock for the whole run, so Dream never reads a log
 a live grind is still writing, and it writes nothing outside `.ortus/dream/`.
@@ -24,14 +25,17 @@ from typing import Any, Optional
 import typer
 
 from ortus.core import output
-from ortus.core.agent import BackendError, resolve_backend
+from ortus.core.agent import BackendError, make_runner, resolve_backend
+from ortus.core.bd import BdClient
 from ortus.core.config import DREAM_SINCE, dream_settings, load_config
 from ortus.core.cost import find_grind_logs
+from ortus.core.dream_readers import BYTES_PER_TOKEN, DreamReaderError, run_readers
 from ortus.core.dream_transcripts import (
     CACHE_DIR,
     DreamCacheNotIgnored,
     PreparedWindow,
     ensure_cache_ignored,
+    load_bead_header,
     load_or_prepare,
     render_window,
     split_windows,
@@ -49,8 +53,6 @@ READER_VERSION = 1
 #: Where reader notes are cached, one file per window and reader key.
 NOTES_DIR = CACHE_DIR / "notes"
 
-#: Bytes per token in every Dream estimate: coarse, and the same everywhere.
-BYTES_PER_TOKEN = 3.5
 
 #: Fixed orchestrator overhead on top of its notes: brief, memories, decisions.
 ORCHESTRATOR_OVERHEAD_TOKENS = 20_000
@@ -60,7 +62,7 @@ EXIT_ERROR = 1
 EXIT_REFUSED = 2
 EXIT_NOTHING = 3
 
-READER_STUB_MESSAGE = "ortus dream: reader stage not built yet; use --dry-run"
+ORCHESTRATOR_STUB_MESSAGE = "ortus dream: orchestrator stage not built yet"
 
 
 def reader_key(backend: str, profile: AgentProfile, brief_text: str) -> str:
@@ -398,7 +400,26 @@ def dream(
                     "or raise --budget-tokens",
                 )
                 raise typer.Exit(code=EXIT_REFUSED)
-            output.error(READER_STUB_MESSAGE)
+            try:
+                runner = make_runner(backend_name, repo=target)
+                bd = BdClient(repo=target)
+                run_readers(
+                    selection.candidates,
+                    runner=runner,
+                    repo=target,
+                    header_for=lambda bead_id: load_bead_header(bd, bead_id),
+                    brief=brief,
+                    key=key,
+                    backend=backend_name,
+                    profile=reader,
+                    chunk_tokens=settings["reader_chunk_tokens"],
+                    cut_bytes=settings["cut_bytes"],
+                    notes_path_for=lambda item: notes_path(target, item, key),
+                )
+            except (BackendError, DreamReaderError, OSError) as exc:
+                output.error(str(exc))
+                raise typer.Exit(code=EXIT_ERROR) from exc
+            output.error(ORCHESTRATOR_STUB_MESSAGE)
             raise typer.Exit(code=EXIT_ERROR)
     except FlockBusy as exc:
         output.error(
