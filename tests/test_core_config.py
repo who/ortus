@@ -11,6 +11,8 @@ from ortus.core.config import (
     DEFAULT_MERGE_GATE_TIMEOUT,
     DEFAULT_VERIFICATION_MODE,
     DEFAULTS,
+    DREAM_DEFAULTS,
+    dream_settings,
     load_config,
     read_recorded_local,
 )
@@ -465,3 +467,35 @@ def test_stable_prompt_prefix_default_is_on(tmp_path: Path) -> None:
     assert DEFAULTS["stable_prompt_prefix"] is True
     assert cfg.get("stable_prompt_prefix") is True
 
+
+
+@pytest.mark.parametrize(
+    "toml, message",
+    [
+        ("[dream]\nmax_bead = 3\n", "max_bead"),
+        ("[dream]\nmin_beads = 1\n", "dream.min_beads"),
+        ("[dream]\ncut_bytes = 512\n", "dream.cut_bytes"),
+        ("[dream]\nbudget_tokens = true\n", "dream.budget_tokens"),
+        ('[dream]\nreader_chunk_tokens = "big"\n', "dream.reader_chunk_tokens"),
+        ('[dream]\nsince = "2w"\n', "dream.since"),
+        ('dream = "on"\n', "dream configuration"),
+    ],
+)
+def test_dream_table_rejects_bad_values(tmp_path: Path, toml: str, message: str) -> None:
+    _write_toml(tmp_path / ".ortusrc", toml)
+    with pytest.raises(ProfileError, match=message):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_dream_table_overrides_defaults(tmp_path: Path) -> None:
+    _write_toml(
+        tmp_path / ".ortusrc",
+        '[dream]\nmax_beads = 5\nsince = "7d"\norchestrator_max_tokens = 1000\n',
+    )
+    settings = dream_settings(load_config(repo=tmp_path, home=tmp_path / "home"))
+
+    assert settings["max_beads"] == 5
+    assert settings["since"] == "7d"
+    assert settings["orchestrator_max_tokens"] == 1000
+    assert settings["budget_tokens"] == DREAM_DEFAULTS["budget_tokens"]
+    assert dream_settings(load_config(repo=tmp_path / "none", home=tmp_path / "home")) == DREAM_DEFAULTS

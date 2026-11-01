@@ -13,6 +13,7 @@ are silently skipped.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -324,6 +325,70 @@ def _validate_profiles(values: dict[str, Any]) -> None:
             )
 
 
+#: Built-in values for the `[dream]` table, the layer under it and the CLI.
+#: Kept apart from DEFAULTS so a project's `[dream]` table merges into a copy
+#: rather than into this shared dict.
+DREAM_DEFAULTS: dict[str, Any] = {
+    "max_beads": 40,
+    "budget_tokens": 1_500_000,
+    "min_beads": 2,
+    "cut_bytes": 8192,
+    "reader_chunk_tokens": 100_000,
+    "orchestrator_max_tokens": 400_000,
+    "since": None,
+}
+
+#: The smallest value each integer `[dream]` key accepts.
+DREAM_INT_MINIMUMS: dict[str, int] = {
+    "max_beads": 1,
+    "budget_tokens": 1,
+    "min_beads": 2,
+    "cut_bytes": 1024,
+    "reader_chunk_tokens": 1000,
+    "orchestrator_max_tokens": 1000,
+}
+
+#: `since` is an age: a count of days or hours, compared to a log's mtime.
+DREAM_SINCE = re.compile(r"^\d+[dh]$")
+
+
+def _validate_dream(values: dict[str, Any]) -> None:
+    """Reject a malformed `[dream]` table, naming the key at fault.
+
+    Every key is optional; an unknown one fails rather than being ignored, so
+    a misspelt cap cannot silently leave Dream running on the default.
+    """
+    table = values.get("dream")
+    if table is None:
+        return
+    if not isinstance(table, dict):
+        raise ProfileError("invalid dream configuration: expected a TOML table")
+    unknown = set(table) - set(DREAM_DEFAULTS)
+    if unknown:
+        raise ProfileError(
+            f"invalid [dream] field(s): {', '.join(sorted(unknown))}; expected "
+            + ", ".join(DREAM_DEFAULTS)
+        )
+    for key, minimum in DREAM_INT_MINIMUMS.items():
+        if key not in table:
+            continue
+        value = table[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ProfileError(
+                f"invalid dream.{key} {value!r}; expected an integer >= {minimum}"
+            )
+    since = table.get("since")
+    if since is not None and (not isinstance(since, str) or not DREAM_SINCE.match(since)):
+        raise ProfileError(
+            f"invalid dream.since {since!r}; expected <N>d or <N>h, e.g. \"7d\""
+        )
+
+
+def dream_settings(config: Config) -> dict[str, Any]:
+    """The `[dream]` table over its built-in defaults."""
+    return {**DREAM_DEFAULTS, **config.values.get("dream", {})}
+
+
 def _validate_local(values: dict[str, Any]) -> None:
     """Reject a malformed `[local]` table, or a missing one under a backend that needs it.
 
@@ -419,5 +484,6 @@ def load_config(
     _validate_stable_prompt_prefix(cfg.values)
     _validate_profiles(cfg.values)
     _validate_local(cfg.values)
+    _validate_dream(cfg.values)
     _warn_legacy_judge(ignored)
     return cfg

@@ -7,6 +7,7 @@ import typer
 from ortus.commands.check import check
 from ortus.commands.cost import cost
 from ortus.commands.dashboard import dashboard
+from ortus.commands.dream import dream
 from ortus.commands.eval import evaluate
 from ortus.commands.export import export
 from ortus.commands.grind import grind
@@ -109,6 +110,10 @@ app.command(
     name="export",
     help="Refresh the tracked beads export, scrubbed of this clone's protected terms.",
 )(export)
+app.command(
+    name="dream",
+    help="Propose bd memory changes from finished grind logs; --dry-run to estimate.",
+)(dream)
 app.add_typer(prompt_app, name="prompt")
 # Hook plumbing for stealth repositories, not a verb an operator types.
 app.add_typer(guard_app, name="guard", hidden=True)

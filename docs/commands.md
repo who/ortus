@@ -117,6 +117,23 @@ Report per-bead token cost by billing bucket from grind logs. `--log`,
 Run the frozen evaluation set's recipe, or report what it produced. `--matrix`,
 `--run`, `--backend`, `--cell-timeout`, `--json`. See [cost](cost.md).
 
+## Curating memory
+
+### `ortus dream <repo>`
+
+Propose `bd remember` / `bd forget` lines from finished grind logs, filed as
+one decision bead for a human. Read-only toward bd and git; it writes only the
+`.ortus/dream/` caches, which must be git-ignored, and refuses while a grind
+holds the lock. `--since`, `--logs`, `--beads`, `--reader-model`,
+`--reader-reasoning-effort`, `--orchestrator-model`,
+`--orchestrator-reasoning-effort`, `--backend`, `--max-beads`,
+`--budget-tokens`, `--min-beads`, `--cut-bytes`, `--dry-run`, `--no-file`,
+`--reread`, `--json`. Defaults come from the `[dream]` table in `.ortusrc`.
+`--dry-run` prints windows found, windows needing a reader, reused notes,
+skipped windows, prepared size, chunk count, the token estimate and both
+resolved profiles without calling a model. Exit 0 ok, 1 error, 2 refused
+(lock held, cache not ignored, over budget), 3 nothing to propose.
+
 ## Prompt overrides
 
 ### `ortus prompt list [<repo>]`
