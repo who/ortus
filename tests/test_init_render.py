@@ -1017,3 +1017,25 @@ def test_rendered_ortusrc_names_the_verification_key() -> None:
     assert "full | prototype" in text
     assert "ortus grind --prototype" in text
     assert "verification" not in tomllib.loads(text)
+
+
+# ortus-5zs5 — a grind worker's forced push is refused by a PreToolUse hook,
+# with deny rules for the common spellings as defense in depth.
+def test_rendered_settings_guard_force_push() -> None:
+    data = json.loads(
+        render_template(".claude/settings.json", RenderContext(prefix="p", project_type="python"))
+    )
+    pre_tool = data["hooks"]["PreToolUse"]
+    assert {
+        "matcher": "Bash",
+        "hooks": [{"command": "ortus guard worker-bash", "type": "command"}],
+    } in pre_tool
+    deny = data["permissions"]["deny"]
+    for rule in (
+        "Bash(git push --force:*)",
+        "Bash(git push -f:*)",
+        "Bash(git push --force-with-lease:*)",
+        "Bash(git push origin +*)",
+    ):
+        assert rule in deny
+    assert "Bash(git commit --amend:*)" not in deny

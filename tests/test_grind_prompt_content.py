@@ -859,3 +859,20 @@ def test_worker_ingest_gate_owns_follow_up_filing() -> None:
             line for line in condition.splitlines() if gate in line
         )
         assert "follow-up bead" in follow_up
+
+
+def test_pushed_commit_is_final() -> None:
+    """ortus-5zs5: every goal-mode surface says a pushed commit is final."""
+    from ortus.commands.grind import _IMPLEMENTATION_INSTRUCTION, _implementation_instruction
+    from ortus.core.prompts import bundled_prompt_text
+    from ortus.core.prompt_audit import audited_goal_text
+
+    for text in (
+        _IMPLEMENTATION_INSTRUCTION,
+        _implementation_instruction("trailer", False),
+        _implementation_instruction("subject", True),
+    ):
+        assert "A pushed commit is final" in text
+        assert "force-push" in text
+    for text in (bundled_prompt_text("goal-prompt"), audited_goal_text()):
+        assert "A pushed commit is final" in text

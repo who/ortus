@@ -83,6 +83,7 @@ from ortus.core.readiness import (
 )
 from ortus.core.git import GitClient
 from ortus.core.stealth import ZERO_SHA, is_stealth, push_violations
+from ortus.core.worker_guard import GRIND_WORKER_ENV
 from ortus.core.grind_logic import (
     FlockBusy,
     build_condition,
@@ -269,9 +270,18 @@ _MESSAGE_RULES = message_rules("subject")
 #: The implementation phase rules injected ahead of the worker's condition.
 #: Module-level so the prompt-content tests can hold its message guidance to
 #: the same rule set the finalization gate enforces.
+#: A worker read "repaired in place" as leave to amend and force-push a
+#: commit already on origin; this says whose repair that is.
+_PUSHED_COMMIT_IS_FINAL = (
+    " A pushed commit is final: never amend it or force-push. If a pushed "
+    "commit breaks a message rule, leave it and say so in your answer; "
+    "'repaired in place' refers to Ortus's own merge step, not to you."
+)
+
 _IMPLEMENTATION_INSTRUCTION = (
     "Follow the one-issue goal-prompt loop. Session-close that id per "
     "AGENTS.md. " + _MESSAGE_RULES + " Do not pick a second issue."
+    + _PUSHED_COMMIT_IS_FINAL
 )
 
 #: The staging rule a stealth worker reads. Upstream must never see an Ortus
@@ -295,6 +305,7 @@ def _implementation_instruction(issue_ref: str, stealth: bool) -> str:
     instruction = (
         "Follow the one-issue goal-prompt loop. Session-close that id per "
         "AGENTS.md. " + message_rules(issue_ref) + " Do not pick a second issue."
+        + _PUSHED_COMMIT_IS_FINAL
     )
     if stealth:
         instruction += _STEALTH_STAGING_RULE
@@ -2110,6 +2121,9 @@ def grind(
             runner.extra_env.setdefault(
                 "BEADS_DIR", str((target / ".beads").resolve())
             )
+            # The worker's PreToolUse hook (`ortus guard worker-bash`) refuses a
+            # forced push or an amend of a pushed commit only inside a worker.
+            runner.extra_env[GRIND_WORKER_ENV] = "1"
             # A stealth tracker has no Dolt remote of its own, and bd would
             # otherwise adopt origin as one and push the tracker to the fork.
             if stealth:

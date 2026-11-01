@@ -1,13 +1,19 @@
-"""`ortus guard`: the checks the stealth git hooks run.
+"""`ortus guard`: the checks the stealth git hooks and worker hooks run.
 
 Plumbing for the `pre-push` and `pre-commit` hooks a stealth init installs,
 not a verb an operator types. Each subcommand prints every violation and
 exits 1, or exits 0 silently. Outside stealth both always exit 0, so a hook
 left behind in a repository that has dropped stealth blocks nothing.
+
+`worker-bash` is the Claude Code PreToolUse hook `ortus init` renders. It
+refuses a grind worker's forced push or amend of a pushed commit with exit 2,
+which Claude Code feeds back to the model, and allows everything outside a
+grind worker.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -15,10 +21,18 @@ from pathlib import Path
 import typer
 
 from ortus.core.stealth import is_stealth, push_violations, staged_gitignore_violation
+from ortus.core.worker_guard import (
+    ALLOW_FORCE_PUSH_ENV,
+    GRIND_WORKER_ENV,
+    bash_violation,
+)
 
 guard_app = typer.Typer(
     name="guard",
-    help="Stealth git-hook checks (run by the hooks ortus init --stealth installs).",
+    help=(
+        "Stealth git-hook checks and grind-worker command checks (run by the "
+        "hooks ortus init installs)."
+    ),
     no_args_is_help=True,
 )
 
@@ -62,3 +76,28 @@ def pre_commit() -> None:
     violation = staged_gitignore_violation(repo, os.environ)
     if violation:
         _refuse("commit", [violation])
+
+
+@guard_app.command("worker-bash")
+def worker_bash() -> None:
+    """Refuse a grind worker's forced push or amend of a pushed commit."""
+    if os.environ.get(GRIND_WORKER_ENV) != "1":
+        return
+    if os.environ.get(ALLOW_FORCE_PUSH_ENV) == "1":
+        return
+    try:
+        payload = json.loads(sys.stdin.read() or "null")
+    except ValueError:
+        return
+    if not isinstance(payload, dict) or payload.get("tool_name") != "Bash":
+        return
+    tool_input = payload.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return
+    cwd = payload.get("cwd")
+    repo = Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
+    violation = bash_violation(command, repo)
+    if violation:
+        typer.echo(f"ortus worker guard: {violation}", err=True)
+        raise typer.Exit(code=2)

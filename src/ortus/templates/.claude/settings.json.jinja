@@ -14,6 +14,10 @@
     "deny": [
       "Bash(sudo *)",
       "Bash(rm -rf *)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push origin +*)",
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(~/.ssh/**)",
@@ -50,6 +54,12 @@
     }
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [{"command": "ortus guard worker-bash", "type": "command"}],
+        "matcher": "Bash"
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [{"command": "bd prime", "type": "command"}],

@@ -212,7 +212,7 @@ def test_parse_eject_stamp_reads_only_the_first_line() -> None:
 # nothing, so the legacy bytes are pinned by digest: a change to either file
 # has to be deliberate enough to update the hash here.
 _LEGACY_GOAL_SHA256 = (
-    "d616293b6c768786eb46b13af1d1c7ad86b7efdf695bf166102c60dd7f5728d3"
+    "fc9c47f0e0faa3a715d8eb15ca23ea75798d9071c466198dc9989b09ba5bc7ec"
 )
 _LEGACY_WORK_ISSUE_SHA256 = (
     "41d84a253c7f87e39da860243a15e1dce9f6cd3481caecf2442ec92933fdb79d"
