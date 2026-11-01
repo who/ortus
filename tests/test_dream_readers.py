@@ -12,7 +12,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import dream as dream_module
-from ortus.commands.dream import NOTES_DIR, ORCHESTRATOR_STUB_MESSAGE
+from ortus.commands.dream import NOTES_DIR, VALIDATOR_STUB_MESSAGE
 from ortus.core.dream_readers import (
     INPUTS_DIR,
     DreamReaderError,
@@ -227,6 +227,7 @@ def _cli_runner(monkeypatch: pytest.MonkeyPatch, fake: FakeRunner) -> None:
     monkeypatch.setattr(
         dream_module, "load_bead_header", lambda bd, bead: f"[bead {bead}]\n[/bead]"
     )
+    monkeypatch.setattr(dream_module, "run_orchestrator", lambda **kwargs: None)
 
 
 def test_cache_reused_on_rerun_unless_reread(
@@ -237,16 +238,16 @@ def test_cache_reused_on_rerun_unless_reread(
 
     first = cli.invoke(app, ["dream", str(repo)])
     assert first.exit_code == 1
-    assert ORCHESTRATOR_STUB_MESSAGE in first.output
+    assert VALIDATOR_STUB_MESSAGE in first.output
     assert len(fake.calls) == 2
     assert len(list((repo / NOTES_DIR).glob("*.json"))) == 2
 
     second = cli.invoke(app, ["dream", str(repo)])
-    assert ORCHESTRATOR_STUB_MESSAGE in second.output
+    assert VALIDATOR_STUB_MESSAGE in second.output
     assert len(fake.calls) == 2
 
     third = cli.invoke(app, ["dream", str(repo), "--reread"])
-    assert ORCHESTRATOR_STUB_MESSAGE in third.output
+    assert VALIDATOR_STUB_MESSAGE in third.output
     assert len(fake.calls) == 4
 
 
