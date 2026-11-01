@@ -228,7 +228,7 @@ COST_ESTIMATED = "estimated"
 #: The revision of the price table below. Prices change, and a dollar figure
 #: weighted by a table that has since moved must stay readable as such, so the
 #: version travels with the report rather than living only in this file.
-PRICE_TABLE_VERSION = "2026-06-24"
+PRICE_TABLE_VERSION = "2026-10-31"
 
 
 @dataclass(frozen=True)
@@ -259,6 +259,7 @@ PRICES: dict[str, ModelPrice] = {
     "claude-opus-4-6": ModelPrice(5.0, 6.25, 10.0, 0.5, 25.0),
     "claude-sonnet-5": ModelPrice(2.0, 2.5, 4.0, 0.2, 10.0),
     "claude-sonnet-4-6": ModelPrice(3.0, 3.75, 6.0, 0.3, 15.0),
+    "claude-haiku-5-5": ModelPrice(0.10, 0.125, 0.20, 0.01, 0.50),
     "claude-haiku-4-5": ModelPrice(1.0, 1.25, 2.0, 0.1, 5.0),
 }
 

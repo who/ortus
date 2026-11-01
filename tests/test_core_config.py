@@ -19,7 +19,7 @@ from ortus.core.local_backend import (
     LocalConfig,
     load_local_config,
 )
-from ortus.core.profiles import Phase, ProfileError
+from ortus.core.profiles import Phase, ProfileError, resolve_dream_profile
 
 
 def _write_toml(p: Path, content: str) -> None:
@@ -186,8 +186,60 @@ def test_finalize_phase_profile_is_named_in_the_error_for_an_unknown_phase(
     tmp_path: Path,
 ) -> None:
     _write_toml(tmp_path / ".ortusrc", '[profiles.claude.ship]\nmodel = "x"\n')
-    with pytest.raises(ProfileError, match="expected plan, implement, verify, finalize"):
+    with pytest.raises(
+        ProfileError,
+        match="expected plan, implement, verify, finalize, dream_reader, "
+        "dream_orchestrator",
+    ):
         load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_dream_profiles_validate_and_override(tmp_path: Path) -> None:
+    """Both Dream tables load, resolve, and yield to a CLI field like any phase."""
+
+    _write_toml(
+        tmp_path / ".ortusrc",
+        '[profiles.claude.dream_reader]\nmodel = "sonnet"\nreasoning_effort = "low"\n'
+        '[profiles.codex.dream_orchestrator]\nmodel = "gpt-5.2-codex"\n',
+    )
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+
+    reader = cfg.resolve_profile("claude", Phase.DREAM_READER)
+    assert (reader.model, reader.reasoning_effort) == ("sonnet", "low")
+    assert (
+        cfg.resolve_profile("codex", Phase.DREAM_ORCHESTRATOR).model
+        == "gpt-5.2-codex"
+    )
+    overridden = resolve_dream_profile(
+        cfg, "claude", Phase.DREAM_READER, model="opus"
+    )
+    assert (overridden.model, overridden.reasoning_effort) == ("opus", "low")
+
+    _write_toml(
+        tmp_path / ".ortusrc",
+        '[profiles.codex.dream_reader]\nreasoning_effort = "max"\n',
+    )
+    with pytest.raises(ProfileError, match="profiles.codex.dream_reader"):
+        load_config(repo=tmp_path, home=tmp_path / "home")
+
+
+def test_dream_default_model_is_haiku_on_claude_only(tmp_path: Path) -> None:
+    _write_toml(
+        tmp_path / ".ortusrc",
+        '[profiles.claude.dream_orchestrator]\nreasoning_effort = "high"\n',
+    )
+    cfg = load_config(repo=tmp_path, home=tmp_path / "home")
+
+    for phase in (Phase.DREAM_READER, Phase.DREAM_ORCHESTRATOR):
+        assert resolve_dream_profile(cfg, "claude", phase).model == "claude-haiku-5-5"
+        for backend in ("codex", "grok", "local", "opencode"):
+            assert resolve_dream_profile(cfg, backend, phase).model is None
+    orchestrator = resolve_dream_profile(cfg, "claude", Phase.DREAM_ORCHESTRATOR)
+    assert orchestrator.reasoning_effort == "high"
+    # The default is Dream's alone: no other phase picks up a model.
+    assert cfg.resolve_profile("claude", Phase.IMPLEMENT).model is None
+    with pytest.raises(ProfileError, match="not a Dream phase"):
+        resolve_dream_profile(cfg, "claude", Phase.IMPLEMENT)
 
 
 @pytest.mark.parametrize(

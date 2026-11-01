@@ -693,6 +693,20 @@ def test_the_price_table_reads_a_context_marker_as_the_same_family() -> None:
     ) == pytest.approx(25.0)
 
 
+def test_haiku_5_5_is_priced() -> None:
+    price = model_price("claude-haiku-5-5")
+    assert price is not None
+    assert (
+        price.input_usd,
+        price.cache_write_5m_usd,
+        price.cache_write_1h_usd,
+        price.cache_read_usd,
+        price.output_usd,
+    ) == pytest.approx((0.10, 0.125, 0.20, 0.01, 0.50))
+    assert model_price("claude-haiku-5-5[1m]") == price
+    assert model_price("claude-haiku-4-5") != price
+
+
 def _plan_log(tmp_path: Path, *, cost: float = 1.5) -> Path:
     """One planning session: an agent stream with no harness markers at all."""
 

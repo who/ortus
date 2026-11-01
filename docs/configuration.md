@@ -32,6 +32,12 @@ reasoning_effort = "high"
 [profiles.claude.finalize]
 model = "haiku"
 
+[profiles.claude.dream_reader]
+reasoning_effort = "low"  # model left unset: Dream defaults to claude-haiku-5-5 on Claude
+
+[profiles.claude.dream_orchestrator]
+model = "sonnet"
+
 [profiles.codex.implement]
 model = "gpt-5.2-codex"
 reasoning_effort = "high"
@@ -181,6 +187,13 @@ Resolution is CLI phase override, then the matching project table, then the
 matching user table, then the provider default. Nested tables merge field by
 field, so a project can override only `model` while inheriting
 `reasoning_effort` from `~/.ortusrc`. Omitted fields add no backend CLI flags.
+
+`dream_reader` and `dream_orchestrator` configure the two `ortus dream` roles
+and validate exactly like the other tables. They are the first phases with a
+built-in model default: when the CLI, project and user layers name no model on
+the Claude backend, Dream runs on `claude-haiku-5-5`, keeping any configured
+`reasoning_effort`. A configured `model` always wins, and every other backend
+keeps its provider default.
 
 Under `opencode` (or `local`) the served model comes from `[local].model`, a
 profile `model` overrides it for that phase only, and `reasoning_effort` is
