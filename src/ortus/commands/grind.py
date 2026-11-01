@@ -34,11 +34,14 @@ New behavior:
 
 from __future__ import annotations
 
+import atexit
 import datetime as _dt
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -84,6 +87,7 @@ from ortus.core.readiness import (
 from ortus.core.git import GitClient
 from ortus.core.stealth import ZERO_SHA, is_stealth, push_violations
 from ortus.core.worker_guard import GRIND_WORKER_ENV
+from ortus.core.worker_path import python_target, with_python_shim
 from ortus.core.grind_logic import (
     FlockBusy,
     build_condition,
@@ -1572,6 +1576,31 @@ def _discard_leftover_journal(
     )
 
 
+def _install_python_shim(
+    env: dict[str, str], repo: Path, write_log: Callable[[str], None]
+) -> None:
+    """Give workers a `python` when their PATH resolves only `python3`.
+
+    Runs once per grind run. The shim lives in a temp directory outside the
+    repository that is removed when the process exits, and the shimmed PATH is
+    the one the pre-claim program check reads as well. A shim that cannot be
+    built is logged and skipped; it never stops the run.
+    """
+
+    worker_path = env.get("PATH") or os.environ.get("PATH", "")
+    target = python_target(repo, worker_path)
+    if target is None:
+        return
+    try:
+        shim_root = Path(tempfile.mkdtemp(prefix="ortus-pyshim-"))
+        atexit.register(shutil.rmtree, shim_root, ignore_errors=True)
+        env["PATH"] = with_python_shim(repo, worker_path, shim_root)
+    except OSError as exc:
+        write_log(f"worker PATH: python shim skipped ({exc})")
+        return
+    write_log(f"worker PATH: python -> {target} (shim)")
+
+
 def grind(
     repo: Optional[Path] = typer.Argument(
         None, help="Target repo directory. Defaults to $PWD; no walk-up."
@@ -2128,6 +2157,7 @@ def grind(
             # otherwise adopt origin as one and push the tracker to the fork.
             if stealth:
                 runner.extra_env.setdefault("BD_NO_REMOTE_ADOPT", "1")
+            _install_python_shim(runner.extra_env, target, write_log)
 
             def triage_park(issue_id: str, evidence: str) -> None:
                 """Release one bead that has just reached the human queue as a pin."""
