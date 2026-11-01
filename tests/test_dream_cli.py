@@ -13,12 +13,14 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import dream as dream_module
-from ortus.commands.dream import NOTES_DIR, REPORT_STUB_MESSAGE, reader_key
+from ortus.commands.dream import NOTES_DIR, reader_key
 from ortus.core.config import load_config
 from ortus.core.dream_transcripts import window_key
+from ortus.core.dream_validate import ValidationResult
 from ortus.core.grind_logic import grind_flock
 from ortus.core.profiles import Phase, resolve_dream_profile
 from ortus.core.prompts import resolve_named_prompt
+from tests.test_dream_report import FACTS
 
 FIXTURE = Path(__file__).parent / "fixtures" / "dream" / "grind-20261011-000000.log"
 
@@ -197,7 +199,7 @@ def test_refuse_over_budget_in_a_real_run(repo: Path) -> None:
     assert summary["over_budget"] is True
 
 
-def test_real_run_stops_at_the_report_stub(
+def test_real_run_with_nothing_validated_writes_the_report_and_exits_3(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class Reader:
@@ -229,12 +231,17 @@ def test_real_run_stops_at_the_report_stub(
         dream_module, "load_bead_header", lambda bd, bead: f"[bead {bead}]\n[/bead]"
     )
     monkeypatch.setattr(dream_module, "run_orchestrator", lambda **kwargs: None)
-    monkeypatch.setattr(dream_module, "validate_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dream_module,
+        "validate_run",
+        lambda *args, **kwargs: ValidationResult((), (), (), (), ()),
+    )
+    monkeypatch.setattr(dream_module, "run_facts", lambda *args, **kwargs: FACTS)
     result = runner.invoke(app, ["dream", str(repo)])
 
-    assert result.exit_code == 1
-    assert REPORT_STUB_MESSAGE in result.output
+    assert result.exit_code == 3, result.output
     assert len(list((repo / NOTES_DIR).glob("*.json"))) == 2
+    assert len(list((repo / "logs").glob("dream-*.md"))) == 1
 
 
 def test_real_run_with_no_logs_exits_nothing(repo: Path) -> None:

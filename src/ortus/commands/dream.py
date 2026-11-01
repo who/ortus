@@ -7,8 +7,8 @@ token cost of reading them is estimated before any model is called. A real
 run then hands each candidate to a read-only reader (`dream_readers`), caches
 its notes, and runs one read-only orchestrator (`dream_orchestrator`) over
 every cached note, memory and past decision. Code then validates what the
-orchestrator drafted (`dream_validate`); the report stage is later work, so
-until it exists a real run stops after validation.
+orchestrator drafted (`dream_validate`), and the report stage
+(`dream_report`) writes `logs/dream-<ts>.md` and files one decision bead.
 
 The verb holds the grind flock for the whole run, so Dream never reads a log
 a live grind is still writing, and it writes nothing outside `.ortus/dream/`.
@@ -41,6 +41,7 @@ from ortus.core.dream_orchestrator import (
     run_orchestrator,
 )
 from ortus.core.dream_readers import (
+    ReaderResult,
     BYTES_PER_TOKEN,
     DreamReaderError,
     run_log_writer,
@@ -56,6 +57,7 @@ from ortus.core.dream_transcripts import (
     split_windows,
     window_key,
 )
+from ortus.core.dream_report import RunFacts, deliver
 from ortus.core.dream_validate import ValidationResult, validate
 from ortus.core.grind_logic import FlockBusy, grind_flock
 from ortus.core.profiles import AgentProfile, Phase, ProfileError, resolve_dream_profile
@@ -73,8 +75,6 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REFUSED = 2
 EXIT_NOTHING = 3
-
-REPORT_STUB_MESSAGE = "ortus dream: report stage not built yet"
 
 
 def reader_key(backend: str, profile: AgentProfile, brief_text: str) -> str:
@@ -271,6 +271,40 @@ def validate_run(
     return validation
 
 
+def run_facts(
+    client: BdClient,
+    *,
+    backend: str,
+    reader: AgentProfile,
+    orchestrator: AgentProfile,
+    selection: Selection,
+    readers: list[ReaderResult],
+    windows_fed: int,
+    result: OrchestratorResult,
+) -> RunFacts:
+    """Gather the report's run facts; a bd read that fails reads as unavailable."""
+
+    memories = client.memories()
+    try:
+        prime_chars: int | None = len(client.prime())
+    except BdError:
+        prime_chars = None
+    return RunFacts(
+        backend=backend,
+        reader=reader.display_name,
+        orchestrator=orchestrator.display_name,
+        windows_read=sum(1 for item in readers if item.notes_file is not None),
+        windows_reused=selection.reused,
+        windows_fed=windows_fed,
+        chunked_windows=sum(1 for item in readers if item.chunks > 1),
+        usage=result.usage,
+        cost_usd=result.cost_usd,
+        memory_chars=sum(len(value) for value in memories.values()),
+        memory_keys=len(memories),
+        prime_chars=prime_chars,
+    )
+
+
 def _report(selection: Selection, reader: AgentProfile, orchestrator: AgentProfile) -> None:
     rows = [
         ("windows found", str(selection.windows_total)),
@@ -361,7 +395,6 @@ def dream(
     budget), 3 nothing to propose.
     """
 
-    del no_file  # consumed by the report stage
     target = resolve_repo(repo)
     if since is not None and not DREAM_SINCE.match(since):
         output.error(f"invalid --since {since!r}; expected <N>d or <N>h, e.g. 7d")
@@ -450,7 +483,7 @@ def dream(
                 runner = make_runner(backend_name, repo=target)
                 bd = BdClient(repo=target)
                 stamp = time.strftime("%Y%m%d-%H%M%S")
-                run_readers(
+                readers = run_readers(
                     selection.candidates,
                     runner=runner,
                     repo=target,
@@ -477,13 +510,38 @@ def dream(
                     stamp=stamp,
                     log=run_log_writer(target, stamp),
                 )
-                validate_run(
+                validation = validate_run(
                     target,
                     bd,
                     result,
                     prepared,
                     key=key,
                     min_beads=settings["min_beads"],
+                )
+                fed = [
+                    window_key(item.window)
+                    for item in prepared
+                    if item.skipped is None and notes_path(target, item, key).is_file()
+                ]
+                delivery = deliver(
+                    validation,
+                    run_facts(
+                        bd,
+                        backend=backend_name,
+                        reader=reader,
+                        orchestrator=orchestrator,
+                        selection=selection,
+                        readers=readers,
+                        windows_fed=len(fed),
+                        result=result,
+                    ),
+                    repo=target,
+                    client=bd,
+                    stamp=stamp,
+                    windows=fed,
+                    reader_key=key,
+                    orchestrator_profile=orchestrator.display_name,
+                    no_file=no_file,
                 )
             except (
                 BackendError,
@@ -494,8 +552,14 @@ def dream(
             ) as exc:
                 output.error(str(exc))
                 raise typer.Exit(code=EXIT_ERROR) from exc
-            output.error(REPORT_STUB_MESSAGE)
-            raise typer.Exit(code=EXIT_ERROR)
+            if delivery.error:
+                output.error(delivery.error)
+            if delivery.bead_id:
+                typer.echo(delivery.bead_id)
+            filed = delivery.bead_id or "no bead filed"
+            output.progress("dream", f"done ({filed}, report {delivery.report_path})")
+            if delivery.exit_code != EXIT_OK:
+                raise typer.Exit(code=delivery.exit_code)
     except FlockBusy as exc:
         output.error(
             f"{exc}; Dream waits for the grind to finish",

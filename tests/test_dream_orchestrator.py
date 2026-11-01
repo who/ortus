@@ -11,8 +11,8 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import dream as dream_module
-from ortus.commands.dream import REPORT_STUB_MESSAGE
 from ortus.core.bd import BdError
+from tests.test_dream_report import FACTS
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.dream_orchestrator import (
     MAX_NEEDS,
@@ -395,7 +395,7 @@ def test_parse_result_carries_invalid_count(repo: Path) -> None:
 # --- command wiring --------------------------------------------------------
 
 
-def test_cli_runs_orchestrator_and_validation_then_stops_at_report_stub(
+def test_cli_runs_orchestrator_and_validation_then_writes_the_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -418,10 +418,12 @@ def test_cli_runs_orchestrator_and_validation_then_stops_at_report_stub(
         dream_module, "load_bead_header", lambda bd, bead: f"[bead {bead}]\n[/bead]"
     )
 
-    result = cli.invoke(app, ["dream", str(root)])
+    monkeypatch.setattr(dream_module, "run_facts", lambda *args, **kwargs: FACTS)
 
-    assert result.exit_code == 1
-    assert REPORT_STUB_MESSAGE in result.output
+    result = cli.invoke(app, ["dream", str(root), "--no-file"])
+
+    assert result.exit_code in (0, 3), result.output
+    assert len(list((root / "logs").glob("dream-*.md"))) == 1
     assert len(fake.calls) == 3
     assert fake.calls[2]["log_path"].name == "orchestrator.jsonl"
     inputs = list((root / INPUTS_DIR).glob("orchestrator-*.md"))

@@ -252,3 +252,21 @@ def test_contract_memories_feed_bounded_lessons(client: BdClient) -> None:
     assert [key for key, _ in lessons] == ["sandbox-sweep", "stale-scheduler"]
     assert dict(lessons)["stale-scheduler"].endswith(" […]")
     assert all(len(body) <= 60 + len(" […]") for _, body in lessons)
+
+
+def test_contract_actor_decision_and_description_replace(client: BdClient) -> None:
+    """A decision bead filed under an actor, then its description rewritten."""
+    issue_id = client.create(
+        title="decision packet",
+        issue_type="decision",
+        description="see [src:DREAM_BEAD]",
+        labels=["human", "dream"],
+        actor="ortus-dream",
+    )
+    client.update_description(
+        issue_id, f"see [src:{issue_id}]", actor="ortus-dream"
+    )
+    shown = client.show(issue_id)
+    assert shown["issue_type"] == "decision"
+    assert set(shown["labels"]) == {"human", "dream"}
+    assert shown["description"] == f"see [src:{issue_id}]"

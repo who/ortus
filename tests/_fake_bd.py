@@ -309,11 +309,14 @@ class FakeBdClient(BdClient):
             return "Flags:\n  --claim  claim the issue for --actor\n"
         issue_id: str | None = None
         status: str | None = None
+        description: str | None = None
         claim = False
         while args:
             arg = args.pop(0)
             if arg == "--status":
                 status = args.pop(0)
+            elif arg == "--description":
+                description = args.pop(0)
             elif arg == "--claim":
                 claim = True
             elif arg == "--":
@@ -326,6 +329,8 @@ class FakeBdClient(BdClient):
             row["assignee"] = self._actor
         elif status is not None:
             row["status"] = status
+        if description is not None:
+            row["description"] = description
         row["updated_at"] = _stamp()
         return f"✓ Updated issue: {row['id']} — {row['title']}"
 

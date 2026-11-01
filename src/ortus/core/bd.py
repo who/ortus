@@ -587,6 +587,11 @@ class BdClient:
         self._invalidate()
         self._run("comments", "add", issue_id, body)
 
+    def prime(self) -> str:
+        """`bd --readonly --sandbox prime`: the context bd injects into a session."""
+        stdout, _ = self._run("--readonly", "--sandbox", "prime")
+        return stdout
+
     def memories(self) -> dict[str, str]:
         """`bd --readonly --sandbox memories --json`: the raw memory store.
 
@@ -673,8 +678,13 @@ class BdClient:
         notes: str | None = None,
         labels: list[str] | None = None,
         external_ref: str | None = None,
+        actor: str | None = None,
     ) -> str:
-        """Create an issue via `bd create --silent`. Returns the new issue id."""
+        """Create an issue via `bd create --silent`. Returns the new issue id.
+
+        `actor` is bd's global `--actor`, so it goes before the subcommand, as
+        `claim` passes it; without one the argv is unchanged.
+        """
         args = [
             "create",
             "--silent",
@@ -697,9 +707,21 @@ class BdClient:
             args.extend(["--labels", ",".join(labels)])
         if external_ref:
             args.extend(["--external-ref", external_ref])
+        if actor:
+            args = ["--actor", actor, *args]
         self._invalidate()
         stdout, _ = self._run(*args)
         return stdout.strip()
+
+    def update_description(
+        self, issue_id: str, text: str, *, actor: str | None = None
+    ) -> None:
+        """`bd update <id> --description <text>`: replace the whole description."""
+        args = ["update", issue_id, "--description", text]
+        if actor:
+            args = ["--actor", actor, *args]
+        self._invalidate()
+        self._run(*args)
 
     def close(self, issue_id: str, *, reason: str | None = None) -> None:
         """`bd close <id>`, dropping the open reading like every other write.
@@ -805,10 +827,15 @@ class BdClient:
         )
         del self._fresh_claims[issue_id]
 
-    def add_label(self, issue_id: str, label: str) -> None:
+    def add_label(
+        self, issue_id: str, label: str, *, actor: str | None = None
+    ) -> None:
         """`bd label add <id> <label>`. Used by orphan-policy=escalate."""
+        args = ["label", "add", issue_id, label]
+        if actor:
+            args = ["--actor", actor, *args]
         self._invalidate()
-        self._run("label", "add", issue_id, label)
+        self._run(*args)
 
     def remove_label(self, issue_id: str, label: str) -> None:
         """`bd label remove <id> <label>`. Used by the triage routes that unpark."""
