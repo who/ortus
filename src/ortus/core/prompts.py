@@ -64,6 +64,18 @@ PROMPT_REGISTRY: tuple[PromptInfo, ...] = (
         phase="planning",
         description="PRD decomposition into readiness-v1 bd issues.",
     ),
+    PromptInfo(
+        name="dream-reader",
+        filename="dream-reader",
+        phase="dream",
+        description="Per-bead-window transcript reader for ortus dream.",
+    ),
+    PromptInfo(
+        name="dream-orchestrator",
+        filename="dream-orchestrator",
+        phase="dream",
+        description="Cross-bead pattern orchestrator for ortus dream.",
+    ),
 )
 
 

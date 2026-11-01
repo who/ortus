@@ -137,6 +137,29 @@ def test_registry_reconciles_with_bundled_package(tmp_path: Path) -> None:
         assert resolved.text.strip()
 
 
+def test_dream_prompts_resolve_and_name_their_envelopes(tmp_path: Path) -> None:
+    """Each Dream brief states every output line the code parses from it."""
+    home = tmp_path / "home"
+    envelopes = {
+        "dream-reader": ("ORTUS_DREAM_NOTE:", "ORTUS_DREAM_WINDOW:"),
+        "dream-orchestrator": (
+            "ORTUS_DREAM_PROPOSAL:",
+            "ORTUS_DREAM_FOLLOWUP:",
+            "ORTUS_DREAM_HELPED:",
+            "ORTUS_DREAM_NEED:",
+        ),
+    }
+    for name, prefixes in envelopes.items():
+        resolved = resolve_named_prompt(name, repo=tmp_path, home=home)
+        assert resolved.source == "bundled"
+        for prefix in prefixes:
+            assert prefix in resolved.text, f"{name} lacks {prefix}"
+    orchestrator = resolve_named_prompt("dream-orchestrator", repo=tmp_path, home=home)
+    filled = substitute(orchestrator.text, min_beads="2")
+    assert "$min_beads" in orchestrator.text
+    assert "$min_beads" not in filled and "at least 2 distinct beads" in filled
+
+
 def test_resolve_named_prompt_is_a_thin_alias(tmp_path: Path) -> None:
     """`goal` resolves to the same prompt as the `goal-prompt` stem."""
     home = tmp_path / "home"
@@ -223,8 +246,10 @@ def test_flag_off_resolution_reads_the_legacy_bundle(tmp_path: Path) -> None:
 
 def test_audited_variant_is_absent_from_the_registry_package() -> None:
     """`prompts_in_package()` sees the legacy bundles only, so the registry
-    reconciliation gate keeps naming exactly three prompts."""
+    reconciliation gate keeps naming exactly the registered prompts."""
     assert prompts_in_package() == (
+        "dream-orchestrator",
+        "dream-reader",
         "goal-prompt",
         "interview-prompt",
         "plan-prompt",

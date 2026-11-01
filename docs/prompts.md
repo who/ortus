@@ -1,9 +1,16 @@
 # Runtime prompts
 
-The prompts that drive agent phases (`goal`, `interview`, `plan`) ship inside
-the CLI. `ortus init` never copies them into your repo, and the generated
-`AGENTS.md` does not point at them. The `prompt` verb is how you read and
-override them.
+The prompts that drive agent phases ship inside the CLI. `ortus init` never
+copies them into your repo, and the generated `AGENTS.md` does not point at
+them. The `prompt` verb is how you read and override them.
+
+| Name | Phase | Drives |
+|---|---|---|
+| `goal` | implementation | the one-issue worker loop `ortus grind` points workers at |
+| `interview` | interview | the interactive PRD-building interview |
+| `plan` | planning | PRD decomposition into readiness-v1 bd issues |
+| `dream-reader` | dream | one `ortus dream` reader per bead window; emits `ORTUS_DREAM_NOTE` and `ORTUS_DREAM_WINDOW` lines |
+| `dream-orchestrator` | dream | the `ortus dream` cross-bead orchestrator; emits `ORTUS_DREAM_PROPOSAL`, `ORTUS_DREAM_FOLLOWUP`, `ORTUS_DREAM_HELPED` and `ORTUS_DREAM_NEED` lines |
 
 ```bash
 ortus prompt list [<repo>]          # each prompt: name, winning source, phase, description
