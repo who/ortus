@@ -6,8 +6,9 @@ that still need a reader are selected newest first under the caps, and the
 token cost of reading them is estimated before any model is called. A real
 run then hands each candidate to a read-only reader (`dream_readers`), caches
 its notes, and runs one read-only orchestrator (`dream_orchestrator`) over
-every cached note, memory and past decision; the validation stage is later
-work, so until it exists a real run stops after the orchestrator.
+every cached note, memory and past decision. Code then validates what the
+orchestrator drafted (`dream_validate`); the report stage is later work, so
+until it exists a real run stops after validation.
 
 The verb holds the grind flock for the whole run, so Dream never reads a log
 a live grind is still writing, and it writes nothing outside `.ortus/dream/`.
@@ -31,9 +32,12 @@ from ortus.core.bd import BdClient, BdError
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import DREAM_SINCE, dream_settings, load_config
 from ortus.core.cost import find_grind_logs
+from ortus.core.dream_decisions import load_decisions
 from ortus.core.dream_orchestrator import (
     NOTES_DIR,
     DreamOrchestratorError,
+    OrchestratorResult,
+    load_notes,
     run_orchestrator,
 )
 from ortus.core.dream_readers import (
@@ -52,6 +56,7 @@ from ortus.core.dream_transcripts import (
     split_windows,
     window_key,
 )
+from ortus.core.dream_validate import ValidationResult, validate
 from ortus.core.grind_logic import FlockBusy, grind_flock
 from ortus.core.profiles import AgentProfile, Phase, ProfileError, resolve_dream_profile
 from ortus.core.prompts import PromptNotFound, resolve_named_prompt
@@ -69,7 +74,7 @@ EXIT_ERROR = 1
 EXIT_REFUSED = 2
 EXIT_NOTHING = 3
 
-VALIDATOR_STUB_MESSAGE = "ortus dream: validation stage not built yet"
+REPORT_STUB_MESSAGE = "ortus dream: report stage not built yet"
 
 
 def reader_key(backend: str, profile: AgentProfile, brief_text: str) -> str:
@@ -236,6 +241,34 @@ def select_windows(
         over_budget=est_reader + est_orchestrator > settings["budget_tokens"],
         logs=log_count,
     )
+
+
+def validate_run(
+    repo: Path,
+    client: BdClient,
+    result: OrchestratorResult,
+    prepared: list[PreparedWindow],
+    *,
+    key: str,
+    min_beads: int,
+) -> ValidationResult:
+    """Validate the orchestrator's answer against the caches it was drawn from."""
+
+    validation = validate(
+        result,
+        windows=prepared,
+        records=load_notes(repo, key),
+        memories=client.memories(),
+        decisions=load_decisions(client),
+        min_beads=min_beads,
+    )
+    output.progress(
+        "dream",
+        f"validated: {len(validation.proposals)} proposal(s), "
+        f"{len(validation.followups)} follow-up(s) kept, "
+        f"{len(validation.drops)} dropped",
+    )
+    return validation
 
 
 def _report(selection: Selection, reader: AgentProfile, orchestrator: AgentProfile) -> None:
@@ -431,7 +464,7 @@ def dream(
                     notes_path_for=lambda item: notes_path(target, item, key),
                     stamp=stamp,
                 )
-                run_orchestrator(
+                result = run_orchestrator(
                     runner=runner,
                     repo=target,
                     client=bd,
@@ -444,6 +477,14 @@ def dream(
                     stamp=stamp,
                     log=run_log_writer(target, stamp),
                 )
+                validate_run(
+                    target,
+                    bd,
+                    result,
+                    prepared,
+                    key=key,
+                    min_beads=settings["min_beads"],
+                )
             except (
                 BackendError,
                 BdError,
@@ -453,7 +494,7 @@ def dream(
             ) as exc:
                 output.error(str(exc))
                 raise typer.Exit(code=EXIT_ERROR) from exc
-            output.error(VALIDATOR_STUB_MESSAGE)
+            output.error(REPORT_STUB_MESSAGE)
             raise typer.Exit(code=EXIT_ERROR)
     except FlockBusy as exc:
         output.error(

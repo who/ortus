@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from ortus.cli import app
 from ortus.commands import dream as dream_module
-from ortus.commands.dream import NOTES_DIR, VALIDATOR_STUB_MESSAGE, reader_key
+from ortus.commands.dream import NOTES_DIR, REPORT_STUB_MESSAGE, reader_key
 from ortus.core.config import load_config
 from ortus.core.dream_transcripts import window_key
 from ortus.core.grind_logic import grind_flock
@@ -197,7 +197,7 @@ def test_refuse_over_budget_in_a_real_run(repo: Path) -> None:
     assert summary["over_budget"] is True
 
 
-def test_real_run_stops_at_the_validator_stub(
+def test_real_run_stops_at_the_report_stub(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class Reader:
@@ -229,10 +229,11 @@ def test_real_run_stops_at_the_validator_stub(
         dream_module, "load_bead_header", lambda bd, bead: f"[bead {bead}]\n[/bead]"
     )
     monkeypatch.setattr(dream_module, "run_orchestrator", lambda **kwargs: None)
+    monkeypatch.setattr(dream_module, "validate_run", lambda *args, **kwargs: None)
     result = runner.invoke(app, ["dream", str(repo)])
 
     assert result.exit_code == 1
-    assert VALIDATOR_STUB_MESSAGE in result.output
+    assert REPORT_STUB_MESSAGE in result.output
     assert len(list((repo / NOTES_DIR).glob("*.json"))) == 2
 
 
