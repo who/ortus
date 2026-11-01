@@ -18,6 +18,10 @@
     "deny": [
       "Bash(sudo *)",
       "Bash(rm -rf *)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push origin +*)",
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(~/.ssh/**)",
@@ -31,7 +35,10 @@
     "failIfUnavailable": true,
     "autoAllowBashIfSandboxed": true,
     "allowUnsandboxedCommands": false,
-    "excludedCommands": ["bd", "bd *"],
+    "excludedCommands": [
+      "bd",
+      "bd *"
+    ],
     "network": {
       "allowLocalBinding": true,
       "allowManagedDomainsOnly": true,
@@ -53,6 +60,17 @@
     }
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "ortus guard worker-bash",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [
