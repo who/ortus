@@ -281,7 +281,17 @@ def substitute(text: str, /, **values: str) -> str:
 #: The session-close sequence the bundled goal prompts carry in step 4. It is
 #: the anchor the stealth rewrite replaces, so a bundle that loses it is
 #: caught by `session_close_steps(False, None)` no longer matching the text.
+#: The close comes before the commit so the export staged with the work
+#: already shows the issue closed.
 _SESSION_CLOSE_ANCHOR = (
+    "completion comment, `bd close`, commit, `git pull --rebase --autostash`, "
+    "`bd dolt push`, `git push`"
+)
+
+#: The order the bundled prompts stated before the close moved ahead of the
+#: commit. An override copied from them still carries it, and in stealth its
+#: `bd dolt push` is just as much a leak as the current anchor's.
+_LEGACY_SESSION_CLOSE_ANCHOR = (
     "completion comment, commit, `bd close`, `git pull --rebase --autostash`, "
     "`bd dolt push`, `git push`"
 )
@@ -301,8 +311,8 @@ def session_close_steps(stealth: bool, tracker_remote: str | None) -> str:
 
     steps = [
         "completion comment",
-        "commit",
         "`bd close`",
+        "commit",
         "`git pull --rebase --autostash`",
     ]
     if tracker_remote:
@@ -317,14 +327,17 @@ def apply_session_close(
     """The resolved prompt with its session-close step fitted to stealth.
 
     Only a bundled text is rewritten. An override is the operator's own
-    contract and is served untouched; in stealth one that still carries the
-    bundled anchor gets a warning back, because its `bd dolt push` would
+    contract and is served untouched; in stealth one that still carries a
+    bundled anchor, current or legacy, gets a warning back, because its `bd dolt push` would
     publish the tracker to origin.
     """
     if not stealth:
         return resolved, None
     if resolved.source not in ("bundled", "audited"):
-        if _SESSION_CLOSE_ANCHOR in resolved.text:
+        if any(
+            anchor in resolved.text
+            for anchor in (_SESSION_CLOSE_ANCHOR, _LEGACY_SESSION_CLOSE_ANCHOR)
+        ):
             return resolved, (
                 f"stealth: {resolved.source} override {resolved.path} keeps "
                 "`bd dolt push` in its session-close step; served unchanged"

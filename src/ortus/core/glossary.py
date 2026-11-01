@@ -144,7 +144,7 @@ TERMS: tuple[Term, ...] = (
     Term(
         term="session-close",
         definition=(
-            "The worker's own commit, bd close, bd dolt push and git push at "
+            "The worker's own bd close, commit, bd dolt push and git push at "
             "the end of one issue, after which grind reaps."
         ),
         home="`src/ortus/prompts/goal-prompt.md` step 4",

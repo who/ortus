@@ -74,9 +74,18 @@ def test_session_close_drops_dolt_push_in_stealth() -> None:
     steps = session_close_steps(True, None)
     assert "bd dolt push" not in steps
     assert steps == (
-        "completion comment, commit, `bd close`, "
+        "completion comment, `bd close`, commit, "
         "`git pull --rebase --autostash`, `git push`"
     )
+
+
+@pytest.mark.parametrize("stealth", [False, True])
+@pytest.mark.parametrize("tracker_remote", [None, "git@example.com:me/t.git"])
+def test_session_close_closes_before_commit(
+    stealth: bool, tracker_remote: str | None
+) -> None:
+    steps = session_close_steps(stealth, tracker_remote).split(", ")
+    assert steps.index("`bd close`") < steps.index("commit")
 
 
 def test_session_close_pushes_only_private_remote() -> None:
@@ -90,6 +99,17 @@ def test_session_close_override_untouched_with_warning() -> None:
     override = ResolvedPrompt(
         name="goal-prompt", source="repo", path=Path("/x/goal-prompt.md"),
         text="close: " + session_close_steps(False, None),
+    )
+    fitted, warning = apply_session_close(override, stealth=True, tracker_remote=None)
+    assert fitted is override
+    assert warning and "bd dolt push" in warning
+
+
+def test_legacy_anchor_override_still_warns_in_stealth() -> None:
+    override = ResolvedPrompt(
+        name="goal-prompt", source="user", path=Path("/x/goal-prompt.md"),
+        text="close: completion comment, commit, `bd close`, "
+        "`git pull --rebase --autostash`, `bd dolt push`, `git push`",
     )
     fitted, warning = apply_session_close(override, stealth=True, tracker_remote=None)
     assert fitted is override

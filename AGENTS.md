@@ -82,7 +82,7 @@ is the only tracker file a commit carries. Two things keep it honest:
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **Refresh the tracked export** - `ortus export`, then stage `.beads/issues.jsonl` with the commit
+4. **Refresh the tracked export** - after `bd close`, run `ortus export` and stage `.beads/issues.jsonl` in the same commit as the work; never export before the close
 5. **PUSH TO REMOTE** - This is MANDATORY when a remote is configured:
    ```bash
    if [ -n "$(git remote)" ]; then

@@ -74,8 +74,8 @@ Before saying "done", verify:
 
 1. `git status` — what changed
 2. `git add` the relevant files
-3. `git commit` with a clear message
-4. `bd close <id> --reason "..."` — the issue, not just the code
+3. `bd close <id> --reason "..."` — the issue, not just the code
+4. `git commit` with a clear message
 5. `git push` to the remote, when one is configured
 
 Work is not done until it is pushed.

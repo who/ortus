@@ -391,6 +391,19 @@ def test_agents_block_carries_the_authoring_contract() -> None:
     assert "`ortus spec`" in text
 
 
+def test_session_close_order_in_agents_block() -> None:
+    """The close lands before the commit, so the staged export shows it."""
+    text = render_block("agents")
+    protocol = text[text.index("### Session-close protocol"):]
+    assert (
+        protocol.index("`git status`")
+        < protocol.index("`git add`")
+        < protocol.index("`bd close <id>")
+        < protocol.index("`git commit`")
+        < protocol.index("`git push`")
+    )
+
+
 def test_agents_block_authoring_contract_sits_with_the_bd_guidance() -> None:
     """Authoring fails when the issue is written, not when grind runs it."""
     text = render_block("agents")
@@ -494,7 +507,7 @@ def test_bd_claim_command_matches_the_bundled_goal_prompt(tmp_path: Path) -> Non
 # so editing what a block teaches without bumping its schema fails here. Bump
 # BLOCK_SCHEMAS[<block>] and re-pin the digest in the same commit.
 PINNED_BLOCK_TEMPLATES: dict[str, tuple[int, str]] = {
-    "agents": (4, "b58c54fdcff19224e46aeb8ef63e8b101260fb57427c4599f83d1c678bd1f07c"),
+    "agents": (5, "68dfcba9aaa92f69cdbbdad8aff3336ab6012f850b7d680732dcdafd0fda2094"),
     "pointer": (1, "e20aa4135de14e37eb79a5c589277750c37cfafbd16c8a4d7378a99ac606601a"),
 }
 
