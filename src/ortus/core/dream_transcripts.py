@@ -19,17 +19,30 @@ out the rest of the window.
 
 Only the Claude stream-json shape is understood. A run under another backend
 is reported as skipped rather than parsed on a guess.
+
+What a reader finally receives is labeled: a `[bead <id>]` header rebuilt
+from bd on every run, then the window inside a `[grind-log ...]` label. Code
+writes those labels; a line of tool output that only looks like one is
+escaped, so a transcript cannot forge a memory or a past decision. The text
+is scrubbed of credential values and this clone's protected terms, and the
+prepared body is cached under `.ortus/dream/windows/` beside a sidecar that
+says which log state produced it. The header is never cached, because a bead
+edit must not invalidate a transcript that did not change.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from ortus.core.agent_files import gitignore_match
+from ortus.core.bd import BdError, ensure_protected_terms, scrub_protected_terms
 from ortus.core.cost import _PREP, _RUN_START, _STAMPED
+from ortus.core.spill import redact_secrets
 
 #: Bumped when a prepared body changes for the same log, so caches keyed on
 #: it are rebuilt rather than read back stale.
@@ -215,3 +228,225 @@ def prepare_window(
         cuts += count
         kept.append(json.dumps(cut, ensure_ascii=False, separators=(",", ":")))
     return PreparedWindow(window=window, body="\n".join(kept), cuts=cuts)
+
+
+# ---------------------------------------------------------------------------
+# Labels, escaping and scrub
+# ---------------------------------------------------------------------------
+
+#: Every label kind Dream's code writes. A line of transcript text that opens
+#: with one of these is escaped, whoever produced it.
+LABEL_KINDS = (
+    "bead",
+    "grind-log",
+    "reader-notes",
+    "memory",
+    "dream-decision",
+    "need-answer",
+)
+
+_LABEL_LINE = re.compile(
+    r"^(\s*)\[(/?)(" + "|".join(re.escape(kind) for kind in LABEL_KINDS) + r")\b",
+    re.MULTILINE,
+)
+
+#: How much of a close reason and of each recent comment a header carries.
+HEADER_CLOSE_REASON_CHARS = 160
+HEADER_COMMENT_CHARS = 200
+HEADER_COMMENTS = 2
+
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def window_label(window: BeadWindow) -> str:
+    """The opening `[grind-log ...]` label naming where a window came from."""
+
+    return (
+        f"[grind-log bead={window.bead_id} run={window.run} "
+        f"lines={window.start_line}-{window.end_line}]"
+    )
+
+
+def window_key(window: BeadWindow) -> str:
+    """A window's cache name: `<stem>.<bead>.<a>-<b>`, safe on any filesystem."""
+
+    run = _UNSAFE_NAME.sub("-", window.run)
+    bead = _UNSAFE_NAME.sub("-", window.bead_id)
+    return f"{run}.{bead}.{window.start_line}-{window.end_line}"
+
+
+def escape_labels(text: str) -> str:
+    """Backslash every line that opens like a Dream label.
+
+    A JSON line starts with `{`, so a label-like string inside one is left
+    alone; only text a reader could mistake for a code-made label changes.
+    Escaping is idempotent: an escaped line no longer opens with `[`.
+    """
+
+    return _LABEL_LINE.sub(r"\1\\[\2\3", text)
+
+
+def _one_line(value: Any, limit: int | None = None) -> str:
+    text = " ".join(str(value or "").split())
+    return text if limit is None else text[:limit]
+
+
+def bead_header(issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
+    """The `[bead <id>]` block a reader sees above a bead's window."""
+
+    bead_id = str(issue.get("id") or "unknown")
+    labels = issue.get("labels") or []
+    reason = _one_line(issue.get("close_reason"), HEADER_CLOSE_REASON_CHARS)
+    recent = [
+        _one_line(comment.get("text"), HEADER_COMMENT_CHARS)
+        for comment in comments[-HEADER_COMMENTS:]
+    ]
+    lines = [
+        f"[bead {bead_id}]",
+        f"title:   {escape_labels(_one_line(issue.get('title')))}",
+        f"labels:  {escape_labels(', '.join(str(label) for label in labels)) or 'none'}",
+        f"status:  {_one_line(issue.get('status')) or 'unknown'}"
+        f" · close_reason: {escape_labels(reason) or 'none'}",
+        f"last comments (≤{HEADER_COMMENTS}, ≤{HEADER_COMMENT_CHARS} chars each):",
+        *(f"  - {escape_labels(text)}" for text in recent),
+        "[/bead]",
+    ]
+    return "\n".join(lines)
+
+
+class _BeadReader(Protocol):
+    def show(self, issue_id: str) -> dict[str, Any]: ...
+
+    def comments(self, issue_id: str) -> list[dict[str, Any]]: ...
+
+
+def load_bead_header(bd: _BeadReader, bead_id: str) -> str:
+    """The header for `bead_id` as bd has it now; `status: unknown` when gone.
+
+    A bead deleted since its run must not fail the whole Dream pass.
+    """
+
+    try:
+        issue = bd.show(bead_id)
+    except BdError:
+        return bead_header({"id": bead_id}, [])
+    try:
+        comments = bd.comments(bead_id)
+    except BdError:
+        comments = []
+    return bead_header(issue, comments)
+
+
+def scrub(text: str, repo: Path) -> str:
+    """`text` with credential values and this clone's protected terms removed."""
+
+    return scrub_protected_terms(redact_secrets(text), ensure_protected_terms(repo))
+
+
+def render_window(prepared: PreparedWindow, header: str) -> str:
+    """The labeled text one reader receives for one bead window."""
+
+    return "\n".join(
+        (
+            header,
+            window_label(prepared.window),
+            escape_labels(prepared.body),
+            "[/grind-log]",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Window cache
+# ---------------------------------------------------------------------------
+
+#: Where prepared windows are cached, relative to the repository.
+CACHE_DIR = Path(".ortus") / "dream"
+WINDOWS_DIR = CACHE_DIR / "windows"
+
+
+class DreamCacheNotIgnored(RuntimeError):
+    """The Dream cache directory is not git-ignored, so nothing is written."""
+
+
+def ensure_cache_ignored(repo: Path) -> None:
+    """Refuse a cache write that would show up as an untracked worktree file."""
+
+    if gitignore_match(repo, CACHE_DIR.as_posix()) is None:
+        raise DreamCacheNotIgnored(
+            f"{CACHE_DIR.as_posix()}/ is not ignored in {repo}; add it to "
+            ".gitignore (`ortus init --force` does) before running Dream"
+        )
+
+
+def _sidecar(window: BeadWindow, cut_bytes: int) -> dict[str, Any] | None:
+    """The fields a cached window must match, or None when the log is gone."""
+
+    try:
+        stat = window.log_path.stat()
+    except OSError:
+        return None
+    return {
+        "log_path": str(window.log_path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "start_line": window.start_line,
+        "end_line": window.end_line,
+        "transcript_version": TRANSCRIPT_VERSION,
+        "cut_bytes": cut_bytes,
+    }
+
+
+def _cached(
+    window: BeadWindow, text_path: Path, meta_path: Path, expected: dict[str, Any]
+) -> PreparedWindow | None:
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        body = text_path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    if any(meta.get(key) != value for key, value in expected.items()):
+        return None
+    cuts = meta.get("cuts")
+    skipped = meta.get("skipped")
+    if not isinstance(cuts, int) or not (skipped is None or isinstance(skipped, str)):
+        return None
+    return PreparedWindow(window=window, body=body, cuts=cuts, skipped=skipped)
+
+
+def load_or_prepare(
+    window: BeadWindow, *, repo: Path, cut_bytes: int = DEFAULT_CUT_BYTES
+) -> PreparedWindow:
+    """The window prepared, escaped and scrubbed, read from cache when current.
+
+    The cache is reused only when its sidecar matches the log's size and
+    mtime, the window's line range, the transcript version and `cut_bytes`;
+    anything else rewrites it. A skipped window is cached as skipped with an
+    empty body, so it is counted rather than parsed again.
+    """
+
+    directory = repo / WINDOWS_DIR
+    key = window_key(window)
+    text_path = directory / f"{key}.txt"
+    meta_path = directory / f"{key}.json"
+    expected = _sidecar(window, cut_bytes)
+    if expected is not None:
+        cached = _cached(window, text_path, meta_path, expected)
+        if cached is not None:
+            return cached
+
+    prepared = prepare_window(window, cut_bytes=cut_bytes)
+    body = scrub(escape_labels(prepared.body), repo) if prepared.body else ""
+    result = PreparedWindow(
+        window=window, body=body, cuts=prepared.cuts, skipped=prepared.skipped
+    )
+    if expected is None:
+        return result
+    ensure_cache_ignored(repo)
+    directory.mkdir(parents=True, exist_ok=True)
+    text_path.write_text(body, encoding="utf-8")
+    meta = {**expected, "cuts": result.cuts, "skipped": result.skipped}
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    return result
