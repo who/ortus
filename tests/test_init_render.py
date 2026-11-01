@@ -37,6 +37,7 @@ from ortus.core.init_render import (
     merge_opencode_config,
     read_opencode_config,
     render_all,
+    render_gitignore_section,
     render_template,
 )
 from ortus.core.local_backend import (
@@ -234,6 +235,14 @@ def test_rendered_gitignore_excludes_the_codegraph_index() -> None:
     """The index is local, machine-specific, and must never be committed."""
     ctx = RenderContext(prefix="acme", project_type="go")
     assert ".codegraph/" in render_template(".gitignore", ctx)
+
+
+def test_rendered_gitignore_excludes_the_dream_cache(tmp_path: Path) -> None:
+    """Dream caches are regenerated scratch and must never show as untracked."""
+    ctx = RenderContext(prefix="acme")
+    assert ".ortus/dream/" in render_gitignore_section(ctx)
+    merge_gitignore(tmp_path, ctx)
+    assert gitignore_match(tmp_path, ".ortus/dream") is not None
 
 
 def test_rendered_gitignore_never_hides_the_managed_agent_files(tmp_path: Path) -> None:

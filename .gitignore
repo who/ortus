@@ -34,3 +34,6 @@ package.json
 .beads/*.bak
 .beads/*.pre-embedded-*
 .beads.gate.lock
+
+# ortus dream caches (windows, reader notes, run state) — local, regenerated
+.ortus/dream/
