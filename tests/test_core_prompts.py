@@ -213,8 +213,10 @@ def test_parse_eject_stamp_reads_only_the_first_line() -> None:
 # has to be deliberate enough to update the hash here. The goal digest moved
 # once on purpose: both arms gained the `BLOCKED:` exit (ortus-urkb), since a
 # session-close blocked outside the worker's reach stalls either arm alike.
+# It moved again when both arms gained the `rm -rf` deny guidance
+# (ortus-hvyh), which names a permission rule rather than a style choice.
 _LEGACY_GOAL_SHA256 = (
-    "5e135c8543cf36c9ab1fb95cfeaf26efb367f5b922eab08606f4999abc664c9a"
+    "de06726008350ad7d13b46cf72e6e05e2c8db104f5033f42284f95575041d650"
 )
 _LEGACY_WORK_ISSUE_SHA256 = (
     "41d84a253c7f87e39da860243a15e1dce9f6cd3481caecf2442ec92933fdb79d"
