@@ -122,11 +122,11 @@ def test_render_carries_every_section_in_order() -> None:
     text = render_report(_result(), FACTS, "ortus-x1")
 
     headings = [
-        "## Proposals",
-        "### P1 add pytest-uv-run",
-        "### P2 prune stale-key",
-        "## Follow-ups (not memories)",
-        "### F1 Pin the uv version",
+        "## Suggested memory changes",
+        "### pytest-uv-run",
+        "### stale-key",
+        "## Possible follow-up tasks",
+        "### pin-the-uv-version",
         "## Did it help?",
         "## Run facts",
         "## How to respond",
@@ -139,7 +139,10 @@ def test_render_carries_every_section_in_order() -> None:
     assert "| old-lesson | 40.0 | 20.0 | 3/1 |" in text
     assert "drops: bad-key=1, cap=2" in text
     assert "bd prime: unavailable chars" in text
-    assert 'bd human respond ortus-x1 "accepted P1; rejected P2 (reason); F1 filed"' in text
+    assert (
+        'bd human respond ortus-x1 "accept pytest-uv-run; reject stale-key (reason); '
+        'file follow-up pin-the-uv-version"'
+    ) in text
 
 
 def _listed_ids(text: str) -> set[str]:
@@ -158,12 +161,60 @@ def test_render_example_ids_name_only_what_the_report_lists() -> None:
     text = render_report(_result(), FACTS, "ortus-x1")
     example = _rendered_example(text, "ortus-x1")
 
-    assert "P3" not in example
     assert example == example_response(_result())
-    named = parse_response(example)
-    assert named == {"P1": "accepted", "P2": "rejected"}
-    assert set(named) <= _listed_ids(text)
-    assert "F1" in example
+    named = parse_response(example, _listed_ids(text))
+    assert named == {
+        "pytest-uv-run": "accepted",
+        "stale-key": "rejected",
+        "pin-the-uv-version": "accepted",
+    }
+    assert set(named) == _listed_ids(text)
+
+
+def test_slug_reply_example_parses_to_exactly_the_report_ids() -> None:
+    result = _result(
+        proposals=[_kept(key="commit-message-rules"), _kept(key="pinned-prompt-hash-tests")],
+        followups=[Followup(title="Dolt SSH push", why="x", beads=(), sources=())],
+    )
+    text = render_report(result, FACTS, "ortus-x1")
+    example = _rendered_example(text, "ortus-x1")
+
+    assert example == (
+        "accept commit-message-rules; reject pinned-prompt-hash-tests (reason); "
+        "file follow-up dolt-ssh-push"
+    )
+    for known in (_listed_ids(text), None):
+        assert set(parse_response(example, known)) == _listed_ids(text)
+    reply = "accept commit-message-rules, pinned-prompt-hash-tests; file follow-up dolt-ssh-push"
+    assert parse_response(reply, _listed_ids(text)) == dict.fromkeys(
+        ["commit-message-rules", "pinned-prompt-hash-tests", "dolt-ssh-push"], "accepted"
+    )
+
+
+def test_render_shows_descriptive_names_and_what_accepting_does() -> None:
+    text = render_report(_result(), FACTS, "ortus-x1")
+    memory = text[text.index("### pytest-uv-run") : text.index("## Possible follow-up tasks")]
+    followup = text[text.index("### pin-the-uv-version") : text.index("## Did it help?")]
+
+    assert "Accepting this saves the memory below with `bd remember`." in memory
+    assert "Accepting this deletes the memory `stale-key` with the `bd forget` line below." in memory
+    assert "Change: add `pytest-uv-run`" in memory
+    assert "Accepting this means you file it as a task with `ortus ingest`" in followup
+    assert "Task: Pin the uv version" in followup
+
+
+def test_no_bare_codes_in_report_or_decision_bead(tmp_path: Path) -> None:
+    import re
+
+    client = FakeBdClient(tmp_path)
+    delivery = _deliver(tmp_path, client)
+    report = delivery.report_path.read_text(encoding="utf-8")
+    description = client.show(delivery.bead_id)["description"]
+
+    for text in (report, description):
+        assert not re.search(r"\b[PF]\d+\b", text)
+        assert "## Suggested memory changes" in text
+        assert "## Possible follow-up tasks" in text
 
 
 def test_render_how_to_respond_is_agent_ready() -> None:
@@ -171,20 +222,21 @@ def test_render_how_to_respond_is_agent_ready() -> None:
     section = text[text.index("## How to respond") : text.index("```ortus-dream-fingerprints")]
 
     assert "`bd remember`" in section
-    assert "command shown under it in Proposals" in section
+    assert "command shown under it" in section
     assert 'bd human respond ortus-x1 "<response>"' in section
-    assert "`accepted <ids>`" in section and "`rejected <ids> (reason)`" in section
+    assert "`accept <names>`" in section and "`reject <names> (reason)`" in section
+    assert "`file follow-up <names>`" in section
     assert "`ortus ingest --packet <dir>`" in section
     assert "`ortus ingest --stdin`" in section
-    assert "Dream never files follow-ups" in section
+    assert "Dream never files follow-up tasks" in section
 
 
 @pytest.mark.parametrize(
     ("proposals", "followups", "expected"),
     [
-        ([_kept()], [], {"P1": "accepted"}),
-        ([_kept()], None, {"P1": "accepted"}),
-        ([], None, {"F1": "accepted"}),
+        ([_kept()], [], {"pytest-uv-run": "accepted"}),
+        ([_kept()], None, {"pytest-uv-run": "accepted", "pin-the-uv-version": "accepted"}),
+        ([], None, {"pin-the-uv-version": "accepted"}),
         ([], [], {}),
     ],
 )
@@ -194,8 +246,9 @@ def test_render_edge_examples_parse_to_listed_ids(proposals, followups, expected
     example = _rendered_example(text, "ortus-x1")
 
     assert example == example_response(result)
-    named = parse_response(example)
+    named = parse_response(example, _listed_ids(text))
     assert named == expected
+    assert parse_response(example) == expected
     assert set(named) <= _listed_ids(text)
 
 
@@ -216,10 +269,10 @@ def test_render_fingerprints_block_round_trips() -> None:
     block = parse_fingerprints_block(render_report(_result(), FACTS, "ortus-x1"))
 
     assert block is not None
-    assert [row["id"] for row in block["proposals"]] == ["P1", "P2"]
+    assert [row["id"] for row in block["proposals"]] == ["pytest-uv-run", "stale-key"]
     assert block["proposals"][0]["fingerprint"] == _kept().fingerprint
     assert block["proposals"][0]["quotes"] == ["pytest: command not found"] * 2
-    assert block["followups"] == [{"id": "F1", "title": "Pin the uv version"}]
+    assert block["followups"] == [{"id": "pin-the-uv-version", "title": "Pin the uv version"}]
 
 
 def test_render_title_counts_followups_only_when_present() -> None:
@@ -342,7 +395,7 @@ def test_no_bead_no_file_writes_the_report_only(tmp_path: Path) -> None:
     assert delivery.bead_id is None
     assert client.calls == []
     report = delivery.report_path.read_text(encoding="utf-8")
-    assert "### P1 add pytest-uv-run" in report
+    assert "### pytest-uv-run" in report
     assert f"Decision bead: {NOT_FILED}" in report
     state = json.loads((tmp_path / STATE_FILE).read_text(encoding="utf-8"))
     assert state[0]["bead"] is None

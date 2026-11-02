@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from ortus.core.bd import BdError
-from ortus.core.dream_decisions import DECISION_TYPE, DREAM_LABEL, render_fingerprints_block
+from ortus.core.dream_decisions import (
+    DECISION_TYPE,
+    DREAM_LABEL,
+    item_ids,
+    render_fingerprints_block,
+)
 from ortus.core.dream_transcripts import scrub
 from ortus.core.dream_validate import HelpedRow, ValidationResult
 
@@ -102,16 +107,44 @@ def _helped_row(row: HelpedRow) -> str:
     )
 
 
-def _proposals(result: ValidationResult, bead_id: str) -> list[str]:
-    lines = ["## Proposals", ""]
+#: Section headings, plain enough that a reader needs no key to them.
+MEMORY_HEADING = "## Suggested memory changes"
+FOLLOWUP_HEADING = "## Possible follow-up tasks"
+
+
+def _accepting(kind: str, key: str) -> str:
+    """One sentence saying what accepting a suggested memory change does."""
+
+    if kind == "prune":
+        return f"Accepting this deletes the memory `{key}` with the `bd forget` line below."
+    if kind == "update":
+        return f"Accepting this replaces the memory `{key}` with the `bd remember` line below."
+    return "Accepting this saves the memory below with `bd remember`."
+
+
+def report_ids(result: ValidationResult) -> tuple[list[str], list[str]]:
+    """The descriptive id of every item this report lists, as its block records them."""
+
+    return item_ids(
+        [{"kind": kept.proposal.kind, "key": kept.proposal.key} for kept in result.proposals],
+        [{"title": followup.title} for followup in result.followups],
+    )
+
+
+def _proposals(result: ValidationResult, bead_id: str, ids: list[str]) -> list[str]:
+    lines = [MEMORY_HEADING, ""]
     if not result.proposals:
         lines.extend(["None.", ""])
-    for index, kept in enumerate(result.proposals, start=1):
+    for item_id, kept in zip(ids, result.proposals):
         proposal = kept.proposal
         stats = kept.stats
         lines.extend(
             [
-                f"### P{index} {proposal.kind} {proposal.key}",
+                f"### {item_id}",
+                "",
+                _accepting(proposal.kind, proposal.key),
+                "",
+                f"Change: {proposal.kind} `{proposal.key}`",
                 "",
                 f"Pattern: {_one_line(proposal.pattern)}",
                 "",
@@ -135,14 +168,19 @@ def _proposals(result: ValidationResult, bead_id: str) -> list[str]:
     return lines
 
 
-def _followups(result: ValidationResult) -> list[str]:
-    lines = ["## Follow-ups (not memories)", ""]
+def _followups(result: ValidationResult, ids: list[str]) -> list[str]:
+    lines = [FOLLOWUP_HEADING, ""]
     if not result.followups:
         lines.extend(["None.", ""])
-    for index, followup in enumerate(result.followups, start=1):
+    for item_id, followup in zip(ids, result.followups):
         lines.extend(
             [
-                f"### F{index} {_one_line(followup.title)}",
+                f"### {item_id}",
+                "",
+                "Accepting this means you file it as a task with `ortus ingest`; "
+                "Dream never files it.",
+                "",
+                f"Task: {_one_line(followup.title)}",
                 "",
                 f"Why: {_one_line(followup.why)}",
                 "",
@@ -218,21 +256,26 @@ def render_report(result: ValidationResult, run_facts: RunFacts, bead_id: str) -
     """The decision bead's description, which is also the report file's text."""
 
     respond = PLACEHOLDER if bead_id == NOT_FILED else bead_id
+    proposal_ids, followup_ids = report_ids(result)
     block = render_fingerprints_block(
         [
             {
+                "id": item_id,
                 "kind": kept.proposal.kind,
                 "key": kept.proposal.key,
                 "fingerprint": kept.fingerprint,
                 "quotes": [quote for quote, _ in kept.examples],
             }
-            for kept in result.proposals
+            for item_id, kept in zip(proposal_ids, result.proposals)
         ],
-        [{"title": followup.title} for followup in result.followups],
+        [
+            {"id": item_id, "title": followup.title}
+            for item_id, followup in zip(followup_ids, result.followups)
+        ],
     )
     lines = [
-        *_proposals(result, respond),
-        *_followups(result),
+        *_proposals(result, respond, proposal_ids),
+        *_followups(result, followup_ids),
         *_helped(result),
         *_facts(result, run_facts),
         *_how_to_respond(result, bead_id, respond),
@@ -245,25 +288,23 @@ def render_report(result: ValidationResult, run_facts: RunFacts, bead_id: str) -
 def example_response(result: ValidationResult) -> str:
     """A `bd human respond` answer built from the ids this report really lists.
 
-    A fixed example once named a P3 the run did not have. With two or more
-    proposals the last is shown rejected so both verdict words appear; a
-    follow-up is shown as filed. With no proposals the follow-up itself is
-    accepted, and with nothing at all the answer names no id, so every form
-    here parses through `parse_response` to ids the report carries.
+    A fixed example once named an item the run did not have. With two or more
+    suggested memory changes the last is shown rejected so both verdicts
+    appear; the first follow-up is shown filed. With nothing at all the answer
+    names no id, so every form here parses through `parse_response` to ids
+    the report carries.
     """
 
-    ids = [f"P{index}" for index in range(1, len(result.proposals) + 1)]
-    if len(ids) >= 2:
-        text = f"accepted {' '.join(ids[:-1])}; rejected {ids[-1]} (reason)"
-    elif ids:
-        text = "accepted P1"
-    elif result.followups:
-        return "accepted F1 (filed)"
-    else:
-        return "accepted none"
-    if result.followups:
-        text += "; F1 filed"
-    return text
+    proposal_ids, followup_ids = report_ids(result)
+    groups: list[str] = []
+    if len(proposal_ids) >= 2:
+        groups.append(f"accept {', '.join(proposal_ids[:-1])}")
+        groups.append(f"reject {proposal_ids[-1]} (reason)")
+    elif proposal_ids:
+        groups.append(f"accept {proposal_ids[0]}")
+    if followup_ids:
+        groups.append(f"file follow-up {followup_ids[0]}")
+    return "; ".join(groups) or "accept none"
 
 
 def _how_to_respond(result: ValidationResult, bead_id: str, respond: str) -> list[str]:
@@ -276,8 +317,8 @@ def _how_to_respond(result: ValidationResult, bead_id: str, respond: str) -> lis
         "",
         "Steps for you or your agent, in order:",
         "",
-        "1. For each proposal you accept, run the `bd remember` (or `bd forget`) "
-        "command shown under it in Proposals. Dream never runs them itself.",
+        "1. For each suggested memory change you accept, run the `bd remember` "
+        "(or `bd forget`) command shown under it. Dream never runs them itself.",
         f"2. Record the decision on the bead with `bd human respond {respond} "
         '"<response>"`:',
         "",
@@ -285,10 +326,10 @@ def _how_to_respond(result: ValidationResult, bead_id: str, respond: str) -> lis
         f'bd human respond {respond} "{example_response(result)}"',
         "```",
         "",
-        "   The response is `accepted <ids>` and `rejected <ids> (reason)` groups "
-        "separated by `;`. Ids are `P<n>` for proposals and `F<n>` for follow-ups, "
-        "as numbered above; an id the response leaves out stays undecided.",
-        "3. Dream never files follow-ups. File each one you want as a bead with "
+        "   The response is `accept <names>`, `reject <names> (reason)` and "
+        "`file follow-up <names>` groups separated by `;`. The names are the "
+        "headings above; an item the response leaves out stays undecided.",
+        "3. Dream never files follow-up tasks. File each one you want as a bead with "
         "`ortus ingest --packet <dir>` (a directory holding description.md, "
         "design.md and acceptance.md) or `ortus ingest --stdin` (one JSON packet).",
         "",
@@ -408,7 +449,8 @@ def next_steps(result: ValidationResult, delivery: Delivery) -> str:
     return "\n".join(
         [
             f"Dream filed decision {delivery.bead_id}: "
-            f"{len(result.proposals)} proposals, {len(result.followups)} follow-ups.",
+            f"{len(result.proposals)} suggested memory changes, "
+            f"{len(result.followups)} possible follow-up tasks.",
             report,
             f"Ask your agent: Walk me through Dream decision {delivery.bead_id} "
             "and record what I accept.",

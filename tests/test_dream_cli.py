@@ -266,12 +266,26 @@ def test_real_run_prints_next_steps_on_stderr_and_only_the_id_on_stdout(
     assert result.stdout.splitlines()[-1] == "ortus-p9xq"
     assert "Ask your agent" not in result.stdout
     assert "Report:" not in result.stdout
-    assert "Dream filed decision ortus-p9xq: 2 proposals, 1 follow-ups." in result.stderr
+    assert (
+        "Dream filed decision ortus-p9xq: 2 suggested memory changes, "
+        "1 possible follow-up tasks." in result.stderr
+    )
     assert f"Report: {report}" in result.stderr
     assert (
         "Ask your agent: Walk me through Dream decision ortus-p9xq and record what I accept."
         in result.stderr
     )
+
+
+def test_next_steps_have_no_bare_codes(tmp_path: Path) -> None:
+    import re
+
+    text = next_steps(
+        _result(), Delivery(exit_code=0, bead_id="ortus-p9xq", report_path=tmp_path / "d.md")
+    )
+
+    assert not re.search(r"\b[PF]\d+\b", text)
+    assert "suggested memory changes" in text and "possible follow-up tasks" in text
 
 
 def test_next_steps_without_a_bead_names_only_the_report(tmp_path: Path) -> None:

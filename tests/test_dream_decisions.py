@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ortus.core.dream_decisions import (
     ACCEPTED,
     PENDING,
@@ -9,6 +11,7 @@ from ortus.core.dream_decisions import (
     UNDECIDED,
     accepted,
     fingerprint,
+    item_ids,
     load_decisions,
     parse_fingerprints_block,
     parse_response,
@@ -30,9 +33,25 @@ PROPOSALS = (
     {"kind": "update", "key": "fake-bd", "pattern": "fake omits empty fields"},
 )
 FOLLOWUPS = ({"title": "Refresh the tool install in grind preflight"},)
+#: The block a decision bead filed before items had names carried these ids.
+LEGACY_PROPOSALS = tuple(
+    {**proposal, "id": f"P{index}"} for index, proposal in enumerate(PROPOSALS, start=1)
+)
+LEGACY_FOLLOWUPS = ({**FOLLOWUPS[0], "id": "F1"},)
 
 
-def _dream_bead(client: FakeBdClient, *, labels: str = "dream,human", kind: str = "decision") -> str:
+def _dream_bead(
+    client: FakeBdClient,
+    *,
+    labels: str = "dream,human",
+    kind: str = "decision",
+    legacy: bool = True,
+) -> str:
+    block = (
+        render_fingerprints_block(LEGACY_PROPOSALS, LEGACY_FOLLOWUPS)
+        if legacy
+        else render_fingerprints_block(PROPOSALS, FOLLOWUPS)
+    )
     return seed(
         client,
         "create",
@@ -43,7 +62,7 @@ def _dream_bead(client: FakeBdClient, *, labels: str = "dream,human", kind: str 
         "--labels",
         labels,
         "--description",
-        "Proposals below.\n\n" + render_fingerprints_block(PROPOSALS, FOLLOWUPS) + "\n",
+        "Proposals below.\n\n" + block + "\n",
     )
 
 
@@ -64,13 +83,13 @@ def test_fingerprint_block_round_trips() -> None:
     parsed = parse_fingerprints_block(f"Intro text.\n\n{block}\n\nTrailer.")
     assert parsed is not None
     assert parsed["version"] == 1
-    assert [p["id"] for p in parsed["proposals"]] == ["P1", "P2", "P3"]
+    assert [p["id"] for p in parsed["proposals"]] == ["uv-tool-reinstall", "old-pin", "fake-bd"]
     assert parsed["proposals"][0]["fingerprint"] == fingerprint(
         "add", "uv-tool-reinstall", "PATH ortus is a stale uv tool install"
     )
     assert len(parsed["proposals"][0]["quotes"]) == 2
     assert parsed["followups"] == [
-        {"id": "F1", "title": "Refresh the tool install in grind preflight"}
+        {"id": "refresh-the-tool-install-in", "title": "Refresh the tool install in grind preflight"}
     ]
 
 
@@ -196,3 +215,103 @@ def test_suppress_tolerates_missing_and_future_blocks(tmp_path) -> None:
     assert by_id[future].proposals == ()
     assert "version 9" in by_id[future].warning
     assert suppressed(by_id.values()) == (frozenset(), frozenset())
+
+
+def test_slug_ids_fall_back_and_stay_unique() -> None:
+    proposals, followups = item_ids(
+        [
+            {"kind": "add", "key": "Commit_Message rules"},
+            {"kind": "add", "key": "commit-message-rules"},
+            {"kind": "prune", "key": ""},
+            {"kind": "", "key": ""},
+            {"kind": "add", "key": "p1"},
+        ],
+        [{"title": "Commit message rules"}, {"title": ""}],
+    )
+    assert proposals == [
+        "commit-message-rules",
+        "commit-message-rules-2",
+        "prune",
+        "memory-change-4",
+        "memory-p1",
+    ]
+    assert followups == ["commit-message-rules-3", "follow-up-2"]
+
+
+def test_slug_reply_parses_new_verbs_against_known_ids() -> None:
+    known = ["commit-message-rules", "pinned-prompt-hash-tests", "skip-flaky", "dolt-ssh-push"]
+    reply = (
+        "accept Commit-Message-Rules, pinned-prompt-hash-tests; "
+        "skip skip-flaky (one-off); file follow-up dolt-ssh-push"
+    )
+    assert parse_response(reply, known) == {
+        "commit-message-rules": ACCEPTED,
+        "pinned-prompt-hash-tests": ACCEPTED,
+        "skip-flaky": REJECTED,
+        "dolt-ssh-push": ACCEPTED,
+    }
+    assert parse_response("rejected unknown-thing; filed dolt-ssh-push", known) == {
+        "dolt-ssh-push": ACCEPTED
+    }
+    assert parse_response("accept a-b, c (because x-y); skipped d") == {
+        "a-b": ACCEPTED,
+        "c": ACCEPTED,
+        "d": REJECTED,
+    }
+
+
+def test_slug_reply_drives_verdicts_on_a_closed_bead(tmp_path) -> None:
+    client = FakeBdClient(tmp_path)
+    bead = _dream_bead(client, legacy=False)
+    client.add_comment(
+        bead,
+        "accept uv-tool-reinstall; reject old-pin (one-off); "
+        "file follow-up refresh-the-tool-install-in",
+    )
+    client.close(bead, reason="Responded")
+
+    (decision,) = load_decisions(client)
+    assert _verdicts(decision) == {
+        "uv-tool-reinstall": ACCEPTED,
+        "old-pin": REJECTED,
+        "fake-bd": UNDECIDED,
+    }
+    assert [f.verdict for f in decision.followups] == [ACCEPTED]
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("accepted P1 P2; F1 filed", {"P1": ACCEPTED, "P2": ACCEPTED, "P3": UNDECIDED}),
+        ("accepted P1, rejected P2", {"P1": ACCEPTED, "P2": REJECTED, "P3": UNDECIDED}),
+    ],
+)
+def test_legacy_replies_keep_their_verdicts_against_an_old_block(
+    tmp_path, reply, expected
+) -> None:
+    assert {
+        key: value for key, value in parse_response(reply).items() if key.startswith("P")
+    } == {key: value for key, value in expected.items() if value != UNDECIDED}
+    client = FakeBdClient(tmp_path)
+    bead = _dream_bead(client)
+    client.add_comment(bead, reply)
+    client.close(bead, reason="Responded")
+
+    (decision,) = load_decisions(client)
+    assert _verdicts(decision) == expected
+    assert [f.verdict for f in decision.followups] == [UNDECIDED]
+
+
+def test_legacy_reply_reaches_a_named_block_by_position(tmp_path) -> None:
+    client = FakeBdClient(tmp_path)
+    bead = _dream_bead(client, legacy=False)
+    client.add_comment(bead, "accepted P1 F1; rejected P2")
+    client.close(bead, reason="Responded")
+
+    (decision,) = load_decisions(client)
+    assert _verdicts(decision) == {
+        "uv-tool-reinstall": ACCEPTED,
+        "old-pin": REJECTED,
+        "fake-bd": UNDECIDED,
+    }
+    assert [f.verdict for f in decision.followups] == [ACCEPTED]
