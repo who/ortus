@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -114,6 +115,46 @@ def _since_seconds(since: str) -> float:
     return count * (86_400 if unit == "d" else 3_600)
 
 
+#: The run id a grind log is named by: `grind-YYYYMMDD-HHMMSS`.
+_RUN_STAMP = re.compile(r"^grind-(\d{8}-\d{6})")
+
+#: Refusal when both recency filters are given; they disagree on what "recent"
+#: means, so neither silently wins.
+LAST_AND_SINCE = "use --last or --since, not both"
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _run_time(path: Path) -> float:
+    """When a grind run started, from its log name; its mtime when unparseable."""
+
+    match = _RUN_STAMP.match(path.name)
+    if match is not None:
+        try:
+            return time.mktime(time.strptime(match.group(1), "%Y%m%d-%H%M%S"))
+        except (ValueError, OverflowError):
+            pass
+    return _mtime(path)
+
+
+def newest_runs(paths: list[Path], last: int) -> list[Path]:
+    """The `last` most recent grind logs, however old, newest first.
+
+    Recency is the run id in the log's name, so copying or touching a log
+    does not reorder it; equal or unparseable stamps fall back to mtime.
+    """
+
+    ordered = sorted(
+        paths, key=lambda path: (_run_time(path), _mtime(path), path.name), reverse=True
+    )
+    return ordered[:last]
+
+
 @dataclass(frozen=True)
 class Selection:
     """What one Dream pass found, chose and expects to spend."""
@@ -129,6 +170,7 @@ class Selection:
     over_budget: bool
     logs: int
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
+    last: int | None = None
 
     def summary(self, reader: AgentProfile, orchestrator: AgentProfile) -> dict[str, Any]:
         return {
@@ -142,6 +184,8 @@ class Selection:
             "est_orchestrator_tokens": self.est_orchestrator_tokens,
             "chunks": self.chunks,
             "over_budget": self.over_budget,
+            "runs_selected": self.logs,
+            "last": self.last,
             "reader_profile": reader.display_name,
             "orchestrator_profile": orchestrator.display_name,
         }
@@ -185,11 +229,14 @@ def select_windows(
     reread: bool,
     log_count: int,
     now: float | None = None,
+    last: int | None = None,
 ) -> Selection:
     """Narrow, cap and estimate the windows a reader still has to read.
 
     A window matches when it passes every narrowing flag given; it is a
     candidate when it also has no notes for this reader (or `reread` is set).
+    `last` only labels the selection: the caller already narrowed `prepared`
+    to the windows of the runs it picked.
     Candidates are taken newest first by log stem, then by start line. The
     orchestrator estimate counts every existing note for this reader,
     matching or not, because the orchestrator reads them all.
@@ -246,6 +293,7 @@ def select_windows(
         over_budget=est_reader + est_orchestrator > settings["budget_tokens"],
         logs=log_count,
         skipped_by_reason=dict(sorted(by_reason.items())),
+        last=last,
     )
 
 
@@ -322,7 +370,13 @@ def _skip_label(reason: str) -> str:
 
 
 def _report(selection: Selection, reader: AgentProfile, orchestrator: AgentProfile) -> None:
+    runs = (
+        [("runs selected", f"{selection.logs} (--last {selection.last})")]
+        if selection.last is not None
+        else []
+    )
     rows = [
+        *runs,
         ("windows found", str(selection.windows_total)),
         ("needing a reader", str(len(selection.candidates))),
         ("reused notes", str(selection.reused)),
@@ -350,6 +404,12 @@ def dream(
     ),
     since: Optional[str] = typer.Option(
         None, "--since", help="Only logs modified within this age: <N>d or <N>h."
+    ),
+    last: Optional[int] = typer.Option(
+        None,
+        "--last",
+        min=1,
+        help="Only the N most recent grind runs, however old.",
     ),
     logs: Optional[list[Path]] = typer.Option(
         None, "--logs", help="Only windows from this log file (repeatable)."
@@ -415,6 +475,9 @@ def dream(
     """
 
     target = resolve_repo(repo)
+    if last is not None and since is not None:
+        output.error(LAST_AND_SINCE)
+        raise typer.Exit(code=EXIT_REFUSED)
     if since is not None and not DREAM_SINCE.match(since):
         output.error(f"invalid --since {since!r}; expected <N>d or <N>h, e.g. 7d")
         raise typer.Exit(code=EXIT_ERROR)
@@ -455,6 +518,10 @@ def dream(
         "cut_bytes": cut_bytes,
     }
     settings.update({k: v for k, v in overrides.items() if v is not None})
+    if last is not None:
+        # An explicit run count replaces a `[dream] since` default: the point
+        # of `--last` is reaching runs older than any age window.
+        settings["since"] = None
     key = reader_key(backend_name, reader, brief)
 
     try:
@@ -465,6 +532,11 @@ def dream(
                 output.error(str(exc))
                 raise typer.Exit(code=EXIT_REFUSED) from exc
             paths = _log_paths(target, list(logs or []))
+            if last is not None:
+                if logs:
+                    given = {path.expanduser().resolve() for path in logs}
+                    paths = [path for path in paths if path.resolve() in given]
+                paths = newest_runs(paths, last)
             output.progress("dream", f"preparing windows from {len(paths)} grind log(s)")
             prepared = _prepare_all(target, paths, settings["cut_bytes"])
             selection = select_windows(
@@ -476,6 +548,7 @@ def dream(
                 beads=list(beads or []),
                 reread=reread,
                 log_count=len(paths),
+                last=last,
             )
             if json_out:
                 typer.echo(json.dumps(selection.summary(reader, orchestrator)))
@@ -494,7 +567,7 @@ def dream(
                 output.error(
                     f"estimated {selection.est_reader_tokens + selection.est_orchestrator_tokens}"
                     f" tokens exceeds the budget of {settings['budget_tokens']}",
-                    hint="narrow with --since, --logs, --beads or --max-beads, "
+                    hint="narrow with --since, --last, --logs, --beads or --max-beads, "
                     "or raise --budget-tokens",
                 )
                 raise typer.Exit(code=EXIT_REFUSED)
