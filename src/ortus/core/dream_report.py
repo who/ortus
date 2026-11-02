@@ -235,20 +235,64 @@ def render_report(result: ValidationResult, run_facts: RunFacts, bead_id: str) -
         *_followups(result),
         *_helped(result),
         *_facts(result, run_facts),
-        "## How to respond",
-        "",
-        f"Decision bead: {bead_id}",
-        "",
-        "Paste the commands you accept, then record the answer:",
-        "",
-        "```bash",
-        f'bd human respond {respond} "accepted P1 P3; rejected P2 (reason)"',
-        "```",
-        "",
+        *_how_to_respond(result, bead_id, respond),
         block,
         "",
     ]
     return "\n".join(lines)
+
+
+def example_response(result: ValidationResult) -> str:
+    """A `bd human respond` answer built from the ids this report really lists.
+
+    A fixed example once named a P3 the run did not have. With two or more
+    proposals the last is shown rejected so both verdict words appear; a
+    follow-up is shown as filed. With no proposals the follow-up itself is
+    accepted, and with nothing at all the answer names no id, so every form
+    here parses through `parse_response` to ids the report carries.
+    """
+
+    ids = [f"P{index}" for index in range(1, len(result.proposals) + 1)]
+    if len(ids) >= 2:
+        text = f"accepted {' '.join(ids[:-1])}; rejected {ids[-1]} (reason)"
+    elif ids:
+        text = "accepted P1"
+    elif result.followups:
+        return "accepted F1 (filed)"
+    else:
+        return "accepted none"
+    if result.followups:
+        text += "; F1 filed"
+    return text
+
+
+def _how_to_respond(result: ValidationResult, bead_id: str, respond: str) -> list[str]:
+    """Steps an agent can follow from this section alone, without `ortus --help`."""
+
+    return [
+        "## How to respond",
+        "",
+        f"Decision bead: {bead_id}",
+        "",
+        "Steps for you or your agent, in order:",
+        "",
+        "1. For each proposal you accept, run the `bd remember` (or `bd forget`) "
+        "command shown under it in Proposals. Dream never runs them itself.",
+        f"2. Record the decision on the bead with `bd human respond {respond} "
+        '"<response>"`:',
+        "",
+        "```bash",
+        f'bd human respond {respond} "{example_response(result)}"',
+        "```",
+        "",
+        "   The response is `accepted <ids>` and `rejected <ids> (reason)` groups "
+        "separated by `;`. Ids are `P<n>` for proposals and `F<n>` for follow-ups, "
+        "as numbered above; an id the response leaves out stays undecided.",
+        "3. Dream never files follow-ups. File each one you want as a bead with "
+        "`ortus ingest --packet <dir>` (a directory holding description.md, "
+        "design.md and acceptance.md) or `ortus ingest --stdin` (one JSON packet).",
+        "",
+    ]
 
 
 class _Filer(Protocol):
@@ -348,3 +392,25 @@ def deliver(
         },
     )
     return Delivery(exit_code=exit_code, bead_id=bead_id, report_path=report_path, error=error)
+
+
+def next_steps(result: ValidationResult, delivery: Delivery) -> str:
+    """What a finished run tells the operator to do next, for stderr.
+
+    stdout stays the bead id alone so `id=$(ortus dream ...)` keeps working.
+    With no bead filed there is nothing for an agent to walk through, so only
+    the report is named.
+    """
+
+    report = f"Report: {delivery.report_path}"
+    if not delivery.bead_id:
+        return f"Dream filed no decision bead.\n{report}"
+    return "\n".join(
+        [
+            f"Dream filed decision {delivery.bead_id}: "
+            f"{len(result.proposals)} proposals, {len(result.followups)} follow-ups.",
+            report,
+            f"Ask your agent: Walk me through Dream decision {delivery.bead_id} "
+            "and record what I accept.",
+        ]
+    )

@@ -20,7 +20,8 @@ from ortus.core.dream_validate import ValidationResult
 from ortus.core.grind_logic import grind_flock
 from ortus.core.profiles import Phase, resolve_dream_profile
 from ortus.core.prompts import resolve_named_prompt
-from tests.test_dream_report import FACTS
+from ortus.core.dream_report import Delivery, next_steps
+from tests.test_dream_report import FACTS, _result
 
 FIXTURE = Path(__file__).parent / "fixtures" / "dream" / "grind-20261011-000000.log"
 
@@ -242,6 +243,43 @@ def test_real_run_with_nothing_validated_writes_the_report_and_exits_3(
     assert result.exit_code == 3, result.output
     assert len(list((repo / NOTES_DIR).glob("*.json"))) == 2
     assert len(list((repo / "logs").glob("dream-*.md"))) == 1
+
+
+def test_real_run_prints_next_steps_on_stderr_and_only_the_id_on_stdout(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = repo / "logs" / "dream-20261102-113256.md"
+    monkeypatch.setattr(dream_module, "make_runner", lambda backend, repo=None: object())
+    monkeypatch.setattr(dream_module, "run_readers", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dream_module, "run_orchestrator", lambda **kwargs: None)
+    monkeypatch.setattr(dream_module, "validate_run", lambda *args, **kwargs: _result())
+    monkeypatch.setattr(dream_module, "run_facts", lambda *args, **kwargs: FACTS)
+    monkeypatch.setattr(
+        dream_module,
+        "deliver",
+        lambda *args, **kwargs: Delivery(exit_code=0, bead_id="ortus-p9xq", report_path=report),
+    )
+
+    result = runner.invoke(app, ["dream", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[-1] == "ortus-p9xq"
+    assert "Ask your agent" not in result.stdout
+    assert "Report:" not in result.stdout
+    assert "Dream filed decision ortus-p9xq: 2 proposals, 1 follow-ups." in result.stderr
+    assert f"Report: {report}" in result.stderr
+    assert (
+        "Ask your agent: Walk me through Dream decision ortus-p9xq and record what I accept."
+        in result.stderr
+    )
+
+
+def test_next_steps_without_a_bead_names_only_the_report(tmp_path: Path) -> None:
+    report = tmp_path / "dream.md"
+    text = next_steps(_result(), Delivery(exit_code=1, bead_id=None, report_path=report))
+
+    assert f"Report: {report}" in text
+    assert "Ask your agent" not in text
 
 
 def test_real_run_with_no_logs_exits_nothing(repo: Path) -> None:

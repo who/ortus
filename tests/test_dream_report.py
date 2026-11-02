@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 from ortus.core.bd import SRC_TAIL, BdError
-from ortus.core.dream_decisions import fingerprint, load_decisions, parse_fingerprints_block
+from ortus.core.dream_decisions import (
+    fingerprint,
+    load_decisions,
+    parse_fingerprints_block,
+    parse_response,
+)
 from ortus.core.dream_orchestrator import Followup, Proposal
 from ortus.core.dream_report import (
     DREAM_ACTOR,
@@ -20,6 +25,7 @@ from ortus.core.dream_report import (
     RunFacts,
     command,
     deliver,
+    example_response,
     render_report,
     title,
 )
@@ -133,7 +139,64 @@ def test_render_carries_every_section_in_order() -> None:
     assert "| old-lesson | 40.0 | 20.0 | 3/1 |" in text
     assert "drops: bad-key=1, cap=2" in text
     assert "bd prime: unavailable chars" in text
-    assert 'bd human respond ortus-x1 "accepted P1 P3; rejected P2 (reason)"' in text
+    assert 'bd human respond ortus-x1 "accepted P1; rejected P2 (reason); F1 filed"' in text
+
+
+def _listed_ids(text: str) -> set[str]:
+    block = parse_fingerprints_block(text)
+    assert block is not None
+    return {row["id"] for row in block["proposals"]} | {row["id"] for row in block["followups"]}
+
+
+def _rendered_example(text: str, bead_id: str) -> str:
+    prefix = f'bd human respond {bead_id} "'
+    line = next(line for line in text.splitlines() if line.startswith(prefix))
+    return line[len(prefix) : -1]
+
+
+def test_render_example_ids_name_only_what_the_report_lists() -> None:
+    text = render_report(_result(), FACTS, "ortus-x1")
+    example = _rendered_example(text, "ortus-x1")
+
+    assert "P3" not in example
+    assert example == example_response(_result())
+    named = parse_response(example)
+    assert named == {"P1": "accepted", "P2": "rejected"}
+    assert set(named) <= _listed_ids(text)
+    assert "F1" in example
+
+
+def test_render_how_to_respond_is_agent_ready() -> None:
+    text = render_report(_result(), FACTS, "ortus-x1")
+    section = text[text.index("## How to respond") : text.index("```ortus-dream-fingerprints")]
+
+    assert "`bd remember`" in section
+    assert "command shown under it in Proposals" in section
+    assert 'bd human respond ortus-x1 "<response>"' in section
+    assert "`accepted <ids>`" in section and "`rejected <ids> (reason)`" in section
+    assert "`ortus ingest --packet <dir>`" in section
+    assert "`ortus ingest --stdin`" in section
+    assert "Dream never files follow-ups" in section
+
+
+@pytest.mark.parametrize(
+    ("proposals", "followups", "expected"),
+    [
+        ([_kept()], [], {"P1": "accepted"}),
+        ([_kept()], None, {"P1": "accepted"}),
+        ([], None, {"F1": "accepted"}),
+        ([], [], {}),
+    ],
+)
+def test_render_edge_examples_parse_to_listed_ids(proposals, followups, expected) -> None:
+    result = _result(proposals=proposals, followups=followups)
+    text = render_report(result, FACTS, "ortus-x1")
+    example = _rendered_example(text, "ortus-x1")
+
+    assert example == example_response(result)
+    named = parse_response(example)
+    assert named == expected
+    assert set(named) <= _listed_ids(text)
 
 
 def test_render_command_quotes_a_tricky_body_with_the_real_id() -> None:

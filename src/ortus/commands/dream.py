@@ -60,7 +60,7 @@ from ortus.core.dream_transcripts import (
     split_windows,
     window_key,
 )
-from ortus.core.dream_report import RunFacts, deliver
+from ortus.core.dream_report import RunFacts, deliver, next_steps
 from ortus.core.dream_validate import HeadRefs, ValidationResult, validate
 from ortus.core.git import GitClient
 from ortus.core.grind_logic import FlockBusy, grind_flock
@@ -734,6 +734,7 @@ def dream(
                 output.error(delivery.error)
             if delivery.bead_id:
                 typer.echo(delivery.bead_id)
+            typer.echo(next_steps(validation, delivery), err=True)
             filed = delivery.bead_id or "no bead filed"
             output.progress("dream", f"done ({filed}, report {delivery.report_path})")
             if delivery.exit_code != EXIT_OK:
