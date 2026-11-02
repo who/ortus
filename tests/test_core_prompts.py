@@ -210,9 +210,11 @@ def test_parse_eject_stamp_reads_only_the_first_line() -> None:
 # The `prompt_audit` flag adds a second variant of the two worker-facing
 # texts. Off is the control arm of the A/B, and an arm that drifts measures
 # nothing, so the legacy bytes are pinned by digest: a change to either file
-# has to be deliberate enough to update the hash here.
+# has to be deliberate enough to update the hash here. The goal digest moved
+# once on purpose: both arms gained the `BLOCKED:` exit (ortus-urkb), since a
+# session-close blocked outside the worker's reach stalls either arm alike.
 _LEGACY_GOAL_SHA256 = (
-    "fc9c47f0e0faa3a715d8eb15ca23ea75798d9071c466198dc9989b09ba5bc7ec"
+    "5e135c8543cf36c9ab1fb95cfeaf26efb367f5b922eab08606f4999abc664c9a"
 )
 _LEGACY_WORK_ISSUE_SHA256 = (
     "41d84a253c7f87e39da860243a15e1dce9f6cd3481caecf2442ec92933fdb79d"

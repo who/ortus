@@ -692,13 +692,20 @@ _CLAUDE_GOAL_CONDITION_LIMIT = 4_000
 # done bar — not the inlined goal-prompt.md body. The done bar is the same
 # under either verification mode; only the framing of what already counted
 # as verification differs, and the two framings are the same length to within
-# a few characters so neither inflates the condition.
+# a few characters so neither inflates the condition. The blocked exit gives
+# a session-close stalled outside the worker's reach (a refused push, an
+# approval, a history rewrite) one recorded stop instead of a Stop hook that
+# re-fires on the same unmeetable bar until Claude's block cap ends the turn.
+# The clause is the bar only; the goal prompt's Exit step carries the
+# procedure, because the recovery-handoff budget leaves little room here.
 _GOAL_POINTER_HEAD = (
     "One window, one issue. Continue leftover in_progress, else run "
     "bd ready and claim the first non-epic. Read AGENTS.md. Run "
     "`ortus prompt show goal` and follow that one-issue loop. "
     "Session-close that id per AGENTS.md. "
     "Achieved when that issue is closed and HEAD is in sync with origin. "
+    "Also achieved when the only unmet step is out of your reach (a refused "
+    "push, an approval) and one `BLOCKED:` bd comment names it. "
 )
 _FULL_VERIFICATION_FRAMING = (
     "The issue's criterion-check commands already ran during implement — "
