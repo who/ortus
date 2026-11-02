@@ -62,6 +62,7 @@ from ortus.core.local_backend import (
     resolve_opencode_binary,
     serving_hint,
 )
+from ortus.core.git import GitClient
 from ortus.core.profiles import ProfileError
 from ortus.core.readiness import (
     READINESS_MEMORY_KEY,
@@ -82,6 +83,7 @@ from ortus.core.stealth import (
     status_ortus_paths,
     tracked_ortus_paths,
 )
+from ortus.core.worker_guard import install_commit_msg_hook
 
 
 def _bd_init(repo: Path, prefix: str | None) -> None:
@@ -179,6 +181,19 @@ def _bd_hooks_install(repo: Path) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def _install_commit_msg_hook(repo: Path) -> Path | None:
+    """Add Ortus's commit-subject check to the `commit-msg` hook git will run.
+
+    The directory is the one git resolves, `core.hooksPath` included, and a
+    hook already there keeps its own lines. None when git resolves no hooks
+    directory at all.
+    """
+    hooks = GitClient(repo=repo).hooks_dir()
+    if hooks is None:
+        return None
+    return install_commit_msg_hook(hooks)
 
 
 def _remove_bd_claude_scaffold(repo: Path) -> None:
@@ -1298,7 +1313,7 @@ def init(
         for warning in hook_warnings:
             output.warn(f"stealth hooks: {warning}")
         if not hook_warnings:
-            output.success("installed stealth pre-push and pre-commit guard hooks")
+            output.success("installed stealth pre-push, pre-commit and commit-msg guard hooks")
     elif not already_initialized:
         output.progress("init", f"creating .beads/ workspace (prefix={resolved_prefix})")
         try:
@@ -1349,6 +1364,15 @@ def init(
             )
         else:
             output.success("beads git hooks installed")
+        # After bd's install, so its hooks directory (core.hooksPath when bd set
+        # one) is the one git will run; bd ships no commit-msg of its own.
+        try:
+            hook = _install_commit_msg_hook(target)
+        except Exception as exc:  # noqa: BLE001 - a missing hook never fails init
+            output.warn(f"could not install the commit-msg subject hook: {exc}")
+        else:
+            if hook is not None:
+                output.success(f"commit-msg subject hook installed ({hook})")
 
     # Indexing runs before rendering so a failure leaves no half-written Ortus
     # config behind.

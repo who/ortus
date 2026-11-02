@@ -99,6 +99,7 @@ from ortus.core.stealth import (
     tracked_excluded_paths,
     tracked_ortus_paths,
 )
+from ortus.core.worker_guard import COMMIT_MSG_BEGIN
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -284,6 +285,35 @@ def check_tracker_hooks(repo: Path) -> CheckResult:
 
 
 STEALTH_REINIT_HINT = "re-run ortus init --stealth --force"
+
+
+def check_commit_msg_hook(repo: Path) -> CheckResult:
+    """Report whether git will run Ortus's commit-subject check on commit.
+
+    Informational, like the tracker-hook row: without it a worker's over-long
+    `git commit -m` is still refused by the worker hook, and only the stop
+    hook catches a subject written any other way. Either Ortus marker counts,
+    the stealth hook's or the section a normal init writes.
+    """
+    name = "commit-msg subject hook"
+    hint = "ortus init --stealth --force" if is_stealth(repo) else "ortus init --force"
+    git = GitClient(repo=repo)
+    try:
+        hooks = git.hooks_dir() if git.is_git_repo() else None
+    except OSError as exc:
+        return CheckResult(name, False, f"git could not be run: {exc}", level="info")
+    if hooks is None:
+        return CheckResult(name, True, "not a git checkout", level="info")
+    hook = hooks / "commit-msg"
+    try:
+        text = hook.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if COMMIT_MSG_BEGIN not in text and STEALTH_HOOK_MARKER not in text:
+        return CheckResult(name, False, f"not installed in {hooks} — {hint}", level="info")
+    if not os.access(hook, os.X_OK):
+        return CheckResult(name, False, f"{hook} is not executable — chmod +x it", level="info")
+    return CheckResult(name, True, str(hook))
 
 
 def _bd_json(repo: Path, *args: str) -> Any:
@@ -1402,6 +1432,7 @@ def _run_all(repo: Path, backend: str = "claude") -> list[CheckResult]:
     repo_checks: list[tuple[Callable[[Path], CheckResult | list[CheckResult]], str]] = [
         (check_beads_dir, ".beads/"),
         (check_tracker_hooks, "tracker git hooks"),
+        (check_commit_msg_hook, "commit-msg subject hook"),
         (check_stealth_rows, "stealth"),
         (check_readiness_memory, "bd readiness memory"),
         (settings_check, settings_label),

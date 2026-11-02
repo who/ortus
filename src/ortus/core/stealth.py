@@ -255,6 +255,7 @@ STEALTH_HOOK_MARKER = "# ortus stealth hook v1"
 STEALTH_HOOKS: dict[str, str] = {
     "pre-push": 'ortus guard pre-push "$@"',
     "pre-commit": "ortus guard pre-commit",
+    "commit-msg": 'ortus guard commit-msg "$1"',
 }
 ALLOW_GITIGNORE_ENV = "ORTUS_STEALTH_ALLOW_GITIGNORE"
 
@@ -456,7 +457,7 @@ def _hook_script(command: str) -> str:
 
 
 def install_stealth_hooks(repo: Path) -> list[str]:
-    """Write the stealth `pre-push` and `pre-commit` hooks; return warnings.
+    """Write the stealth `pre-push`, `pre-commit`, `commit-msg` hooks; warn.
 
     Only into git's own hooks directory, and only when `core.hooksPath` is
     unset: a hooks path belongs to whatever set it, and grind's in-process
