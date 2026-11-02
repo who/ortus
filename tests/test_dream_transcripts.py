@@ -10,7 +10,6 @@ import pytest
 from ortus.core.bd import BdError
 from ortus.core.dream_transcripts import (
     CUT_KEEP_BYTES,
-    SKIPPED_UNKNOWN_SHAPE,
     WINDOWS_DIR,
     BeadWindow,
     DreamCacheNotIgnored,
@@ -28,6 +27,7 @@ from ortus.core.dream_transcripts import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "dream" / "grind-20261011-000000.log"
+CODEX_FIXTURE = Path(__file__).parent / "fixtures" / "dream" / "grind-20261012-000000.log"
 
 
 def _events(body: str) -> list[dict]:
@@ -161,19 +161,121 @@ def test_cut_leaves_a_string_exactly_at_the_limit() -> None:
     assert event["b"][0][0] == over + " [cut 1 KB]"
 
 
-def test_unknown_shape_backend_is_skipped(tmp_path: Path) -> None:
+def test_grok_backend_is_skipped_with_its_backend_named(tmp_path: Path) -> None:
     log = tmp_path / "grind-20261011-000001.log"
     log.write_text(
-        FIXTURE.read_text(encoding="utf-8").replace("backend=claude", "backend=codex", 1),
+        FIXTURE.read_text(encoding="utf-8").replace("backend=claude", "backend=grok", 1),
         encoding="utf-8",
     )
 
     windows = split_windows(log)
     prepared = [prepare_window(window) for window in windows]
 
-    assert [w.backend for w in windows] == ["codex", "codex"]
-    assert all(p.skipped == SKIPPED_UNKNOWN_SHAPE for p in prepared)
+    assert [w.backend for w in windows] == ["grok", "grok"]
+    assert all(p.skipped == "backend-grok" for p in prepared)
     assert all(p.body == "" and p.cuts == 0 for p in prepared)
+
+
+def test_codex_window_is_prepared_with_lifecycle_noise_dropped() -> None:
+    first, second = split_windows(CODEX_FIXTURE)
+    prepared = prepare_window(first)
+
+    assert first.backend == "codex"
+    assert prepared.skipped is None
+    assert prepared.body
+    kinds = [event["type"] for event in _events(prepared.body)]
+    assert kinds == ["item.completed"] * 3 + ["ortus.codegraph"]
+    items = [event["item"] for event in _events(prepared.body)[:3]]
+    assert [item["type"] for item in items] == [
+        "reasoning",
+        "command_execution",
+        "agent_message",
+    ]
+    assert all("id" not in item for item in items)
+    assert items[1]["aggregated_output"] == "1 failed"
+    assert prepared.body.splitlines()[0].endswith("iter prep: worker will claim ortus-ccc3 via goal-prompt")
+    assert "turn.completed" not in prepared.body and "thread.started" not in prepared.body
+
+    tail = prepare_window(second)
+    assert "plain text before any event" in tail.body
+    assert [event["type"] for event in _events(tail.body)] == ["turn.failed"]
+
+
+def test_codex_cuts_oversized_output() -> None:
+    huge = "y" * 9000
+    line = json.dumps(
+        {"type": "item.completed", "item": {"id": "i", "type": "command_execution", "aggregated_output": huge}}
+    )
+    prepared = prepare_window(_window([line], backend="codex"), cut_bytes=1024)
+
+    assert prepared.cuts == 1
+    (event,) = _events(prepared.body)
+    assert event["item"]["aggregated_output"].endswith(" [cut 9 KB]")
+
+
+def test_codex_window_without_json_is_plain_text() -> None:
+    prepared = prepare_window(_window(["just text", "more text"], backend="codex"))
+
+    assert prepared.skipped is None
+    assert prepared.body == "just text\nmore text"
+
+
+def test_skipped_drop_names_the_grok_reason(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from ortus.commands.dream import _report, select_windows
+    from ortus.core.profiles import AgentProfile, Phase
+
+    repo = _ignored_repo(tmp_path)
+    claude_one = tmp_path / "grind-20261013-000000.log"
+    claude_one.write_text(
+        "[2026-10-13 00:00:00] === ortus grind started (shape; backend=claude) ===\n"
+        "[2026-10-13 00:00:01] iter prep: worker will claim ortus-eee5 via goal-prompt\n"
+        "plain\n",
+        encoding="utf-8",
+    )
+    grok = tmp_path / "grind-20261014-000000.log"
+    grok.write_text(
+        "[2026-10-14 00:00:00] === ortus grind started (shape; backend=grok) ===\n"
+        "[2026-10-14 00:00:01] iter prep: worker will claim ortus-fff6 via goal-prompt\n"
+        "plain\n",
+        encoding="utf-8",
+    )
+    windows = [
+        *split_windows(FIXTURE),
+        *split_windows(claude_one),
+        *split_windows(CODEX_FIXTURE),
+        *split_windows(grok),
+    ]
+    assert [w.backend for w in windows].count("claude") == 3
+    assert [w.backend for w in windows].count("codex") == 2
+    assert [w.backend for w in windows].count("grok") == 1
+    # Before Codex was read, every non-Claude window was skipped.
+    assert sum(1 for w in windows if w.backend not in (None, "claude")) == 3
+
+    prepared = [prepare_window(window) for window in windows]
+    selection = select_windows(
+        repo,
+        prepared,
+        key="k",
+        settings={"max_beads": 50, "reader_chunk_tokens": 100_000, "budget_tokens": 10**9},
+        logs=[],
+        beads=[],
+        reread=False,
+        log_count=4,
+    )
+
+    assert selection.skipped_unknown_shape == 1
+    assert selection.skipped_by_reason == {"backend-grok": 1}
+    assert len(selection.candidates) == 5
+    profile = AgentProfile(backend="claude", phase=Phase.DREAM_READER)
+    summary = selection.summary(profile, profile)
+    assert summary["skipped_unknown_shape"] == 1
+    assert summary["skipped_by_reason"] == {"backend-grok": 1}
+    _report(selection, profile, profile)
+    out = capsys.readouterr().out
+    assert any(
+        line.split() == ["skipped", "(backend", "grok)", "1"] for line in out.splitlines()
+    )
+    assert "unknown shape" not in out
 
 
 def _ignored_repo(tmp_path: Path) -> Path:
@@ -350,7 +452,7 @@ def test_cache_records_a_skipped_window_with_empty_text(tmp_path: Path) -> None:
     repo = _ignored_repo(tmp_path)
     log = tmp_path / "grind-20261011-000001.log"
     log.write_text(
-        FIXTURE.read_text(encoding="utf-8").replace("backend=claude", "backend=codex", 1),
+        FIXTURE.read_text(encoding="utf-8").replace("backend=claude", "backend=grok", 1),
         encoding="utf-8",
     )
     window, _ = split_windows(log)
@@ -358,7 +460,7 @@ def test_cache_records_a_skipped_window_with_empty_text(tmp_path: Path) -> None:
     prepared = load_or_prepare(window, repo=repo)
     again = load_or_prepare(window, repo=repo)
 
-    assert prepared.skipped == SKIPPED_UNKNOWN_SHAPE
+    assert prepared.skipped == "backend-grok"
     assert again == prepared
     assert (repo / WINDOWS_DIR / f"{window_key(window)}.txt").read_text() == ""
 

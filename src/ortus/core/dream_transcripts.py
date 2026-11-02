@@ -17,8 +17,9 @@ a cut of any single string past a byte threshold, which leaves its head and a
 marker naming how much went, so a huge file read or test dump cannot crowd
 out the rest of the window.
 
-Only the Claude stream-json shape is understood. A run under another backend
-is reported as skipped rather than parsed on a guess.
+The Claude stream-json and Codex `exec --json` shapes are understood. A run
+under any other backend is reported as skipped, with that backend named in
+the reason, rather than parsed on a guess.
 
 What a reader finally receives is labeled: a `[bead <id>]` header rebuilt
 from bd on every run, then the window inside a `[grind-log ...]` label. Code
@@ -46,7 +47,7 @@ from ortus.core.spill import redact_secrets
 
 #: Bumped when a prepared body changes for the same log, so caches keyed on
 #: it are rebuilt rather than read back stale.
-TRANSCRIPT_VERSION = 1
+TRANSCRIPT_VERSION = 2
 
 #: Any single string longer than this many UTF-8 bytes is cut.
 DEFAULT_CUT_BYTES = 8192
@@ -54,12 +55,34 @@ DEFAULT_CUT_BYTES = 8192
 #: How many bytes of a cut string survive in front of its marker.
 CUT_KEEP_BYTES = 400
 
-#: The `skipped` reason for a run whose stream shape has no adapter yet.
+#: The `skipped` reason older caches recorded for any backend without an
+#: adapter; new skips name the backend instead (see `skipped_reason`).
 SKIPPED_UNKNOWN_SHAPE = "unknown-shape"
 
 #: Backends whose stream this module parses. None is a run header that named
 #: no backend, which only Claude-era logs wrote.
 _CLAUDE_BACKENDS = (None, "claude")
+_CODEX_BACKENDS = ("codex",)
+
+#: Codex `exec --json` event types. `item.completed` carries every message,
+#: command and its output; `turn.failed` and `error` carry failures. The rest
+#: is lifecycle or usage bookkeeping: an `item.started` repeats the command
+#: its `item.completed` reports, and an `item.updated` is a partial copy.
+_CODEX_TYPES = frozenset(
+    {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+        "item.started",
+        "item.updated",
+        "item.completed",
+        "error",
+    }
+)
+_CODEX_DROPPED_TYPES = frozenset(
+    {"thread.started", "turn.started", "turn.completed", "item.started", "item.updated"}
+)
 
 #: Claude stream-json event types; any other JSON object is kept verbatim.
 _CLAUDE_TYPES = frozenset(
@@ -169,6 +192,25 @@ def _clean_event(event: dict[str, Any]) -> dict[str, Any] | None:
     return cleaned
 
 
+def _clean_codex_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    """One Codex event without its item id, or None when it is pure noise."""
+
+    if event.get("type") in _CODEX_DROPPED_TYPES:
+        return None
+    item = event.get("item")
+    if isinstance(item, dict) and "id" in item:
+        return {**event, "item": {k: v for k, v in item.items() if k != "id"}}
+    return dict(event)
+
+
+def skipped_reason(backend: str | None) -> str | None:
+    """Why a window under `backend` is skipped, or None when it is parsed."""
+
+    if backend in _CLAUDE_BACKENDS or backend in _CODEX_BACKENDS:
+        return None
+    return f"backend-{backend}"
+
+
 def _cut_string(value: str, cut_bytes: int) -> tuple[str, int]:
     encoded = value.encode("utf-8")
     if len(encoded) <= cut_bytes:
@@ -205,23 +247,26 @@ def prepare_window(
 ) -> PreparedWindow:
     """The window's body with transport noise removed and huge strings cut.
 
-    Plain text lines and JSON objects that are not Claude events (Ortus'
-    own records) are kept verbatim; only Claude events are cleaned, cut and
-    re-serialized.
+    Plain text lines and JSON objects that are not events of the run's
+    backend (Ortus' own records) are kept verbatim; only Claude or Codex
+    events are cleaned, cut and re-serialized.
     """
 
-    if window.backend not in _CLAUDE_BACKENDS:
-        return PreparedWindow(
-            window=window, body="", cuts=0, skipped=SKIPPED_UNKNOWN_SHAPE
-        )
+    reason = skipped_reason(window.backend)
+    if reason is not None:
+        return PreparedWindow(window=window, body="", cuts=0, skipped=reason)
+    if window.backend in _CODEX_BACKENDS:
+        types, clean = _CODEX_TYPES, _clean_codex_event
+    else:
+        types, clean = _CLAUDE_TYPES, _clean_event
     kept: list[str] = []
     cuts = 0
     for line in window.lines:
         event = _as_object(line)
-        if event is None or event.get("type") not in _CLAUDE_TYPES:
+        if event is None or event.get("type") not in types:
             kept.append(line)
             continue
-        cleaned = _clean_event(event)
+        cleaned = clean(event)
         if cleaned is None:
             continue
         cut, count = _cut(cleaned, cut_bytes)

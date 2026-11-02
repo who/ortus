@@ -20,7 +20,8 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -48,6 +49,7 @@ from ortus.core.dream_readers import (
     run_readers,
 )
 from ortus.core.dream_transcripts import (
+    SKIPPED_UNKNOWN_SHAPE,
     DreamCacheNotIgnored,
     PreparedWindow,
     ensure_cache_ignored,
@@ -126,6 +128,7 @@ class Selection:
     chunks: int
     over_budget: bool
     logs: int
+    skipped_by_reason: dict[str, int] = field(default_factory=dict)
 
     def summary(self, reader: AgentProfile, orchestrator: AgentProfile) -> dict[str, Any]:
         return {
@@ -133,6 +136,7 @@ class Selection:
             "candidates": len(self.candidates),
             "reused": self.reused,
             "skipped_unknown_shape": self.skipped_unknown_shape,
+            "skipped_by_reason": dict(self.skipped_by_reason),
             "bytes": self.bytes,
             "est_reader_tokens": self.est_reader_tokens,
             "est_orchestrator_tokens": self.est_orchestrator_tokens,
@@ -211,6 +215,7 @@ def select_windows(
         return True
 
     readable = [item for item in prepared if item.skipped is None]
+    by_reason = Counter(item.skipped for item in prepared if item.skipped is not None)
     paths = {id(item): notes_path(repo, item, key) for item in readable}
     noted = {item_id: path for item_id, path in paths.items() if path.is_file()}
     pool = [
@@ -240,6 +245,7 @@ def select_windows(
         chunks=chunks,
         over_budget=est_reader + est_orchestrator > settings["budget_tokens"],
         logs=log_count,
+        skipped_by_reason=dict(sorted(by_reason.items())),
     )
 
 
@@ -305,12 +311,25 @@ def run_facts(
     )
 
 
+def _skip_label(reason: str) -> str:
+    """`backend-grok` reads as `backend grok`; other reasons as recorded."""
+
+    if reason.startswith("backend-"):
+        return "backend " + reason.removeprefix("backend-")
+    if reason == SKIPPED_UNKNOWN_SHAPE:
+        return "unknown shape"
+    return reason
+
+
 def _report(selection: Selection, reader: AgentProfile, orchestrator: AgentProfile) -> None:
     rows = [
         ("windows found", str(selection.windows_total)),
         ("needing a reader", str(len(selection.candidates))),
         ("reused notes", str(selection.reused)),
-        ("skipped (unknown shape)", str(selection.skipped_unknown_shape)),
+        *(
+            (f"skipped ({_skip_label(reason)})", str(count))
+            for reason, count in selection.skipped_by_reason.items()
+        ),
         ("prepared bytes", str(selection.bytes)),
         ("reader chunks", str(selection.chunks)),
         ("est. reader tokens", str(selection.est_reader_tokens)),
