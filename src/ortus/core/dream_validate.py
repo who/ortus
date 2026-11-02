@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
-from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Iterable, Mapping
 
 from ortus.commands.grind import _LESSON_MAX_CHARS
 from ortus.core.dream_decisions import Decision, accepted, fingerprint, suppressed
@@ -59,6 +59,18 @@ DROP_KEY_EXISTS = "key-exists"
 DROP_KEY_MISSING = "key-missing"
 DROP_PREVIOUSLY_REJECTED = "previously-rejected"
 DROP_CAP = "cap"
+DROP_STALE_REF = "stale-ref"
+
+#: A backticked span: `src/x.py`, `select_windows`, `bd remember ...`.
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
+#: A bare file name with no directory: `dream.py`, matched anywhere in the tree.
+_FILENAME = re.compile(
+    r"^[\w.-]+\.(?:py|md|jinja|toml|json|jsonl|ya?ml|txt|sh|cfg|ini|ts|tsx|js|go|rs)$"
+)
+#: A name code can be grepped for; a dotted name is grepped whole.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?$")
+#: A path: has a slash and ends in a file suffix, or sits under src/ or tests/.
+_PATH = re.compile(r"^(?:(?:src|tests)/\S*|\S*/\S*\.[A-Za-z0-9]+)$")
 
 _STEM_RE = re.compile(r"^grind-(\d{8}-\d{6})")
 
@@ -103,6 +115,44 @@ class ValidationResult:
     helped_rows: tuple[HelpedRow, ...]
     drops: tuple[tuple[str, str], ...]
     stat_diffs: tuple[str, ...]
+    #: Each stale-ref drop with the names it cited that HEAD no longer has.
+    stale_refs: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+@dataclass(frozen=True)
+class HeadRefs:
+    """How validation asks whether a cited path or symbol still exists."""
+
+    path: Callable[[str], bool]
+    symbol: Callable[[str], bool]
+
+
+def missing_names(texts: Iterable[str], refs: HeadRefs | None) -> tuple[str, ...]:
+    """Backticked paths and identifiers in `texts` that HEAD does not have.
+
+    A span with whitespace is a shell command, not a name, and is ignored, as
+    is any span that is neither a path nor an identifier.
+    """
+
+    if refs is None:
+        return ()
+    missing: list[str] = []
+    for text in texts:
+        for token in _BACKTICKED.findall(text or ""):
+            token = token.strip()
+            if not token or any(ch.isspace() for ch in token) or token in missing:
+                continue
+            if _PATH.match(token):
+                found = refs.path(token.rstrip("/"))
+            elif _FILENAME.match(token):
+                found = refs.path(token) or refs.path(f"*/{token}")
+            elif _IDENTIFIER.match(token):
+                found = refs.symbol(token.removesuffix("()"))
+            else:
+                continue
+            if not found:
+                missing.append(token)
+    return tuple(missing)
 
 
 def _rate(hits: int, windows: int) -> float | None:
@@ -331,11 +381,14 @@ def validate(
     memories: Mapping[str, str],
     decisions: Iterable[Decision],
     min_beads: int,
+    refs: HeadRefs | None = None,
 ) -> ValidationResult:
     """Check every proposal and follow-up, recount stats and Did-it-help.
 
     `windows` are the prepared (cached) windows, `records` the cached notes
-    records the orchestrator input was composed from.
+    records the orchestrator input was composed from. With `refs`, a proposal
+    naming a path or symbol absent at HEAD is dropped as stale-ref and a
+    follow-up doing so is kept with the missing names marked on its why.
     """
 
     windows = tuple(windows)
@@ -347,6 +400,7 @@ def validate(
     keys_out, prints_out = suppressed(decisions)
 
     drops: list[tuple[str, str]] = []
+    stale: list[tuple[str, tuple[str, ...]]] = []
     diffs: list[str] = []
     passed: list[KeptProposal] = []
     for proposal in result.proposals:
@@ -364,6 +418,13 @@ def validate(
             proposal.key in keys_out or kept.fingerprint in prints_out
         ):
             reason = DROP_PREVIOUSLY_REJECTED
+        if reason is None:
+            gone = missing_names(
+                (proposal.body, proposal.pattern, proposal.why), refs
+            )
+            if gone:
+                reason = DROP_STALE_REF
+                stale.append((name, gone))
         if reason is not None:
             drops.append((name, reason))
             continue
@@ -388,6 +449,12 @@ def validate(
         elif len(kept_followups) >= MAX_FOLLOWUPS:
             drops.append((name, DROP_CAP))
         else:
+            gone = missing_names((followup.title, followup.why), refs)
+            if gone:
+                followup = replace(
+                    followup,
+                    why=f"{followup.why} (names missing: {', '.join(gone)})",
+                )
             kept_followups.append(followup)
 
     rows = helped_rows(accepted(decisions), windows)
@@ -418,4 +485,5 @@ def validate(
         helped_rows=rows,
         drops=tuple(drops),
         stat_diffs=tuple(diffs),
+        stale_refs=tuple(stale),
     )

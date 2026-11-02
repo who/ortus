@@ -61,7 +61,8 @@ from ortus.core.dream_transcripts import (
     window_key,
 )
 from ortus.core.dream_report import RunFacts, deliver
-from ortus.core.dream_validate import ValidationResult, validate
+from ortus.core.dream_validate import HeadRefs, ValidationResult, validate
+from ortus.core.git import GitClient
 from ortus.core.grind_logic import FlockBusy, grind_flock
 from ortus.core.profiles import AgentProfile, Phase, ProfileError, resolve_dream_profile
 from ortus.core.prompts import PromptNotFound, resolve_named_prompt
@@ -73,6 +74,13 @@ READER_VERSION = 1
 
 #: Fixed orchestrator overhead on top of its notes: brief, memories, decisions.
 ORCHESTRATOR_OVERHEAD_TOKENS = 20_000
+
+#: Why a window whose bead never reached the default branch was not read.
+SKIPPED_NOT_ON_MAIN = "not-on-main"
+#: Run-facts value when no git repository or default branch could be read.
+REACH_UNAVAILABLE = "unavailable"
+#: Run-facts value when `--include-unmerged` turned the filter off.
+REACH_BYPASSED = "bypassed (--include-unmerged)"
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -171,6 +179,10 @@ class Selection:
     logs: int
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
     last: int | None = None
+    #: The branch reachability was read from, or why it was not.
+    reachability: str | None = None
+    #: Bead ids whose matching windows were skipped as not-on-main.
+    not_on_main: tuple[str, ...] = ()
 
     def summary(self, reader: AgentProfile, orchestrator: AgentProfile) -> dict[str, Any]:
         return {
@@ -186,6 +198,8 @@ class Selection:
             "over_budget": self.over_budget,
             "runs_selected": self.logs,
             "last": self.last,
+            "reachability": self.reachability,
+            "not_on_main": list(self.not_on_main),
             "reader_profile": reader.display_name,
             "orchestrator_profile": orchestrator.display_name,
         }
@@ -218,6 +232,34 @@ def _prepare_all(repo: Path, paths: list[Path], cut_bytes: int) -> list[Prepared
     return prepared
 
 
+def merged_beads(repo: Path) -> tuple[str, frozenset[str] | None]:
+    """The default branch and the bead ids with a commit reachable from it.
+
+    `(REACH_UNAVAILABLE, None)` when there is no repository, no default
+    branch or the log cannot be read: the filter is then skipped.
+    """
+
+    git = GitClient(repo=repo)
+    if not git.is_git_repo():
+        return REACH_UNAVAILABLE, None
+    branch = git.default_branch()
+    if not branch:
+        return REACH_UNAVAILABLE, None
+    beads = git.beads_on_branch(branch)
+    if beads is None:
+        return REACH_UNAVAILABLE, None
+    return branch, beads
+
+
+def head_refs(repo: Path) -> HeadRefs | None:
+    """Path and symbol lookups at HEAD, or None outside a repository."""
+
+    git = GitClient(repo=repo)
+    if not git.is_git_repo() or not git.head_oid():
+        return None
+    return HeadRefs(path=git.path_at_head, symbol=git.symbol_at_head)
+
+
 def select_windows(
     repo: Path,
     prepared: list[PreparedWindow],
@@ -230,13 +272,17 @@ def select_windows(
     log_count: int,
     now: float | None = None,
     last: int | None = None,
+    merged: frozenset[str] | None = None,
+    reachability: str | None = None,
 ) -> Selection:
     """Narrow, cap and estimate the windows a reader still has to read.
 
     A window matches when it passes every narrowing flag given; it is a
     candidate when it also has no notes for this reader (or `reread` is set).
     `last` only labels the selection: the caller already narrowed `prepared`
-    to the windows of the runs it picked.
+    to the windows of the runs it picked. With `merged`, a matching window
+    whose bead is not in it is skipped as not-on-main and its notes are not
+    counted toward the orchestrator.
     Candidates are taken newest first by log stem, then by start line. The
     orchestrator estimate counts every existing note for this reader,
     matching or not, because the orchestrator reads them all.
@@ -263,6 +309,14 @@ def select_windows(
 
     readable = [item for item in prepared if item.skipped is None]
     by_reason = Counter(item.skipped for item in prepared if item.skipped is not None)
+    unmerged: list[PreparedWindow] = []
+    if merged is not None:
+        unmerged = [item for item in readable if item.window.bead_id not in merged]
+        readable = [item for item in readable if item.window.bead_id in merged]
+        skipped = [item for item in unmerged if matches(item)]
+        if skipped:
+            by_reason[SKIPPED_NOT_ON_MAIN] = len(skipped)
+    not_on_main = tuple(sorted({item.window.bead_id for item in unmerged if matches(item)}))
     paths = {id(item): notes_path(repo, item, key) for item in readable}
     noted = {item_id: path for item_id, path in paths.items() if path.is_file()}
     pool = [
@@ -285,7 +339,7 @@ def select_windows(
         windows_total=len(prepared),
         candidates=chosen,
         reused=sum(1 for item_id in noted if item_id not in chosen_ids),
-        skipped_unknown_shape=len(prepared) - len(readable),
+        skipped_unknown_shape=len(prepared) - len(readable) - len(unmerged),
         bytes=total,
         est_reader_tokens=est_reader,
         est_orchestrator_tokens=est_orchestrator,
@@ -294,6 +348,8 @@ def select_windows(
         logs=log_count,
         skipped_by_reason=dict(sorted(by_reason.items())),
         last=last,
+        reachability=reachability,
+        not_on_main=not_on_main,
     )
 
 
@@ -305,16 +361,22 @@ def validate_run(
     *,
     key: str,
     min_beads: int,
+    merged: frozenset[str] | None = None,
 ) -> ValidationResult:
-    """Validate the orchestrator's answer against the caches it was drawn from."""
+    """Validate the orchestrator's answer against the caches it was drawn from.
+
+    Cited paths and symbols are checked against HEAD when `repo` is a git
+    repository; `merged` limits the notes to the beads that were fed.
+    """
 
     validation = validate(
         result,
         windows=prepared,
-        records=load_notes(repo, key),
+        records=load_notes(repo, key, only_beads=merged),
         memories=client.memories(),
         decisions=load_decisions(client),
         min_beads=min_beads,
+        refs=head_refs(repo),
     )
     output.progress(
         "dream",
@@ -356,6 +418,8 @@ def run_facts(
         memory_chars=sum(len(value) for value in memories.values()),
         memory_keys=len(memories),
         prime_chars=prime_chars,
+        reachability=selection.reachability,
+        not_on_main=selection.not_on_main,
     )
 
 
@@ -366,6 +430,8 @@ def _skip_label(reason: str) -> str:
         return "backend " + reason.removeprefix("backend-")
     if reason == SKIPPED_UNKNOWN_SHAPE:
         return "unknown shape"
+    if reason == SKIPPED_NOT_ON_MAIN:
+        return "not on main"
     return reason
 
 
@@ -377,6 +443,11 @@ def _report(selection: Selection, reader: AgentProfile, orchestrator: AgentProfi
     )
     rows = [
         *runs,
+        *(
+            [("reachability", selection.reachability)]
+            if selection.reachability is not None
+            else []
+        ),
         ("windows found", str(selection.windows_total)),
         ("needing a reader", str(len(selection.candidates))),
         ("reused notes", str(selection.reused)),
@@ -464,6 +535,11 @@ def dream(
     reread: bool = typer.Option(
         False, "--reread", help="Read matching windows again despite cached notes."
     ),
+    include_unmerged: bool = typer.Option(
+        False,
+        "--include-unmerged",
+        help="Also read windows whose bead has no commit on the default branch.",
+    ),
     json_out: bool = typer.Option(
         False, "--json", help="Print the selection summary as one JSON object."
     ),
@@ -539,6 +615,10 @@ def dream(
                 paths = newest_runs(paths, last)
             output.progress("dream", f"preparing windows from {len(paths)} grind log(s)")
             prepared = _prepare_all(target, paths, settings["cut_bytes"])
+            if include_unmerged:
+                reachability, merged = REACH_BYPASSED, None
+            else:
+                reachability, merged = merged_beads(target)
             selection = select_windows(
                 target,
                 prepared,
@@ -549,6 +629,8 @@ def dream(
                 reread=reread,
                 log_count=len(paths),
                 last=last,
+                merged=merged,
+                reachability=reachability,
             )
             if json_out:
                 typer.echo(json.dumps(selection.summary(reader, orchestrator)))
@@ -601,6 +683,7 @@ def dream(
                     codegraph_mode=codegraph_mode,
                     stamp=stamp,
                     log=run_log_writer(target, stamp),
+                    only_beads=merged,
                 )
                 validation = validate_run(
                     target,
@@ -609,11 +692,14 @@ def dream(
                     prepared,
                     key=key,
                     min_beads=settings["min_beads"],
+                    merged=merged,
                 )
                 fed = [
                     window_key(item.window)
                     for item in prepared
-                    if item.skipped is None and notes_path(target, item, key).is_file()
+                    if item.skipped is None
+                    and (merged is None or item.window.bead_id in merged)
+                    and notes_path(target, item, key).is_file()
                 ]
                 delivery = deliver(
                     validation,

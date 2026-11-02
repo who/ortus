@@ -127,8 +127,13 @@ def _one_line(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
-def load_notes(repo: Path, key: str) -> list[dict[str, Any]]:
-    """Every cached notes record for reader `key`, oldest run first."""
+def load_notes(
+    repo: Path, key: str, *, only_beads: frozenset[str] | None = None
+) -> list[dict[str, Any]]:
+    """Every cached notes record for reader `key`, oldest run first.
+
+    With `only_beads`, a record for any other bead is left out.
+    """
 
     records: list[dict[str, Any]] = []
     for path in sorted((repo / NOTES_DIR).glob(f"*.{key}.json")):
@@ -136,8 +141,11 @@ def load_notes(repo: Path, key: str) -> list[dict[str, Any]]:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        if isinstance(record, dict) and record.get("reader_key", key) == key:
-            records.append(record)
+        if not isinstance(record, dict) or record.get("reader_key", key) != key:
+            continue
+        if only_beads is not None and record.get("bead") not in only_beads:
+            continue
+        records.append(record)
     records.sort(key=lambda record: (str(record.get("run") or ""), str(record.get("lines") or "")))
     return records
 
@@ -500,15 +508,17 @@ def run_orchestrator(
     stamp: str | None = None,
     log: Callable[[str], None] = lambda message: None,
     explore: Callable[[str], str] | None = None,
+    only_beads: frozenset[str] | None = None,
 ) -> OrchestratorResult:
     """Compose the input, run the orchestrator, answer its needs once, parse.
 
-    Raises `DreamOrchestratorError` on a timeout, a nonzero exit, a failed
-    read-only preflight or memories too large to fit; `BdError` from reading
-    memories or decisions propagates.
+    `only_beads`, when given, limits the notes fed to those beads; the other
+    cached notes stay on disk. Raises `DreamOrchestratorError` on a timeout,
+    a nonzero exit, a failed read-only preflight or memories too large to
+    fit; `BdError` from reading memories or decisions propagates.
     """
 
-    records = load_notes(repo, key)
+    records = load_notes(repo, key, only_beads=only_beads)
     memories = client.memories()
     if not records and not memories:
         log("orchestrator: no reader notes and no memories; nothing to weigh")

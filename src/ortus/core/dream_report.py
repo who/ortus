@@ -60,6 +60,11 @@ class RunFacts:
     memory_chars: int
     memory_keys: int
     prime_chars: int | None
+    #: The branch windows were checked against, "unavailable" with no git or
+    #: default branch, or None when the run did not report it.
+    reachability: str | None = None
+    #: Bead ids whose windows were skipped for having no commit on that branch.
+    not_on_main: tuple[str, ...] = ()
 
 
 def title(result: ValidationResult, windows: int, today: _dt.date) -> str:
@@ -172,6 +177,19 @@ def _usage_line(usage: Mapping[str, Any] | None) -> str:
     return " ".join(parts) or "unavailable"
 
 
+def _reach_lines(result: ValidationResult, facts: RunFacts) -> list[str]:
+    lines: list[str] = []
+    if facts.reachability is not None:
+        lines.append(f"- reachability: {facts.reachability}")
+    if facts.not_on_main:
+        lines.append(f"- skipped not-on-main: {', '.join(facts.not_on_main)}")
+    lines.extend(
+        f"- stale-ref drop: {_one_line(name)} (missing: {', '.join(names)})"
+        for name, names in result.stale_refs
+    )
+    return lines
+
+
 def _facts(result: ValidationResult, facts: RunFacts) -> list[str]:
     drops = Counter(reason for _, reason in result.drops)
     dropped = ", ".join(f"{reason}={count}" for reason, count in sorted(drops.items()))
@@ -189,6 +207,7 @@ def _facts(result: ValidationResult, facts: RunFacts) -> list[str]:
         f"- tokens: {_usage_line(facts.usage)}",
         f"- cost: {cost}",
         f"- drops: {dropped or 'none'}",
+        *_reach_lines(result, facts),
         f"- memory store: {facts.memory_chars} chars, {facts.memory_keys} keys",
         f"- bd prime: {prime} chars",
         "",

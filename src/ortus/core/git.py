@@ -90,6 +90,11 @@ _WORKER_PATHSPECS = (
 # A refusing pre-commit hook may print a whole lint report; the reason git or
 # the hook gives is in the first lines, so keep those and drop the rest rather
 # than flooding the run log with someone else's output.
+#: `<bead-id>: subject`, the prefix every Ortus commit subject carries.
+_BEAD_SUBJECT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9.]+):\s")
+#: `Ortus-Issue: <bead-id>`, the trailer an Ortus commit message carries.
+_BEAD_TRAILER = re.compile(r"^\s*Ortus-Issue:\s*(\S+)\s*$", re.MULTILINE)
+
 _FAILURE_LINES = 5
 _FAILURE_CHARS = 400
 
@@ -327,6 +332,54 @@ class GitClient:
         """Return the current HEAD object id, or an empty string when unborn."""
         proc = self._run("rev-parse", "--verify", "HEAD")
         return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    def default_branch(self) -> str:
+        """The branch merged work lands on: origin/HEAD, else main, else master.
+
+        Returns the ref as git resolves it (`origin/main`, `main`), or "" when
+        the directory is not a repository or none of the three exists.
+        """
+        proc = self._run("rev-parse", "--abbrev-ref", "--verify", "-q", "origin/HEAD")
+        name = proc.stdout.strip()
+        if proc.returncode == 0 and name and name != "origin/HEAD":
+            return name
+        for candidate in ("main", "master"):
+            check = self._run("rev-parse", "--verify", "-q", f"refs/heads/{candidate}")
+            if check.returncode == 0:
+                return candidate
+        return ""
+
+    def beads_on_branch(self, branch: str) -> frozenset[str] | None:
+        """Bead ids with a commit reachable from `branch`, or None on error.
+
+        A commit counts for a bead when its subject starts with `<bead>: `
+        or its message carries an `Ortus-Issue: <bead>` trailer, the two
+        marks an Ortus commit is written with. One `git log` pass.
+        """
+        proc = self._run("log", "--format=%H%x00%s%x00%b%x1e", branch, "--")
+        if proc.returncode != 0:
+            return None
+        beads: set[str] = set()
+        for entry in proc.stdout.split("\x1e"):
+            parts = entry.strip("\n").split("\x00")
+            if len(parts) < 3:
+                continue
+            subject, body = parts[1], parts[2]
+            match = _BEAD_SUBJECT.match(subject)
+            if match:
+                beads.add(match.group(1))
+            beads.update(_BEAD_TRAILER.findall(body))
+        return frozenset(beads)
+
+    def path_at_head(self, path: str) -> bool:
+        """True when `path` names a tracked file or directory (`git ls-files`)."""
+        proc = self._run("ls-files", "--", path)
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+
+    def symbol_at_head(self, symbol: str) -> bool:
+        """True when `symbol` occurs as a whole word in HEAD's tree."""
+        proc = self._run("grep", "-q", "-w", "-F", "-e", symbol, "HEAD", "--")
+        return proc.returncode == 0
 
     def _count(self, *rev_args: str) -> int:
         """`git rev-list --count <rev_args>` → int, 0 on any error.
