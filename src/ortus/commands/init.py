@@ -23,6 +23,7 @@ from ortus.core.agent_files import (
     gitignore_match,
     render_block,
 )
+from ortus.core.bd import scoped_bd_env
 from ortus.core.codegraph import CodeGraphMode
 from ortus.core.config import (
     COMMIT_ISSUE_REF_CHOICES,
@@ -102,7 +103,7 @@ def _bd_init(repo: Path, prefix: str | None) -> None:
     args = ["bd", "init", "--non-interactive"]
     if prefix:
         args.extend(["--prefix", prefix])
-    subprocess.run(args, cwd=str(repo), check=True)
+    subprocess.run(args, cwd=str(repo), env=scoped_bd_env(repo), check=True)
 
 
 def _bd_init_stealth(repo: Path, prefix: str | None) -> None:
@@ -115,7 +116,7 @@ def _bd_init_stealth(repo: Path, prefix: str | None) -> None:
     args = ["bd", "init", "--stealth", "--non-interactive", "--skip-agents"]
     if prefix:
         args.extend(["--prefix", prefix])
-    subprocess.run(args, cwd=str(repo), check=True)
+    subprocess.run(args, cwd=str(repo), env=scoped_bd_env(repo), check=True)
 
 
 def _bd_no_git_ops(repo: Path) -> None:
@@ -123,6 +124,7 @@ def _bd_no_git_ops(repo: Path) -> None:
     subprocess.run(
         ["bd", "config", "set", "no-git-ops", "true"],
         cwd=str(repo),
+        env=scoped_bd_env(repo),
         check=True,
         capture_output=True,
         text=True,
@@ -134,6 +136,7 @@ def _bd_add_tracker_remote(repo: Path, url: str) -> None:
     subprocess.run(
         ["bd", "dolt", "remote", "add", TRACKER_REMOTE_NAME, url],
         cwd=str(repo),
+        env=scoped_bd_env(repo),
         check=True,
         capture_output=True,
         text=True,
@@ -151,6 +154,7 @@ def _bd_remember(repo: Path) -> None:
     subprocess.run(
         ["bd", "remember", readiness_memory_text(), "--key", READINESS_MEMORY_KEY],
         cwd=str(repo),
+        env=scoped_bd_env(repo),
         check=True,
     )
 
@@ -170,6 +174,7 @@ def _bd_hooks_install(repo: Path) -> None:
     subprocess.run(
         ["bd", "hooks", "install"],
         cwd=str(repo),
+        env=scoped_bd_env(repo),
         check=True,
         capture_output=True,
         text=True,

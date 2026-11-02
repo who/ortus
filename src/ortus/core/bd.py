@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -252,6 +253,107 @@ def select_lessons(
     return tuple(selected)
 
 
+# --- BEADS_DIR scoping ----------------------------------------------------
+
+BEADS_DIR_ENV = "BEADS_DIR"
+
+#: Set once the foreign-BEADS_DIR notice has been printed in this process.
+_foreign_beads_dir_noticed = False
+
+
+def _git_line(repo: Path, *args: str) -> str | None:
+    """One line of git output for `repo`, or None when git cannot answer."""
+
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _origin_path(repo: Path) -> Path | None:
+    """The local directory `repo`'s origin points at, when it is one.
+
+    Grind's disposable worker clones are cloned from the primary checkout,
+    so their origin is a filesystem path (or a ``file://`` URL). A network
+    URL names no local tracker and resolves to None.
+    """
+
+    url = _git_line(repo, "remote", "get-url", "origin")
+    if not url:
+        return None
+    if url.startswith("file://"):
+        url = url[len("file://") :]
+    elif "://" in url or (":" in url and not url.startswith(("/", "."))):
+        return None
+    candidate = Path(url)
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    return resolved.parent if resolved.name == ".git" else resolved
+
+
+def beads_dir_belongs_to(repo: Path, beads_dir: str) -> bool:
+    """Whether an inherited BEADS_DIR is `repo`'s own tracker.
+
+    It belongs when its parent is `repo` (or `repo`'s git toplevel), or when
+    `repo` is a clone whose origin is that parent — the grind worker clone,
+    which must keep sharing the primary tracker. A BEADS_DIR that does not
+    exist belongs to nobody.
+    """
+
+    candidate = Path(beads_dir).expanduser()
+    if not candidate.exists():
+        return False
+    owner = candidate.resolve().parent
+    target = Path(repo).resolve()
+    if target == owner:
+        return True
+    toplevel = _git_line(target, "rev-parse", "--show-toplevel")
+    if toplevel and Path(toplevel).resolve() == owner:
+        return True
+    return _origin_path(Path(toplevel) if toplevel else target) == owner
+
+
+def scoped_bd_env(
+    repo: Path, env: dict[str, str] | None = None
+) -> dict[str, str]:
+    """The env for a bd subprocess run for `repo`, minus a foreign BEADS_DIR.
+
+    ``ortus grind`` exports BEADS_DIR so its worker clones share the primary
+    tracker, and every process a worker spawns inherits it — including an
+    Ortus command aimed at an unrelated scratch repo, whose bd calls would
+    otherwise land in the primary database. Such a BEADS_DIR is dropped from
+    the returned copy (``os.environ`` is never mutated) and a one-line notice
+    goes to stderr once per process.
+    """
+
+    global _foreign_beads_dir_noticed
+    scoped = dict(os.environ if env is None else env)
+    beads_dir = scoped.get(BEADS_DIR_ENV)
+    if not beads_dir or beads_dir_belongs_to(repo, beads_dir):
+        return scoped
+    del scoped[BEADS_DIR_ENV]
+    if not _foreign_beads_dir_noticed:
+        _foreign_beads_dir_noticed = True
+        print(
+            f"ignoring inherited BEADS_DIR={beads_dir}; it belongs to another repo",
+            file=sys.stderr,
+        )
+    return scoped
+
+
 @dataclass
 class BeadsTracker:
     """Public ``run`` interface for the beads tracker.
@@ -269,6 +371,7 @@ class BeadsTracker:
         proc = subprocess.run(
             argv,
             cwd=str(self.repo),
+            env=scoped_bd_env(self.repo),
             capture_output=True,
             text=True,
             check=False,

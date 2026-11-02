@@ -226,6 +226,8 @@ def prepare_route(
         if callable(configure):
             configure(probe.capability)
         runner.extra_env.update(env)
+        # Ortus's bd calls keep this pin only for `repo` or a clone of it;
+        # `scoped_bd_env` drops it for a scratch repo a worker targets.
         runner.extra_env.setdefault("BEADS_DIR", str((repo / ".beads").resolve()))
         return ExecutionBundle(backend, runner, *profiles, probe, execution_backend)
     except (BackendError, ProfileError, HookConflictError, CodeGraphUnavailable,

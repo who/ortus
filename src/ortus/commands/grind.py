@@ -2153,7 +2153,9 @@ def grind(
             runner.extra_env.update(cache_env)
             # Workers run in disposable clones but share the primary
             # repository's tracker: BEADS_DIR pins every bd command to the one
-            # database, so intake and workers never fork state.
+            # database, so intake and workers never fork state. Ortus's own bd
+            # calls honour it only for this repo or a clone of it:
+            # `scoped_bd_env` drops it for any other repo a worker targets.
             runner.extra_env.setdefault(
                 "BEADS_DIR", str((target / ".beads").resolve())
             )
