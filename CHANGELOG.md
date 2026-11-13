@@ -6,6 +6,105 @@ All notable changes to Ortus are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
+### Added
+
+- **`ortus dream`.** Reads the grind logs a project already has and suggests
+  changes to the project's bd memories: lessons to add, ones to update, and
+  ones to drop. It reads each bead's part of a log on its own, with cheap
+  read-only reader models (Claude Haiku 5.5 by default for both roles), then
+  makes one more call that looks for the same problem across beads. Code
+  checks every suggestion before you see it: each one has to quote the logs
+  word for word, show up in at least two separate beads (`--min-beads`), and
+  not repeat anything you already rejected or have not answered yet. The
+  result is a report in `logs/dream-<time>.md` and one decision bead,
+  labeled `human` and `dream`, for you to answer. Dream only reads: it never
+  runs `bd remember`, never edits code, and never files follow-up work
+  itself. It writes only its own caches under `.ortus/dream/`, which must be
+  git-ignored, and it refuses to start while a grind holds the repo's lock. `--dry-run` shows which runs and beads would be read, how many
+  tokens that should cost, and which models would do it, without calling a
+  model, and `--budget-tokens` refuses a run estimated above a limit. Notes
+  are cached per bead, so a second run only reads what is new. A `[dream]`
+  table in `.ortusrc` sets the defaults. See `ortus dream` in
+  `docs/commands.md`.
+- **A Dream report reads without a manual.** The report has two sections,
+  "Suggested memory changes" and "Possible follow-up tasks". Each item is
+  named in plain words: a memory change by its memory key, such as
+  `commit-message-rules`, and a follow-up by the first words of its title,
+  such as `dolt-ssh-push`, with `-2` added to a repeated name. Every item
+  says in one sentence what accepting it does, and every memory change
+  comes with the exact `bd remember` or `bd forget` line to run.
+- **Your answer is one line, and the report writes the example for you.**
+  Reply with something like
+  `accept commit-message-rules; reject pinned-prompt-hash-tests (already a test); file follow-up dolt-ssh-push`
+  and record it with `bd human respond <decision-id> "..."`. The example in
+  the report is built from the items that run actually kept, so it never
+  names one that is not there, and the report's "How to respond" section
+  walks an AI agent through the whole answer: run the memory lines, record
+  the verdicts, and file any wanted follow-up through `ortus ingest`. At the
+  end of a run Dream prints the next steps on stderr: the decision bead with
+  its counts, the report path, and a line to hand to an agent. The decision
+  bead id is still the last line of stdout, so `id=$(ortus dream .)` keeps
+  working. Answers written in the older numbered form, such as
+  `accepted P1 P2; F2 filed`, still parse for decision beads already open.
+- **`ortus dream --last N` reads the newest N grind runs, however old.** A
+  project whose last grind ran months ago can be dreamed without guessing an
+  age for `--since`. Runs are ordered by the time in their log name, so a
+  copied or touched log keeps its place.
+- **Dream reads Codex runs.** Grind logs from the Codex backend are read like
+  Claude ones. A run from a backend Dream cannot read yet is skipped with its
+  backend named, such as `backend-grok`, instead of a blanket "unknown shape".
+- **Dream ignores work that never landed.** A bead with no commit on the
+  default branch, such as a reverted spike or an abandoned branch, is skipped
+  as not on main, so it cannot teach a lesson about code that does not exist.
+  `--include-unmerged` reads it anyway. A suggestion that names a file or
+  function no longer in the code is dropped as stale, and a follow-up that
+  does is kept with the missing names listed, so you can tell what moved.
+- **Dream checks whether past lessons helped.** For each memory you accepted
+  from an earlier run, the report compares how often its problem showed up
+  in grind logs before and after you accepted it.
+- **`ortus guard commit-msg`.** A `commit-msg` hook, installed by every
+  `ortus init`, refuses a commit whose subject is longer than 72 characters
+  before the commit exists, instead of the stop hook catching it after the
+  push. Merge, fixup, squash, and revert subjects are exempt, and
+  `ORTUS_ALLOW_LONG_SUBJECT=1` waives it once. Claude grind workers get the
+  same check on `git commit -m` even where no hook is installed, and
+  `ortus check` reports whether the hook is wired.
+- **Grind workers cannot rewrite published history.** A new worker hook,
+  `ortus guard worker-bash`, refuses every force-push spelling and an amend
+  of a commit already on the remote. It acts only inside grind workers, so
+  your own sessions are untouched, and `ORTUS_ALLOW_FORCE_PUSH=1` turns it
+  off.
+
+### Changed
+
+- **Workers close the issue before they commit.** The session-close steps now
+  run close, commit, pull, push, so the tracker export that rides along with
+  the work no longer shows the issue as still in progress. Run
+  `ortus init --force` to refresh the steps in an existing repo's agent
+  files. A prompt override copied from the older order is still served as
+  written.
+- **A worker that cannot finish its last step stops cleanly.** When the only
+  step left needs something a worker cannot do, such as a push the remote
+  refuses or a human approval, one `BLOCKED:` comment naming the step now
+  ends the session instead of the goal check firing again until Claude gives
+  up.
+- **Workers are told up front that `rm -rf` inside a chained command is
+  refused,** and to build scratch trees in a fresh temporary directory
+  instead, so they stop losing turns splitting the chain after the fact.
+
+### Fixed
+
+- **`python` works in worker shells that only have `python3`.** Grind puts a
+  `python` link on the worker PATH, pointing at the repo's `.venv` Python when
+  there is one, so `python - <<EOF` edits no longer fail with exit 127.
+- **An Ortus command aimed at another repo uses that repo's tracker.** A
+  `BEADS_DIR` inherited from a grind no longer sends bd writes for an
+  unrelated repo, such as a stealth init in a scratch directory, into the
+  grind's own database. Ortus drops a foreign `BEADS_DIR` for that command and
+  says so once on stderr.
+
 ## [0.5.0] - 2026-10-11
 
 ### Added
@@ -196,6 +295,7 @@ All notable changes to Ortus are recorded here. The format follows
 - **A worker finishes what it starts.** Every check a worker began must complete
   before it exits, so a half-run verification cannot pass as done.
 
+[0.6.0]: https://github.com/who/ortus/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/who/ortus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/who/ortus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/who/ortus/compare/v0.2.0...v0.3.0
